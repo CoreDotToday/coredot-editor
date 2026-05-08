@@ -1,11 +1,29 @@
 {
   "name": "coredot-editor",
   "version": "0.1.0",
+  "description": "Open-source AI document editor starter built with Next.js, Tiptap, Drizzle, SQLite, and the Vercel AI SDK.",
+  "license": "MIT",
   "private": true,
+  "packageManager": "pnpm@10.6.5",
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=10.0.0"
+  },
+  "keywords": [
+    "ai-editor",
+    "document-editor",
+    "nextjs",
+    "tiptap",
+    "drizzle",
+    "vercel-ai-sdk",
+    "openai",
+    "sqlite"
+  ],
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
+    "check": "pnpm lint && pnpm typecheck && pnpm test && pnpm build",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
@@ -13,6 +31,7 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:seed": "tsx src/db/seed.ts",
+    "db:setup": "pnpm db:migrate && pnpm db:seed",
     "e2e:prepare": "tsx scripts/e2e/prepare.ts",
     "e2e": "pnpm e2e:prepare && playwright test"
   },
