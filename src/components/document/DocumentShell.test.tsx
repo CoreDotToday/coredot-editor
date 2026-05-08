@@ -25,6 +25,20 @@ vi.mock("./DocumentEditor", () => ({
       <button onClick={() => onSelectionCommand?.("Improve clarity", "selected text")} type="button">
         Mock selection command
       </button>
+      <button
+        onClick={() =>
+          onChange({
+            title,
+            contentJson: {
+              type: "doc",
+              content: [{ type: "paragraph", content: [{ type: "text", text: "fresh edited body" }] }],
+            },
+          })
+        }
+        type="button"
+      >
+        Mock body edit
+      </button>
     </div>
   ),
 }));
@@ -234,6 +248,44 @@ describe("DocumentShell", () => {
 
     expect(screen.getByText("Last selection command: Improve clarity")).toBeInTheDocument();
     expect(screen.getByText("Selected: selected text")).toBeInTheDocument();
+  });
+
+  it("runs a full document review with current unsaved draft text", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          run: {
+            id: "run_1",
+            commandType: "document_review",
+            status: "completed",
+            createdAt: "2026-01-01T00:00:00.000Z",
+          },
+          review: { summary: "One finding.", findings: [] },
+          proposals: [],
+          skippedProposalCount: 0,
+        }),
+      ),
+    );
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "stale initial body")}
+        templates={[{ id: "tpl_1", name: "Board review", category: "review" }]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Mock body edit" }));
+    await user.click(screen.getByRole("button", { name: "Review document" }));
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/ai/review",
+      expect.objectContaining({
+        method: "POST",
+        body: expect.stringContaining('"documentText":"fresh edited body"'),
+      }),
+    );
   });
 });
 

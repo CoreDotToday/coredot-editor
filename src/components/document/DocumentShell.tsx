@@ -1,18 +1,27 @@
 "use client";
 
 import { useCallback, useMemo, useRef, useState } from "react";
-import type { AiRunRecord, DocumentRecord, PromptTemplateRecord, TiptapJson } from "@/db/schema";
+import { AiReviewPanel, type AiReviewProposal } from "@/components/ai/AiReviewPanel";
+import { AiRunHistory, type AiRunHistoryItem } from "@/components/ai/AiRunHistory";
+import { PromptTemplatePanel } from "@/components/templates/PromptTemplatePanel";
+import type { AiProposalRecord, AiRunRecord, DocumentRecord, PromptTemplateRecord, TiptapJson } from "@/db/schema";
+import { extractPlainTextFromTiptap } from "@/features/documents/tiptap-text";
 import { DocumentEditor } from "./DocumentEditor";
 
 type ShellDocument = Pick<DocumentRecord, "id" | "title" | "contentJson" | "plainText">;
 type ShellTemplate = Pick<PromptTemplateRecord, "id" | "name" | "category">;
 type ShellAiRun = Pick<AiRunRecord, "id" | "commandType" | "status" | "createdAt">;
+type ShellProposal = Pick<
+  AiProposalRecord,
+  "id" | "targetText" | "replacementText" | "explanation" | "status"
+>;
 type SaveState = "saved" | "dirty" | "saving" | "failed";
 
 type DocumentShellProps = {
   document: ShellDocument;
   templates: ShellTemplate[];
   aiRuns: ShellAiRun[];
+  proposals?: ShellProposal[];
 };
 
 type DraftState = {
@@ -39,18 +48,24 @@ const saveStateLabel: Record<SaveState, string> = {
   failed: "Save failed",
 };
 
-const dateFormatter = new Intl.DateTimeFormat("en", {
-  month: "short",
-  day: "numeric",
-  hour: "numeric",
-  minute: "2-digit",
-});
+type ReviewResponse = {
+  run?: ShellAiRun;
+  proposals?: ShellProposal[];
+};
 
-export function DocumentShell({ aiRuns, document, templates }: DocumentShellProps) {
-  return <DocumentShellContent key={document.id} aiRuns={aiRuns} document={document} templates={templates} />;
+export function DocumentShell({ aiRuns, document, proposals = [], templates }: DocumentShellProps) {
+  return (
+    <DocumentShellContent
+      key={document.id}
+      aiRuns={aiRuns}
+      document={document}
+      proposals={proposals}
+      templates={templates}
+    />
+  );
 }
 
-function DocumentShellContent({ aiRuns, document, templates }: DocumentShellProps) {
+function DocumentShellContent({ aiRuns, document, proposals = [], templates }: DocumentShellProps) {
   const incomingDocument = useMemo(
     () => ({
       id: document.id,
@@ -71,6 +86,12 @@ function DocumentShellContent({ aiRuns, document, templates }: DocumentShellProp
   const [saveState, setSaveState] = useState<SaveState>("saved");
   const [selectionCommand, setSelectionCommand] = useState<SelectionCommandPayload | null>(null);
   const [observedDocument, setObservedDocument] = useState<DocumentSnapshot>(incomingDocument);
+  const [selectedTemplateId, setSelectedTemplateId] = useState(templates[0]?.id ?? "");
+  const [reviewProposals, setReviewProposals] = useState<AiReviewProposal[]>(proposals);
+  const [reviewRuns, setReviewRuns] = useState<AiRunHistoryItem[]>(aiRuns);
+  const [isReviewing, setIsReviewing] = useState(false);
+  const [reviewError, setReviewError] = useState("");
+  const selectedTemplate = templates.find((template) => template.id === selectedTemplateId) ?? null;
 
   if (
     observedDocument.id !== incomingDocument.id ||
@@ -82,17 +103,13 @@ function DocumentShellContent({ aiRuns, document, templates }: DocumentShellProp
     if (saveState === "saved") {
       setDraft(initialDraft);
       setSelectionCommand(null);
+      setSelectedTemplateId(templates[0]?.id ?? "");
+      setReviewProposals(proposals);
+      setReviewRuns(aiRuns);
+      setIsReviewing(false);
+      setReviewError("");
     }
   }
-
-  const templateGroups = useMemo(() => {
-    return templates.reduce<Record<string, ShellTemplate[]>>((groups, template) => {
-      const group = groups[template.category] ?? [];
-      group.push(template);
-      groups[template.category] = group;
-      return groups;
-    }, {});
-  }, [templates]);
 
   const handleDraftChange = useCallback((nextDraft: DraftState) => {
     draftVersionRef.current += 1;
@@ -133,6 +150,51 @@ function DocumentShellContent({ aiRuns, document, templates }: DocumentShellProp
     }
   }, [document.id, draft]);
 
+  const runDocumentReview = useCallback(async () => {
+    if (!selectedTemplate) {
+      return;
+    }
+
+    setIsReviewing(true);
+    setReviewError("");
+
+    try {
+      const response = await fetch("/api/ai/review", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          documentId: document.id,
+          templateId: selectedTemplate.id,
+          command: "Review document",
+          variables: {},
+          documentText: extractPlainTextFromTiptap(draft.contentJson),
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error("Failed to run review");
+      }
+
+      const body = (await response.json()) as ReviewResponse;
+      setReviewProposals(body.proposals ?? []);
+      if (body.run) {
+        setReviewRuns((currentRuns) => [body.run!, ...currentRuns]);
+      }
+    } catch {
+      setReviewError("Review failed. Try again.");
+    } finally {
+      setIsReviewing(false);
+    }
+  }, [document.id, draft.contentJson, selectedTemplate]);
+
+  const updateProposalStatus = useCallback((proposalId: string, status: AiReviewProposal["status"]) => {
+    setReviewProposals((currentProposals) =>
+      currentProposals.map((proposal) => (proposal.id === proposalId ? { ...proposal, status } : proposal)),
+    );
+  }, []);
+
   return (
     <main className="flex h-screen min-h-[720px] bg-zinc-50 text-zinc-950">
       <aside className="flex w-72 shrink-0 flex-col border-r border-zinc-200 bg-zinc-50">
@@ -141,50 +203,13 @@ function DocumentShellContent({ aiRuns, document, templates }: DocumentShellProp
           <p className="mt-3 text-sm leading-6 text-zinc-500">Headings will appear here as the document develops.</p>
         </section>
 
-        <section className="min-h-0 flex-1 overflow-y-auto border-b border-zinc-200 px-4 py-5">
-          <h2 className="text-sm font-semibold text-zinc-950">Templates</h2>
-          {templates.length === 0 ? (
-            <p className="mt-3 text-sm leading-6 text-zinc-500">No active templates.</p>
-          ) : (
-            <div className="mt-3 space-y-5">
-              {Object.entries(templateGroups).map(([category, categoryTemplates]) => (
-                <div key={category}>
-                  <h3 className="text-xs font-medium uppercase tracking-normal text-zinc-500">{category}</h3>
-                  <ul className="mt-2 space-y-1">
-                    {categoryTemplates.map((template) => (
-                      <li key={template.id}>
-                        <button
-                          className="w-full rounded-md px-2 py-1.5 text-left text-sm text-zinc-700 hover:bg-zinc-100"
-                          type="button"
-                        >
-                          {template.name}
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              ))}
-            </div>
-          )}
-        </section>
+        <PromptTemplatePanel
+          selectedTemplateId={selectedTemplateId}
+          templates={templates}
+          onSelectTemplate={setSelectedTemplateId}
+        />
 
-        <section className="px-4 py-5">
-          <h2 className="text-sm font-semibold text-zinc-950">History</h2>
-          {aiRuns.length === 0 ? (
-            <p className="mt-3 text-sm leading-6 text-zinc-500">No AI runs yet.</p>
-          ) : (
-            <ul className="mt-3 space-y-3">
-              {aiRuns.slice(0, 5).map((run) => (
-                <li key={run.id} className="text-sm text-zinc-700">
-                  <div className="font-medium">{run.commandType.replace("_", " ")}</div>
-                  <div className="mt-1 text-xs text-zinc-500">
-                    {run.status} · {dateFormatter.format(run.createdAt)}
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
+        <AiRunHistory runs={reviewRuns} />
       </aside>
 
       <section className="flex min-w-0 flex-1 flex-col">
@@ -212,12 +237,14 @@ function DocumentShellContent({ aiRuns, document, templates }: DocumentShellProp
       </section>
 
       <aside className="flex w-80 shrink-0 flex-col border-l border-zinc-200 bg-white">
-        <section className="border-b border-zinc-200 px-5 py-5">
-          <h2 className="text-sm font-semibold text-zinc-950">AI Review</h2>
-          <p className="mt-3 text-sm leading-6 text-zinc-500">
-            Run document reviews and selection rewrites from this panel.
-          </p>
-        </section>
+        <AiReviewPanel
+          errorMessage={reviewError}
+          isReviewing={isReviewing}
+          onReviewDocument={runDocumentReview}
+          onUpdateProposalStatus={updateProposalStatus}
+          proposals={reviewProposals}
+          selectedTemplateName={selectedTemplate?.name ?? ""}
+        />
         <section className="px-5 py-5">
           <h3 className="text-xs font-medium uppercase tracking-normal text-zinc-500">Selection command</h3>
           <p className="mt-3 text-sm leading-6 text-zinc-600">
