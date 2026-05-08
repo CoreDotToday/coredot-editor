@@ -56,11 +56,13 @@ function createDocumentWithContent(id: string, title: string, paragraphText: str
 
 function createDeferredResponse() {
   let resolve!: (response: Response) => void;
-  const promise = new Promise<Response>((resolver) => {
+  let reject!: (error: Error) => void;
+  const promise = new Promise<Response>((resolver, rejecter) => {
     resolve = resolver;
+    reject = rejecter;
   });
 
-  return { promise, resolve };
+  return { promise, reject, resolve };
 }
 
 describe("DocumentShell", () => {
@@ -160,6 +162,67 @@ describe("DocumentShell", () => {
     );
 
     expect(screen.getByRole("textbox", { name: "Document title" })).toHaveValue("Local dirty title");
+  });
+
+  it("preserves local edits during same-document prop updates while saving", async () => {
+    const user = userEvent.setup();
+    const deferredSave = createDeferredResponse();
+    vi.spyOn(globalThis, "fetch").mockReturnValue(deferredSave.promise);
+    const { rerender } = render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "Original body")}
+        templates={[]}
+      />,
+    );
+
+    await user.clear(screen.getByRole("textbox", { name: "Document title" }));
+    await user.type(screen.getByRole("textbox", { name: "Document title" }), "Saving local title");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    rerender(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Server title", "Server body")}
+        templates={[]}
+      />,
+    );
+
+    expect(screen.getByRole("textbox", { name: "Document title" })).toHaveValue("Saving local title");
+  });
+
+  it("preserves local edits during same-document prop updates after save failure", async () => {
+    const user = userEvent.setup();
+    const deferredSave = createDeferredResponse();
+    vi.spyOn(globalThis, "fetch").mockReturnValue(deferredSave.promise);
+    const { rerender } = render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "Original body")}
+        templates={[]}
+      />,
+    );
+
+    await user.clear(screen.getByRole("textbox", { name: "Document title" }));
+    await user.type(screen.getByRole("textbox", { name: "Document title" }), "Failed local title");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await act(async () => {
+      deferredSave.reject(new Error("network"));
+      await deferredSave.promise.catch(() => undefined);
+    });
+
+    expect(screen.getByText("Save failed")).toBeInTheDocument();
+
+    rerender(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Server title", "Server body")}
+        templates={[]}
+      />,
+    );
+
+    expect(screen.getByRole("textbox", { name: "Document title" })).toHaveValue("Failed local title");
   });
 
   it("reflects the last selection command in the AI panel", async () => {

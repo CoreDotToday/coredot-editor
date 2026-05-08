@@ -21,11 +21,11 @@ type DocumentEditorProps = {
 };
 
 export function DocumentEditor({ contentJson, onChange, onSelectionCommand, title }: DocumentEditorProps) {
-  const [localTitle, setLocalTitle] = useState(title);
   const [hasSelection, setHasSelection] = useState(false);
   const titleRef = useRef(title);
   const onChangeRef = useRef(onChange);
   const onSelectionCommandRef = useRef(onSelectionCommand);
+  const contentJsonSignature = useMemo(() => JSON.stringify(contentJson), [contentJson]);
 
   useEffect(() => {
     onChangeRef.current = onChange;
@@ -34,6 +34,10 @@ export function DocumentEditor({ contentJson, onChange, onSelectionCommand, titl
   useEffect(() => {
     onSelectionCommandRef.current = onSelectionCommand;
   }, [onSelectionCommand]);
+
+  useEffect(() => {
+    titleRef.current = title;
+  }, [title]);
 
   const extensions = useMemo(
     () => [
@@ -71,10 +75,18 @@ export function DocumentEditor({ contentJson, onChange, onSelectionCommand, titl
     },
   });
 
+  useEffect(() => {
+    if (!editor) return;
+
+    const editorContentSignature = JSON.stringify(editor.getJSON());
+    if (editorContentSignature !== contentJsonSignature) {
+      editor.commands.setContent(contentJson as JSONContent, { emitUpdate: false });
+    }
+  }, [contentJson, contentJsonSignature, editor]);
+
   const handleTitleChange = useCallback(
     (value: string) => {
       titleRef.current = value;
-      setLocalTitle(value);
       onChangeRef.current({
         title: value,
         contentJson: (editor?.getJSON() as TiptapJson | undefined) ?? contentJson,
@@ -105,7 +117,7 @@ export function DocumentEditor({ contentJson, onChange, onSelectionCommand, titl
           aria-label="Document title"
           className="w-full bg-transparent text-2xl font-semibold tracking-normal text-zinc-950 outline-none placeholder:text-zinc-400"
           onChange={(event) => handleTitleChange(event.target.value)}
-          value={localTitle}
+          value={title}
         />
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto px-6 py-6">
