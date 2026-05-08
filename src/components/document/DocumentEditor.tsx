@@ -1,0 +1,123 @@
+"use client";
+
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import CharacterCount from "@tiptap/extension-character-count";
+import Link from "@tiptap/extension-link";
+import Placeholder from "@tiptap/extension-placeholder";
+import TaskItem from "@tiptap/extension-task-item";
+import TaskList from "@tiptap/extension-task-list";
+import Typography from "@tiptap/extension-typography";
+import { EditorContent, useEditor } from "@tiptap/react";
+import StarterKit from "@tiptap/starter-kit";
+import type { JSONContent } from "@tiptap/core";
+import type { TiptapJson } from "@/db/schema";
+import { SelectionAiMenu } from "./SelectionAiMenu";
+
+type DocumentEditorProps = {
+  title: string;
+  contentJson: TiptapJson;
+  onChange: (draft: { title: string; contentJson: TiptapJson }) => void;
+  onSelectionCommand?: (command: string, selectedText: string) => void;
+};
+
+export function DocumentEditor({ contentJson, onChange, onSelectionCommand, title }: DocumentEditorProps) {
+  const [localTitle, setLocalTitle] = useState(title);
+  const [hasSelection, setHasSelection] = useState(false);
+  const titleRef = useRef(title);
+  const onChangeRef = useRef(onChange);
+  const onSelectionCommandRef = useRef(onSelectionCommand);
+
+  useEffect(() => {
+    onChangeRef.current = onChange;
+  }, [onChange]);
+
+  useEffect(() => {
+    onSelectionCommandRef.current = onSelectionCommand;
+  }, [onSelectionCommand]);
+
+  const extensions = useMemo(
+    () => [
+      StarterKit,
+      Placeholder.configure({
+        placeholder: "Write the memo...",
+      }),
+      Link.configure({
+        autolink: true,
+        openOnClick: false,
+      }),
+      TaskList,
+      TaskItem.configure({
+        nested: true,
+      }),
+      Typography,
+      CharacterCount,
+    ],
+    [],
+  );
+
+  const editor = useEditor({
+    extensions,
+    content: contentJson as JSONContent,
+    immediatelyRender: false,
+    onSelectionUpdate: ({ editor: currentEditor }) => {
+      const { empty } = currentEditor.state.selection;
+      setHasSelection(!empty);
+    },
+    onUpdate: ({ editor: currentEditor }) => {
+      onChangeRef.current({
+        title: titleRef.current,
+        contentJson: currentEditor.getJSON() as TiptapJson,
+      });
+    },
+  });
+
+  const handleTitleChange = useCallback(
+    (value: string) => {
+      titleRef.current = value;
+      setLocalTitle(value);
+      onChangeRef.current({
+        title: value,
+        contentJson: (editor?.getJSON() as TiptapJson | undefined) ?? contentJson,
+      });
+    },
+    [contentJson, editor],
+  );
+
+  const handleCommand = useCallback(
+    (command: string) => {
+      if (!editor) return;
+
+      const { from, to } = editor.state.selection;
+      const selectedText = editor.state.doc.textBetween(from, to, "\n").trim();
+      onSelectionCommandRef.current?.(command, selectedText);
+    },
+    [editor],
+  );
+
+  const characterCount = editor?.storage.characterCount.characters() ?? 0;
+  const wordCount = editor?.storage.characterCount.words() ?? 0;
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col bg-white">
+      <SelectionAiMenu hasSelection={hasSelection} onCommand={handleCommand} />
+      <div className="border-b border-zinc-200 px-6 py-5">
+        <input
+          aria-label="Document title"
+          className="w-full bg-transparent text-2xl font-semibold tracking-normal text-zinc-950 outline-none placeholder:text-zinc-400"
+          onChange={(event) => handleTitleChange(event.target.value)}
+          value={localTitle}
+        />
+      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto px-6 py-6">
+        <EditorContent
+          className="min-h-full [&_.tiptap]:min-h-[52rem] [&_.tiptap]:max-w-3xl [&_.tiptap]:outline-none [&_.tiptap]:text-base [&_.tiptap]:leading-7 [&_.tiptap]:text-zinc-900 [&_.tiptap_a]:text-zinc-950 [&_.tiptap_a]:underline [&_.tiptap_blockquote]:border-l-2 [&_.tiptap_blockquote]:border-zinc-300 [&_.tiptap_blockquote]:pl-4 [&_.tiptap_h1]:text-3xl [&_.tiptap_h1]:font-semibold [&_.tiptap_h2]:text-2xl [&_.tiptap_h2]:font-semibold [&_.tiptap_h3]:text-xl [&_.tiptap_h3]:font-semibold [&_.tiptap_li]:my-1 [&_.tiptap_p.is-editor-empty:first-child::before]:pointer-events-none [&_.tiptap_p.is-editor-empty:first-child::before]:float-left [&_.tiptap_p.is-editor-empty:first-child::before]:h-0 [&_.tiptap_p.is-editor-empty:first-child::before]:text-zinc-400 [&_.tiptap_p.is-editor-empty:first-child::before]:content-[attr(data-placeholder)] [&_.tiptap_p]:my-3 [&_.tiptap_ul]:my-3 [&_.tiptap_ul]:list-disc [&_.tiptap_ul]:pl-6"
+          editor={editor}
+        />
+      </div>
+      <footer className="flex items-center justify-end gap-4 border-t border-zinc-200 px-6 py-2 text-xs text-zinc-500">
+        <span>{wordCount} words</span>
+        <span>{characterCount} characters</span>
+      </footer>
+    </div>
+  );
+}
