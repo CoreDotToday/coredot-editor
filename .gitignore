@@ -14,6 +14,12 @@
 /coverage
 /test-results
 
+# generated sqlite databases
+/data/*.db
+/data/*.db-*
+/data/*.sqlite
+/data/*.sqlite-*
+
 # next.js
 /.next/
 /out/

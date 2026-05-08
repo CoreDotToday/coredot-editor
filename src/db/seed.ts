@@ -1,7 +1,7 @@
-import { eq } from "drizzle-orm";
 import { promptTemplates, type PromptVariableSchema } from "./schema";
 
 type DefaultPromptTemplate = {
+  id: string;
   name: string;
   description: string;
   category: string;
@@ -20,6 +20,7 @@ const strategyVariableSchema: PromptVariableSchema = {
 
 export const defaultPromptTemplates: DefaultPromptTemplate[] = [
   {
+    id: "tpl_strategy_review",
     name: "Strategy Review",
     description: "Evaluate strategic clarity, evidence, risks, and executive readability.",
     category: "strategy_review",
@@ -28,6 +29,7 @@ export const defaultPromptTemplates: DefaultPromptTemplate[] = [
     variableSchema: strategyVariableSchema,
   },
   {
+    id: "tpl_executive_rewrite",
     name: "Executive Rewrite",
     description: "Rewrite selected text for concise executive communication.",
     category: "executive_rewrite",
@@ -36,6 +38,7 @@ export const defaultPromptTemplates: DefaultPromptTemplate[] = [
     variableSchema: strategyVariableSchema,
   },
   {
+    id: "tpl_market_research",
     name: "Market Research Critique",
     description: "Check market claims, assumptions, segmentation, and evidence gaps.",
     category: "market_research",
@@ -49,14 +52,10 @@ export async function seedDefaultPromptTemplates(now = new Date()) {
   const { db } = await import("./client");
 
   for (const template of defaultPromptTemplates) {
-    const existing = await db
-      .select({ id: promptTemplates.id })
-      .from(promptTemplates)
-      .where(eq(promptTemplates.name, template.name))
-      .limit(1);
-
-    if (existing.length === 0) {
-      await db.insert(promptTemplates).values({
+    await db
+      .insert(promptTemplates)
+      .values({
+        id: template.id,
         name: template.name,
         description: template.description,
         category: template.category,
@@ -66,8 +65,20 @@ export async function seedDefaultPromptTemplates(now = new Date()) {
         isActive: true,
         createdAt: now,
         updatedAt: now,
+      })
+      .onConflictDoUpdate({
+        target: promptTemplates.id,
+        set: {
+          name: template.name,
+          description: template.description,
+          category: template.category,
+          systemPrompt: template.systemPrompt,
+          variableSchemaJson: template.variableSchema,
+          isDefault: true,
+          isActive: true,
+          updatedAt: now,
+        },
       });
-    }
   }
 }
 

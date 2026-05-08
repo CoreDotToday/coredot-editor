@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "ec86fad5-dd53-4948-a599-1e26f0c4d26e",
+  "id": "5f37342b-fcdd-4a39-a529-cf526089f45e",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "ai_proposals": {
@@ -72,7 +72,22 @@
           "autoincrement": false
         }
       },
-      "indexes": {},
+      "indexes": {
+        "ai_proposals_ai_run_id_idx": {
+          "name": "ai_proposals_ai_run_id_idx",
+          "columns": [
+            "ai_run_id"
+          ],
+          "isUnique": false
+        },
+        "ai_proposals_document_id_idx": {
+          "name": "ai_proposals_document_id_idx",
+          "columns": [
+            "document_id"
+          ],
+          "isUnique": false
+        }
+      },
       "foreignKeys": {
         "ai_proposals_ai_run_id_ai_runs_id_fk": {
           "name": "ai_proposals_ai_run_id_ai_runs_id_fk",
@@ -103,7 +118,12 @@
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
-      "checkConstraints": {}
+      "checkConstraints": {
+        "ai_proposals_status_check": {
+          "name": "ai_proposals_status_check",
+          "value": "\"ai_proposals\".\"status\" in ('pending', 'accepted', 'rejected')"
+        }
+      }
     },
     "ai_runs": {
       "name": "ai_runs",
@@ -202,7 +222,22 @@
           "autoincrement": false
         }
       },
-      "indexes": {},
+      "indexes": {
+        "ai_runs_document_id_idx": {
+          "name": "ai_runs_document_id_idx",
+          "columns": [
+            "document_id"
+          ],
+          "isUnique": false
+        },
+        "ai_runs_prompt_template_id_idx": {
+          "name": "ai_runs_prompt_template_id_idx",
+          "columns": [
+            "prompt_template_id"
+          ],
+          "isUnique": false
+        }
+      },
       "foreignKeys": {
         "ai_runs_document_id_documents_id_fk": {
           "name": "ai_runs_document_id_documents_id_fk",
@@ -233,7 +268,16 @@
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
-      "checkConstraints": {}
+      "checkConstraints": {
+        "ai_runs_command_type_check": {
+          "name": "ai_runs_command_type_check",
+          "value": "\"ai_runs\".\"command_type\" in ('selection_rewrite', 'document_review')"
+        },
+        "ai_runs_status_check": {
+          "name": "ai_runs_status_check",
+          "value": "\"ai_runs\".\"status\" in ('pending', 'streaming', 'completed', 'failed')"
+        }
+      }
     },
     "documents": {
       "name": "documents",
@@ -294,7 +338,12 @@
       "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
-      "checkConstraints": {}
+      "checkConstraints": {
+        "documents_status_check": {
+          "name": "documents_status_check",
+          "value": "\"documents\".\"status\" in ('draft', 'archived')"
+        }
+      }
     },
     "prompt_templates": {
       "name": "prompt_templates",
