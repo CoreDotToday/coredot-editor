@@ -63,6 +63,20 @@ async function createIsolatedAiRunDb() {
       updated_at integer NOT NULL
     )
   `);
+  await db.run(sql`
+    CREATE TABLE ai_proposals (
+      id text PRIMARY KEY NOT NULL,
+      ai_run_id text NOT NULL,
+      document_id text NOT NULL,
+      target_text text NOT NULL,
+      replacement_text text NOT NULL,
+      explanation text NOT NULL,
+      status text DEFAULT 'pending' NOT NULL,
+      created_at integer NOT NULL,
+      updated_at integer NOT NULL,
+      CONSTRAINT "no_bad_targets" CHECK(target_text <> 'bad')
+    )
+  `);
 
   const now = new Date("2026-01-01T00:00:00.000Z");
   await db.insert(schema.documents).values({
@@ -113,5 +127,41 @@ describe("AI run repository", () => {
     expect(failedRun?.status).toBe("failed");
     expect(failedRun?.errorMessage).toBe("late failure");
     expect(runs).toHaveLength(1);
+  });
+
+  it("rolls back proposal inserts when finalizing an AI run fails", async () => {
+    const db = await createIsolatedAiRunDb();
+    const repository = createAiRunRepository(db);
+    const run = await repository.createAiRun({
+      documentId: "doc_1",
+      promptTemplateId: "tpl_1",
+      commandType: "document_review",
+      provider: "stub",
+      model: "stub-editor",
+      inputSummaryJson: { documentTextLength: 4 },
+    });
+
+    await expect(
+      repository.completeAiRunWithProposals(run.id, "review output", [
+        {
+          documentId: "doc_1",
+          targetText: "good",
+          replacementText: "better",
+          explanation: "Valid.",
+        },
+        {
+          documentId: "doc_1",
+          targetText: "bad",
+          replacementText: "worse",
+          explanation: "Should trigger rollback.",
+        },
+      ]),
+    ).rejects.toThrow();
+
+    const [savedRun] = await db.select().from(schema.aiRuns).where(sql`${schema.aiRuns.id} = ${run.id}`);
+    const proposals = await db.select().from(schema.aiProposals);
+
+    expect(savedRun?.status).toBe("pending");
+    expect(proposals).toHaveLength(0);
   });
 });

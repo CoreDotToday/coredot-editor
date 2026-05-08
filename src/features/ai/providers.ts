@@ -1,5 +1,5 @@
 import { openai } from "@ai-sdk/openai";
-import { generateObject, generateText } from "ai";
+import { generateObject, generateText, streamText as streamAiText } from "ai";
 import type { AiMessage, ReviewResult } from "./types";
 import { reviewResultSchema } from "./types";
 
@@ -9,17 +9,22 @@ export type AiProvider = {
   name: AiProviderName;
   model: string;
   generateText(input: { messages: AiMessage[] }): Promise<string>;
+  streamText(input: { messages: AiMessage[] }): Promise<Response>;
   generateReview(input: { messages: AiMessage[] }): Promise<ReviewResult>;
 };
 
 export function createAiProvider(): AiProvider {
   const provider = process.env.AI_PROVIDER ?? "stub";
 
+  if (provider === "stub") {
+    return createStubAiProvider();
+  }
+
   if (provider === "openai") {
     return createOpenAiProvider();
   }
 
-  return createStubAiProvider();
+  throw new Error(`Unsupported AI_PROVIDER: ${provider}`);
 }
 
 function createOpenAiProvider(): AiProvider {
@@ -35,6 +40,13 @@ function createOpenAiProvider(): AiProvider {
       });
       return result.text;
     },
+    async streamText(input) {
+      const result = streamAiText({
+        model: openai(model),
+        messages: input.messages,
+      });
+      return result.toTextStreamResponse();
+    },
     async generateReview(input) {
       const result = await generateObject({
         model: openai(model),
@@ -47,13 +59,22 @@ function createOpenAiProvider(): AiProvider {
 }
 
 function createStubAiProvider(): AiProvider {
+  const generateStubText = (input: { messages: AiMessage[] }) => {
+    const selectedText = extractSection(input.messages, "Selected text") || extractSection(input.messages, "Document text");
+    const command = extractSection(input.messages, "Command") || "Rewrite";
+    return `Stub rewrite: ${selectedText || "No selected text provided."}\n\n[Command: ${command}]`;
+  };
+
   return {
     name: "stub",
     model: "stub-editor",
     async generateText(input) {
-      const selectedText = extractSection(input.messages, "Selected text") || extractSection(input.messages, "Document text");
-      const command = extractSection(input.messages, "Command") || "Rewrite";
-      return `Stub rewrite: ${selectedText || "No selected text provided."}\n\n[Command: ${command}]`;
+      return generateStubText(input);
+    },
+    async streamText(input) {
+      return new Response(generateStubText(input), {
+        headers: { "content-type": "text/plain; charset=utf-8" },
+      });
     },
     async generateReview(input) {
       const targetText = extractSection(input.messages, "Selected text") || extractSection(input.messages, "Document text");

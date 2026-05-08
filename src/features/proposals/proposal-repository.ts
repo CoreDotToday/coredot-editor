@@ -1,3 +1,4 @@
+import { desc, eq } from "drizzle-orm";
 import { db } from "@/db/client";
 import { aiProposals, type NewAiProposalRecord } from "@/db/schema";
 
@@ -24,9 +25,32 @@ export function createProposalRepository(database: ProposalDatabase = db) {
 
       return proposal!;
     },
+
+    async listProposalsForDocument(documentId: string) {
+      return database
+        .select()
+        .from(aiProposals)
+        .where(eq(aiProposals.documentId, documentId))
+        .orderBy(desc(aiProposals.createdAt));
+    },
+
+    async updateProposalStatus(id: string, status: "pending" | "accepted" | "rejected") {
+      const [proposal] = await database
+        .update(aiProposals)
+        .set({
+          status,
+          updatedAt: new Date(),
+        })
+        .where(eq(aiProposals.id, id))
+        .returning();
+
+      return proposal ?? null;
+    },
   };
 }
 
 const defaultRepository = createProposalRepository();
 
 export const createProposal = defaultRepository.createProposal;
+export const listProposalsForDocument = defaultRepository.listProposalsForDocument;
+export const updateProposalStatus = defaultRepository.updateProposalStatus;

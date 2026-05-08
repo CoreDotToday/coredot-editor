@@ -60,4 +60,30 @@ describe("proposal repository", () => {
       status: "pending",
     });
   });
+
+  it("lists proposals for a document and updates proposal status", async () => {
+    const db = await createIsolatedProposalDb();
+    const repository = createProposalRepository(db);
+    const firstProposal = await repository.createProposal({
+      aiRunId: "run_1",
+      documentId: "doc_1",
+      targetText: "first",
+      replacementText: "updated first",
+      explanation: "First.",
+    });
+    await repository.createProposal({
+      aiRunId: "run_1",
+      documentId: "doc_2",
+      targetText: "other",
+      replacementText: "updated other",
+      explanation: "Other.",
+    });
+
+    const updatedProposal = await repository.updateProposalStatus(firstProposal.id, "accepted");
+    const proposals = await repository.listProposalsForDocument("doc_1");
+
+    expect(updatedProposal?.status).toBe("accepted");
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0]).toMatchObject({ id: firstProposal.id, status: "accepted" });
+  });
 });

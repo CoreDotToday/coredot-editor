@@ -1,8 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getDocumentById } from "@/features/documents/document-repository";
 import { createAiProvider } from "@/features/ai/providers";
-import { completeAiRun, createAiRun, failAiRun } from "@/features/ai/ai-run-repository";
-import { createProposal } from "@/features/proposals/proposal-repository";
+import { completeAiRunWithProposals, createAiRun, failAiRun } from "@/features/ai/ai-run-repository";
 import { getPromptTemplateById } from "@/features/templates/template-repository";
 import type { DocumentRecord, PromptTemplateRecord } from "@/db/schema";
 import { POST } from "./route";
@@ -16,13 +15,16 @@ vi.mock("@/features/templates/template-repository", () => ({
 }));
 
 vi.mock("@/features/ai/ai-run-repository", () => ({
-  completeAiRun: vi.fn(async (id, outputText) => ({ id, outputText, status: "completed" })),
+  completeAiRunWithProposals: vi.fn(async (id, outputText, proposals) => ({
+    run: { id, outputText, status: "completed" },
+    proposals: proposals.map((proposal: Record<string, unknown>, index: number) => ({
+      id: `proposal_${index + 1}`,
+      status: "pending",
+      ...proposal,
+    })),
+  })),
   createAiRun: vi.fn(async (input) => ({ id: "run_1", ...input, status: "pending" })),
   failAiRun: vi.fn(async (id, errorMessage) => ({ id, errorMessage, status: "failed" })),
-}));
-
-vi.mock("@/features/proposals/proposal-repository", () => ({
-  createProposal: vi.fn(async (input) => ({ id: "proposal_1", status: "pending", ...input })),
 }));
 
 vi.mock("@/features/ai/providers", () => ({
@@ -77,6 +79,10 @@ const validBody = {
 };
 
 describe("POST /api/ai/rewrite", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   it("returns 400 for bad JSON without touching repositories", async () => {
     const response = await POST(new Request("http://localhost/api/ai/rewrite", { method: "POST", body: "{" }));
 
@@ -94,6 +100,20 @@ describe("POST /api/ai/rewrite", () => {
     expect(await response.json()).toEqual({ error: "Document not found" });
   });
 
+  it("returns 404 when the template is missing before selected text validation", async () => {
+    vi.mocked(getDocumentById).mockResolvedValueOnce({
+      ...documentRecord,
+      plainText: "Old text appears twice. Old text appears twice.",
+    });
+    vi.mocked(getPromptTemplateById).mockResolvedValueOnce(null as never);
+
+    const response = await POST(createJsonRequest(validBody));
+
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: "Template not found" });
+    expect(createAiRun).not.toHaveBeenCalled();
+  });
+
   it("creates a completed AI run and pending proposal for selected text", async () => {
     vi.mocked(getDocumentById).mockResolvedValueOnce(documentRecord);
     vi.mocked(getPromptTemplateById).mockResolvedValueOnce(templateRecord);
@@ -105,7 +125,6 @@ describe("POST /api/ai/rewrite", () => {
       run: { id: "run_1", status: "completed" },
       proposal: {
         id: "proposal_1",
-        aiRunId: "run_1",
         documentId: "doc_1",
         targetText: "Old text",
         replacementText: "Improved text",
@@ -121,13 +140,67 @@ describe("POST /api/ai/rewrite", () => {
         model: "stub-editor",
       }),
     );
-    expect(completeAiRun).toHaveBeenCalledWith("run_1", "Improved text");
-    expect(createProposal).toHaveBeenCalledWith(
-      expect.objectContaining({
-        aiRunId: "run_1",
-        targetText: "Old text",
-        replacementText: "Improved text",
-      }),
+    expect(completeAiRunWithProposals).toHaveBeenCalledWith(
+      "run_1",
+      "Improved text",
+      [
+        expect.objectContaining({
+          targetText: "Old text",
+          replacementText: "Improved text",
+        }),
+      ],
+    );
+  });
+
+  it("returns 400 when selected text is not an exact unique match in the document", async () => {
+    vi.mocked(getDocumentById).mockResolvedValueOnce({
+      ...documentRecord,
+      plainText: "Old text appears twice. Old text appears twice.",
+    });
+    vi.mocked(getPromptTemplateById).mockResolvedValueOnce(templateRecord);
+
+    const response = await POST(createJsonRequest(validBody));
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "Selected text must match exactly once in the document" });
+    expect(createAiRun).not.toHaveBeenCalled();
+    expect(completeAiRunWithProposals).not.toHaveBeenCalled();
+  });
+
+  it("returns 500 when provider configuration is invalid before a run exists", async () => {
+    vi.mocked(getDocumentById).mockResolvedValueOnce(documentRecord);
+    vi.mocked(getPromptTemplateById).mockResolvedValueOnce(templateRecord);
+    vi.mocked(createAiProvider).mockImplementationOnce(() => {
+      throw new Error("Unsupported AI_PROVIDER: bad");
+    });
+
+    const response = await POST(createJsonRequest(validBody));
+
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: "AI generation failed" });
+    expect(createAiRun).not.toHaveBeenCalled();
+    expect(failAiRun).not.toHaveBeenCalled();
+  });
+
+  it("returns 500 and fails the run when finalizing proposals fails", async () => {
+    vi.mocked(getDocumentById).mockResolvedValueOnce(documentRecord);
+    vi.mocked(getPromptTemplateById).mockResolvedValueOnce(templateRecord);
+    vi.mocked(completeAiRunWithProposals).mockRejectedValueOnce(new Error("finalize failed"));
+
+    const response = await POST(createJsonRequest(validBody));
+
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: "AI generation failed" });
+    expect(failAiRun).toHaveBeenCalledWith("run_1", "finalize failed");
+    expect(completeAiRunWithProposals).toHaveBeenCalledWith(
+      "run_1",
+      "Improved text",
+      [
+        expect.objectContaining({
+          targetText: "Old text",
+          replacementText: "Improved text",
+        }),
+      ],
     );
   });
 
@@ -140,6 +213,7 @@ describe("POST /api/ai/rewrite", () => {
       generateText: vi.fn(async () => {
         throw new Error("provider unavailable");
       }),
+      streamText: vi.fn(),
       generateReview: vi.fn(),
     });
 

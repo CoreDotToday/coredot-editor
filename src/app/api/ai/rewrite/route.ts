@@ -2,10 +2,10 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { aiCommandPayloadSchema } from "@/features/ai/types";
 import { buildAiMessages } from "@/features/ai/payload-builder";
-import { completeAiRun, createAiRun, failAiRun } from "@/features/ai/ai-run-repository";
+import { completeAiRunWithProposals, createAiRun, failAiRun } from "@/features/ai/ai-run-repository";
 import { createAiProvider } from "@/features/ai/providers";
 import { getDocumentById } from "@/features/documents/document-repository";
-import { createProposal } from "@/features/proposals/proposal-repository";
+import { applyProposalToText } from "@/features/proposals/proposal-apply";
 import { getPromptTemplateById } from "@/features/templates/template-repository";
 import { validateTemplateVariables } from "@/features/templates/template-validation";
 
@@ -38,7 +38,17 @@ export async function POST(request: Request) {
     );
   }
 
-  const provider = createAiProvider();
+  if (!applyProposalToText(document.plainText, body.selectedText, body.selectedText).ok) {
+    return NextResponse.json({ error: "Selected text must match exactly once in the document" }, { status: 400 });
+  }
+
+  let provider;
+  try {
+    provider = createAiProvider();
+  } catch {
+    return NextResponse.json({ error: "AI generation failed" }, { status: 500 });
+  }
+
   const run = await createAiRun({
     documentId: document.id,
     promptTemplateId: template.id,
@@ -59,16 +69,16 @@ export async function POST(request: Request) {
       systemPrompt: template.systemPrompt,
     });
     const replacementText = await provider.generateText({ messages });
-    const proposal = await createProposal({
-      aiRunId: run.id,
-      documentId: document.id,
-      targetText: body.selectedText,
-      replacementText,
-      explanation: "AI rewrite suggestion.",
-    });
-    const completedRun = await completeAiRun(run.id, replacementText);
+    const finalizedRun = await completeAiRunWithProposals(run.id, replacementText, [
+      {
+        documentId: document.id,
+        targetText: body.selectedText,
+        replacementText,
+        explanation: "AI rewrite suggestion.",
+      },
+    ]);
 
-    return NextResponse.json({ run: completedRun ?? run, proposal });
+    return NextResponse.json({ run: finalizedRun?.run ?? run, proposal: finalizedRun?.proposals[0] ?? null });
   } catch (error) {
     await failAiRun(run.id, error instanceof Error ? error.message : "Unknown AI generation failure");
     return NextResponse.json({ error: "AI generation failed" }, { status: 500 });

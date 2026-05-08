@@ -1,10 +1,10 @@
 import { NextResponse } from "next/server";
 import { aiCommandPayloadSchema, type ReviewResult } from "@/features/ai/types";
 import { buildAiMessages } from "@/features/ai/payload-builder";
-import { completeAiRun, createAiRun, failAiRun } from "@/features/ai/ai-run-repository";
+import { completeAiRunWithProposals, createAiRun, failAiRun } from "@/features/ai/ai-run-repository";
 import { createAiProvider } from "@/features/ai/providers";
 import { getDocumentById } from "@/features/documents/document-repository";
-import { createProposal } from "@/features/proposals/proposal-repository";
+import { applyProposalToText } from "@/features/proposals/proposal-apply";
 import { getPromptTemplateById } from "@/features/templates/template-repository";
 import { validateTemplateVariables } from "@/features/templates/template-validation";
 
@@ -33,7 +33,13 @@ export async function POST(request: Request) {
     );
   }
 
-  const provider = createAiProvider();
+  let provider;
+  try {
+    provider = createAiProvider();
+  } catch {
+    return NextResponse.json({ error: "AI generation failed" }, { status: 500 });
+  }
+
   const run = await createAiRun({
     documentId: document.id,
     promptTemplateId: template.id,
@@ -54,20 +60,33 @@ export async function POST(request: Request) {
       systemPrompt: template.systemPrompt,
     });
     const review = await provider.generateReview({ messages });
-    const proposals = await Promise.all(
-      review.findings.map((finding) =>
-        createProposal({
-          aiRunId: run.id,
-          documentId: document.id,
-          targetText: finding.targetText,
-          replacementText: finding.replacementText,
-          explanation: formatFindingExplanation(finding),
-        }),
-      ),
+    const validFindings = review.findings.filter((finding) =>
+      applyProposalToText(document.plainText, finding.targetText, finding.replacementText).ok,
     );
-    const completedRun = await completeAiRun(run.id, JSON.stringify(review));
+    const skippedProposalCount = review.findings.length - validFindings.length;
 
-    return NextResponse.json({ run: completedRun ?? run, review, proposals });
+    if (review.findings.length > 0 && validFindings.length === 0) {
+      throw new Error("AI review produced no applicable findings");
+    }
+
+    const outputText = JSON.stringify(review);
+    const finalizedRun = await completeAiRunWithProposals(
+      run.id,
+      outputText,
+      validFindings.map((finding) => ({
+        documentId: document.id,
+        targetText: finding.targetText,
+        replacementText: finding.replacementText,
+        explanation: formatFindingExplanation(finding),
+      })),
+    );
+
+    return NextResponse.json({
+      run: finalizedRun?.run ?? run,
+      review,
+      proposals: finalizedRun?.proposals ?? [],
+      skippedProposalCount,
+    });
   } catch (error) {
     await failAiRun(run.id, error instanceof Error ? error.message : "Unknown AI generation failure");
     return NextResponse.json({ error: "AI generation failed" }, { status: 500 });

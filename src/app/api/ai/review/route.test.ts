@@ -1,6 +1,6 @@
-import { describe, expect, it, vi } from "vitest";
-import { completeAiRun, createAiRun } from "@/features/ai/ai-run-repository";
-import { createProposal } from "@/features/proposals/proposal-repository";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { completeAiRunWithProposals, createAiRun } from "@/features/ai/ai-run-repository";
+import { createAiProvider } from "@/features/ai/providers";
 import { getDocumentById } from "@/features/documents/document-repository";
 import { getPromptTemplateById } from "@/features/templates/template-repository";
 import type { DocumentRecord, PromptTemplateRecord } from "@/db/schema";
@@ -15,13 +15,16 @@ vi.mock("@/features/templates/template-repository", () => ({
 }));
 
 vi.mock("@/features/ai/ai-run-repository", () => ({
-  completeAiRun: vi.fn(async (id, outputText) => ({ id, outputText, status: "completed" })),
+  completeAiRunWithProposals: vi.fn(async (id, outputText, proposals) => ({
+    run: { id, outputText, status: "completed" },
+    proposals: proposals.map((proposal: Record<string, unknown>, index: number) => ({
+      id: `proposal_${index + 1}`,
+      status: "pending",
+      ...proposal,
+    })),
+  })),
   createAiRun: vi.fn(async (input) => ({ id: "run_1", ...input, status: "pending" })),
   failAiRun: vi.fn(),
-}));
-
-vi.mock("@/features/proposals/proposal-repository", () => ({
-  createProposal: vi.fn(async (input) => ({ id: `proposal_${input.targetText}`, status: "pending", ...input })),
 }));
 
 vi.mock("@/features/ai/providers", () => ({
@@ -42,6 +45,12 @@ vi.mock("@/features/ai/providers", () => ({
           reason: "Ownership helps execution.",
           targetText: "someone should follow up",
           replacementText: "Sales Ops should follow up",
+        },
+        {
+          problem: "Missing source",
+          reason: "The target does not appear in the document.",
+          targetText: "missing target",
+          replacementText: "replacement",
         },
       ],
     })),
@@ -79,6 +88,10 @@ function createJsonRequest(body: unknown) {
 }
 
 describe("POST /api/ai/review", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   it("returns 400 when required template variables are missing", async () => {
     vi.mocked(getDocumentById).mockResolvedValueOnce(documentRecord);
     vi.mocked(getPromptTemplateById).mockResolvedValueOnce({
@@ -121,9 +134,37 @@ describe("POST /api/ai/review", () => {
       run: { id: "run_1", status: "completed" },
       review: { summary: "Two findings." },
       proposals: [{ targetText: "growth was good" }, { targetText: "someone should follow up" }],
+      skippedProposalCount: 1,
     });
     expect(createAiRun).toHaveBeenCalledWith(expect.objectContaining({ commandType: "document_review" }));
-    expect(createProposal).toHaveBeenCalledTimes(2);
-    expect(completeAiRun).toHaveBeenCalledWith("run_1", expect.stringContaining("Two findings."));
+    expect(completeAiRunWithProposals).toHaveBeenCalledWith(
+      "run_1",
+      expect.stringContaining("Two findings."),
+      expect.arrayContaining([
+        expect.objectContaining({ targetText: "growth was good" }),
+        expect.objectContaining({ targetText: "someone should follow up" }),
+      ]),
+    );
+  });
+
+  it("returns 500 when provider configuration is invalid before a run exists", async () => {
+    vi.mocked(getDocumentById).mockResolvedValueOnce(documentRecord);
+    vi.mocked(getPromptTemplateById).mockResolvedValueOnce(templateRecord);
+    vi.mocked(createAiProvider).mockImplementationOnce(() => {
+      throw new Error("Unsupported AI_PROVIDER: bad");
+    });
+
+    const response = await POST(
+      createJsonRequest({
+        documentId: "doc_1",
+        templateId: "tpl_1",
+        command: "Review",
+        variables: {},
+      }),
+    );
+
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: "AI generation failed" });
+    expect(createAiRun).not.toHaveBeenCalled();
   });
 });
