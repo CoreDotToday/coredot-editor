@@ -26,6 +26,12 @@ type SelectionCommandPayload = {
   contentJson: TiptapJson;
 };
 
+type DocumentSnapshot = {
+  id: string;
+  title: string;
+  contentJson: TiptapJson;
+};
+
 const saveStateLabel: Record<SaveState, string> = {
   saved: "Saved",
   dirty: "Unsaved",
@@ -45,18 +51,39 @@ export function DocumentShell({ aiRuns, document, templates }: DocumentShellProp
 }
 
 function DocumentShellContent({ aiRuns, document, templates }: DocumentShellProps) {
-  const initialDraft = useMemo(
+  const incomingDocument = useMemo(
     () => ({
+      id: document.id,
       title: document.title,
       contentJson: document.contentJson,
     }),
-    [document.contentJson, document.title],
+    [document.contentJson, document.id, document.title],
+  );
+  const initialDraft = useMemo(
+    () => ({
+      title: incomingDocument.title,
+      contentJson: incomingDocument.contentJson,
+    }),
+    [incomingDocument],
   );
   const [draft, setDraft] = useState<DraftState>(initialDraft);
-  const draftRef = useRef<DraftState>(initialDraft);
   const draftVersionRef = useRef(0);
   const [saveState, setSaveState] = useState<SaveState>("saved");
   const [selectionCommand, setSelectionCommand] = useState<SelectionCommandPayload | null>(null);
+  const [observedDocument, setObservedDocument] = useState<DocumentSnapshot>(incomingDocument);
+
+  if (
+    observedDocument.id !== incomingDocument.id ||
+    observedDocument.title !== incomingDocument.title ||
+    observedDocument.contentJson !== incomingDocument.contentJson
+  ) {
+    setObservedDocument(incomingDocument);
+
+    if (saveState === "saved") {
+      setDraft(initialDraft);
+      setSelectionCommand(null);
+    }
+  }
 
   const templateGroups = useMemo(() => {
     return templates.reduce<Record<string, ShellTemplate[]>>((groups, template) => {
@@ -68,7 +95,6 @@ function DocumentShellContent({ aiRuns, document, templates }: DocumentShellProp
   }, [templates]);
 
   const handleDraftChange = useCallback((nextDraft: DraftState) => {
-    draftRef.current = nextDraft;
     draftVersionRef.current += 1;
     setDraft(nextDraft);
     setSaveState("dirty");
@@ -78,13 +104,13 @@ function DocumentShellContent({ aiRuns, document, templates }: DocumentShellProp
     setSelectionCommand({
       command,
       selectedText,
-      contentJson: draftRef.current.contentJson,
+      contentJson: draft.contentJson,
     });
-  }, []);
+  }, [draft.contentJson]);
 
   const saveDraft = useCallback(async () => {
     const savingVersion = draftVersionRef.current;
-    const savingDraft = draftRef.current;
+    const savingDraft = draft;
 
     setSaveState("saving");
 
@@ -105,7 +131,7 @@ function DocumentShellContent({ aiRuns, document, templates }: DocumentShellProp
     } catch {
       setSaveState((currentState) => (draftVersionRef.current === savingVersion ? "failed" : currentState));
     }
-  }, [document.id]);
+  }, [document.id, draft]);
 
   return (
     <main className="flex h-screen min-h-[720px] bg-zinc-50 text-zinc-950">
@@ -199,6 +225,9 @@ function DocumentShellContent({ aiRuns, document, templates }: DocumentShellProp
               ? `Last selection command: ${selectionCommand.command}`
               : "Select text in the editor to reveal AI commands."}
           </p>
+          {selectionCommand ? (
+            <p className="mt-2 truncate text-xs leading-5 text-zinc-500">Selected: {selectionCommand.selectedText}</p>
+          ) : null}
         </section>
       </aside>
     </main>

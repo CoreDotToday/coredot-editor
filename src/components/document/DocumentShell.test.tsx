@@ -42,6 +42,18 @@ function createDocument(id: string, title: string) {
   };
 }
 
+function createDocumentWithContent(id: string, title: string, paragraphText: string) {
+  return {
+    id,
+    title,
+    contentJson: {
+      type: "doc" as const,
+      content: [{ type: "paragraph", content: [{ type: "text", text: paragraphText }] }],
+    },
+    plainText: paragraphText,
+  };
+}
+
 function createDeferredResponse() {
   let resolve!: (response: Response) => void;
   const promise = new Promise<Response>((resolver) => {
@@ -106,6 +118,50 @@ describe("DocumentShell", () => {
     expect(screen.getByRole("textbox", { name: "Document title" })).toHaveValue("Board Brief");
   });
 
+  it("accepts same-document prop updates while saved", () => {
+    const { rerender } = render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "Original body")}
+        templates={[]}
+      />,
+    );
+
+    rerender(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo Updated", "Updated body")}
+        templates={[]}
+      />,
+    );
+
+    expect(screen.getByRole("textbox", { name: "Document title" })).toHaveValue("Market Entry Memo Updated");
+  });
+
+  it("preserves local dirty edits during same-document prop updates", async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "Original body")}
+        templates={[]}
+      />,
+    );
+
+    await user.clear(screen.getByRole("textbox", { name: "Document title" }));
+    await user.type(screen.getByRole("textbox", { name: "Document title" }), "Local dirty title");
+
+    rerender(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Server title", "Server body")}
+        templates={[]}
+      />,
+    );
+
+    expect(screen.getByRole("textbox", { name: "Document title" })).toHaveValue("Local dirty title");
+  });
+
   it("reflects the last selection command in the AI panel", async () => {
     const user = userEvent.setup();
 
@@ -114,6 +170,7 @@ describe("DocumentShell", () => {
     await user.click(screen.getByRole("button", { name: "Mock selection command" }));
 
     expect(screen.getByText("Last selection command: Improve clarity")).toBeInTheDocument();
+    expect(screen.getByText("Selected: selected text")).toBeInTheDocument();
   });
 });
 
