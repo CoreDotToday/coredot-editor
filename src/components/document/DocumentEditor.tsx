@@ -41,7 +41,9 @@ export function DocumentEditor({ contentJson, onChange, onSelectionCommand, titl
 
   const extensions = useMemo(
     () => [
-      StarterKit,
+      StarterKit.configure({
+        link: false,
+      }),
       Placeholder.configure({
         placeholder: "Write the memo...",
       }),
