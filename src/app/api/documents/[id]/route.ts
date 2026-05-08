@@ -35,6 +35,9 @@ export async function PUT(request: Request, { params }: Params) {
 
 export async function DELETE(_request: Request, { params }: Params) {
   const { id } = await params;
-  await archiveDocument(id);
+  const document = await archiveDocument(id);
+  if (!document) {
+    return NextResponse.json({ error: "Document not found" }, { status: 404 });
+  }
   return NextResponse.json({ ok: true });
 }

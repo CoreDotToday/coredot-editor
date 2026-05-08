@@ -56,7 +56,13 @@ export function createDocumentRepository(database: DocumentDatabase = db) {
 
     async archiveDocument(id: string) {
       const now = new Date();
-      await database.update(documents).set({ status: "archived", updatedAt: now }).where(eq(documents.id, id));
+      const rows = await database
+        .update(documents)
+        .set({ status: "archived", updatedAt: now })
+        .where(eq(documents.id, id))
+        .returning();
+
+      return rows[0] ?? null;
     },
   };
 }

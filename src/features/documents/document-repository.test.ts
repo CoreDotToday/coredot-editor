@@ -51,4 +51,26 @@ describe("document repository", () => {
     expect(document.status).toBe("draft");
     expect(documents.some((item) => item.id === document.id)).toBe(true);
   });
+
+  it("archives an existing document and removes it from draft listings", async () => {
+    const db = await createIsolatedDocumentDb();
+    const { archiveDocument, createDocumentDraft, getDocumentById, listDocuments } = createDocumentRepository(db);
+    const document = await createDocumentDraft("Market Entry Memo");
+
+    const archivedDocument = await archiveDocument(document.id);
+    const savedDocument = await getDocumentById(document.id);
+    const documents = await listDocuments();
+
+    expect(archivedDocument?.id).toBe(document.id);
+    expect(archivedDocument?.status).toBe("archived");
+    expect(savedDocument?.status).toBe("archived");
+    expect(documents.some((item) => item.id === document.id)).toBe(false);
+  });
+
+  it("returns null when archiving a missing document", async () => {
+    const db = await createIsolatedDocumentDb();
+    const { archiveDocument } = createDocumentRepository(db);
+
+    await expect(archiveDocument("missing-document")).resolves.toBeNull();
+  });
 });
