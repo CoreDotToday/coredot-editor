@@ -62,6 +62,13 @@ export function DocumentEditor({ contentJson, onChange, onSelectionCommand, titl
   const editor = useEditor({
     extensions,
     content: contentJson as JSONContent,
+    editorProps: {
+      attributes: {
+        "aria-label": "Document body",
+        "aria-multiline": "true",
+        role: "textbox",
+      },
+    },
     immediatelyRender: false,
     onSelectionUpdate: ({ editor: currentEditor }) => {
       const { empty } = currentEditor.state.selection;

@@ -13,7 +13,7 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:seed": "tsx src/db/seed.ts",
-    "e2e": "playwright test"
+    "e2e": "pnpm db:migrate && pnpm db:seed && playwright test"
   },
   "dependencies": {
     "@ai-sdk/openai": "^3.0.63",
