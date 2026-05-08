@@ -167,6 +167,21 @@ describe("POST /api/ai/rewrite", () => {
     expect(completeAiRunWithProposals).not.toHaveBeenCalled();
   });
 
+  it("preserves selected text whitespace when validating exact matches", async () => {
+    vi.mocked(getDocumentById).mockResolvedValueOnce({
+      ...documentRecord,
+      plainText: "Old text.",
+    });
+    vi.mocked(getPromptTemplateById).mockResolvedValueOnce(templateRecord);
+
+    const response = await POST(createJsonRequest({ ...validBody, selectedText: "Old text " }));
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "Selected text must match exactly once in the document" });
+    expect(createAiRun).not.toHaveBeenCalled();
+    expect(completeAiRunWithProposals).not.toHaveBeenCalled();
+  });
+
   it("returns 500 when provider configuration is invalid before a run exists", async () => {
     vi.mocked(getDocumentById).mockResolvedValueOnce(documentRecord);
     vi.mocked(getPromptTemplateById).mockResolvedValueOnce(templateRecord);

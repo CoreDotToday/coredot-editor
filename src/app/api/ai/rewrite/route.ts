@@ -10,7 +10,7 @@ import { getPromptTemplateById } from "@/features/templates/template-repository"
 import { validateTemplateVariables } from "@/features/templates/template-validation";
 
 const rewritePayloadSchema = aiCommandPayloadSchema.extend({
-  selectedText: z.string().trim().min(1),
+  selectedText: z.string().refine((value) => value.trim().length > 0),
 });
 
 export async function POST(request: Request) {
