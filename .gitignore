@@ -19,6 +19,10 @@
 /data/*.db-*
 /data/*.sqlite
 /data/*.sqlite-*
+/data/**/*.db
+/data/**/*.db-*
+/data/**/*.sqlite
+/data/**/*.sqlite-*
 
 # next.js
 /.next/
