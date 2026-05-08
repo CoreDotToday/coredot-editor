@@ -1,4 +1,4 @@
-import { asc, eq } from "drizzle-orm";
+import { and, asc, eq } from "drizzle-orm";
 import { db } from "@/db/client";
 import { promptTemplates, type NewPromptTemplateRecord, type PromptTemplateRecord } from "@/db/schema";
 
@@ -57,7 +57,7 @@ export function createPromptTemplateRepository(database: PromptTemplateDatabase 
           ...input,
           updatedAt: new Date(),
         })
-        .where(eq(promptTemplates.id, id))
+        .where(and(eq(promptTemplates.id, id), eq(promptTemplates.isActive, true)))
         .returning();
 
       return template ?? null;
@@ -70,7 +70,7 @@ export function createPromptTemplateRepository(database: PromptTemplateDatabase 
           isActive: false,
           updatedAt: new Date(),
         })
-        .where(eq(promptTemplates.id, id))
+        .where(and(eq(promptTemplates.id, id), eq(promptTemplates.isActive, true)))
         .returning();
 
       return template ?? null;

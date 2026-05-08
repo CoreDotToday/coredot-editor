@@ -92,6 +92,7 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
   const selectedIdRef = useRef(selectedId);
   const selectionVersionRef = useRef(0);
   const draftVersionRef = useRef(0);
+  const saveInFlightRef = useRef(false);
   const selectedTemplate = useMemo(
     () => (selectedId === NEW_TEMPLATE_ID ? null : managedTemplates.find((template) => template.id === selectedId) ?? null),
     [managedTemplates, selectedId],
@@ -102,6 +103,7 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
   const [saveState, setSaveState] = useState<SaveState>("saved");
   const [statusMessage, setStatusMessage] = useState("Saved");
   const [formErrors, setFormErrors] = useState<FormErrors>({});
+  const [isSaveInFlight, setIsSaveInFlight] = useState(false);
   const isCreating = selectedId === NEW_TEMPLATE_ID;
 
   useEffect(() => {
@@ -166,6 +168,10 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
   };
 
   const saveTemplate = async () => {
+    if (saveInFlightRef.current) {
+      return;
+    }
+
     const savingSelectedId = selectedIdRef.current;
     const savingSelectionVersion = selectionVersionRef.current;
     const savingDraftVersion = draftVersionRef.current;
@@ -179,9 +185,6 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
       setStatusMessage("Variable schema must be valid JSON.");
       return;
     }
-
-    setSaveState("saving");
-    setStatusMessage("Saving");
 
     try {
       const isNewTemplate = savingSelectedId === NEW_TEMPLATE_ID;
@@ -205,6 +208,11 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
       }
 
       setFormErrors({});
+      saveInFlightRef.current = true;
+      setIsSaveInFlight(true);
+      setSaveState("saving");
+      setStatusMessage("Saving");
+
       const response = await fetch(
         isNewTemplate ? "/api/templates" : `/api/templates/${encodeURIComponent(savingSelectedId)}`,
         {
@@ -221,15 +229,18 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
       }
 
       const body = (await response.json()) as { template: PromptTemplateRecord };
-      setManagedTemplates((currentTemplates) =>
-        listVisibleTemplates([
-          ...currentTemplates.filter((template) => template.id !== body.template.id),
-          body.template,
-        ]),
-      );
-
       const isSameSelection =
         selectedIdRef.current === savingSelectedId && selectionVersionRef.current === savingSelectionVersion;
+      const isSameDraft = draftVersionRef.current === savingDraftVersion;
+
+      if (isSameSelection && isSameDraft) {
+        setManagedTemplates((currentTemplates) =>
+          listVisibleTemplates([
+            ...currentTemplates.filter((template) => template.id !== body.template.id),
+            body.template,
+          ]),
+        );
+      }
 
       if (isNewTemplate && isSameSelection) {
         selectedIdRef.current = body.template.id;
@@ -238,7 +249,7 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
 
       if (
         isSameSelection &&
-        draftVersionRef.current === savingDraftVersion
+        isSameDraft
       ) {
         selectedIdRef.current = body.template.id;
         setSelectedId(body.template.id);
@@ -255,6 +266,9 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
         setSaveState("failed");
         setStatusMessage("Save failed");
       }
+    } finally {
+      saveInFlightRef.current = false;
+      setIsSaveInFlight(false);
     }
   };
 
@@ -358,7 +372,7 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
             {!isCreating && selectedTemplate ? (
               <button
                 className="inline-flex h-9 items-center gap-2 rounded-md border border-zinc-300 bg-white px-3 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:text-zinc-400"
-                disabled={saveState === "saving"}
+                disabled={isSaveInFlight || saveState === "saving"}
                 onClick={archiveTemplate}
                 type="button"
               >
@@ -368,12 +382,12 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
             ) : null}
             <button
               className="inline-flex h-9 items-center gap-2 rounded-md bg-zinc-950 px-4 text-sm font-medium text-white transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-300"
-              disabled={saveState === "saving" || saveState === "saved"}
+              disabled={isSaveInFlight || saveState === "saving" || saveState === "saved"}
               onClick={saveTemplate}
               type="button"
             >
               <Save aria-hidden="true" className="size-4" />
-              {saveState === "saving" ? "Saving..." : "Save"}
+              {isSaveInFlight || saveState === "saving" ? "Saving..." : "Save"}
             </button>
           </div>
         </header>

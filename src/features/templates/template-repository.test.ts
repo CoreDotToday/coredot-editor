@@ -64,4 +64,43 @@ describe("template repository", () => {
 
     expect(templates.map((template) => template.id)).toEqual([activeTemplate.id]);
   });
+
+  it("does not update archived templates", async () => {
+    const db = await createIsolatedTemplateDb();
+    const { archivePromptTemplate, createPromptTemplate, updatePromptTemplate } = createPromptTemplateRepository(db);
+    const template = await createPromptTemplate({
+      name: "Archived Review",
+      description: "Archived",
+      category: "custom",
+      systemPrompt: "You are archived.",
+      variableSchemaJson: { fields: [], required: [] },
+    });
+    await archivePromptTemplate(template.id);
+
+    const updatedTemplate = await updatePromptTemplate(template.id, {
+      name: "Reactivated Review",
+      description: "Reactivated",
+      category: "custom",
+      systemPrompt: "You are reactivated.",
+      variableSchemaJson: { fields: [], required: [] },
+      isActive: true,
+    });
+
+    expect(updatedTemplate).toBeNull();
+  });
+
+  it("returns null when archiving an already archived template", async () => {
+    const db = await createIsolatedTemplateDb();
+    const { archivePromptTemplate, createPromptTemplate } = createPromptTemplateRepository(db);
+    const template = await createPromptTemplate({
+      name: "Archived Review",
+      description: "Archived",
+      category: "custom",
+      systemPrompt: "You are archived.",
+      variableSchemaJson: { fields: [], required: [] },
+    });
+
+    expect(await archivePromptTemplate(template.id)).not.toBeNull();
+    await expect(archivePromptTemplate(template.id)).resolves.toBeNull();
+  });
 });

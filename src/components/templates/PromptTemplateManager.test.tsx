@@ -86,6 +86,8 @@ describe("PromptTemplateManager", () => {
 
     expect(screen.getByLabelText("Name")).toHaveValue("Board Review");
     expect(screen.getByDisplayValue("You are a board editor.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Strategy Review v2/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Strategy Review/ })).toBeInTheDocument();
   });
 
   it("creates a new template from the manager", async () => {
@@ -180,6 +182,29 @@ describe("PromptTemplateManager", () => {
       "/api/templates/tpl_created",
       expect.objectContaining({ method: "PUT" }),
     );
+  });
+
+  it("keeps save disabled while a create request is in flight", async () => {
+    const user = userEvent.setup();
+    const deferredCreate = createDeferredResponse();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockReturnValueOnce(deferredCreate.promise);
+
+    render(<PromptTemplateManager templates={[createTemplate()]} />);
+
+    await user.click(screen.getByRole("button", { name: "New template" }));
+    await user.clear(screen.getByLabelText("Name"));
+    await user.type(screen.getByLabelText("Name"), "Board Brief");
+    await user.clear(screen.getByLabelText("System prompt"));
+    await user.type(screen.getByLabelText("System prompt"), "You write board briefs.");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await user.type(screen.getByLabelText("Name"), " v2");
+
+    const saveButton = screen.getByRole("button", { name: /Save|Saving/ });
+    expect(saveButton).toBeDisabled();
+
+    await user.click(saveButton);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("shows validation errors before save", async () => {

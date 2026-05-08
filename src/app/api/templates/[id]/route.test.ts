@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { archivePromptTemplate, updatePromptTemplate } from "@/features/templates/template-repository";
 import { DELETE, PUT } from "./route";
 
@@ -17,6 +17,10 @@ vi.mock("@/features/templates/template-repository", () => ({
   })),
   updatePromptTemplate: vi.fn(),
 }));
+
+afterEach(() => {
+  vi.clearAllMocks();
+});
 
 const validUpdateBody = {
   name: "Strategy Review",
@@ -59,9 +63,27 @@ describe("PUT /api/templates/[id]", () => {
     expect(await response.json()).toEqual({ error: "Invalid request body" });
     expect(updatePromptTemplate).not.toHaveBeenCalled();
   });
+
+  it("returns 404 when updating an archived or missing template", async () => {
+    vi.mocked(updatePromptTemplate).mockResolvedValueOnce(null as never);
+
+    const response = await PUT(createJsonRequest(validUpdateBody), params);
+
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: "Template not found" });
+  });
 });
 
 describe("DELETE /api/templates/[id]", () => {
+  it("returns 404 when archiving an already archived or missing template", async () => {
+    vi.mocked(archivePromptTemplate).mockResolvedValueOnce(null as never);
+
+    const response = await DELETE(new Request("http://localhost/api/templates/tpl_1", { method: "DELETE" }), params);
+
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: "Template not found" });
+  });
+
   it("archives a template instead of deleting the record", async () => {
     const response = await DELETE(new Request("http://localhost/api/templates/tpl_1", { method: "DELETE" }), params);
 
