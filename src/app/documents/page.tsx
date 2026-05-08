@@ -2,6 +2,8 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { createDocumentDraft, listDocuments } from "@/features/documents/document-repository";
 
+export const dynamic = "force-dynamic";
+
 async function createDocument() {
   "use server";
 

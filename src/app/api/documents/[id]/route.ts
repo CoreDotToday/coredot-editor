@@ -25,7 +25,12 @@ export async function GET(_request: Request, { params }: Params) {
 
 export async function PUT(request: Request, { params }: Params) {
   const { id } = await params;
-  const body = updateDocumentSchema.parse(await request.json());
+  const result = updateDocumentSchema.safeParse(await request.json().catch(() => null));
+  if (!result.success) {
+    return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
+  }
+
+  const body = result.data;
   const document = await updateDocumentContent(id, body);
   if (!document) {
     return NextResponse.json({ error: "Document not found" }, { status: 404 });

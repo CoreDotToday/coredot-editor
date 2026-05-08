@@ -1,4 +1,4 @@
-import { desc, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { db } from "@/db/client";
 import { documents, type TiptapJson } from "@/db/schema";
 import { extractPlainTextFromTiptap } from "./tiptap-text";
@@ -34,7 +34,11 @@ export function createDocumentRepository(database: DocumentDatabase = db) {
     },
 
     async getDocumentById(id: string) {
-      const rows = await database.select().from(documents).where(eq(documents.id, id)).limit(1);
+      const rows = await database
+        .select()
+        .from(documents)
+        .where(and(eq(documents.id, id), eq(documents.status, "draft")))
+        .limit(1);
       return rows[0] ?? null;
     },
 
@@ -48,7 +52,7 @@ export function createDocumentRepository(database: DocumentDatabase = db) {
           plainText: extractPlainTextFromTiptap(input.contentJson),
           updatedAt: now,
         })
-        .where(eq(documents.id, id))
+        .where(and(eq(documents.id, id), eq(documents.status, "draft")))
         .returning();
 
       return rows[0] ?? null;
@@ -59,7 +63,7 @@ export function createDocumentRepository(database: DocumentDatabase = db) {
       const rows = await database
         .update(documents)
         .set({ status: "archived", updatedAt: now })
-        .where(eq(documents.id, id))
+        .where(and(eq(documents.id, id), eq(documents.status, "draft")))
         .returning();
 
       return rows[0] ?? null;

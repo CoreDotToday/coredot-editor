@@ -12,7 +12,12 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
-  const body = createDocumentSchema.parse(await request.json().catch(() => ({})));
+  const result = createDocumentSchema.safeParse(await request.json().catch(() => null));
+  if (!result.success) {
+    return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
+  }
+
+  const body = result.data;
   const document = await createDocumentDraft(body.title);
   return NextResponse.json({ document }, { status: 201 });
 }

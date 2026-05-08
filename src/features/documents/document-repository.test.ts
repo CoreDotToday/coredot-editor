@@ -63,14 +63,31 @@ describe("document repository", () => {
 
     expect(archivedDocument?.id).toBe(document.id);
     expect(archivedDocument?.status).toBe("archived");
-    expect(savedDocument?.status).toBe("archived");
+    expect(savedDocument).toBeNull();
     expect(documents.some((item) => item.id === document.id)).toBe(false);
   });
 
-  it("returns null when archiving a missing document", async () => {
+  it("returns null when archiving a missing or already archived document", async () => {
     const db = await createIsolatedDocumentDb();
-    const { archiveDocument } = createDocumentRepository(db);
+    const { archiveDocument, createDocumentDraft } = createDocumentRepository(db);
+    const document = await createDocumentDraft("Market Entry Memo");
+    await archiveDocument(document.id);
 
     await expect(archiveDocument("missing-document")).resolves.toBeNull();
+    await expect(archiveDocument(document.id)).resolves.toBeNull();
+  });
+
+  it("returns null when updating an archived document", async () => {
+    const db = await createIsolatedDocumentDb();
+    const { archiveDocument, createDocumentDraft, updateDocumentContent } = createDocumentRepository(db);
+    const document = await createDocumentDraft("Market Entry Memo");
+    await archiveDocument(document.id);
+
+    await expect(
+      updateDocumentContent(document.id, {
+        title: "Updated Memo",
+        contentJson: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "Updated" }] }] },
+      }),
+    ).resolves.toBeNull();
   });
 });
