@@ -3,6 +3,10 @@
 import { Archive, Plus, Save } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { PromptTemplateRecord } from "@/db/schema";
+import {
+  promptTemplatePayloadSchema,
+  promptTemplateUpdatePayloadSchema,
+} from "@/features/templates/template-validation";
 
 type PromptTemplateManagerProps = {
   templates: PromptTemplateRecord[];
@@ -18,6 +22,8 @@ type TemplateDraft = {
   variableSchemaText: string;
   isActive: boolean;
 };
+
+type FormErrors = Partial<Record<"name" | "description" | "category" | "systemPrompt" | "variableSchemaText", string>>;
 
 const NEW_TEMPLATE_ID = "__new_prompt_template__";
 
@@ -50,9 +56,39 @@ function createNewDraft(): TemplateDraft {
   };
 }
 
+function listVisibleTemplates(templates: PromptTemplateRecord[]) {
+  return templates
+    .filter((template) => template.isActive)
+    .sort((first, second) => first.name.localeCompare(second.name));
+}
+
+function validationErrorsFromIssues(
+  issues: Array<{ message: string; path: Array<PropertyKey> }>,
+): FormErrors {
+  const errors: FormErrors = {};
+
+  for (const issue of issues) {
+    const [field] = issue.path;
+
+    if (field === "name" && !errors.name) {
+      errors.name = issue.message;
+    } else if (field === "description" && !errors.description) {
+      errors.description = issue.message;
+    } else if (field === "category" && !errors.category) {
+      errors.category = issue.message;
+    } else if (field === "systemPrompt" && !errors.systemPrompt) {
+      errors.systemPrompt = issue.message;
+    } else if (field === "variableSchemaJson" && !errors.variableSchemaText) {
+      errors.variableSchemaText = issue.message;
+    }
+  }
+
+  return errors;
+}
+
 export function PromptTemplateManager({ templates }: PromptTemplateManagerProps) {
-  const [managedTemplates, setManagedTemplates] = useState(templates);
-  const [selectedId, setSelectedId] = useState(templates[0]?.id ?? "");
+  const [managedTemplates, setManagedTemplates] = useState(() => listVisibleTemplates(templates));
+  const [selectedId, setSelectedId] = useState(managedTemplates[0]?.id ?? "");
   const selectedIdRef = useRef(selectedId);
   const selectionVersionRef = useRef(0);
   const draftVersionRef = useRef(0);
@@ -65,6 +101,7 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
   );
   const [saveState, setSaveState] = useState<SaveState>("saved");
   const [statusMessage, setStatusMessage] = useState("Saved");
+  const [formErrors, setFormErrors] = useState<FormErrors>({});
   const isCreating = selectedId === NEW_TEMPLATE_ID;
 
   useEffect(() => {
@@ -86,6 +123,7 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
               setDraft(createNewDraft());
               setSaveState("dirty");
               setStatusMessage("New template");
+              setFormErrors({});
             }}
             type="button"
           >
@@ -105,6 +143,7 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
     setDraft(createDraft(template));
     setSaveState("saved");
     setStatusMessage("Saved");
+    setFormErrors({});
   };
 
   const startNewTemplate = () => {
@@ -115,6 +154,7 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
     setDraft(createNewDraft());
     setSaveState("dirty");
     setStatusMessage("New template");
+    setFormErrors({});
   };
 
   const updateDraft = (nextDraft: Partial<TemplateDraft>) => {
@@ -122,17 +162,19 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
     setDraft((currentDraft) => (currentDraft ? { ...currentDraft, ...nextDraft } : currentDraft));
     setSaveState("dirty");
     setStatusMessage("Unsaved changes");
+    setFormErrors({});
   };
 
   const saveTemplate = async () => {
     const savingSelectedId = selectedIdRef.current;
     const savingSelectionVersion = selectionVersionRef.current;
     const savingDraftVersion = draftVersionRef.current;
-    let variableSchemaJson: PromptTemplateRecord["variableSchemaJson"];
+    let variableSchemaJson: unknown;
 
     try {
       variableSchemaJson = JSON.parse(draft.variableSchemaText);
     } catch {
+      setFormErrors({ variableSchemaText: "Variable schema must be valid JSON." });
       setSaveState("failed");
       setStatusMessage("Variable schema must be valid JSON.");
       return;
@@ -143,6 +185,26 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
 
     try {
       const isNewTemplate = savingSelectedId === NEW_TEMPLATE_ID;
+      const payload = {
+        name: draft.name,
+        description: draft.description,
+        category: draft.category,
+        systemPrompt: draft.systemPrompt,
+        variableSchemaJson,
+        ...(isNewTemplate ? {} : { isActive: draft.isActive }),
+      };
+      const validationResult = (
+        isNewTemplate ? promptTemplatePayloadSchema : promptTemplateUpdatePayloadSchema
+      ).safeParse(payload);
+
+      if (!validationResult.success) {
+        setFormErrors(validationErrorsFromIssues(validationResult.error.issues));
+        setSaveState("failed");
+        setStatusMessage("Fix validation errors");
+        return;
+      }
+
+      setFormErrors({});
       const response = await fetch(
         isNewTemplate ? "/api/templates" : `/api/templates/${encodeURIComponent(savingSelectedId)}`,
         {
@@ -150,14 +212,7 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
           headers: {
             "Content-Type": "application/json",
           },
-          body: JSON.stringify({
-            name: draft.name,
-            description: draft.description,
-            category: draft.category,
-            systemPrompt: draft.systemPrompt,
-            variableSchemaJson,
-            ...(isNewTemplate ? {} : { isActive: draft.isActive }),
-          }),
+          body: JSON.stringify(validationResult.data),
         },
       );
 
@@ -166,18 +221,23 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
       }
 
       const body = (await response.json()) as { template: PromptTemplateRecord };
-      setManagedTemplates((currentTemplates) => {
-        const existingTemplate = currentTemplates.some((template) => template.id === body.template.id);
-        const nextTemplates = existingTemplate
-          ? currentTemplates.map((template) => (template.id === body.template.id ? body.template : template))
-          : [...currentTemplates, body.template];
+      setManagedTemplates((currentTemplates) =>
+        listVisibleTemplates([
+          ...currentTemplates.filter((template) => template.id !== body.template.id),
+          body.template,
+        ]),
+      );
 
-        return [...nextTemplates].sort((first, second) => first.name.localeCompare(second.name));
-      });
+      const isSameSelection =
+        selectedIdRef.current === savingSelectedId && selectionVersionRef.current === savingSelectionVersion;
+
+      if (isNewTemplate && isSameSelection) {
+        selectedIdRef.current = body.template.id;
+        setSelectedId(body.template.id);
+      }
 
       if (
-        selectedIdRef.current === savingSelectedId &&
-        selectionVersionRef.current === savingSelectionVersion &&
+        isSameSelection &&
         draftVersionRef.current === savingDraftVersion
       ) {
         selectedIdRef.current = body.template.id;
@@ -236,6 +296,7 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
         setSaveState("saved");
         setStatusMessage("Archived");
       }
+      setFormErrors({});
     } catch {
       setSaveState("failed");
       setStatusMessage("Archive failed");
@@ -324,11 +385,18 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
                 Name
               </label>
               <input
+                aria-describedby={formErrors.name ? "template-name-error" : undefined}
+                aria-invalid={formErrors.name ? "true" : undefined}
                 className="h-10 rounded-md border border-zinc-300 bg-white px-3 text-sm outline-none transition-colors focus:border-zinc-950"
                 id="template-name"
                 onChange={(event) => updateDraft({ name: event.target.value })}
                 value={draft.name}
               />
+              {formErrors.name ? (
+                <p className="text-sm text-red-700" id="template-name-error">
+                  {formErrors.name}
+                </p>
+              ) : null}
             </div>
 
             <div className="grid gap-2">
@@ -336,11 +404,18 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
                 Description
               </label>
               <input
+                aria-describedby={formErrors.description ? "template-description-error" : undefined}
+                aria-invalid={formErrors.description ? "true" : undefined}
                 className="h-10 rounded-md border border-zinc-300 bg-white px-3 text-sm outline-none transition-colors focus:border-zinc-950"
                 id="template-description"
                 onChange={(event) => updateDraft({ description: event.target.value })}
                 value={draft.description}
               />
+              {formErrors.description ? (
+                <p className="text-sm text-red-700" id="template-description-error">
+                  {formErrors.description}
+                </p>
+              ) : null}
             </div>
 
             <div className="grid gap-2">
@@ -348,11 +423,18 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
                 Category
               </label>
               <input
+                aria-describedby={formErrors.category ? "template-category-error" : undefined}
+                aria-invalid={formErrors.category ? "true" : undefined}
                 className="h-10 rounded-md border border-zinc-300 bg-white px-3 text-sm outline-none transition-colors focus:border-zinc-950"
                 id="template-category"
                 onChange={(event) => updateDraft({ category: event.target.value })}
                 value={draft.category}
               />
+              {formErrors.category ? (
+                <p className="text-sm text-red-700" id="template-category-error">
+                  {formErrors.category}
+                </p>
+              ) : null}
             </div>
 
             <div className="grid gap-2">
@@ -360,11 +442,18 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
                 System prompt
               </label>
               <textarea
+                aria-describedby={formErrors.systemPrompt ? "template-system-prompt-error" : undefined}
+                aria-invalid={formErrors.systemPrompt ? "true" : undefined}
                 className="min-h-56 resize-y rounded-md border border-zinc-300 bg-white px-3 py-2 font-mono text-sm leading-6 outline-none transition-colors focus:border-zinc-950"
                 id="template-system-prompt"
                 onChange={(event) => updateDraft({ systemPrompt: event.target.value })}
                 value={draft.systemPrompt}
               />
+              {formErrors.systemPrompt ? (
+                <p className="text-sm text-red-700" id="template-system-prompt-error">
+                  {formErrors.systemPrompt}
+                </p>
+              ) : null}
             </div>
 
             <div className="grid gap-2">
@@ -372,12 +461,19 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
                 Variable schema JSON
               </label>
               <textarea
+                aria-describedby={formErrors.variableSchemaText ? "template-variable-schema-error" : undefined}
+                aria-invalid={formErrors.variableSchemaText ? "true" : undefined}
                 className="min-h-72 resize-y rounded-md border border-zinc-300 bg-white px-3 py-2 font-mono text-sm leading-6 outline-none transition-colors focus:border-zinc-950"
                 id="template-variable-schema"
                 onChange={(event) => updateDraft({ variableSchemaText: event.target.value })}
                 spellCheck={false}
                 value={draft.variableSchemaText}
               />
+              {formErrors.variableSchemaText ? (
+                <p className="text-sm text-red-700" id="template-variable-schema-error">
+                  {formErrors.variableSchemaText}
+                </p>
+              ) : null}
             </div>
 
             <label className="flex items-center gap-2 text-sm font-medium text-zinc-700">

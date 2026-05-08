@@ -1,4 +1,4 @@
-import { act, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PromptTemplateRecord } from "@/db/schema";
@@ -122,6 +122,105 @@ describe("PromptTemplateManager", () => {
     expect(screen.getByLabelText("Name")).toHaveValue("Board Brief");
   });
 
+  it("continues saving a pending created template with PUT after local edits", async () => {
+    const user = userEvent.setup();
+    const deferredCreate = createDeferredResponse();
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockReturnValueOnce(deferredCreate.promise)
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            template: createTemplate({
+              id: "tpl_created",
+              name: "Board Brief v2",
+              description: "Draft board brief",
+              category: "custom",
+              systemPrompt: "You write board briefs.",
+              isDefault: false,
+            }),
+          }),
+        ),
+      );
+
+    render(<PromptTemplateManager templates={[createTemplate()]} />);
+
+    await user.click(screen.getByRole("button", { name: "New template" }));
+    await user.clear(screen.getByLabelText("Name"));
+    await user.type(screen.getByLabelText("Name"), "Board Brief");
+    await user.clear(screen.getByLabelText("System prompt"));
+    await user.type(screen.getByLabelText("System prompt"), "You write board briefs.");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await user.type(screen.getByLabelText("Name"), " v2");
+
+    await act(async () => {
+      deferredCreate.resolve(
+        new Response(
+          JSON.stringify({
+            template: createTemplate({
+              id: "tpl_created",
+              name: "Board Brief",
+              description: "Draft board brief",
+              category: "custom",
+              systemPrompt: "You write board briefs.",
+              isDefault: false,
+            }),
+          }),
+          { status: 201 },
+        ),
+      );
+      await deferredCreate.promise;
+    });
+
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(fetchMock).toHaveBeenNthCalledWith(1, "/api/templates", expect.objectContaining({ method: "POST" }));
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "/api/templates/tpl_created",
+      expect.objectContaining({ method: "PUT" }),
+    );
+  });
+
+  it("shows validation errors before save", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+
+    render(<PromptTemplateManager templates={[createTemplate()]} />);
+
+    await user.clear(screen.getByLabelText("Name"));
+    await user.clear(screen.getByLabelText("System prompt"));
+    await user.clear(screen.getByLabelText("Variable schema JSON"));
+    fireEvent.change(screen.getByLabelText("Variable schema JSON"), {
+      target: {
+        value: JSON.stringify({
+          fields: [{ name: "tone", label: "Tone", type: "select", required: false }],
+          required: [],
+        }),
+      },
+    });
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(screen.getByText("Name is required")).toBeInTheDocument();
+    expect(screen.getByText("System prompt is required")).toBeInTheDocument();
+    expect(screen.getByText("Select fields require at least one option")).toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("does not render inactive templates", () => {
+    render(
+      <PromptTemplateManager
+        templates={[
+          createTemplate({ id: "tpl_active", name: "Strategy Review", isActive: true }),
+          createTemplate({ id: "tpl_archived", name: "Archived Review", isActive: false }),
+        ]}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: /Strategy Review/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Archived Review/ })).not.toBeInTheDocument();
+  });
+
   it("archives the selected template", async () => {
     const user = userEvent.setup();
     const fetchMock = vi
@@ -142,6 +241,7 @@ describe("PromptTemplateManager", () => {
       />,
     );
 
+    await user.click(screen.getByRole("button", { name: /Strategy Review/ }));
     await user.click(screen.getByRole("button", { name: "Archive" }));
 
     expect(fetchMock).toHaveBeenCalledWith("/api/templates/tpl_1", expect.objectContaining({ method: "DELETE" }));

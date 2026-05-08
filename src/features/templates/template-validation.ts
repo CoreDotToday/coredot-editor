@@ -51,10 +51,10 @@ export const promptVariableSchema = z
   });
 
 export const promptTemplatePayloadSchema = z.object({
-  name: z.string().min(1),
-  description: z.string().min(1),
-  category: z.string().min(1),
-  systemPrompt: z.string().min(1),
+  name: z.string().trim().min(1, "Name is required"),
+  description: z.string().trim().min(1, "Description is required"),
+  category: z.string().trim().min(1, "Category is required"),
+  systemPrompt: z.string().trim().min(1, "System prompt is required"),
   variableSchemaJson: promptVariableSchema,
 });
 
