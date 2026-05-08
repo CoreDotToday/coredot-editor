@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import type { AiRunRecord, DocumentRecord, PromptTemplateRecord, TiptapJson } from "@/db/schema";
 import { DocumentEditor } from "./DocumentEditor";
 
@@ -13,6 +13,17 @@ type DocumentShellProps = {
   document: ShellDocument;
   templates: ShellTemplate[];
   aiRuns: ShellAiRun[];
+};
+
+type DraftState = {
+  title: string;
+  contentJson: TiptapJson;
+};
+
+type SelectionCommandPayload = {
+  command: string;
+  selectedText: string;
+  contentJson: TiptapJson;
 };
 
 const saveStateLabel: Record<SaveState, string> = {
@@ -30,12 +41,22 @@ const dateFormatter = new Intl.DateTimeFormat("en", {
 });
 
 export function DocumentShell({ aiRuns, document, templates }: DocumentShellProps) {
-  const [draft, setDraft] = useState({
-    title: document.title,
-    contentJson: document.contentJson,
-  });
+  return <DocumentShellContent key={document.id} aiRuns={aiRuns} document={document} templates={templates} />;
+}
+
+function DocumentShellContent({ aiRuns, document, templates }: DocumentShellProps) {
+  const initialDraft = useMemo(
+    () => ({
+      title: document.title,
+      contentJson: document.contentJson,
+    }),
+    [document.contentJson, document.title],
+  );
+  const [draft, setDraft] = useState<DraftState>(initialDraft);
+  const draftRef = useRef<DraftState>(initialDraft);
+  const draftVersionRef = useRef(0);
   const [saveState, setSaveState] = useState<SaveState>("saved");
-  const [selectedCommand, setSelectedCommand] = useState<string | null>(null);
+  const [selectionCommand, setSelectionCommand] = useState<SelectionCommandPayload | null>(null);
 
   const templateGroups = useMemo(() => {
     return templates.reduce<Record<string, ShellTemplate[]>>((groups, template) => {
@@ -46,12 +67,25 @@ export function DocumentShell({ aiRuns, document, templates }: DocumentShellProp
     }, {});
   }, [templates]);
 
-  const handleDraftChange = useCallback((nextDraft: { title: string; contentJson: TiptapJson }) => {
+  const handleDraftChange = useCallback((nextDraft: DraftState) => {
+    draftRef.current = nextDraft;
+    draftVersionRef.current += 1;
     setDraft(nextDraft);
     setSaveState("dirty");
   }, []);
 
+  const handleSelectionCommand = useCallback((command: string, selectedText: string) => {
+    setSelectionCommand({
+      command,
+      selectedText,
+      contentJson: draftRef.current.contentJson,
+    });
+  }, []);
+
   const saveDraft = useCallback(async () => {
+    const savingVersion = draftVersionRef.current;
+    const savingDraft = draftRef.current;
+
     setSaveState("saving");
 
     try {
@@ -60,18 +94,18 @@ export function DocumentShell({ aiRuns, document, templates }: DocumentShellProp
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify(draft),
+        body: JSON.stringify(savingDraft),
       });
 
       if (!response.ok) {
         throw new Error("Failed to save document");
       }
 
-      setSaveState("saved");
+      setSaveState((currentState) => (draftVersionRef.current === savingVersion ? "saved" : currentState));
     } catch {
-      setSaveState("failed");
+      setSaveState((currentState) => (draftVersionRef.current === savingVersion ? "failed" : currentState));
     }
-  }, [document.id, draft]);
+  }, [document.id]);
 
   return (
     <main className="flex h-screen min-h-[720px] bg-zinc-50 text-zinc-950">
@@ -129,7 +163,9 @@ export function DocumentShell({ aiRuns, document, templates }: DocumentShellProp
 
       <section className="flex min-w-0 flex-1 flex-col">
         <header className="flex h-14 shrink-0 items-center justify-between border-b border-zinc-200 bg-white px-6">
-          <div className="text-xs font-medium uppercase tracking-normal text-zinc-500">{saveStateLabel[saveState]}</div>
+          <div aria-live="polite" className="text-xs font-medium uppercase tracking-normal text-zinc-500" role="status">
+            {saveStateLabel[saveState]}
+          </div>
           <button
             className="inline-flex h-9 items-center justify-center rounded-md bg-zinc-950 px-4 text-sm font-medium text-white transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-300"
             disabled={saveState === "saved" || saveState === "saving"}
@@ -141,10 +177,11 @@ export function DocumentShell({ aiRuns, document, templates }: DocumentShellProp
         </header>
 
         <DocumentEditor
-          contentJson={document.contentJson}
+          key={document.id}
+          contentJson={draft.contentJson}
           onChange={handleDraftChange}
-          onSelectionCommand={(command) => setSelectedCommand(command)}
-          title={document.title}
+          onSelectionCommand={handleSelectionCommand}
+          title={draft.title}
         />
       </section>
 
@@ -158,7 +195,9 @@ export function DocumentShell({ aiRuns, document, templates }: DocumentShellProp
         <section className="px-5 py-5">
           <h3 className="text-xs font-medium uppercase tracking-normal text-zinc-500">Selection command</h3>
           <p className="mt-3 text-sm leading-6 text-zinc-600">
-            {selectedCommand ?? "Select text in the editor to reveal AI commands."}
+            {selectionCommand
+              ? `Last selection command: ${selectionCommand.command}`
+              : "Select text in the editor to reveal AI commands."}
           </p>
         </section>
       </aside>

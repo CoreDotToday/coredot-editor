@@ -17,6 +17,7 @@ export function SelectionAiMenu({ hasSelection, onCommand }: SelectionAiMenuProp
           className="rounded-md border border-neutral-200 px-3 py-1.5 text-xs font-medium text-neutral-700 hover:bg-neutral-100"
           key={command}
           onClick={() => onCommand(command)}
+          onMouseDown={(event) => event.preventDefault()}
           type="button"
         >
           {command}
