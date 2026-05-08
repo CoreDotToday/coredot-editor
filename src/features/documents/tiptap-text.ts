@@ -2,7 +2,7 @@ type TiptapNode = {
   type?: string;
   text?: string;
   attrs?: Record<string, unknown>;
-  content?: TiptapNode[];
+  content?: unknown[];
 };
 
 const blockTypes = new Set(["paragraph", "heading", "blockquote", "listItem"]);
@@ -13,7 +13,9 @@ function collectText(node: TiptapNode, lines: string[], current: string[]): void
   }
 
   for (const child of node.content ?? []) {
-    collectText(child, lines, current);
+    if (child && typeof child === "object") {
+      collectText(child, lines, current);
+    }
   }
 
   if (node.type && blockTypes.has(node.type) && current.length > 0) {
