@@ -1,4 +1,66 @@
+import { z } from "zod";
 import type { PromptVariableSchema } from "@/db/schema";
+
+const variableFieldSchema = z
+  .object({
+    name: z.string().min(1),
+    label: z.string().min(1),
+    type: z.enum(["text", "textarea", "select"]),
+    required: z.boolean(),
+    options: z.array(z.string().min(1)).optional(),
+  })
+  .superRefine((field, context) => {
+    if (field.type === "select" && (!field.options || field.options.length === 0)) {
+      context.addIssue({
+        code: "custom",
+        message: "Select fields require at least one option",
+        path: ["options"],
+      });
+    }
+  });
+
+export const promptVariableSchema = z
+  .object({
+    fields: z.array(variableFieldSchema),
+    required: z.array(z.string().min(1)),
+  })
+  .superRefine((schema, context) => {
+    const fieldNames = new Set<string>();
+
+    schema.fields.forEach((field, index) => {
+      if (fieldNames.has(field.name)) {
+        context.addIssue({
+          code: "custom",
+          message: "Variable field names must be unique",
+          path: ["fields", index, "name"],
+        });
+      }
+
+      fieldNames.add(field.name);
+    });
+
+    schema.required.forEach((requiredField, index) => {
+      if (!fieldNames.has(requiredField)) {
+        context.addIssue({
+          code: "custom",
+          message: "Required variables must be declared fields",
+          path: ["required", index],
+        });
+      }
+    });
+  });
+
+export const promptTemplatePayloadSchema = z.object({
+  name: z.string().min(1),
+  description: z.string().min(1),
+  category: z.string().min(1),
+  systemPrompt: z.string().min(1),
+  variableSchemaJson: promptVariableSchema,
+});
+
+export const promptTemplateUpdatePayloadSchema = promptTemplatePayloadSchema.extend({
+  isActive: z.boolean(),
+});
 
 export type TemplateVariableValidation =
   | { ok: true; errors: Record<string, never> }

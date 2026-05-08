@@ -50,3 +50,16 @@ export async function updatePromptTemplate(id: string, input: PromptTemplateUpda
 
   return template ?? null;
 }
+
+export async function archivePromptTemplate(id: string) {
+  const [template] = await db
+    .update(promptTemplates)
+    .set({
+      isActive: false,
+      updatedAt: new Date(),
+    })
+    .where(eq(promptTemplates.id, id))
+    .returning();
+
+  return template ?? null;
+}

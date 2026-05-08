@@ -1,7 +1,7 @@
 "use client";
 
-import { Save } from "lucide-react";
-import { useMemo, useState } from "react";
+import { Archive, Plus, Save } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { PromptTemplateRecord } from "@/db/schema";
 
 type PromptTemplateManagerProps = {
@@ -13,10 +13,13 @@ type SaveState = "saved" | "dirty" | "saving" | "failed";
 type TemplateDraft = {
   name: string;
   description: string;
+  category: string;
   systemPrompt: string;
   variableSchemaText: string;
   isActive: boolean;
 };
+
+const NEW_TEMPLATE_ID = "__new_prompt_template__";
 
 const saveStateLabel: Record<SaveState, string> = {
   saved: "Saved",
@@ -29,17 +32,32 @@ function createDraft(template: PromptTemplateRecord): TemplateDraft {
   return {
     name: template.name,
     description: template.description,
+    category: template.category,
     systemPrompt: template.systemPrompt,
     variableSchemaText: JSON.stringify(template.variableSchemaJson, null, 2),
     isActive: template.isActive,
   };
 }
 
+function createNewDraft(): TemplateDraft {
+  return {
+    name: "Untitled template",
+    description: "Custom prompt template",
+    category: "custom",
+    systemPrompt: "You are an editorial assistant.",
+    variableSchemaText: JSON.stringify({ fields: [], required: [] }, null, 2),
+    isActive: true,
+  };
+}
+
 export function PromptTemplateManager({ templates }: PromptTemplateManagerProps) {
   const [managedTemplates, setManagedTemplates] = useState(templates);
   const [selectedId, setSelectedId] = useState(templates[0]?.id ?? "");
+  const selectedIdRef = useRef(selectedId);
+  const selectionVersionRef = useRef(0);
+  const draftVersionRef = useRef(0);
   const selectedTemplate = useMemo(
-    () => managedTemplates.find((template) => template.id === selectedId) ?? managedTemplates[0] ?? null,
+    () => (selectedId === NEW_TEMPLATE_ID ? null : managedTemplates.find((template) => template.id === selectedId) ?? null),
     [managedTemplates, selectedId],
   );
   const [draft, setDraft] = useState<TemplateDraft | null>(() =>
@@ -47,29 +65,69 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
   );
   const [saveState, setSaveState] = useState<SaveState>("saved");
   const [statusMessage, setStatusMessage] = useState("Saved");
+  const isCreating = selectedId === NEW_TEMPLATE_ID;
 
-  if (managedTemplates.length === 0 || !selectedTemplate || !draft) {
+  useEffect(() => {
+    selectedIdRef.current = selectedId;
+  }, [selectedId]);
+
+  if (!draft) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-zinc-50 px-6 text-zinc-950">
-        <p className="text-sm text-zinc-500">No templates found. Run the seed command.</p>
+        <div className="grid justify-items-center gap-4">
+          <p className="text-sm text-zinc-500">No templates found. Run the seed command.</p>
+          <button
+            className="inline-flex h-9 items-center gap-2 rounded-md bg-zinc-950 px-4 text-sm font-medium text-white transition-colors hover:bg-zinc-800"
+            onClick={() => {
+              selectedIdRef.current = NEW_TEMPLATE_ID;
+              selectionVersionRef.current += 1;
+              draftVersionRef.current += 1;
+              setSelectedId(NEW_TEMPLATE_ID);
+              setDraft(createNewDraft());
+              setSaveState("dirty");
+              setStatusMessage("New template");
+            }}
+            type="button"
+          >
+            <Plus aria-hidden="true" className="size-4" />
+            New template
+          </button>
+        </div>
       </main>
     );
   }
 
   const selectTemplate = (template: PromptTemplateRecord) => {
+    selectedIdRef.current = template.id;
+    selectionVersionRef.current += 1;
+    draftVersionRef.current += 1;
     setSelectedId(template.id);
     setDraft(createDraft(template));
     setSaveState("saved");
     setStatusMessage("Saved");
   };
 
+  const startNewTemplate = () => {
+    selectedIdRef.current = NEW_TEMPLATE_ID;
+    selectionVersionRef.current += 1;
+    draftVersionRef.current += 1;
+    setSelectedId(NEW_TEMPLATE_ID);
+    setDraft(createNewDraft());
+    setSaveState("dirty");
+    setStatusMessage("New template");
+  };
+
   const updateDraft = (nextDraft: Partial<TemplateDraft>) => {
+    draftVersionRef.current += 1;
     setDraft((currentDraft) => (currentDraft ? { ...currentDraft, ...nextDraft } : currentDraft));
     setSaveState("dirty");
     setStatusMessage("Unsaved changes");
   };
 
   const saveTemplate = async () => {
+    const savingSelectedId = selectedIdRef.current;
+    const savingSelectionVersion = selectionVersionRef.current;
+    const savingDraftVersion = draftVersionRef.current;
     let variableSchemaJson: PromptTemplateRecord["variableSchemaJson"];
 
     try {
@@ -84,35 +142,103 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
     setStatusMessage("Saving");
 
     try {
-      const response = await fetch(`/api/templates/${encodeURIComponent(selectedTemplate.id)}`, {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
+      const isNewTemplate = savingSelectedId === NEW_TEMPLATE_ID;
+      const response = await fetch(
+        isNewTemplate ? "/api/templates" : `/api/templates/${encodeURIComponent(savingSelectedId)}`,
+        {
+          method: isNewTemplate ? "POST" : "PUT",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            name: draft.name,
+            description: draft.description,
+            category: draft.category,
+            systemPrompt: draft.systemPrompt,
+            variableSchemaJson,
+            ...(isNewTemplate ? {} : { isActive: draft.isActive }),
+          }),
         },
-        body: JSON.stringify({
-          name: draft.name,
-          description: draft.description,
-          category: selectedTemplate.category,
-          systemPrompt: draft.systemPrompt,
-          variableSchemaJson,
-          isActive: draft.isActive,
-        }),
-      });
+      );
 
       if (!response.ok) {
         throw new Error("Failed to save template");
       }
 
       const body = (await response.json()) as { template: PromptTemplateRecord };
-      setManagedTemplates((currentTemplates) =>
-        currentTemplates.map((template) => (template.id === body.template.id ? body.template : template)),
-      );
-      setDraft(createDraft(body.template));
-      setSaveState("saved");
-      setStatusMessage("Saved");
+      setManagedTemplates((currentTemplates) => {
+        const existingTemplate = currentTemplates.some((template) => template.id === body.template.id);
+        const nextTemplates = existingTemplate
+          ? currentTemplates.map((template) => (template.id === body.template.id ? body.template : template))
+          : [...currentTemplates, body.template];
+
+        return [...nextTemplates].sort((first, second) => first.name.localeCompare(second.name));
+      });
+
+      if (
+        selectedIdRef.current === savingSelectedId &&
+        selectionVersionRef.current === savingSelectionVersion &&
+        draftVersionRef.current === savingDraftVersion
+      ) {
+        selectedIdRef.current = body.template.id;
+        setSelectedId(body.template.id);
+        setDraft(createDraft(body.template));
+        setSaveState("saved");
+        setStatusMessage("Saved");
+      }
+    } catch {
+      if (
+        selectedIdRef.current === savingSelectedId &&
+        selectionVersionRef.current === savingSelectionVersion &&
+        draftVersionRef.current === savingDraftVersion
+      ) {
+        setSaveState("failed");
+        setStatusMessage("Save failed");
+      }
+    }
+  };
+
+  const archiveTemplate = async () => {
+    if (!selectedTemplate || isCreating) {
+      return;
+    }
+
+    const archivedTemplateId = selectedTemplate.id;
+    setSaveState("saving");
+    setStatusMessage("Archiving");
+
+    try {
+      const response = await fetch(`/api/templates/${encodeURIComponent(archivedTemplateId)}`, {
+        method: "DELETE",
+      });
+
+      if (!response.ok) {
+        throw new Error("Failed to archive template");
+      }
+
+      const remainingTemplates = managedTemplates.filter((template) => template.id !== archivedTemplateId);
+      const nextTemplate = remainingTemplates[0] ?? null;
+      setManagedTemplates(remainingTemplates);
+
+      selectionVersionRef.current += 1;
+      draftVersionRef.current += 1;
+
+      if (nextTemplate) {
+        selectedIdRef.current = nextTemplate.id;
+        setSelectedId(nextTemplate.id);
+        setDraft(createDraft(nextTemplate));
+        setSaveState("saved");
+        setStatusMessage("Archived");
+      } else {
+        selectedIdRef.current = "";
+        setSelectedId("");
+        setDraft(null);
+        setSaveState("saved");
+        setStatusMessage("Archived");
+      }
     } catch {
       setSaveState("failed");
-      setStatusMessage("Save failed");
+      setStatusMessage("Archive failed");
     }
   };
 
@@ -120,14 +246,25 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
     <main className="flex min-h-screen bg-zinc-50 text-zinc-950">
       <aside className="flex w-80 shrink-0 flex-col border-r border-zinc-200 bg-white">
         <header className="border-b border-zinc-200 px-5 py-5">
-          <h1 className="text-base font-semibold">Prompt templates</h1>
+          <div className="flex items-center justify-between gap-3">
+            <h1 className="text-base font-semibold">Prompt templates</h1>
+            <button
+              className="inline-flex size-8 items-center justify-center rounded-md border border-zinc-200 text-zinc-700 transition-colors hover:bg-zinc-100"
+              onClick={startNewTemplate}
+              title="New template"
+              type="button"
+            >
+              <Plus aria-hidden="true" className="size-4" />
+              <span className="sr-only">New template</span>
+            </button>
+          </div>
           <p className="mt-2 text-sm leading-6 text-zinc-500">Manage saved prompts used by document AI actions.</p>
         </header>
 
         <nav aria-label="Prompt templates" className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
           <ul className="space-y-1">
             {managedTemplates.map((template) => {
-              const isSelected = template.id === selectedTemplate.id;
+              const isSelected = template.id === selectedTemplate?.id;
 
               return (
                 <li key={template.id}>
@@ -156,15 +293,28 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
           <div aria-live="polite" className="text-xs font-medium uppercase tracking-normal text-zinc-500" role="status">
             {statusMessage}
           </div>
-          <button
-            className="inline-flex h-9 items-center gap-2 rounded-md bg-zinc-950 px-4 text-sm font-medium text-white transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-300"
-            disabled={saveState === "saving" || saveState === "saved"}
-            onClick={saveTemplate}
-            type="button"
-          >
-            <Save aria-hidden="true" className="size-4" />
-            {saveState === "saving" ? "Saving..." : "Save"}
-          </button>
+          <div className="flex items-center gap-2">
+            {!isCreating && selectedTemplate ? (
+              <button
+                className="inline-flex h-9 items-center gap-2 rounded-md border border-zinc-300 bg-white px-3 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:text-zinc-400"
+                disabled={saveState === "saving"}
+                onClick={archiveTemplate}
+                type="button"
+              >
+                <Archive aria-hidden="true" className="size-4" />
+                Archive
+              </button>
+            ) : null}
+            <button
+              className="inline-flex h-9 items-center gap-2 rounded-md bg-zinc-950 px-4 text-sm font-medium text-white transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-300"
+              disabled={saveState === "saving" || saveState === "saved"}
+              onClick={saveTemplate}
+              type="button"
+            >
+              <Save aria-hidden="true" className="size-4" />
+              {saveState === "saving" ? "Saving..." : "Save"}
+            </button>
+          </div>
         </header>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-6 py-6">
@@ -190,6 +340,18 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
                 id="template-description"
                 onChange={(event) => updateDraft({ description: event.target.value })}
                 value={draft.description}
+              />
+            </div>
+
+            <div className="grid gap-2">
+              <label className="text-sm font-medium text-zinc-700" htmlFor="template-category">
+                Category
+              </label>
+              <input
+                className="h-10 rounded-md border border-zinc-300 bg-white px-3 text-sm outline-none transition-colors focus:border-zinc-950"
+                id="template-category"
+                onChange={(event) => updateDraft({ category: event.target.value })}
+                value={draft.category}
               />
             </div>
 
