@@ -19,4 +19,22 @@ describe("applyProposalToText", () => {
       reason: "target_not_found",
     });
   });
+
+  it("returns an empty target failure for blank target text", () => {
+    const result = applyProposalToText("A weak claim.", "", "A better claim.");
+
+    expect(result).toEqual({
+      ok: false,
+      reason: "empty_target",
+    });
+  });
+
+  it("returns an ambiguous target failure when target text appears more than once", () => {
+    const result = applyProposalToText("Repeat this. Repeat this.", "Repeat this.", "Replace this.");
+
+    expect(result).toEqual({
+      ok: false,
+      reason: "ambiguous_target",
+    });
+  });
 });

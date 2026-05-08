@@ -8,7 +8,7 @@ type BuildMessagesInput = Omit<AiCommandPayload, "documentId" | "templateId"> & 
 
 export function buildAiMessages(input: BuildMessagesInput): AiMessage[] {
   const variableLines = Object.entries(input.variables)
-    .map(([key, value]) => `${key}: ${String(value)}`)
+    .map(([key, value]) => `${key}: ${formatVariableValue(value)}`)
     .join("\n");
 
   const userContent = [
@@ -26,4 +26,8 @@ export function buildAiMessages(input: BuildMessagesInput): AiMessage[] {
     { role: "system", content: input.systemPrompt },
     { role: "user", content: userContent },
   ];
+}
+
+function formatVariableValue(value: unknown): string {
+  return typeof value === "string" ? value : JSON.stringify(value);
 }

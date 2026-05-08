@@ -17,4 +17,22 @@ describe("buildAiMessages", () => {
     expect(messages[1]?.content).toContain("audience: CEO");
     expect(messages[1]?.content).toContain("Selected text:\nWe might enter Japan.");
   });
+
+  it("formats object and array template variables as JSON", () => {
+    const messages = buildAiMessages({
+      systemPrompt: "You are a strategy editor.",
+      command: "Improve clarity",
+      variables: {
+        audiences: ["CEO", "CFO"],
+        constraints: { region: "Japan", budget: 100 },
+      },
+      selectedText: "",
+      beforeContext: "",
+      afterContext: "",
+      documentText: "",
+    });
+
+    expect(messages[1]?.content).toContain('audiences: ["CEO","CFO"]');
+    expect(messages[1]?.content).toContain('constraints: {"region":"Japan","budget":100}');
+  });
 });
