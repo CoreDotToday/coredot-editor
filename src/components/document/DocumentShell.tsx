@@ -6,10 +6,11 @@ import { AiRunHistory, type AiRunHistoryItem } from "@/components/ai/AiRunHistor
 import { PromptTemplatePanel } from "@/components/templates/PromptTemplatePanel";
 import type { AiProposalRecord, AiRunRecord, DocumentRecord, PromptTemplateRecord, TiptapJson } from "@/db/schema";
 import { extractPlainTextFromTiptap } from "@/features/documents/tiptap-text";
+import { validateTemplateVariables } from "@/features/templates/template-validation";
 import { DocumentEditor } from "./DocumentEditor";
 
 type ShellDocument = Pick<DocumentRecord, "id" | "title" | "contentJson" | "plainText">;
-type ShellTemplate = Pick<PromptTemplateRecord, "id" | "name" | "category">;
+type ShellTemplate = Pick<PromptTemplateRecord, "id" | "name" | "category" | "variableSchemaJson">;
 type ShellAiRun = Pick<AiRunRecord, "id" | "commandType" | "status" | "createdAt">;
 type ShellProposal = Pick<
   AiProposalRecord,
@@ -39,6 +40,11 @@ type DocumentSnapshot = {
   id: string;
   title: string;
   contentJson: TiptapJson;
+};
+
+type AiSnapshot = {
+  aiRuns: ShellAiRun[];
+  proposals: ShellProposal[];
 };
 
 const saveStateLabel: Record<SaveState, string> = {
@@ -86,12 +92,18 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
   const [saveState, setSaveState] = useState<SaveState>("saved");
   const [selectionCommand, setSelectionCommand] = useState<SelectionCommandPayload | null>(null);
   const [observedDocument, setObservedDocument] = useState<DocumentSnapshot>(incomingDocument);
+  const [observedAiSnapshot, setObservedAiSnapshot] = useState<AiSnapshot>({ aiRuns, proposals });
   const [selectedTemplateId, setSelectedTemplateId] = useState(templates[0]?.id ?? "");
   const [reviewProposals, setReviewProposals] = useState<AiReviewProposal[]>(proposals);
   const [reviewRuns, setReviewRuns] = useState<AiRunHistoryItem[]>(aiRuns);
   const [isReviewing, setIsReviewing] = useState(false);
   const [reviewError, setReviewError] = useState("");
-  const selectedTemplate = templates.find((template) => template.id === selectedTemplateId) ?? null;
+  const [templateVariables, setTemplateVariables] = useState<Record<string, string>>({});
+  const [templateVariableErrors, setTemplateVariableErrors] = useState<Record<string, string>>({});
+  const activeTemplateId = templates.some((template) => template.id === selectedTemplateId)
+    ? selectedTemplateId
+    : templates[0]?.id ?? "";
+  const selectedTemplate = templates.find((template) => template.id === activeTemplateId) ?? null;
 
   if (
     observedDocument.id !== incomingDocument.id ||
@@ -108,7 +120,15 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
       setReviewRuns(aiRuns);
       setIsReviewing(false);
       setReviewError("");
+      setTemplateVariables({});
+      setTemplateVariableErrors({});
     }
+  }
+
+  if (observedAiSnapshot.aiRuns !== aiRuns || observedAiSnapshot.proposals !== proposals) {
+    setObservedAiSnapshot({ aiRuns, proposals });
+    setReviewRuns(aiRuns);
+    setReviewProposals(proposals);
   }
 
   const handleDraftChange = useCallback((nextDraft: DraftState) => {
@@ -150,13 +170,37 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
     }
   }, [document.id, draft]);
 
+  const selectTemplate = useCallback((templateId: string) => {
+    setSelectedTemplateId(templateId);
+    setTemplateVariableErrors({});
+    setReviewError("");
+  }, []);
+
+  const updateTemplateVariable = useCallback((name: string, value: string) => {
+    setTemplateVariables((currentVariables) => ({ ...currentVariables, [name]: value }));
+    setTemplateVariableErrors((currentErrors) => {
+      const remainingErrors = { ...currentErrors };
+      delete remainingErrors[name];
+      return remainingErrors;
+    });
+    setReviewError("");
+  }, []);
+
   const runDocumentReview = useCallback(async () => {
     if (!selectedTemplate) {
       return;
     }
 
+    const variableValidation = validateTemplateVariables(selectedTemplate.variableSchemaJson, templateVariables);
+    if (!variableValidation.ok) {
+      setTemplateVariableErrors(variableValidation.errors);
+      setReviewError("Fill required template fields.");
+      return;
+    }
+
     setIsReviewing(true);
     setReviewError("");
+    setTemplateVariableErrors({});
 
     try {
       const response = await fetch("/api/ai/review", {
@@ -168,7 +212,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
           documentId: document.id,
           templateId: selectedTemplate.id,
           command: "Review document",
-          variables: {},
+          variables: collectTemplateVariables(selectedTemplate, templateVariables),
           documentText: extractPlainTextFromTiptap(draft.contentJson),
         }),
       });
@@ -187,13 +231,51 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
     } finally {
       setIsReviewing(false);
     }
-  }, [document.id, draft.contentJson, selectedTemplate]);
+  }, [document.id, draft.contentJson, selectedTemplate, templateVariables]);
 
-  const updateProposalStatus = useCallback((proposalId: string, status: AiReviewProposal["status"]) => {
+  const updateProposalStatus = useCallback(async (proposalId: string, status: AiReviewProposal["status"]) => {
+    const previousProposal = reviewProposals.find((proposal) => proposal.id === proposalId);
+    if (!previousProposal) {
+      return;
+    }
+
+    setReviewError("");
     setReviewProposals((currentProposals) =>
       currentProposals.map((proposal) => (proposal.id === proposalId ? { ...proposal, status } : proposal)),
     );
-  }, []);
+
+    try {
+      const response = await fetch(`/api/proposals/${encodeURIComponent(proposalId)}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ status }),
+      });
+
+      if (!response.ok) {
+        throw new Error("Failed to update proposal status");
+      }
+
+      const body = (await response.json()) as { proposal?: AiReviewProposal };
+      if (body.proposal) {
+        setReviewProposals((currentProposals) =>
+          currentProposals.map((proposal) => (proposal.id === proposalId ? body.proposal! : proposal)),
+        );
+      }
+    } catch {
+      setReviewProposals((currentProposals) =>
+        currentProposals.map((proposal) => (proposal.id === proposalId ? previousProposal : proposal)),
+      );
+      setReviewError("Could not update proposal status.");
+    }
+  }, [reviewProposals]);
+
+  const updateProposalStatusLocally = useCallback((proposalId: string, status: AiReviewProposal["status"]) => {
+    void updateProposalStatus(proposalId, status);
+  }, [updateProposalStatus]);
+
+  const selectedTemplateName = selectedTemplate?.name ?? "";
 
   return (
     <main className="flex h-screen min-h-[720px] bg-zinc-50 text-zinc-950">
@@ -204,9 +286,12 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
         </section>
 
         <PromptTemplatePanel
-          selectedTemplateId={selectedTemplateId}
+          onSelectTemplate={selectTemplate}
+          onVariableChange={updateTemplateVariable}
+          selectedTemplateId={activeTemplateId}
           templates={templates}
-          onSelectTemplate={setSelectedTemplateId}
+          variableErrors={templateVariableErrors}
+          variableValues={templateVariables}
         />
 
         <AiRunHistory runs={reviewRuns} />
@@ -241,9 +326,9 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
           errorMessage={reviewError}
           isReviewing={isReviewing}
           onReviewDocument={runDocumentReview}
-          onUpdateProposalStatus={updateProposalStatus}
+          onUpdateProposalStatus={updateProposalStatusLocally}
           proposals={reviewProposals}
-          selectedTemplateName={selectedTemplate?.name ?? ""}
+          selectedTemplateName={selectedTemplateName}
         />
         <section className="px-5 py-5">
           <h3 className="text-xs font-medium uppercase tracking-normal text-zinc-500">Selection command</h3>
@@ -259,4 +344,11 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
       </aside>
     </main>
   );
+}
+
+function collectTemplateVariables(template: ShellTemplate, values: Record<string, string>) {
+  return template.variableSchemaJson.fields.reduce<Record<string, string>>((variables, field) => {
+    variables[field.name] = values[field.name] ?? "";
+    return variables;
+  }, {});
 }

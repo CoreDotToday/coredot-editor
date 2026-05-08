@@ -147,6 +147,52 @@ describe("POST /api/ai/review", () => {
     );
   });
 
+  it("validates generated findings against submitted document text", async () => {
+    vi.mocked(getDocumentById).mockResolvedValueOnce({
+      ...documentRecord,
+      plainText: "persisted stale body",
+    });
+    vi.mocked(getPromptTemplateById).mockResolvedValueOnce(templateRecord);
+    vi.mocked(createAiProvider).mockReturnValueOnce({
+      name: "stub",
+      model: "stub-editor",
+      generateText: vi.fn(),
+      streamText: vi.fn(),
+      generateReview: vi.fn(async () => ({
+        summary: "Draft finding.",
+        findings: [
+          {
+            problem: "Draft wording",
+            reason: "The submitted draft contains this text.",
+            targetText: "fresh edited body",
+            replacementText: "fresh edited body with clearer owner",
+          },
+        ],
+      })),
+    });
+
+    const response = await POST(
+      createJsonRequest({
+        documentId: "doc_1",
+        templateId: "tpl_1",
+        command: "Review",
+        variables: {},
+        documentText: "fresh edited body",
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      proposals: [{ targetText: "fresh edited body" }],
+      skippedProposalCount: 0,
+    });
+    expect(completeAiRunWithProposals).toHaveBeenCalledWith(
+      "run_1",
+      expect.stringContaining("Draft finding."),
+      [expect.objectContaining({ targetText: "fresh edited body" })],
+    );
+  });
+
   it("returns 500 when provider configuration is invalid before a run exists", async () => {
     vi.mocked(getDocumentById).mockResolvedValueOnce(documentRecord);
     vi.mocked(getPromptTemplateById).mockResolvedValueOnce(templateRecord);

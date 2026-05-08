@@ -68,6 +68,50 @@ function createDocumentWithContent(id: string, title: string, paragraphText: str
   };
 }
 
+function createTemplate(id: string, name: string) {
+  return {
+    id,
+    name,
+    category: "review",
+    variableSchemaJson: { fields: [], required: [] },
+  };
+}
+
+function createRequiredTemplate() {
+  return {
+    id: "tpl_1",
+    name: "Board review",
+    category: "review",
+    variableSchemaJson: {
+      fields: [{ name: "audience", label: "Audience", type: "text" as const, required: true }],
+      required: ["audience"],
+    },
+  };
+}
+
+function createProposal(
+  id: string,
+  status: "pending" | "accepted" | "rejected" = "pending",
+  targetText = "growth was good",
+) {
+  return {
+    id,
+    targetText,
+    replacementText: "revenue grew 8%",
+    explanation: "Unclear metric: Specificity helps review.",
+    status,
+  };
+}
+
+function createAiRun(id: string) {
+  return {
+    id,
+    commandType: "document_review" as const,
+    status: "completed" as const,
+    createdAt: new Date("2026-01-01T00:00:00.000Z"),
+  };
+}
+
 function createDeferredResponse() {
   let resolve!: (response: Response) => void;
   let reject!: (error: Error) => void;
@@ -272,7 +316,7 @@ describe("DocumentShell", () => {
       <DocumentShell
         aiRuns={[]}
         document={createDocumentWithContent("doc_1", "Market Entry Memo", "stale initial body")}
-        templates={[{ id: "tpl_1", name: "Board review", category: "review" }]}
+        templates={[createTemplate("tpl_1", "Board review")]}
       />,
     );
 
@@ -286,6 +330,115 @@ describe("DocumentShell", () => {
         body: expect.stringContaining('"documentText":"fresh edited body"'),
       }),
     );
+  });
+
+  it("validates required template variables before review", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}"));
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "body")}
+        templates={[createRequiredTemplate()]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Review document" }));
+
+    expect(screen.getByText("Audience is required")).toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("sends template variable values with full document review requests", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          run: createAiRun("run_1"),
+          proposals: [],
+        }),
+      ),
+    );
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "body")}
+        templates={[createRequiredTemplate()]}
+      />,
+    );
+
+    await user.type(screen.getByRole("textbox", { name: "Audience" }), "Board");
+    await user.click(screen.getByRole("button", { name: "Review document" }));
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/ai/review",
+      expect.objectContaining({
+        body: expect.stringContaining('"variables":{"audience":"Board"}'),
+      }),
+    );
+  });
+
+  it("persists proposal status changes and rolls back failed updates", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({ proposal: { ...createProposal("proposal_1"), status: "accepted" } })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "Failed" }), { status: 500 }));
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "body")}
+        proposals={[createProposal("proposal_1"), createProposal("proposal_2", "pending", "owner is unclear")]}
+        templates={[createTemplate("tpl_1", "Board review")]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Accept proposal for growth was good" }));
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/proposals/proposal_1",
+      expect.objectContaining({
+        method: "PATCH",
+        body: JSON.stringify({ status: "accepted" }),
+      }),
+    );
+    expect(screen.getByText("Accepted")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Reject proposal for owner is unclear" }));
+
+    expect(screen.getByText("Pending")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("Could not update proposal status.");
+  });
+
+  it("refreshes same-document AI runs and proposals without clobbering dirty edits", async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "Original body")}
+        proposals={[]}
+        templates={[createTemplate("tpl_1", "Board review")]}
+      />,
+    );
+
+    await user.clear(screen.getByRole("textbox", { name: "Document title" }));
+    await user.type(screen.getByRole("textbox", { name: "Document title" }), "Local dirty title");
+
+    rerender(
+      <DocumentShell
+        aiRuns={[createAiRun("run_1")]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "Original body")}
+        proposals={[createProposal("proposal_1")]}
+        templates={[createTemplate("tpl_1", "Board review")]}
+      />,
+    );
+
+    expect(screen.getByRole("textbox", { name: "Document title" })).toHaveValue("Local dirty title");
+    expect(screen.getByText("growth was good")).toBeInTheDocument();
+    expect(screen.getByText("document review")).toBeInTheDocument();
   });
 });
 

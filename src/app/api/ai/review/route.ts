@@ -40,6 +40,8 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "AI generation failed" }, { status: 500 });
   }
 
+  const reviewedText = body.documentText || document.plainText;
+
   const run = await createAiRun({
     documentId: document.id,
     promptTemplateId: template.id,
@@ -48,7 +50,7 @@ export async function POST(request: Request) {
     model: provider.model,
     inputSummaryJson: {
       command: body.command,
-      documentTextLength: (body.documentText || document.plainText).length,
+      documentTextLength: reviewedText.length,
       variableNames: Object.keys(body.variables),
     },
   });
@@ -56,12 +58,12 @@ export async function POST(request: Request) {
   try {
     const messages = buildAiMessages({
       ...body,
-      documentText: body.documentText || document.plainText,
+      documentText: reviewedText,
       systemPrompt: template.systemPrompt,
     });
     const review = await provider.generateReview({ messages });
     const validFindings = review.findings.filter((finding) =>
-      applyProposalToText(document.plainText, finding.targetText, finding.replacementText).ok,
+      applyProposalToText(reviewedText, finding.targetText, finding.replacementText).ok,
     );
     const skippedProposalCount = review.findings.length - validFindings.length;
 
