@@ -42,6 +42,12 @@ The schema drives both the prompt template panel and route validation. Keep requ
 
 The provider contract lives in `src/features/ai/providers.ts`.
 
+The built-in provider modes are:
+
+- `stub`: deterministic local output for tests and demos
+- `coredot`: Core.Today OpenAI-compatible LLM proxy
+- `openai`: direct OpenAI provider
+
 If your product uses another provider, add it behind the same interface:
 
 ```ts
@@ -107,7 +113,7 @@ If you change database paths or Playwright config, preserve this isolation. E2E 
 - [ ] Set up `.env.local`.
 - [ ] Run `pnpm db:setup`.
 - [ ] Replace default prompt templates.
-- [ ] Decide provider mode: `stub`, `openai`, or custom.
+- [ ] Decide provider mode: `stub`, `coredot`, `openai`, or custom.
 - [ ] Run `pnpm check`.
 - [ ] Run `pnpm e2e`.
 - [ ] Review `SECURITY.md` and vulnerability reporting path.

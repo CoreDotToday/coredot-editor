@@ -20,8 +20,15 @@ type DocumentEditorProps = {
   onSelectionCommand?: (command: string, selectedText: string) => void;
 };
 
+type SelectionMenuState = {
+  left: number;
+  selectedText: string;
+  top: number;
+};
+
 export function DocumentEditor({ contentJson, onChange, onSelectionCommand, title }: DocumentEditorProps) {
-  const [hasSelection, setHasSelection] = useState(false);
+  const [selectionMenu, setSelectionMenu] = useState<SelectionMenuState | null>(null);
+  const editorFrameRef = useRef<HTMLDivElement>(null);
   const titleRef = useRef(title);
   const onChangeRef = useRef(onChange);
   const onSelectionCommandRef = useRef(onSelectionCommand);
@@ -73,8 +80,19 @@ export function DocumentEditor({ contentJson, onChange, onSelectionCommand, titl
     },
     immediatelyRender: false,
     onSelectionUpdate: ({ editor: currentEditor }) => {
-      const { empty } = currentEditor.state.selection;
-      setHasSelection(!empty);
+      const { empty, from, to } = currentEditor.state.selection;
+      if (empty) {
+        setSelectionMenu(null);
+        return;
+      }
+
+      const selectedText = currentEditor.state.doc.textBetween(from, to, "\n").trim();
+      if (!selectedText) {
+        setSelectionMenu(null);
+        return;
+      }
+
+      setSelectionMenu(getSelectionMenuPosition(currentEditor, selectedText));
     },
     onUpdate: ({ editor: currentEditor }) => {
       onChangeRef.current({
@@ -109,10 +127,10 @@ export function DocumentEditor({ contentJson, onChange, onSelectionCommand, titl
       if (!editor) return;
 
       const { from, to } = editor.state.selection;
-      const selectedText = editor.state.doc.textBetween(from, to, "\n").trim();
+      const selectedText = selectionMenu?.selectedText ?? editor.state.doc.textBetween(from, to, "\n").trim();
       onSelectionCommandRef.current?.(command, selectedText);
     },
-    [editor],
+    [editor, selectionMenu?.selectedText],
   );
 
   const characterCount = editor?.storage.characterCount.characters() ?? 0;
@@ -120,7 +138,6 @@ export function DocumentEditor({ contentJson, onChange, onSelectionCommand, titl
 
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-white">
-      <SelectionAiMenu hasSelection={hasSelection} onCommand={handleCommand} />
       <div className="border-b border-zinc-200 px-6 py-5">
         <input
           aria-label="Document title"
@@ -129,7 +146,14 @@ export function DocumentEditor({ contentJson, onChange, onSelectionCommand, titl
           value={title}
         />
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto px-6 py-6">
+      <div className="relative min-h-0 flex-1 overflow-y-auto px-6 py-6" ref={editorFrameRef}>
+        <SelectionAiMenu
+          hasSelection={selectionMenu !== null}
+          left={selectionMenu?.left}
+          onCommand={handleCommand}
+          selectedText={selectionMenu?.selectedText}
+          top={selectionMenu?.top}
+        />
         <EditorContent
           className="min-h-full [&_.tiptap]:min-h-[52rem] [&_.tiptap]:max-w-3xl [&_.tiptap]:outline-none [&_.tiptap]:text-base [&_.tiptap]:leading-7 [&_.tiptap]:text-zinc-900 [&_.tiptap_a]:text-zinc-950 [&_.tiptap_a]:underline [&_.tiptap_blockquote]:border-l-2 [&_.tiptap_blockquote]:border-zinc-300 [&_.tiptap_blockquote]:pl-4 [&_.tiptap_h1]:text-3xl [&_.tiptap_h1]:font-semibold [&_.tiptap_h2]:text-2xl [&_.tiptap_h2]:font-semibold [&_.tiptap_h3]:text-xl [&_.tiptap_h3]:font-semibold [&_.tiptap_li]:my-1 [&_.tiptap_p.is-editor-empty:first-child::before]:pointer-events-none [&_.tiptap_p.is-editor-empty:first-child::before]:float-left [&_.tiptap_p.is-editor-empty:first-child::before]:h-0 [&_.tiptap_p.is-editor-empty:first-child::before]:text-zinc-400 [&_.tiptap_p.is-editor-empty:first-child::before]:content-[attr(data-placeholder)] [&_.tiptap_p]:my-3 [&_.tiptap_ul]:my-3 [&_.tiptap_ul]:list-disc [&_.tiptap_ul]:pl-6"
           editor={editor}
@@ -141,4 +165,29 @@ export function DocumentEditor({ contentJson, onChange, onSelectionCommand, titl
       </footer>
     </div>
   );
+
+  function getSelectionMenuPosition(currentEditor: NonNullable<typeof editor>, selectedText: string): SelectionMenuState {
+    const frame = editorFrameRef.current;
+    if (!frame) {
+      return { left: 16, selectedText, top: 16 };
+    }
+
+    try {
+      const { from, to } = currentEditor.state.selection;
+      const start = currentEditor.view.coordsAtPos(from);
+      const end = currentEditor.view.coordsAtPos(to);
+      const frameRect = frame.getBoundingClientRect();
+      const menuWidth = Math.min(512, Math.max(240, frameRect.width - 32));
+      const selectionCenter = (start.left + end.right) / 2 - frameRect.left;
+      const left = clamp(selectionCenter - menuWidth / 2, 16, Math.max(16, frameRect.width - menuWidth - 16));
+      const top = Math.max(16, start.top - frameRect.top + frame.scrollTop - 58);
+      return { left, selectedText, top };
+    } catch {
+      return { left: 16, selectedText, top: 16 };
+    }
+  }
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), max);
 }

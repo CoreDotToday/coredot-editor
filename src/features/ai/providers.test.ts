@@ -2,7 +2,15 @@ import { describe, expect, it, vi } from "vitest";
 import { buildAiMessages } from "./payload-builder";
 import { createAiProvider } from "./providers";
 
+const { createOpenAIMock } = vi.hoisted(() => ({
+  createOpenAIMock: vi.fn((options: { apiKey?: string; baseURL?: string }) => {
+    const provider = vi.fn((model: string) => ({ provider: "openai-compatible", model, options }));
+    return provider;
+  }),
+}));
+
 vi.mock("@ai-sdk/openai", () => ({
+  createOpenAI: createOpenAIMock,
   openai: vi.fn((model: string) => ({ provider: "openai", model })),
 }));
 
@@ -102,6 +110,77 @@ describe("AI providers", () => {
         delete process.env.OPENAI_MODEL;
       } else {
         process.env.OPENAI_MODEL = originalModel;
+      }
+    }
+  });
+
+  it("uses the Core.Today OpenAI-compatible proxy when AI_PROVIDER is coredot", async () => {
+    const originalProvider = process.env.AI_PROVIDER;
+    const originalApiKey = process.env.COREDOT_API_KEY;
+    const originalModel = process.env.COREDOT_MODEL;
+    const originalBaseUrl = process.env.COREDOT_BASE_URL;
+    process.env.AI_PROVIDER = "coredot";
+    process.env.COREDOT_API_KEY = "test_core_today_key";
+    process.env.COREDOT_MODEL = "gpt-5-nano";
+    delete process.env.COREDOT_BASE_URL;
+
+    try {
+      const provider = createAiProvider();
+      const response = await provider.streamText({ messages: [{ role: "user", content: "Stream through proxy." }] });
+
+      expect(provider.name).toBe("coredot");
+      expect(provider.model).toBe("gpt-5-nano");
+      expect(createOpenAIMock).toHaveBeenCalledWith({
+        apiKey: "test_core_today_key",
+        baseURL: "https://api.core.today/llm/openai/v1",
+      });
+      await expect(response.text()).resolves.toBe("openai stream");
+    } finally {
+      if (originalProvider === undefined) {
+        delete process.env.AI_PROVIDER;
+      } else {
+        process.env.AI_PROVIDER = originalProvider;
+      }
+
+      if (originalApiKey === undefined) {
+        delete process.env.COREDOT_API_KEY;
+      } else {
+        process.env.COREDOT_API_KEY = originalApiKey;
+      }
+
+      if (originalModel === undefined) {
+        delete process.env.COREDOT_MODEL;
+      } else {
+        process.env.COREDOT_MODEL = originalModel;
+      }
+
+      if (originalBaseUrl === undefined) {
+        delete process.env.COREDOT_BASE_URL;
+      } else {
+        process.env.COREDOT_BASE_URL = originalBaseUrl;
+      }
+    }
+  });
+
+  it("requires COREDOT_API_KEY for the Core.Today provider", () => {
+    const originalProvider = process.env.AI_PROVIDER;
+    const originalApiKey = process.env.COREDOT_API_KEY;
+    process.env.AI_PROVIDER = "coredot";
+    delete process.env.COREDOT_API_KEY;
+
+    try {
+      expect(() => createAiProvider()).toThrow("COREDOT_API_KEY is required when AI_PROVIDER=coredot");
+    } finally {
+      if (originalProvider === undefined) {
+        delete process.env.AI_PROVIDER;
+      } else {
+        process.env.AI_PROVIDER = originalProvider;
+      }
+
+      if (originalApiKey === undefined) {
+        delete process.env.COREDOT_API_KEY;
+      } else {
+        process.env.COREDOT_API_KEY = originalApiKey;
       }
     }
   });

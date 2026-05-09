@@ -1,4 +1,4 @@
-import { act, render, screen } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DocumentShell } from "./DocumentShell";
@@ -294,6 +294,40 @@ describe("DocumentShell", () => {
     expect(screen.getByText("Selected: selected text")).toBeInTheDocument();
   });
 
+  it("runs selection rewrite commands and adds the returned proposal", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          run: createAiRun("run_rewrite"),
+          proposal: createProposal("proposal_rewrite", "pending", "selected text"),
+        }),
+      ),
+    );
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "selected text in document")}
+        templates={[createTemplate("tpl_1", "Rewrite template")]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Mock selection command" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/ai/rewrite",
+        expect.objectContaining({
+          method: "POST",
+          body: expect.stringContaining('"selectedText":"selected text"'),
+        }),
+      );
+    });
+    expect(await screen.findByText("selected text")).toBeInTheDocument();
+    expect(screen.getByText("revenue grew 8%")).toBeInTheDocument();
+  });
+
   it("runs a full document review with current unsaved draft text", async () => {
     const user = userEvent.setup();
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
@@ -444,12 +478,28 @@ describe("DocumentShell", () => {
 
 describe("SelectionAiMenu", () => {
   it("prevents mouse down from clearing the editor selection", () => {
-    render(<SelectionAiMenu hasSelection onCommand={() => undefined} />);
+    render(<SelectionAiMenu hasSelection onCommand={() => undefined} selectedText="selected text" />);
 
     const event = new MouseEvent("mousedown", { bubbles: true, cancelable: true });
     const allowed = screen.getByRole("button", { name: "Improve clarity" }).dispatchEvent(event);
 
     expect(allowed).toBe(false);
     expect(event.defaultPrevented).toBe(true);
+  });
+
+  it("renders as a floating toolbar with selected text context", () => {
+    render(
+      <SelectionAiMenu
+        hasSelection
+        left={120}
+        onCommand={() => undefined}
+        selectedText="A selected sentence for review"
+        top={48}
+      />,
+    );
+
+    const toolbar = screen.getByRole("toolbar", { name: "Selection AI actions" });
+    expect(toolbar).toHaveStyle({ left: "120px", top: "48px" });
+    expect(screen.getByText("A selected sentence for review")).toBeInTheDocument();
   });
 });

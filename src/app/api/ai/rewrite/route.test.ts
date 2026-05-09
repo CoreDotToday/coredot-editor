@@ -152,6 +152,32 @@ describe("POST /api/ai/rewrite", () => {
     );
   });
 
+  it("validates selected text against the reviewed draft text when provided", async () => {
+    vi.mocked(getDocumentById).mockResolvedValueOnce({
+      ...documentRecord,
+      plainText: "Stale saved text",
+    });
+    vi.mocked(getPromptTemplateById).mockResolvedValueOnce(templateRecord);
+
+    const response = await POST(
+      createJsonRequest({
+        ...validBody,
+        documentText: "Unsaved draft has Old text once",
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(completeAiRunWithProposals).toHaveBeenCalledWith(
+      "run_1",
+      "Improved text",
+      [
+        expect.objectContaining({
+          targetText: "Old text",
+        }),
+      ],
+    );
+  });
+
   it("returns 400 when selected text is not an exact unique match in the document", async () => {
     vi.mocked(getDocumentById).mockResolvedValueOnce({
       ...documentRecord,

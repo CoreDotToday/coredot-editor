@@ -73,7 +73,7 @@ The variable schema drives both UI input rendering and server-side validation.
 - `streamText`
 - `generateReview`
 
-The default provider is `stub`, which makes local development and tests deterministic. The `openai` provider uses the Vercel AI SDK and `@ai-sdk/openai`.
+The default provider is `stub`, which makes local development and tests deterministic. The `coredot` provider routes OpenAI-compatible calls through Core.Today's LLM proxy. The `openai` provider uses the Vercel AI SDK and `@ai-sdk/openai` directly.
 
 Add new providers behind the same contract. Keep provider-specific configuration out of UI components.
 

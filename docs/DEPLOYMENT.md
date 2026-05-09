@@ -19,9 +19,13 @@ Open [http://localhost:3000](http://localhost:3000).
 | Name | Required | Notes |
 | --- | --- | --- |
 | `DATABASE_URL` | Yes in deployed environments | Use a writable SQLite/libSQL URL. Relative `file:` paths are mainly for local development. |
-| `AI_PROVIDER` | Recommended | Use `stub` for demos/tests and `openai` for live AI calls. |
+| `AI_PROVIDER` | Recommended | Use `stub` for demos/tests, `coredot` for Core.Today proxy calls, and `openai` for direct OpenAI calls. |
 | `OPENAI_API_KEY` | Only with `AI_PROVIDER=openai` | Store as a secret, never in source control. |
 | `OPENAI_MODEL` | Optional | Defaults through provider code when omitted. |
+| `COREDOT_API_KEY` | Only with `AI_PROVIDER=coredot` | Store as a secret, never in source control. |
+| `COREDOT_MODEL` | Optional | Defaults to `gpt-5-nano`. |
+| `COREDOT_BASE_URL` | Optional | Defaults to `https://api.core.today/llm/openai/v1`. |
+| `COREDOT_MAX_COMPLETION_TOKENS` | Optional | Defaults to provider behavior when omitted. |
 
 ## Database Setup
 
@@ -49,8 +53,9 @@ Before deploying:
 1. Configure `DATABASE_URL`.
 2. Configure `AI_PROVIDER`.
 3. Configure `OPENAI_API_KEY` if using OpenAI.
-4. Run migrations against the production database.
-5. Seed default templates, or create product-specific templates through the UI.
+4. Configure `COREDOT_API_KEY` if using Core.Today.
+5. Run migrations against the production database.
+6. Seed default templates, or create product-specific templates through the UI.
 
 Do not use a relative local SQLite file path for production serverless deployments unless your platform explicitly provides persistent writable storage. Prefer hosted libSQL or a database service with durable storage.
 
@@ -65,6 +70,22 @@ OPENAI_MODEL=gpt-4.1-mini
 ```
 
 The provider adapter lives in `src/features/ai/providers.ts`. Provider configuration errors fail visibly instead of silently falling back to stub mode.
+
+## Core.Today LLM Proxy Provider
+
+Set:
+
+```bash
+AI_PROVIDER=coredot
+COREDOT_API_KEY=your_core_today_api_key
+COREDOT_MODEL=gpt-5-nano
+COREDOT_BASE_URL=https://api.core.today/llm/openai/v1
+COREDOT_MAX_COMPLETION_TOKENS=32768
+```
+
+Core.Today's OpenAI-compatible route lets the app keep the same Vercel AI SDK provider contract while routing requests through `https://api.core.today/llm/openai/v1`.
+
+Do not commit real Core.Today keys. Rotate a key if it appears in public logs, screenshots, issues, or chat transcripts.
 
 ## Stub Provider
 

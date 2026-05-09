@@ -24,3 +24,9 @@ Initial open-source starter release.
 - Unit, component, route, repository, and Playwright E2E tests
 - Isolated E2E database preparation
 - Open-source project documentation and repository policy files
+
+### Changed
+
+- Added Core.Today OpenAI-compatible LLM proxy provider mode.
+- Improved selected-text AI actions with a floating contextual toolbar.
+- Wired selection rewrite commands to the AI rewrite API and proposal panel.

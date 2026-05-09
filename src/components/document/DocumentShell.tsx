@@ -59,6 +59,11 @@ type ReviewResponse = {
   proposals?: ShellProposal[];
 };
 
+type RewriteResponse = {
+  run?: ShellAiRun;
+  proposal?: ShellProposal | null;
+};
+
 export function DocumentShell({ aiRuns, document, proposals = [], templates }: DocumentShellProps) {
   return (
     <DocumentShellContent
@@ -100,6 +105,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
   const [reviewError, setReviewError] = useState("");
   const [templateVariables, setTemplateVariables] = useState<Record<string, string>>({});
   const [templateVariableErrors, setTemplateVariableErrors] = useState<Record<string, string>>({});
+  const [isRewritingSelection, setIsRewritingSelection] = useState(false);
   const activeTemplateId = templates.some((template) => template.id === selectedTemplateId)
     ? selectedTemplateId
     : templates[0]?.id ?? "";
@@ -122,6 +128,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
       setReviewError("");
       setTemplateVariables({});
       setTemplateVariableErrors({});
+      setIsRewritingSelection(false);
     }
   }
 
@@ -137,13 +144,64 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
     setSaveState("dirty");
   }, []);
 
-  const handleSelectionCommand = useCallback((command: string, selectedText: string) => {
+  const handleSelectionCommand = useCallback(async (command: string, selectedText: string) => {
     setSelectionCommand({
       command,
       selectedText,
       contentJson: draft.contentJson,
     });
-  }, [draft.contentJson]);
+
+    if (!selectedTemplate) {
+      setReviewError("Select a template before running selection AI.");
+      return;
+    }
+
+    const variableValidation = validateTemplateVariables(selectedTemplate.variableSchemaJson, templateVariables);
+    if (!variableValidation.ok) {
+      setTemplateVariableErrors(variableValidation.errors);
+      setReviewError("Fill required template fields before running selection AI.");
+      return;
+    }
+
+    setIsRewritingSelection(true);
+    setReviewError("");
+    setTemplateVariableErrors({});
+
+    try {
+      const response = await fetch("/api/ai/rewrite", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          documentId: document.id,
+          templateId: selectedTemplate.id,
+          command,
+          variables: collectTemplateVariables(selectedTemplate, templateVariables),
+          selectedText,
+          documentText: extractPlainTextFromTiptap(draft.contentJson),
+          beforeContext: "",
+          afterContext: "",
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error("Failed to rewrite selection");
+      }
+
+      const body = (await response.json()) as RewriteResponse;
+      if (body.proposal) {
+        setReviewProposals((currentProposals) => [body.proposal!, ...currentProposals]);
+      }
+      if (body.run) {
+        setReviewRuns((currentRuns) => [body.run!, ...currentRuns]);
+      }
+    } catch {
+      setReviewError("Selection rewrite failed. Try again.");
+    } finally {
+      setIsRewritingSelection(false);
+    }
+  }, [document.id, draft.contentJson, selectedTemplate, templateVariables]);
 
   const saveDraft = useCallback(async () => {
     const savingVersion = draftVersionRef.current;
@@ -334,7 +392,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
           <h3 className="text-xs font-medium uppercase tracking-normal text-zinc-500">Selection command</h3>
           <p className="mt-3 text-sm leading-6 text-zinc-600">
             {selectionCommand
-              ? `Last selection command: ${selectionCommand.command}`
+              ? `${isRewritingSelection ? "Running" : "Last"} selection command: ${selectionCommand.command}`
               : "Select text in the editor to reveal AI commands."}
           </p>
           {selectionCommand ? (

@@ -2,7 +2,7 @@
 
 Open-source AI document editor starter for teams building Notion-style business writing tools.
 
-Coredot Editor combines a Tiptap document workspace, editable prompt templates, AI-assisted review and rewrite flows, SQLite persistence, and a provider abstraction that can run locally with a deterministic stub or with OpenAI through the Vercel AI SDK.
+Coredot Editor combines a Tiptap document workspace, editable prompt templates, AI-assisted review and rewrite flows, SQLite persistence, and a provider abstraction that can run locally with a deterministic stub, through Core.Today's OpenAI-compatible LLM proxy, or directly with OpenAI through the Vercel AI SDK.
 
 ## What It Is
 
@@ -22,7 +22,7 @@ The repository keeps `"private": true` in `package.json` to prevent accidental n
 - Drizzle ORM schema with SQLite/libSQL for local persistence
 - Seeded prompt templates for strategy review, executive rewrite, and market research critique
 - Editable prompt template manager with JSON variable schema validation
-- AI provider adapter with local `stub` mode and `openai` mode
+- AI provider adapter with local `stub`, Core.Today `coredot`, and direct `openai` modes
 - Review API that creates proposal records from structured AI findings
 - Rewrite API for exact-match selected text proposals
 - AI run history and persisted proposal accept/reject status
@@ -75,7 +75,23 @@ Open [http://localhost:3000](http://localhost:3000).
 
 By default, the app uses `AI_PROVIDER=stub`, so the AI flows work without an API key.
 
-## OpenAI Setup
+## Core.Today LLM Proxy Setup
+
+Core.Today exposes an OpenAI-compatible LLM base URL at `https://api.core.today/llm/openai/v1`.
+
+Set these values in `.env.local`:
+
+```bash
+AI_PROVIDER=coredot
+COREDOT_API_KEY=your_core_today_api_key
+COREDOT_MODEL=gpt-5-nano
+COREDOT_BASE_URL=https://api.core.today/llm/openai/v1
+COREDOT_MAX_COMPLETION_TOKENS=32768
+```
+
+Do not commit real API keys. If a key is exposed in a chat, issue, log, or screenshot, rotate it in the Core.Today console.
+
+## Direct OpenAI Setup
 
 Set these values in `.env.local` when you want live model calls:
 
@@ -85,7 +101,7 @@ OPENAI_API_KEY=sk-...
 OPENAI_MODEL=gpt-4.1-mini
 ```
 
-The OpenAI integration is isolated in `src/features/ai/providers.ts`. Add other providers there without changing the editor UI or route contracts.
+The provider integrations are isolated in `src/features/ai/providers.ts`. Add other providers there without changing the editor UI or route contracts.
 
 ## Common Commands
 
@@ -109,9 +125,13 @@ pnpm db:seed      # Seed default prompt templates
 | Name | Default | Description |
 | --- | --- | --- |
 | `DATABASE_URL` | `file:./data/coredot.db` | SQLite/libSQL database URL. Relative `file:` paths are resolved from the app root. |
-| `AI_PROVIDER` | `stub` | `stub` for deterministic local output, `openai` for live OpenAI calls. |
+| `AI_PROVIDER` | `stub` | `stub` for deterministic local output, `coredot` for Core.Today proxy calls, `openai` for direct OpenAI calls. |
 | `OPENAI_API_KEY` | empty | Required only when `AI_PROVIDER=openai`. |
 | `OPENAI_MODEL` | `gpt-4.1-mini` | Model used by the OpenAI provider. |
+| `COREDOT_API_KEY` | empty | Required only when `AI_PROVIDER=coredot`. |
+| `COREDOT_MODEL` | `gpt-5-nano` | Model name sent to the Core.Today OpenAI-compatible endpoint. |
+| `COREDOT_BASE_URL` | `https://api.core.today/llm/openai/v1` | OpenAI-compatible Core.Today base URL. |
+| `COREDOT_MAX_COMPLETION_TOKENS` | `32768` | Maximum output tokens for Core.Today proxy calls. |
 
 ## Project Structure
 

@@ -38,7 +38,8 @@ export async function POST(request: Request) {
     );
   }
 
-  if (!applyProposalToText(document.plainText, body.selectedText, body.selectedText).ok) {
+  const reviewedText = body.documentText || document.plainText;
+  if (!applyProposalToText(reviewedText, body.selectedText, body.selectedText).ok) {
     return NextResponse.json({ error: "Selected text must match exactly once in the document" }, { status: 400 });
   }
 
@@ -65,7 +66,7 @@ export async function POST(request: Request) {
   try {
     const messages = buildAiMessages({
       ...body,
-      documentText: body.documentText || document.plainText,
+      documentText: reviewedText,
       systemPrompt: template.systemPrompt,
     });
     const replacementText = await provider.generateText({ messages });

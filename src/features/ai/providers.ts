@@ -1,9 +1,9 @@
-import { openai } from "@ai-sdk/openai";
+import { createOpenAI, openai } from "@ai-sdk/openai";
 import { generateObject, generateText, streamText as streamAiText } from "ai";
 import type { AiMessage, ReviewResult } from "./types";
 import { reviewResultSchema } from "./types";
 
-export type AiProviderName = "stub" | "openai";
+export type AiProviderName = "stub" | "openai" | "coredot";
 
 export type AiProvider = {
   name: AiProviderName;
@@ -22,6 +22,10 @@ export function createAiProvider(): AiProvider {
 
   if (provider === "openai") {
     return createOpenAiProvider();
+  }
+
+  if (provider === "coredot") {
+    return createCoreDotProvider();
   }
 
   throw new Error(`Unsupported AI_PROVIDER: ${provider}`);
@@ -52,6 +56,50 @@ function createOpenAiProvider(): AiProvider {
         model: openai(model),
         messages: input.messages,
         schema: reviewResultSchema,
+      });
+      return result.object;
+    },
+  };
+}
+
+function createCoreDotProvider(): AiProvider {
+  const apiKey = process.env.COREDOT_API_KEY;
+  if (!apiKey) {
+    throw new Error("COREDOT_API_KEY is required when AI_PROVIDER=coredot");
+  }
+
+  const model = process.env.COREDOT_MODEL ?? "gpt-5-nano";
+  const maxOutputTokens = readOptionalPositiveInteger(process.env.COREDOT_MAX_COMPLETION_TOKENS);
+  const coreOpenAi = createOpenAI({
+    apiKey,
+    baseURL: process.env.COREDOT_BASE_URL ?? "https://api.core.today/llm/openai/v1",
+  });
+
+  return {
+    name: "coredot",
+    model,
+    async generateText(input) {
+      const result = await generateText({
+        model: coreOpenAi(model),
+        messages: input.messages,
+        maxOutputTokens,
+      });
+      return result.text;
+    },
+    async streamText(input) {
+      const result = streamAiText({
+        model: coreOpenAi(model),
+        messages: input.messages,
+        maxOutputTokens,
+      });
+      return result.toTextStreamResponse();
+    },
+    async generateReview(input) {
+      const result = await generateObject({
+        model: coreOpenAi(model),
+        messages: input.messages,
+        schema: reviewResultSchema,
+        maxOutputTokens,
       });
       return result.object;
     },
@@ -100,4 +148,11 @@ function extractSection(messages: AiMessage[], section: string): string {
   const escapedSection = section.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const match = userMessage.match(new RegExp(`${escapedSection}:\\n([\\s\\S]*?)(?:\\n\\n[A-Z][^:\\n]*:\\n|$)`));
   return match?.[1]?.trim() ?? "";
+}
+
+function readOptionalPositiveInteger(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
 }
