@@ -34,6 +34,11 @@ test("selection AI toolbar does not shift or cover selected editor text", async 
 
   expect(Math.abs(afterTop - beforeTop)).toBeLessThanOrEqual(1);
   expect(overlap).toBe(false);
+
+  await page.getByRole("button", { name: "Improve clarity" }).click();
+
+  await expect(page.getByText(`Stub rewrite: ${body} [Command: Improve clarity]`)).toBeVisible();
+  await expect(page.getByText("Fill required template fields before running selection AI.")).toHaveCount(0);
 });
 
 async function getTextTop(editor: Locator) {

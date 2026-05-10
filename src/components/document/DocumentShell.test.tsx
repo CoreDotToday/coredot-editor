@@ -89,6 +89,22 @@ function createRequiredTemplate() {
   };
 }
 
+function createStrategyTemplate() {
+  return {
+    id: "tpl_strategy",
+    name: "Executive Rewrite",
+    category: "executive_rewrite",
+    variableSchemaJson: {
+      fields: [
+        { name: "audience", label: "Audience", type: "text" as const, required: true },
+        { name: "objective", label: "Document objective", type: "textarea" as const, required: true },
+        { name: "tone", label: "Tone", type: "select" as const, required: true, options: ["executive", "analytical"] },
+      ],
+      required: ["audience", "objective", "tone"],
+    },
+  };
+}
+
 function createProposal(
   id: string,
   status: "pending" | "accepted" | "rejected" = "pending",
@@ -328,6 +344,47 @@ describe("DocumentShell", () => {
     expect(screen.getByText("revenue grew 8%")).toBeInTheDocument();
   });
 
+  it("runs selection rewrite commands immediately with default template variables", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          run: createAiRun("run_rewrite"),
+          proposal: createProposal("proposal_rewrite", "pending", "selected text"),
+        }),
+      ),
+    );
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "selected text in document")}
+        templates={[createStrategyTemplate()]}
+      />,
+    );
+
+    expect(screen.getByRole("textbox", { name: "Audience" })).toHaveValue("Executive stakeholders");
+    expect(screen.getByRole("textbox", { name: "Document objective" })).toHaveValue(
+      "Improve the selected text while preserving the document's intent.",
+    );
+    expect(screen.getByRole("combobox", { name: "Tone" })).toHaveValue("executive");
+
+    await user.click(screen.getByRole("button", { name: "Mock selection command" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/ai/rewrite",
+        expect.objectContaining({
+          method: "POST",
+          body: expect.stringContaining(
+            '"variables":{"audience":"Executive stakeholders","objective":"Improve the selected text while preserving the document\'s intent.","tone":"executive"}',
+          ),
+        }),
+      );
+    });
+    expect(screen.queryByText("Fill required template fields before running selection AI.")).not.toBeInTheDocument();
+  });
+
   it("runs a full document review with current unsaved draft text", async () => {
     const user = userEvent.setup();
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
@@ -366,7 +423,7 @@ describe("DocumentShell", () => {
     );
   });
 
-  it("validates required template variables before review", async () => {
+  it("validates cleared required template variables before review", async () => {
     const user = userEvent.setup();
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}"));
 
@@ -378,6 +435,7 @@ describe("DocumentShell", () => {
       />,
     );
 
+    await user.clear(screen.getByRole("textbox", { name: "Audience" }));
     await user.click(screen.getByRole("button", { name: "Review document" }));
 
     expect(screen.getByText("Audience is required")).toBeInTheDocument();
@@ -403,6 +461,7 @@ describe("DocumentShell", () => {
       />,
     );
 
+    await user.clear(screen.getByRole("textbox", { name: "Audience" }));
     await user.type(screen.getByRole("textbox", { name: "Audience" }), "Board");
     await user.click(screen.getByRole("button", { name: "Review document" }));
 

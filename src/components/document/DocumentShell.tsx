@@ -11,6 +11,7 @@ import { DocumentEditor } from "./DocumentEditor";
 
 type ShellDocument = Pick<DocumentRecord, "id" | "title" | "contentJson" | "plainText">;
 type ShellTemplate = Pick<PromptTemplateRecord, "id" | "name" | "category" | "variableSchemaJson">;
+type ShellTemplateField = ShellTemplate["variableSchemaJson"]["fields"][number];
 type ShellAiRun = Pick<AiRunRecord, "id" | "commandType" | "status" | "createdAt">;
 type ShellProposal = Pick<
   AiProposalRecord,
@@ -77,6 +78,10 @@ export function DocumentShell({ aiRuns, document, proposals = [], templates }: D
 }
 
 function DocumentShellContent({ aiRuns, document, proposals = [], templates }: DocumentShellProps) {
+  const initialTemplateVariables = useMemo(
+    () => mergeMissingTemplateVariableDefaults(templates[0] ?? null, {}),
+    [templates],
+  );
   const incomingDocument = useMemo(
     () => ({
       id: document.id,
@@ -103,7 +108,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
   const [reviewRuns, setReviewRuns] = useState<AiRunHistoryItem[]>(aiRuns);
   const [isReviewing, setIsReviewing] = useState(false);
   const [reviewError, setReviewError] = useState("");
-  const [templateVariables, setTemplateVariables] = useState<Record<string, string>>({});
+  const [templateVariables, setTemplateVariables] = useState<Record<string, string>>(initialTemplateVariables);
   const [templateVariableErrors, setTemplateVariableErrors] = useState<Record<string, string>>({});
   const [isRewritingSelection, setIsRewritingSelection] = useState(false);
   const activeTemplateId = templates.some((template) => template.id === selectedTemplateId)
@@ -126,7 +131,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
       setReviewRuns(aiRuns);
       setIsReviewing(false);
       setReviewError("");
-      setTemplateVariables({});
+      setTemplateVariables(initialTemplateVariables);
       setTemplateVariableErrors({});
       setIsRewritingSelection(false);
     }
@@ -156,7 +161,10 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
       return;
     }
 
-    const variableValidation = validateTemplateVariables(selectedTemplate.variableSchemaJson, templateVariables);
+    const variablesWithDefaults = mergeMissingTemplateVariableDefaults(selectedTemplate, templateVariables);
+    setTemplateVariables(variablesWithDefaults);
+
+    const variableValidation = validateTemplateVariables(selectedTemplate.variableSchemaJson, variablesWithDefaults);
     if (!variableValidation.ok) {
       setTemplateVariableErrors(variableValidation.errors);
       setReviewError("Fill required template fields before running selection AI.");
@@ -177,7 +185,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
           documentId: document.id,
           templateId: selectedTemplate.id,
           command,
-          variables: collectTemplateVariables(selectedTemplate, templateVariables),
+          variables: collectTemplateVariables(selectedTemplate, variablesWithDefaults),
           selectedText,
           documentText: extractPlainTextFromTiptap(draft.contentJson),
           beforeContext: "",
@@ -229,10 +237,12 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
   }, [document.id, draft]);
 
   const selectTemplate = useCallback((templateId: string) => {
+    const nextTemplate = templates.find((template) => template.id === templateId) ?? null;
     setSelectedTemplateId(templateId);
+    setTemplateVariables((currentVariables) => mergeMissingTemplateVariableDefaults(nextTemplate, currentVariables));
     setTemplateVariableErrors({});
     setReviewError("");
-  }, []);
+  }, [templates]);
 
   const updateTemplateVariable = useCallback((name: string, value: string) => {
     setTemplateVariables((currentVariables) => ({ ...currentVariables, [name]: value }));
@@ -249,7 +259,10 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
       return;
     }
 
-    const variableValidation = validateTemplateVariables(selectedTemplate.variableSchemaJson, templateVariables);
+    const variablesWithDefaults = mergeMissingTemplateVariableDefaults(selectedTemplate, templateVariables);
+    setTemplateVariables(variablesWithDefaults);
+
+    const variableValidation = validateTemplateVariables(selectedTemplate.variableSchemaJson, variablesWithDefaults);
     if (!variableValidation.ok) {
       setTemplateVariableErrors(variableValidation.errors);
       setReviewError("Fill required template fields.");
@@ -270,7 +283,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
           documentId: document.id,
           templateId: selectedTemplate.id,
           command: "Review document",
-          variables: collectTemplateVariables(selectedTemplate, templateVariables),
+          variables: collectTemplateVariables(selectedTemplate, variablesWithDefaults),
           documentText: extractPlainTextFromTiptap(draft.contentJson),
         }),
       });
@@ -409,4 +422,47 @@ function collectTemplateVariables(template: ShellTemplate, values: Record<string
     variables[field.name] = values[field.name] ?? "";
     return variables;
   }, {});
+}
+
+function mergeMissingTemplateVariableDefaults(template: ShellTemplate | null, values: Record<string, string>) {
+  if (!template) {
+    return values;
+  }
+
+  return template.variableSchemaJson.fields.reduce<Record<string, string>>(
+    (variables, field) => {
+      if (!(field.name in variables)) {
+        variables[field.name] = getTemplateVariableDefaultValue(field);
+      }
+
+      return variables;
+    },
+    { ...values },
+  );
+}
+
+function getTemplateVariableDefaultValue(field: ShellTemplateField) {
+  if (field.type === "select") {
+    return field.options?.find((option) => option.toLowerCase() === "executive") ?? field.options?.[0] ?? "";
+  }
+
+  const normalizedName = field.name.toLowerCase();
+  const normalizedLabel = field.label.toLowerCase();
+
+  if (normalizedName.includes("audience") || normalizedLabel.includes("audience")) {
+    return "Executive stakeholders";
+  }
+
+  if (
+    normalizedName.includes("objective") ||
+    normalizedName.includes("goal") ||
+    normalizedName.includes("purpose") ||
+    normalizedLabel.includes("objective") ||
+    normalizedLabel.includes("goal") ||
+    normalizedLabel.includes("purpose")
+  ) {
+    return "Improve the selected text while preserving the document's intent.";
+  }
+
+  return field.type === "textarea" ? "Use the current document context and preserve the author's intent." : "General";
 }
