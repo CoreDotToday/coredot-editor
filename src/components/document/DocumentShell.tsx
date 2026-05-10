@@ -5,6 +5,7 @@ import { AiReviewPanel, type AiReviewProposal } from "@/components/ai/AiReviewPa
 import { AiRunHistory, type AiRunHistoryItem } from "@/components/ai/AiRunHistory";
 import { PromptTemplatePanel } from "@/components/templates/PromptTemplatePanel";
 import type { AiProposalRecord, AiRunRecord, DocumentRecord, PromptTemplateRecord, TiptapJson } from "@/db/schema";
+import { replaceTextInTiptapJson } from "@/features/documents/tiptap-replace";
 import { extractPlainTextFromTiptap } from "@/features/documents/tiptap-text";
 import {
   EDITOR_LANGUAGE_STORAGE_KEY,
@@ -322,6 +323,31 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
       return;
     }
 
+    const previousDraft = draft;
+    const previousSaveState = saveState;
+    let appliedDraftVersion: number | null = null;
+
+    if (status === "accepted") {
+      const appliedDraft = replaceTextInTiptapJson(
+        draft.contentJson,
+        previousProposal.targetText,
+        previousProposal.replacementText,
+      );
+
+      if (!appliedDraft.ok) {
+        setReviewError(messages.errors.updateProposalFailed);
+        return;
+      }
+
+      appliedDraftVersion = draftVersionRef.current + 1;
+      draftVersionRef.current = appliedDraftVersion;
+      setDraft({
+        title: draft.title,
+        contentJson: appliedDraft.contentJson,
+      });
+      setSaveState("dirty");
+    }
+
     setReviewError("");
     setReviewProposals((currentProposals) =>
       currentProposals.map((proposal) => (proposal.id === proposalId ? { ...proposal, status } : proposal)),
@@ -350,9 +376,13 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
       setReviewProposals((currentProposals) =>
         currentProposals.map((proposal) => (proposal.id === proposalId ? previousProposal : proposal)),
       );
+      if (appliedDraftVersion !== null && draftVersionRef.current === appliedDraftVersion) {
+        setDraft(previousDraft);
+        setSaveState(previousSaveState);
+      }
       setReviewError(messages.errors.updateProposalFailed);
     }
-  }, [messages.errors, reviewProposals]);
+  }, [draft, messages.errors, reviewProposals, saveState]);
 
   const updateProposalStatusLocally = useCallback((proposalId: string, status: AiReviewProposal["status"]) => {
     void updateProposalStatus(proposalId, status);

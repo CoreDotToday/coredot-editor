@@ -22,6 +22,7 @@ vi.mock("./DocumentEditor", () => ({
         onChange={(event) => onChange({ title: event.currentTarget.value, contentJson })}
         value={title}
       />
+      <div data-testid="mock-document-body">{readMockTiptapText(contentJson)}</div>
       <button onClick={() => onSelectionCommand?.("Improve clarity", "selected text")} type="button">
         Mock selection command
       </button>
@@ -42,6 +43,18 @@ vi.mock("./DocumentEditor", () => ({
     </div>
   ),
 }));
+
+function readMockTiptapText(node: unknown): string {
+  if (!node || typeof node !== "object") {
+    return "";
+  }
+
+  const typedNode = node as { text?: unknown; content?: unknown[] };
+  const text = typeof typedNode.text === "string" ? typedNode.text : "";
+  const childText = (typedNode.content ?? []).map((child) => readMockTiptapText(child)).join("");
+
+  return `${text}${childText}`;
+}
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -522,7 +535,7 @@ describe("DocumentShell", () => {
     render(
       <DocumentShell
         aiRuns={[]}
-        document={createDocumentWithContent("doc_1", "Market Entry Memo", "body")}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "growth was good")}
         proposals={[createProposal("proposal_1"), createProposal("proposal_2", "pending", "owner is unclear")]}
         templates={[createTemplate("tpl_1", "Board review")]}
       />,
@@ -543,6 +556,34 @@ describe("DocumentShell", () => {
 
     expect(screen.getByText("Pending")).toBeInTheDocument();
     expect(screen.getByRole("alert")).toHaveTextContent("Could not update proposal status.");
+  });
+
+  it("applies accepted proposal text to the local draft", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ proposal: { ...createProposal("proposal_1"), status: "accepted" } })),
+    );
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "growth was good")}
+        proposals={[createProposal("proposal_1")]}
+        templates={[createTemplate("tpl_1", "Board review")]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Accept proposal for growth was good" }));
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/proposals/proposal_1",
+      expect.objectContaining({
+        method: "PATCH",
+        body: JSON.stringify({ status: "accepted" }),
+      }),
+    );
+    expect(screen.getByTestId("mock-document-body")).toHaveTextContent("revenue grew 8%");
+    expect(screen.getByText("Unsaved")).toBeInTheDocument();
   });
 
   it("refreshes same-document AI runs and proposals without clobbering dirty edits", async () => {

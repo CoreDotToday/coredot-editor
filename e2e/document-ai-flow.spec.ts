@@ -29,4 +29,6 @@ test("creates a document and accepts a stub AI review proposal", async ({ page }
 
   await acceptProposal.click();
   await expect(page.getByText("Accepted")).toBeVisible();
+  await expect(page.getByRole("textbox", { name: "Document body" })).toContainText(`${body} [reviewed]`);
+  await expect(page.getByRole("status")).toHaveText("Unsaved");
 });
