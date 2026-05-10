@@ -1,11 +1,11 @@
 "use client";
 
 import { useCallback, useMemo, useRef, useState } from "react";
-import { AiReviewPanel, type AiReviewProposal } from "@/components/ai/AiReviewPanel";
+import { AiReviewPanel, type AiProposalApplyMode, type AiReviewProposal } from "@/components/ai/AiReviewPanel";
 import { AiRunHistory, type AiRunHistoryItem } from "@/components/ai/AiRunHistory";
 import { PromptTemplatePanel } from "@/components/templates/PromptTemplatePanel";
 import type { AiProposalRecord, AiRunRecord, DocumentRecord, PromptTemplateRecord, TiptapJson } from "@/db/schema";
-import { replaceTextInTiptapJson } from "@/features/documents/tiptap-replace";
+import { insertTextBelowTargetInTiptapJson, replaceTextInTiptapJson } from "@/features/documents/tiptap-replace";
 import { extractPlainTextFromTiptap } from "@/features/documents/tiptap-text";
 import {
   EDITOR_LANGUAGE_STORAGE_KEY,
@@ -317,7 +317,11 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
     }
   }, [document.id, draft.contentJson, messages.errors, selectedTemplate, templateVariables]);
 
-  const updateProposalStatus = useCallback(async (proposalId: string, status: AiReviewProposal["status"]) => {
+  const updateProposalStatus = useCallback(async (
+    proposalId: string,
+    status: AiReviewProposal["status"],
+    applyMode: AiProposalApplyMode = "replace",
+  ) => {
     const previousProposal = reviewProposals.find((proposal) => proposal.id === proposalId);
     if (!previousProposal) {
       return;
@@ -328,11 +332,14 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
     let appliedDraftVersion: number | null = null;
 
     if (status === "accepted") {
-      const appliedDraft = replaceTextInTiptapJson(
-        draft.contentJson,
-        previousProposal.targetText,
-        previousProposal.replacementText,
-      );
+      const appliedDraft =
+        applyMode === "insert_below"
+          ? insertTextBelowTargetInTiptapJson(
+              draft.contentJson,
+              previousProposal.targetText,
+              previousProposal.replacementText,
+            )
+          : replaceTextInTiptapJson(draft.contentJson, previousProposal.targetText, previousProposal.replacementText);
 
       if (!appliedDraft.ok) {
         setReviewError(messages.errors.updateProposalFailed);
@@ -384,8 +391,12 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
     }
   }, [draft, messages.errors, reviewProposals, saveState]);
 
-  const updateProposalStatusLocally = useCallback((proposalId: string, status: AiReviewProposal["status"]) => {
-    void updateProposalStatus(proposalId, status);
+  const updateProposalStatusLocally = useCallback((
+    proposalId: string,
+    status: AiReviewProposal["status"],
+    applyMode?: AiProposalApplyMode,
+  ) => {
+    void updateProposalStatus(proposalId, status, applyMode);
   }, [updateProposalStatus]);
 
   const selectedTemplateName = selectedTemplate?.name ?? "";

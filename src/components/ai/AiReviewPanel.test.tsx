@@ -47,7 +47,7 @@ describe("AiReviewPanel", () => {
     expect(screen.getByText("Rejected")).toBeInTheDocument();
   });
 
-  it("requests local proposal status changes from action buttons", async () => {
+  it("requests explicit proposal apply actions from action buttons", async () => {
     const user = userEvent.setup();
     const onUpdateProposalStatus = vi.fn();
 
@@ -62,10 +62,12 @@ describe("AiReviewPanel", () => {
       />,
     );
 
-    await user.click(screen.getByRole("button", { name: "Accept proposal for growth was good" }));
+    await user.click(screen.getByRole("button", { name: "Replace proposal for growth was good" }));
+    await user.click(screen.getByRole("button", { name: "Insert below proposal for growth was good" }));
     await user.click(screen.getByRole("button", { name: "Reject proposal for growth was good" }));
 
-    expect(onUpdateProposalStatus).toHaveBeenNthCalledWith(1, "proposal_1", "accepted");
-    expect(onUpdateProposalStatus).toHaveBeenNthCalledWith(2, "proposal_1", "rejected");
+    expect(onUpdateProposalStatus).toHaveBeenNthCalledWith(1, "proposal_1", "accepted", "replace");
+    expect(onUpdateProposalStatus).toHaveBeenNthCalledWith(2, "proposal_1", "accepted", "insert_below");
+    expect(onUpdateProposalStatus).toHaveBeenNthCalledWith(3, "proposal_1", "rejected");
   });
 });

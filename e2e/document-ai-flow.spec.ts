@@ -23,11 +23,12 @@ test("creates a document and accepts a stub AI review proposal", async ({ page }
   await expect(page.getByText("Stub review finding")).toBeVisible();
   await expect(page.getByText(`${body} [reviewed]`)).toBeVisible();
 
-  const acceptProposal = page.getByRole("button", { name: `Accept proposal for ${body}` });
-  await expect(acceptProposal).toBeVisible();
+  const replaceProposal = page.getByRole("button", { name: `Replace proposal for ${body}` });
+  await expect(replaceProposal).toBeVisible();
+  await expect(page.getByRole("button", { name: `Insert below proposal for ${body}` })).toBeVisible();
   await expect(page.getByRole("button", { name: `Reject proposal for ${body}` })).toBeVisible();
 
-  await acceptProposal.click();
+  await replaceProposal.click();
   await expect(page.getByText("Accepted")).toBeVisible();
   await expect(page.getByRole("textbox", { name: "Document body" })).toContainText(`${body} [reviewed]`);
   await expect(page.getByRole("status")).toHaveText("Unsaved");

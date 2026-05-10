@@ -577,7 +577,7 @@ describe("DocumentShell", () => {
       />,
     );
 
-    await user.click(screen.getByRole("button", { name: "Accept proposal for growth was good" }));
+    await user.click(screen.getByRole("button", { name: "Replace proposal for growth was good" }));
 
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/proposals/proposal_1",
@@ -594,7 +594,7 @@ describe("DocumentShell", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("Could not update proposal status.");
   });
 
-  it("applies accepted proposal text to the local draft", async () => {
+  it("replaces accepted proposal text in the local draft", async () => {
     const user = userEvent.setup();
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(JSON.stringify({ proposal: { ...createProposal("proposal_1"), status: "accepted" } })),
@@ -609,7 +609,7 @@ describe("DocumentShell", () => {
       />,
     );
 
-    await user.click(screen.getByRole("button", { name: "Accept proposal for growth was good" }));
+    await user.click(screen.getByRole("button", { name: "Replace proposal for growth was good" }));
 
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/proposals/proposal_1",
@@ -618,6 +618,35 @@ describe("DocumentShell", () => {
         body: JSON.stringify({ status: "accepted" }),
       }),
     );
+    expect(screen.getByTestId("mock-document-body")).toHaveTextContent("revenue grew 8%");
+    expect(screen.getByText("Unsaved")).toBeInTheDocument();
+  });
+
+  it("inserts accepted proposal text below the target in the local draft", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ proposal: { ...createProposal("proposal_1"), status: "accepted" } })),
+    );
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "growth was good")}
+        proposals={[createProposal("proposal_1")]}
+        templates={[createTemplate("tpl_1", "Board review")]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Insert below proposal for growth was good" }));
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/proposals/proposal_1",
+      expect.objectContaining({
+        method: "PATCH",
+        body: JSON.stringify({ status: "accepted" }),
+      }),
+    );
+    expect(screen.getByTestId("mock-document-body")).toHaveTextContent("growth was good");
     expect(screen.getByTestId("mock-document-body")).toHaveTextContent("revenue grew 8%");
     expect(screen.getByText("Unsaved")).toBeInTheDocument();
   });

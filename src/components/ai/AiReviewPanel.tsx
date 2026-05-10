@@ -7,6 +7,7 @@ export type AiReviewProposal = Pick<
   AiProposalRecord,
   "id" | "targetText" | "replacementText" | "explanation" | "status"
 >;
+export type AiProposalApplyMode = "replace" | "insert_below";
 
 type AiReviewPanelProps = {
   errorMessage: string;
@@ -15,7 +16,11 @@ type AiReviewPanelProps = {
   proposals: AiReviewProposal[];
   selectedTemplateName: string;
   onReviewDocument: () => void;
-  onUpdateProposalStatus: (proposalId: string, status: AiReviewProposal["status"]) => void;
+  onUpdateProposalStatus: (
+    proposalId: string,
+    status: AiReviewProposal["status"],
+    applyMode?: AiProposalApplyMode,
+  ) => void;
 };
 
 const statusStyles: Record<AiReviewProposal["status"], string> = {
@@ -76,14 +81,22 @@ export function AiReviewPanel({
                   {messages[proposal.status]}
                 </span>
                 {proposal.status === "pending" ? (
-                  <div className="flex gap-2">
+                  <div className="flex flex-wrap justify-end gap-2">
                     <button
-                      aria-label={formatEditorMessage(messages.acceptProposal, { targetText: proposal.targetText })}
+                      aria-label={formatEditorMessage(messages.insertBelowProposal, { targetText: proposal.targetText })}
                       className="rounded-md border border-zinc-300 px-2 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-50"
-                      onClick={() => onUpdateProposalStatus(proposal.id, "accepted")}
+                      onClick={() => onUpdateProposalStatus(proposal.id, "accepted", "insert_below")}
                       type="button"
                     >
-                      {messages.accept}
+                      {messages.insertBelow}
+                    </button>
+                    <button
+                      aria-label={formatEditorMessage(messages.replaceProposal, { targetText: proposal.targetText })}
+                      className="rounded-md border border-zinc-300 px-2 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-50"
+                      onClick={() => onUpdateProposalStatus(proposal.id, "accepted", "replace")}
+                      type="button"
+                    >
+                      {messages.replaceAction}
                     </button>
                     <button
                       aria-label={formatEditorMessage(messages.rejectProposal, { targetText: proposal.targetText })}

@@ -42,6 +42,30 @@ export function replaceTextInTiptapJson(
     : { ok: false, reason: "target_not_found" };
 }
 
+export function insertTextBelowTargetInTiptapJson(
+  contentJson: TiptapJson,
+  targetText: string,
+  insertedText: string,
+): TiptapReplaceResult {
+  if (targetText === "") {
+    return { ok: false, reason: "empty_target" };
+  }
+
+  const occurrenceCount = countOccurrencesInNode(contentJson, targetText);
+  if (occurrenceCount === 0) {
+    return { ok: false, reason: "target_not_found" };
+  }
+
+  if (occurrenceCount > 1) {
+    return { ok: false, reason: "ambiguous_target" };
+  }
+
+  const insertion = insertBelowFirstContainingBlock(contentJson, targetText, insertedText);
+  return insertion.inserted
+    ? { ok: true, contentJson: insertion.node as TiptapJson }
+    : { ok: false, reason: "target_not_found" };
+}
+
 function countOccurrencesInNode(node: TiptapNode, targetText: string) {
   const content = node.content ?? [];
   let count = countOccurrencesInTextRuns(content, targetText);
@@ -110,6 +134,35 @@ function replaceFirstOccurrenceInNode(
   }
 
   return replaced ? { node: { ...node, content: nextContent }, replaced: true } : { node, replaced: false };
+}
+
+function insertBelowFirstContainingBlock(
+  node: TiptapNode,
+  targetText: string,
+  insertedText: string,
+): { node: TiptapNode; inserted: boolean } {
+  const content = node.content ?? [];
+  const nextContent: unknown[] = [];
+  let inserted = false;
+
+  for (const child of content) {
+    if (!inserted && isObjectNode(child) && !isTextNode(child)) {
+      if (isBlockNode(child) && countOccurrencesInNode(child, targetText) === 1) {
+        nextContent.push(child, createParagraphNode(insertedText));
+        inserted = true;
+        continue;
+      }
+
+      const childInsertion = insertBelowFirstContainingBlock(child, targetText, insertedText);
+      nextContent.push(childInsertion.node);
+      inserted = childInsertion.inserted;
+      continue;
+    }
+
+    nextContent.push(child);
+  }
+
+  return inserted ? { node: { ...node, content: nextContent }, inserted: true } : { node, inserted: false };
 }
 
 function replaceFirstOccurrenceInTextRuns(
@@ -202,4 +255,15 @@ function isObjectNode(value: unknown): value is TiptapNode {
 
 function isTextNode(value: unknown): value is TiptapNode & { text: string } {
   return isObjectNode(value) && typeof value.text === "string";
+}
+
+function isBlockNode(value: TiptapNode) {
+  return value.type === "paragraph" || value.type === "heading" || value.type === "blockquote" || value.type === "listItem";
+}
+
+function createParagraphNode(text: string): TiptapNode {
+  return {
+    type: "paragraph",
+    content: text ? [{ type: "text", text }] : [],
+  };
 }
