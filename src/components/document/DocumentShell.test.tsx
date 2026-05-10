@@ -7,13 +7,17 @@ import { SelectionAiMenu } from "./SelectionAiMenu";
 vi.mock("./DocumentEditor", () => ({
   DocumentEditor: ({
     contentJson,
+    isSelectionCommandRunning,
     onChange,
     onSelectionCommand,
+    runningSelectionCommand,
     title,
   }: {
     contentJson: { type: "doc"; content?: unknown[] };
+    isSelectionCommandRunning?: boolean;
     onChange: (draft: { title: string; contentJson: { type: "doc"; content?: unknown[] } }) => void;
     onSelectionCommand?: (command: string, selectedText: string) => void;
+    runningSelectionCommand?: string;
     title: string;
   }) => (
     <div>
@@ -23,6 +27,9 @@ vi.mock("./DocumentEditor", () => ({
         value={title}
       />
       <div data-testid="mock-document-body">{readMockTiptapText(contentJson)}</div>
+      {isSelectionCommandRunning ? (
+        <div data-testid="mock-selection-command-running">{runningSelectionCommand}</div>
+      ) : null}
       <button onClick={() => onSelectionCommand?.("Improve clarity", "selected text")} type="button">
         Mock selection command
       </button>
@@ -437,6 +444,35 @@ describe("DocumentShell", () => {
     expect(screen.queryByText("Fill required template fields before running selection AI.")).not.toBeInTheDocument();
   });
 
+  it("shows selection rewrite progress while the command is running", async () => {
+    const user = userEvent.setup();
+    const deferredRewrite = createDeferredResponse();
+    vi.spyOn(globalThis, "fetch").mockReturnValue(deferredRewrite.promise);
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "selected text in document")}
+        templates={[createTemplate("tpl_1", "Rewrite template")]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Mock selection command" }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("mock-selection-command-running")).toHaveTextContent("Improve clarity");
+    });
+
+    await act(async () => {
+      deferredRewrite.resolve(new Response(JSON.stringify({ run: createAiRun("run_rewrite"), proposal: null })));
+      await deferredRewrite.promise;
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("mock-selection-command-running")).not.toBeInTheDocument();
+    });
+  });
+
   it("runs a full document review with current unsaved draft text", async () => {
     const user = userEvent.setup();
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
@@ -670,5 +706,22 @@ describe("SelectionAiMenu", () => {
 
     expect(handleCommand).toHaveBeenNthCalledWith(1, "Translate to Korean");
     expect(handleCommand).toHaveBeenNthCalledWith(2, "Translate to English");
+  });
+
+  it("shows an in-place running status for the active command", () => {
+    const handleCommand = vi.fn();
+
+    render(
+      <SelectionAiMenu
+        hasSelection
+        isRunning
+        onCommand={handleCommand}
+        runningCommand="Translate to Korean"
+        selectedText="selected text"
+      />,
+    );
+
+    expect(screen.getByRole("status")).toHaveTextContent("Running Translate to Korean...");
+    expect(screen.queryByRole("button", { name: "Translate to Korean" })).not.toBeInTheDocument();
   });
 });

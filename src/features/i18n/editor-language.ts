@@ -86,6 +86,7 @@ export const editorMessages = {
         translateEnglish: { ariaLabel: "Translate to English", label: "English" },
         translateKorean: { ariaLabel: "Translate to Korean", label: "Korean" },
       },
+      running: "Running {command}...",
       toolbarLabel: "Selection AI actions",
     },
     templates: {
@@ -179,6 +180,7 @@ export const editorMessages = {
         translateEnglish: { ariaLabel: "영어로 번역", label: "영어" },
         translateKorean: { ariaLabel: "한국어로 번역", label: "한국어" },
       },
+      running: "{command} 실행 중...",
       toolbarLabel: "선택 AI 작업",
     },
     templates: {

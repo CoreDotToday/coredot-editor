@@ -17,10 +17,12 @@ import { SelectionAiMenu } from "./SelectionAiMenu";
 type DocumentEditorProps = {
   title: string;
   contentJson: TiptapJson;
+  isSelectionCommandRunning?: boolean;
   language?: EditorLanguage;
   messages?: EditorMessages["editor"];
   onChange: (draft: { title: string; contentJson: TiptapJson }) => void;
   onSelectionCommand?: (command: string, selectedText: string) => void;
+  runningSelectionCommand?: string;
 };
 
 type SelectionMenuState = {
@@ -47,10 +49,12 @@ const SELECTION_MENU_HEIGHT = 44;
 
 export function DocumentEditor({
   contentJson,
+  isSelectionCommandRunning = false,
   language = "en",
   messages = editorMessages.en.editor,
   onChange,
   onSelectionCommand,
+  runningSelectionCommand = "",
   title,
 }: DocumentEditorProps) {
   const [selectionMenu, setSelectionMenu] = useState<SelectionMenuState | null>(null);
@@ -182,9 +186,11 @@ export function DocumentEditor({
         />
         <SelectionAiMenu
           hasSelection={selectionMenu !== null}
+          isRunning={isSelectionCommandRunning}
           language={language}
           left={selectionMenu?.left}
           onCommand={handleCommand}
+          runningCommand={runningSelectionCommand}
           side={selectionMenu?.side}
           top={selectionMenu?.top}
         />

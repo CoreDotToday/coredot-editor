@@ -37,8 +37,13 @@ test("selection AI toolbar does not shift or cover selected editor text", async 
 
   await expect(page.getByRole("button", { name: "Translate to Korean" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Translate to English" })).toBeVisible();
+  await page.route("**/api/ai/rewrite", async (route) => {
+    await page.waitForTimeout(750);
+    await route.continue();
+  });
   await page.getByRole("button", { name: "Translate to Korean" }).click();
 
+  await expect(page.getByText("Running Translate to Korean...")).toBeVisible();
   await expect(page.getByText(`Stub rewrite: ${body} [Command: Translate to Korean]`)).toBeVisible();
   await expect(page.getByText("Fill required template fields before running selection AI.")).toHaveCount(0);
 });

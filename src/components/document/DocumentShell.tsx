@@ -447,10 +447,12 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
         <DocumentEditor
           key={document.id}
           contentJson={draft.contentJson}
+          isSelectionCommandRunning={isRewritingSelection}
           language={language}
           messages={messages.editor}
           onChange={handleDraftChange}
           onSelectionCommand={handleSelectionCommand}
+          runningSelectionCommand={selectionCommand?.command}
           title={draft.title}
         />
       </section>
