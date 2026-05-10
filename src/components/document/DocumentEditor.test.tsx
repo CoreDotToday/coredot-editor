@@ -49,14 +49,27 @@ describe("DocumentEditor", () => {
 
   it("positions the selection toolbar below text near the top of the editor", () => {
     const position = getSelectionMenuPosition({
-      frameRect: { left: 200, top: 120, width: 720 },
+      frameRect: { height: 520, left: 200, top: 120, width: 720 },
       scrollTop: 0,
       selectedText: "Top line selection",
-      selectionEnd: { left: 380, right: 460, top: 142 },
-      selectionStart: { left: 260, right: 360, top: 140 },
+      selectionEnd: { bottom: 166, left: 380, right: 460, top: 142 },
+      selectionStart: { bottom: 164, left: 260, right: 360, top: 140 },
     });
 
     expect(position.side).toBe("bottom");
-    expect(position.top).toBeGreaterThanOrEqual(52);
+    expect(position.top).toBeGreaterThan(46);
+  });
+
+  it("positions the selection toolbar above text when there is room", () => {
+    const position = getSelectionMenuPosition({
+      frameRect: { height: 520, left: 200, top: 120, width: 720 },
+      scrollTop: 0,
+      selectedText: "Middle selection",
+      selectionEnd: { bottom: 326, left: 380, right: 460, top: 302 },
+      selectionStart: { bottom: 324, left: 260, right: 360, top: 300 },
+    });
+
+    expect(position.side).toBe("top");
+    expect(position.top).toBeLessThan(180);
   });
 });

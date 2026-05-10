@@ -1,6 +1,7 @@
 "use client";
 
 import { BarChart3, Minimize2, Sparkles, Wand2 } from "lucide-react";
+import type { CSSProperties } from "react";
 
 type SelectionAiMenuSide = "top" | "bottom";
 
@@ -20,18 +21,24 @@ const commands = [
   { command: "Strengthen evidence", icon: BarChart3, label: "Evidence" },
 ];
 
-export function SelectionAiMenu({ hasSelection, onCommand, side = "top" }: SelectionAiMenuProps) {
+export function SelectionAiMenu({ hasSelection, left = 16, onCommand, side = "top", top = 16 }: SelectionAiMenuProps) {
   if (!hasSelection) return null;
+
+  const style: CSSProperties = {
+    left,
+    top,
+  };
 
   return (
     <div
       aria-label="Selection AI actions"
-      className="sticky top-0 z-20 flex shrink-0 justify-center bg-white/95 px-4 py-2 backdrop-blur"
+      className="absolute z-20 flex max-w-[calc(100%-2rem)] justify-center"
       data-side={side}
       onMouseDown={(event) => event.preventDefault()}
       role="toolbar"
+      style={style}
     >
-      <div className="inline-flex max-w-full flex-wrap items-center justify-center gap-1 rounded-md border border-zinc-200 bg-white p-1 shadow-lg shadow-zinc-950/10">
+      <div className="inline-flex max-w-full flex-wrap items-center justify-center gap-1 rounded-md border border-zinc-200 bg-white/95 p-1 shadow-lg shadow-zinc-950/10 backdrop-blur">
         {commands.map(({ command, icon: Icon, label }) => (
           <button
             aria-label={command}

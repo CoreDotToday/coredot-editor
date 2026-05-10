@@ -29,10 +29,10 @@ type SelectionMenuState = {
 
 type SelectionMenuSide = "top" | "bottom";
 
-type SelectionRect = Pick<DOMRect, "left" | "right" | "top">;
+type SelectionRect = Pick<DOMRect, "bottom" | "left" | "right" | "top">;
 
 type SelectionMenuPositionInput = {
-  frameRect: Pick<DOMRect, "left" | "top" | "width">;
+  frameRect: Pick<DOMRect, "height" | "left" | "top" | "width">;
   scrollTop: number;
   selectedText: string;
   selectionEnd: SelectionRect;
@@ -41,7 +41,6 @@ type SelectionMenuPositionInput = {
 
 const SELECTION_MENU_GAP = 8;
 const SELECTION_MENU_HEIGHT = 44;
-const SELECTION_LINE_HEIGHT = 32;
 
 export function DocumentEditor({ contentJson, onChange, onSelectionCommand, title }: DocumentEditorProps) {
   const [selectionMenu, setSelectionMenu] = useState<SelectionMenuState | null>(null);
@@ -163,11 +162,17 @@ export function DocumentEditor({ contentJson, onChange, onSelectionCommand, titl
           value={title}
         />
       </div>
-      <SelectionAiMenu hasSelection={selectionMenu !== null} onCommand={handleCommand} side={selectionMenu?.side} />
       <div className="relative min-h-0 flex-1 overflow-y-auto px-6 py-6" ref={editorFrameRef}>
         <EditorContent
           className="min-h-full [&_.tiptap]:min-h-[52rem] [&_.tiptap]:max-w-3xl [&_.tiptap]:outline-none [&_.tiptap]:text-base [&_.tiptap]:leading-7 [&_.tiptap]:text-zinc-900 [&_.tiptap_a]:text-zinc-950 [&_.tiptap_a]:underline [&_.tiptap_blockquote]:border-l-2 [&_.tiptap_blockquote]:border-zinc-300 [&_.tiptap_blockquote]:pl-4 [&_.tiptap_h1]:text-3xl [&_.tiptap_h1]:font-semibold [&_.tiptap_h2]:text-2xl [&_.tiptap_h2]:font-semibold [&_.tiptap_h3]:text-xl [&_.tiptap_h3]:font-semibold [&_.tiptap_li]:my-1 [&_.tiptap_p.is-editor-empty:first-child::before]:pointer-events-none [&_.tiptap_p.is-editor-empty:first-child::before]:float-left [&_.tiptap_p.is-editor-empty:first-child::before]:h-0 [&_.tiptap_p.is-editor-empty:first-child::before]:text-zinc-400 [&_.tiptap_p.is-editor-empty:first-child::before]:content-[attr(data-placeholder)] [&_.tiptap_p]:my-3 [&_.tiptap_ul]:my-3 [&_.tiptap_ul]:list-disc [&_.tiptap_ul]:pl-6"
           editor={editor}
+        />
+        <SelectionAiMenu
+          hasSelection={selectionMenu !== null}
+          left={selectionMenu?.left}
+          onCommand={handleCommand}
+          side={selectionMenu?.side}
+          top={selectionMenu?.top}
         />
       </div>
       <footer className="flex items-center justify-end gap-4 border-t border-zinc-200 px-6 py-2 text-xs text-zinc-500">
@@ -214,6 +219,7 @@ export function getSelectionMenuPosition({
   const selectionCenter = (selectionLeft + selectionRight) / 2 - frameRect.left;
   const left = clamp(selectionCenter - menuWidth / 2, 16, Math.max(16, frameRect.width - menuWidth - 16));
   const selectionTop = Math.min(selectionStart.top, selectionEnd.top) - frameRect.top + scrollTop;
+  const selectionBottom = Math.max(selectionStart.bottom, selectionEnd.bottom) - frameRect.top + scrollTop;
   const topCandidate = selectionTop - SELECTION_MENU_HEIGHT - SELECTION_MENU_GAP;
 
   if (topCandidate < SELECTION_MENU_GAP) {
@@ -221,7 +227,7 @@ export function getSelectionMenuPosition({
       left,
       selectedText,
       side: "bottom",
-      top: selectionTop + SELECTION_LINE_HEIGHT,
+      top: selectionBottom + SELECTION_MENU_GAP,
     };
   }
 

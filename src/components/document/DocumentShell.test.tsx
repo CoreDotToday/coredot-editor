@@ -491,15 +491,19 @@ describe("SelectionAiMenu", () => {
     render(
       <SelectionAiMenu
         hasSelection
+        left={120}
         onCommand={() => undefined}
         side="top"
         selectedText="A selected sentence for review"
+        top={48}
       />,
     );
 
     const toolbar = screen.getByRole("toolbar", { name: "Selection AI actions" });
     expect(toolbar).toHaveAttribute("data-side", "top");
-    expect(toolbar).toHaveClass("sticky");
+    expect(toolbar).toHaveClass("absolute");
+    expect(toolbar).not.toHaveClass("sticky");
+    expect(toolbar).toHaveStyle({ left: "120px", top: "48px" });
     expect(screen.queryByText("A selected sentence for review")).not.toBeInTheDocument();
   });
 });
