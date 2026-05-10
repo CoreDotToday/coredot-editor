@@ -1,6 +1,6 @@
 "use client";
 
-import { BarChart3, Minimize2, Sparkles, Wand2 } from "lucide-react";
+import { BarChart3, Languages, Minimize2, Sparkles, Wand2 } from "lucide-react";
 import type { CSSProperties } from "react";
 
 type SelectionAiMenuSide = "top" | "bottom";
@@ -19,6 +19,8 @@ const commands = [
   { command: "Make concise", icon: Minimize2, label: "Concise" },
   { command: "Make more strategic", icon: Sparkles, label: "Strategic" },
   { command: "Strengthen evidence", icon: BarChart3, label: "Evidence" },
+  { command: "Translate to Korean", icon: Languages, label: "Korean" },
+  { command: "Translate to English", icon: Languages, label: "English" },
 ];
 
 export function SelectionAiMenu({ hasSelection, left = 16, onCommand, side = "top", top = 16 }: SelectionAiMenuProps) {

@@ -565,4 +565,17 @@ describe("SelectionAiMenu", () => {
     expect(toolbar).toHaveStyle({ left: "120px", top: "48px" });
     expect(screen.queryByText("A selected sentence for review")).not.toBeInTheDocument();
   });
+
+  it("offers translation commands for selected text", async () => {
+    const user = userEvent.setup();
+    const handleCommand = vi.fn();
+
+    render(<SelectionAiMenu hasSelection onCommand={handleCommand} selectedText="selected text" />);
+
+    await user.click(screen.getByRole("button", { name: "Translate to Korean" }));
+    await user.click(screen.getByRole("button", { name: "Translate to English" }));
+
+    expect(handleCommand).toHaveBeenNthCalledWith(1, "Translate to Korean");
+    expect(handleCommand).toHaveBeenNthCalledWith(2, "Translate to English");
+  });
 });
