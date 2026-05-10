@@ -43,11 +43,17 @@ Route handlers should validate input with Zod, return predictable status codes, 
 
 `src/components/document/` contains the three-pane workspace:
 
-- Left: outline placeholder and AI run history
+- Left: outline placeholder, prompt templates, template variables, and AI run history
 - Center: Tiptap document editor
-- Right: prompt template variables and AI review proposals
+- Right: AI review proposals and selection command state
 
-`DocumentShell` owns transient client state such as the current draft, selected template, template variables, review status, and proposal status updates.
+`DocumentShell` owns transient client state such as the current draft, selected template, template variables, review status, editor language, and proposal status updates.
+
+### Editor Language Pack
+
+`src/features/i18n/editor-language.ts` contains the lightweight editor language pack. English is the default locale, and the current editor language is stored in `localStorage` under `coredot-editor-language`.
+
+Add new editor UI languages by extending `EditorLanguage`, `editorLanguageOptions`, and `editorMessages`. AI command payloads intentionally stay stable English strings so provider prompts and existing route contracts do not change when the UI language changes.
 
 ### Template System
 

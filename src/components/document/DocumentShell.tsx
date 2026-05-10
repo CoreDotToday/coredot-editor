@@ -6,6 +6,14 @@ import { AiRunHistory, type AiRunHistoryItem } from "@/components/ai/AiRunHistor
 import { PromptTemplatePanel } from "@/components/templates/PromptTemplatePanel";
 import type { AiProposalRecord, AiRunRecord, DocumentRecord, PromptTemplateRecord, TiptapJson } from "@/db/schema";
 import { extractPlainTextFromTiptap } from "@/features/documents/tiptap-text";
+import {
+  EDITOR_LANGUAGE_STORAGE_KEY,
+  editorLanguageOptions,
+  editorMessages,
+  formatEditorMessage,
+  isEditorLanguage,
+  type EditorLanguage,
+} from "@/features/i18n/editor-language";
 import { validateTemplateVariables } from "@/features/templates/template-validation";
 import { DocumentEditor } from "./DocumentEditor";
 
@@ -46,13 +54,6 @@ type DocumentSnapshot = {
 type AiSnapshot = {
   aiRuns: ShellAiRun[];
   proposals: ShellProposal[];
-};
-
-const saveStateLabel: Record<SaveState, string> = {
-  saved: "Saved",
-  dirty: "Unsaved",
-  saving: "Saving",
-  failed: "Save failed",
 };
 
 type ReviewResponse = {
@@ -100,6 +101,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
   const [draft, setDraft] = useState<DraftState>(initialDraft);
   const draftVersionRef = useRef(0);
   const [saveState, setSaveState] = useState<SaveState>("saved");
+  const [language, setLanguage] = useState<EditorLanguage>(() => readStoredEditorLanguage());
   const [selectionCommand, setSelectionCommand] = useState<SelectionCommandPayload | null>(null);
   const [observedDocument, setObservedDocument] = useState<DocumentSnapshot>(incomingDocument);
   const [observedAiSnapshot, setObservedAiSnapshot] = useState<AiSnapshot>({ aiRuns, proposals });
@@ -115,6 +117,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
     ? selectedTemplateId
     : templates[0]?.id ?? "";
   const selectedTemplate = templates.find((template) => template.id === activeTemplateId) ?? null;
+  const messages = editorMessages[language];
 
   if (
     observedDocument.id !== incomingDocument.id ||
@@ -149,6 +152,15 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
     setSaveState("dirty");
   }, []);
 
+  const handleLanguageChange = useCallback((nextLanguage: string) => {
+    if (!isEditorLanguage(nextLanguage)) {
+      return;
+    }
+
+    setLanguage(nextLanguage);
+    window.localStorage.setItem(EDITOR_LANGUAGE_STORAGE_KEY, nextLanguage);
+  }, []);
+
   const handleSelectionCommand = useCallback(async (command: string, selectedText: string) => {
     setSelectionCommand({
       command,
@@ -157,7 +169,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
     });
 
     if (!selectedTemplate) {
-      setReviewError("Select a template before running selection AI.");
+      setReviewError(messages.errors.selectTemplateForSelection);
       return;
     }
 
@@ -167,7 +179,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
     const variableValidation = validateTemplateVariables(selectedTemplate.variableSchemaJson, variablesWithDefaults);
     if (!variableValidation.ok) {
       setTemplateVariableErrors(variableValidation.errors);
-      setReviewError("Fill required template fields before running selection AI.");
+      setReviewError(messages.errors.fillSelectionVariables);
       return;
     }
 
@@ -205,11 +217,11 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
         setReviewRuns((currentRuns) => [body.run!, ...currentRuns]);
       }
     } catch {
-      setReviewError("Selection rewrite failed. Try again.");
+      setReviewError(messages.errors.selectionRewriteFailed);
     } finally {
       setIsRewritingSelection(false);
     }
-  }, [document.id, draft.contentJson, selectedTemplate, templateVariables]);
+  }, [document.id, draft.contentJson, messages.errors, selectedTemplate, templateVariables]);
 
   const saveDraft = useCallback(async () => {
     const savingVersion = draftVersionRef.current;
@@ -265,7 +277,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
     const variableValidation = validateTemplateVariables(selectedTemplate.variableSchemaJson, variablesWithDefaults);
     if (!variableValidation.ok) {
       setTemplateVariableErrors(variableValidation.errors);
-      setReviewError("Fill required template fields.");
+      setReviewError(messages.errors.fillReviewVariables);
       return;
     }
 
@@ -298,11 +310,11 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
         setReviewRuns((currentRuns) => [body.run!, ...currentRuns]);
       }
     } catch {
-      setReviewError("Review failed. Try again.");
+      setReviewError(messages.errors.reviewFailed);
     } finally {
       setIsReviewing(false);
     }
-  }, [document.id, draft.contentJson, selectedTemplate, templateVariables]);
+  }, [document.id, draft.contentJson, messages.errors, selectedTemplate, templateVariables]);
 
   const updateProposalStatus = useCallback(async (proposalId: string, status: AiReviewProposal["status"]) => {
     const previousProposal = reviewProposals.find((proposal) => proposal.id === proposalId);
@@ -338,9 +350,9 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
       setReviewProposals((currentProposals) =>
         currentProposals.map((proposal) => (proposal.id === proposalId ? previousProposal : proposal)),
       );
-      setReviewError("Could not update proposal status.");
+      setReviewError(messages.errors.updateProposalFailed);
     }
-  }, [reviewProposals]);
+  }, [messages.errors, reviewProposals]);
 
   const updateProposalStatusLocally = useCallback((proposalId: string, status: AiReviewProposal["status"]) => {
     void updateProposalStatus(proposalId, status);
@@ -352,11 +364,12 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
     <main className="flex h-screen min-h-[720px] bg-zinc-50 text-zinc-950">
       <aside className="flex w-72 shrink-0 flex-col border-r border-zinc-200 bg-zinc-50">
         <section className="border-b border-zinc-200 px-4 py-5">
-          <h2 className="text-sm font-semibold text-zinc-950">Outline</h2>
-          <p className="mt-3 text-sm leading-6 text-zinc-500">Headings will appear here as the document develops.</p>
+          <h2 className="text-sm font-semibold text-zinc-950">{messages.outline.title}</h2>
+          <p className="mt-3 text-sm leading-6 text-zinc-500">{messages.outline.empty}</p>
         </section>
 
         <PromptTemplatePanel
+          messages={messages.templates}
           onSelectTemplate={selectTemplate}
           onVariableChange={updateTemplateVariable}
           selectedTemplateId={activeTemplateId}
@@ -365,27 +378,47 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
           variableValues={templateVariables}
         />
 
-        <AiRunHistory runs={reviewRuns} />
+        <AiRunHistory language={language} messages={messages.history} runs={reviewRuns} />
       </aside>
 
       <section className="flex min-w-0 flex-1 flex-col">
         <header className="flex h-14 shrink-0 items-center justify-between border-b border-zinc-200 bg-white px-6">
           <div aria-live="polite" className="text-xs font-medium uppercase tracking-normal text-zinc-500" role="status">
-            {saveStateLabel[saveState]}
+            {messages.saveState[saveState]}
           </div>
-          <button
-            className="inline-flex h-9 items-center justify-center rounded-md bg-zinc-950 px-4 text-sm font-medium text-white transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-300"
-            disabled={saveState === "saved" || saveState === "saving"}
-            onClick={saveDraft}
-            type="button"
-          >
-            {saveState === "saving" ? "Saving..." : "Save"}
-          </button>
+          <div className="flex items-center gap-3">
+            <label className="sr-only" htmlFor="editor-language">
+              {messages.header.language}
+            </label>
+            <select
+              aria-label={messages.header.language}
+              className="h-9 rounded-md border border-zinc-300 bg-white px-2 text-sm text-zinc-700 outline-none transition-colors focus:border-zinc-500"
+              id="editor-language"
+              onChange={(event) => handleLanguageChange(event.currentTarget.value)}
+              value={language}
+            >
+              {editorLanguageOptions.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+            <button
+              className="inline-flex h-9 items-center justify-center rounded-md bg-zinc-950 px-4 text-sm font-medium text-white transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-300"
+              disabled={saveState === "saved" || saveState === "saving"}
+              onClick={saveDraft}
+              type="button"
+            >
+              {saveState === "saving" ? messages.header.saving : messages.header.save}
+            </button>
+          </div>
         </header>
 
         <DocumentEditor
           key={document.id}
           contentJson={draft.contentJson}
+          language={language}
+          messages={messages.editor}
           onChange={handleDraftChange}
           onSelectionCommand={handleSelectionCommand}
           title={draft.title}
@@ -396,20 +429,28 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
         <AiReviewPanel
           errorMessage={reviewError}
           isReviewing={isReviewing}
+          messages={messages.aiReview}
           onReviewDocument={runDocumentReview}
           onUpdateProposalStatus={updateProposalStatusLocally}
           proposals={reviewProposals}
           selectedTemplateName={selectedTemplateName}
         />
         <section className="px-5 py-5">
-          <h3 className="text-xs font-medium uppercase tracking-normal text-zinc-500">Selection command</h3>
+          <h3 className="text-xs font-medium uppercase tracking-normal text-zinc-500">
+            {messages.selectionCommand.title}
+          </h3>
           <p className="mt-3 text-sm leading-6 text-zinc-600">
             {selectionCommand
-              ? `${isRewritingSelection ? "Running" : "Last"} selection command: ${selectionCommand.command}`
-              : "Select text in the editor to reveal AI commands."}
+              ? formatEditorMessage(
+                  isRewritingSelection ? messages.selectionCommand.running : messages.selectionCommand.last,
+                  { command: selectionCommand.command },
+                )
+              : messages.selectionCommand.empty}
           </p>
           {selectionCommand ? (
-            <p className="mt-2 truncate text-xs leading-5 text-zinc-500">Selected: {selectionCommand.selectedText}</p>
+            <p className="mt-2 truncate text-xs leading-5 text-zinc-500">
+              {formatEditorMessage(messages.selectionCommand.selected, { selectedText: selectionCommand.selectedText })}
+            </p>
           ) : null}
         </section>
       </aside>
@@ -422,6 +463,15 @@ function collectTemplateVariables(template: ShellTemplate, values: Record<string
     variables[field.name] = values[field.name] ?? "";
     return variables;
   }, {});
+}
+
+function readStoredEditorLanguage(): EditorLanguage {
+  if (typeof window === "undefined") {
+    return "en";
+  }
+
+  const storedLanguage = window.localStorage.getItem(EDITOR_LANGUAGE_STORAGE_KEY);
+  return isEditorLanguage(storedLanguage) ? storedLanguage : "en";
 }
 
 function mergeMissingTemplateVariableDefaults(template: ShellTemplate | null, values: Record<string, string>) {

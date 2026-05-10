@@ -1,6 +1,7 @@
 "use client";
 
 import type { AiProposalRecord } from "@/db/schema";
+import { editorMessages, formatEditorMessage, type EditorMessages } from "@/features/i18n/editor-language";
 
 export type AiReviewProposal = Pick<
   AiProposalRecord,
@@ -10,6 +11,7 @@ export type AiReviewProposal = Pick<
 type AiReviewPanelProps = {
   errorMessage: string;
   isReviewing: boolean;
+  messages?: EditorMessages["aiReview"];
   proposals: AiReviewProposal[];
   selectedTemplateName: string;
   onReviewDocument: () => void;
@@ -22,13 +24,10 @@ const statusStyles: Record<AiReviewProposal["status"], string> = {
   rejected: "border-rose-200 bg-rose-50 text-rose-700",
 };
 
-function formatStatus(status: AiReviewProposal["status"]) {
-  return status.slice(0, 1).toUpperCase() + status.slice(1);
-}
-
 export function AiReviewPanel({
   errorMessage,
   isReviewing,
+  messages = editorMessages.en.aiReview,
   onReviewDocument,
   onUpdateProposalStatus,
   proposals,
@@ -38,9 +37,11 @@ export function AiReviewPanel({
     <section className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h2 className="text-sm font-semibold text-zinc-950">AI Review</h2>
+          <h2 className="text-sm font-semibold text-zinc-950">{messages.title}</h2>
           <p className="mt-1 text-xs leading-5 text-zinc-500">
-            {selectedTemplateName ? `Template: ${selectedTemplateName}` : "Select a template to review."}
+            {selectedTemplateName
+              ? formatEditorMessage(messages.template, { templateName: selectedTemplateName })
+              : messages.selectTemplate}
           </p>
         </div>
         <button
@@ -49,7 +50,7 @@ export function AiReviewPanel({
           onClick={onReviewDocument}
           type="button"
         >
-          {isReviewing ? "Reviewing..." : "Review document"}
+          {isReviewing ? messages.reviewing : messages.reviewDocument}
         </button>
       </div>
 
@@ -60,7 +61,7 @@ export function AiReviewPanel({
       ) : null}
 
       {proposals.length === 0 ? (
-        <p className="mt-5 text-sm leading-6 text-zinc-500">No review proposals yet.</p>
+        <p className="mt-5 text-sm leading-6 text-zinc-500">{messages.noProposals}</p>
       ) : (
         <ul className="mt-5 space-y-4">
           {proposals.map((proposal) => (
@@ -72,25 +73,25 @@ export function AiReviewPanel({
                     statusStyles[proposal.status],
                   ].join(" ")}
                 >
-                  {formatStatus(proposal.status)}
+                  {messages[proposal.status]}
                 </span>
                 {proposal.status === "pending" ? (
                   <div className="flex gap-2">
                     <button
-                      aria-label={`Accept proposal for ${proposal.targetText}`}
+                      aria-label={formatEditorMessage(messages.acceptProposal, { targetText: proposal.targetText })}
                       className="rounded-md border border-zinc-300 px-2 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-50"
                       onClick={() => onUpdateProposalStatus(proposal.id, "accepted")}
                       type="button"
                     >
-                      Accept
+                      {messages.accept}
                     </button>
                     <button
-                      aria-label={`Reject proposal for ${proposal.targetText}`}
+                      aria-label={formatEditorMessage(messages.rejectProposal, { targetText: proposal.targetText })}
                       className="rounded-md border border-zinc-300 px-2 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-50"
                       onClick={() => onUpdateProposalStatus(proposal.id, "rejected")}
                       type="button"
                     >
-                      Reject
+                      {messages.reject}
                     </button>
                   </div>
                 ) : null}
@@ -98,10 +99,10 @@ export function AiReviewPanel({
               <div className="mt-3 space-y-2 text-sm leading-6">
                 <p className="text-zinc-500">{proposal.explanation}</p>
                 <p className="text-zinc-700">
-                  <span className="font-medium text-zinc-950">Replace:</span> {proposal.targetText}
+                  <span className="font-medium text-zinc-950">{messages.replace}</span> {proposal.targetText}
                 </p>
                 <p className="text-zinc-700">
-                  <span className="font-medium text-zinc-950">With:</span> {proposal.replacementText}
+                  <span className="font-medium text-zinc-950">{messages.with}</span> {proposal.replacementText}
                 </p>
               </div>
             </li>

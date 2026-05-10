@@ -1,10 +1,12 @@
 "use client";
 
 import type { PromptTemplateRecord } from "@/db/schema";
+import { editorMessages, type EditorMessages } from "@/features/i18n/editor-language";
 
 export type PromptTemplateOption = Pick<PromptTemplateRecord, "id" | "name" | "category" | "variableSchemaJson">;
 
 type PromptTemplatePanelProps = {
+  messages?: EditorMessages["templates"];
   selectedTemplateId: string;
   templates: PromptTemplateOption[];
   variableErrors: Record<string, string>;
@@ -14,6 +16,7 @@ type PromptTemplatePanelProps = {
 };
 
 export function PromptTemplatePanel({
+  messages = editorMessages.en.templates,
   onSelectTemplate,
   onVariableChange,
   selectedTemplateId,
@@ -32,12 +35,12 @@ export function PromptTemplatePanel({
 
   return (
     <section className="min-h-0 flex-1 overflow-y-auto border-b border-zinc-200 px-4 py-5">
-      <h2 className="text-sm font-semibold text-zinc-950">Templates</h2>
+      <h2 className="text-sm font-semibold text-zinc-950">{messages.title}</h2>
       {templates.length === 0 ? (
-        <p className="mt-3 text-sm leading-6 text-zinc-500">No active templates.</p>
+        <p className="mt-3 text-sm leading-6 text-zinc-500">{messages.empty}</p>
       ) : (
         <div className="mt-3 space-y-5">
-          <div aria-label="Prompt template" className="space-y-5" role="radiogroup">
+          <div aria-label={messages.promptTemplateLabel} className="space-y-5" role="radiogroup">
             {Object.entries(templateGroups).map(([category, categoryTemplates]) => (
               <div key={category}>
                 <h3 className="text-xs font-medium uppercase tracking-normal text-zinc-500">{category}</h3>
@@ -70,17 +73,18 @@ export function PromptTemplatePanel({
           </div>
           {variableFields.length > 0 ? (
             <div className="border-t border-zinc-200 pt-4">
-              <h3 className="text-xs font-medium uppercase tracking-normal text-zinc-500">Variables</h3>
+              <h3 className="text-xs font-medium uppercase tracking-normal text-zinc-500">{messages.variables}</h3>
               <div className="mt-3 space-y-3">
                 {variableFields.map((field) => {
                   const value = variableValues[field.name] ?? "";
                   const error = variableErrors[field.name] ?? "";
                   const fieldId = `prompt-variable-${field.name}`;
+                  const fieldLabel = getTemplateVariableLabel(field, messages);
 
                   return (
                     <div key={field.name}>
                       <label className="block text-xs font-medium text-zinc-700" htmlFor={fieldId}>
-                        {field.label}
+                        {fieldLabel}
                       </label>
                       {field.type === "textarea" ? (
                         <textarea
@@ -98,7 +102,7 @@ export function PromptTemplatePanel({
                           onChange={(event) => onVariableChange(field.name, event.currentTarget.value)}
                           value={value}
                         >
-                          <option value="">Select...</option>
+                          <option value="">{messages.selectPlaceholder}</option>
                           {(field.options ?? []).map((option) => (
                             <option key={option} value={option}>
                               {option}
@@ -125,4 +129,33 @@ export function PromptTemplatePanel({
       )}
     </section>
   );
+}
+
+function getTemplateVariableLabel(
+  field: PromptTemplateOption["variableSchemaJson"]["fields"][number],
+  messages: EditorMessages["templates"],
+) {
+  const normalizedName = field.name.toLowerCase();
+  const normalizedLabel = field.label.toLowerCase();
+
+  if (normalizedName.includes("audience") || normalizedLabel.includes("audience")) {
+    return messages.variableLabels.audience;
+  }
+
+  if (
+    normalizedName.includes("objective") ||
+    normalizedName.includes("goal") ||
+    normalizedName.includes("purpose") ||
+    normalizedLabel.includes("objective") ||
+    normalizedLabel.includes("goal") ||
+    normalizedLabel.includes("purpose")
+  ) {
+    return messages.variableLabels.objective;
+  }
+
+  if (normalizedName.includes("tone") || normalizedLabel.includes("tone")) {
+    return messages.variableLabels.tone;
+  }
+
+  return field.label;
 }

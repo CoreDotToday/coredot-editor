@@ -26,6 +26,7 @@ The repository keeps `"private": true` in `package.json` to prevent accidental n
 - Review API that creates proposal records from structured AI findings
 - Rewrite API for exact-match selected text proposals
 - AI run history and persisted proposal accept/reject status
+- Lightweight editor language pack with English default and Korean UI switching
 - Isolated Playwright E2E database so tests do not mutate local development data
 - Unit, component, route, repository, and E2E coverage
 
@@ -141,6 +142,7 @@ src/components/          Editor, AI panel, template UI components
 src/db/                  Drizzle schema, client, database URL helper, seed data
 src/features/ai/         Provider adapter, payload builder, AI run repository
 src/features/documents/  Document persistence and Tiptap text extraction
+src/features/i18n/       Editor language pack and message formatting helpers
 src/features/proposals/  Proposal persistence and exact-match apply logic
 src/features/templates/  Template persistence and variable validation
 scripts/e2e/             Isolated E2E database preparation

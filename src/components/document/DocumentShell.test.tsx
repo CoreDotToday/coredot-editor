@@ -45,6 +45,7 @@ vi.mock("./DocumentEditor", () => ({
 
 afterEach(() => {
   vi.restoreAllMocks();
+  window.localStorage.clear();
 });
 
 function createDocument(id: string, title: string) {
@@ -157,6 +158,44 @@ describe("DocumentShell", () => {
     expect(screen.getByText("Outline")).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "Document title" })).toHaveValue("Market Entry Memo");
     expect(screen.getByText("AI Review")).toBeInTheDocument();
+  });
+
+  it("defaults to English and persists Korean editor language", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "body")}
+        templates={[createStrategyTemplate()]}
+      />,
+    );
+
+    expect(screen.getByRole("combobox", { name: "Language" })).toHaveValue("en");
+    expect(screen.getByText("AI Review")).toBeInTheDocument();
+
+    await user.selectOptions(screen.getByRole("combobox", { name: "Language" }), "ko");
+
+    expect(screen.getByRole("combobox", { name: "언어" })).toHaveValue("ko");
+    expect(screen.getByText("AI 검토")).toBeInTheDocument();
+    expect(screen.getByText("개요")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "문서 검토" })).toBeInTheDocument();
+    expect(window.localStorage.getItem("coredot-editor-language")).toBe("ko");
+  });
+
+  it("loads the saved editor language preference", () => {
+    window.localStorage.setItem("coredot-editor-language", "ko");
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "body")}
+        templates={[createStrategyTemplate()]}
+      />,
+    );
+
+    expect(screen.getByText("AI 검토")).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "언어" })).toHaveValue("ko");
   });
 
   it("keeps newer unsaved edits dirty when an older save resolves", async () => {
@@ -574,6 +613,19 @@ describe("SelectionAiMenu", () => {
 
     await user.click(screen.getByRole("button", { name: "Translate to Korean" }));
     await user.click(screen.getByRole("button", { name: "Translate to English" }));
+
+    expect(handleCommand).toHaveBeenNthCalledWith(1, "Translate to Korean");
+    expect(handleCommand).toHaveBeenNthCalledWith(2, "Translate to English");
+  });
+
+  it("renders selection commands with Korean labels", async () => {
+    const user = userEvent.setup();
+    const handleCommand = vi.fn();
+
+    render(<SelectionAiMenu hasSelection language="ko" onCommand={handleCommand} selectedText="selected text" />);
+
+    await user.click(screen.getByRole("button", { name: "한국어로 번역" }));
+    await user.click(screen.getByRole("button", { name: "영어로 번역" }));
 
     expect(handleCommand).toHaveBeenNthCalledWith(1, "Translate to Korean");
     expect(handleCommand).toHaveBeenNthCalledWith(2, "Translate to English");

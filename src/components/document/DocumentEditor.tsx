@@ -11,11 +11,14 @@ import { EditorContent, useEditor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import type { JSONContent } from "@tiptap/core";
 import type { TiptapJson } from "@/db/schema";
+import { editorMessages, type EditorLanguage, type EditorMessages } from "@/features/i18n/editor-language";
 import { SelectionAiMenu } from "./SelectionAiMenu";
 
 type DocumentEditorProps = {
   title: string;
   contentJson: TiptapJson;
+  language?: EditorLanguage;
+  messages?: EditorMessages["editor"];
   onChange: (draft: { title: string; contentJson: TiptapJson }) => void;
   onSelectionCommand?: (command: string, selectedText: string) => void;
 };
@@ -42,7 +45,14 @@ type SelectionMenuPositionInput = {
 const SELECTION_MENU_GAP = 8;
 const SELECTION_MENU_HEIGHT = 44;
 
-export function DocumentEditor({ contentJson, onChange, onSelectionCommand, title }: DocumentEditorProps) {
+export function DocumentEditor({
+  contentJson,
+  language = "en",
+  messages = editorMessages.en.editor,
+  onChange,
+  onSelectionCommand,
+  title,
+}: DocumentEditorProps) {
   const [selectionMenu, setSelectionMenu] = useState<SelectionMenuState | null>(null);
   const editorFrameRef = useRef<HTMLDivElement>(null);
   const titleRef = useRef(title);
@@ -68,7 +78,7 @@ export function DocumentEditor({ contentJson, onChange, onSelectionCommand, titl
         link: false,
       }),
       Placeholder.configure({
-        placeholder: "Write the memo...",
+        placeholder: messages.placeholder,
       }),
       Link.configure({
         autolink: true,
@@ -81,42 +91,45 @@ export function DocumentEditor({ contentJson, onChange, onSelectionCommand, titl
       Typography,
       CharacterCount,
     ],
-    [],
+    [messages.placeholder],
   );
 
-  const editor = useEditor({
-    extensions,
-    content: contentJson as JSONContent,
-    editorProps: {
-      attributes: {
-        "aria-label": "Document body",
-        "aria-multiline": "true",
-        role: "textbox",
+  const editor = useEditor(
+    {
+      extensions,
+      content: contentJson as JSONContent,
+      editorProps: {
+        attributes: {
+          "aria-label": messages.bodyLabel,
+          "aria-multiline": "true",
+          role: "textbox",
+        },
+      },
+      immediatelyRender: false,
+      onSelectionUpdate: ({ editor: currentEditor }) => {
+        const { empty, from, to } = currentEditor.state.selection;
+        if (empty) {
+          setSelectionMenu(null);
+          return;
+        }
+
+        const selectedText = currentEditor.state.doc.textBetween(from, to, "\n").trim();
+        if (!selectedText) {
+          setSelectionMenu(null);
+          return;
+        }
+
+        setSelectionMenu(readSelectionMenuPosition(currentEditor, editorFrameRef.current, selectedText));
+      },
+      onUpdate: ({ editor: currentEditor }) => {
+        onChangeRef.current({
+          title: titleRef.current,
+          contentJson: currentEditor.getJSON() as TiptapJson,
+        });
       },
     },
-    immediatelyRender: false,
-    onSelectionUpdate: ({ editor: currentEditor }) => {
-      const { empty, from, to } = currentEditor.state.selection;
-      if (empty) {
-        setSelectionMenu(null);
-        return;
-      }
-
-      const selectedText = currentEditor.state.doc.textBetween(from, to, "\n").trim();
-      if (!selectedText) {
-        setSelectionMenu(null);
-        return;
-      }
-
-      setSelectionMenu(readSelectionMenuPosition(currentEditor, editorFrameRef.current, selectedText));
-    },
-    onUpdate: ({ editor: currentEditor }) => {
-      onChangeRef.current({
-        title: titleRef.current,
-        contentJson: currentEditor.getJSON() as TiptapJson,
-      });
-    },
-  });
+    [extensions, messages.bodyLabel],
+  );
 
   useEffect(() => {
     if (!editor) return;
@@ -156,7 +169,7 @@ export function DocumentEditor({ contentJson, onChange, onSelectionCommand, titl
     <div className="flex min-h-0 flex-1 flex-col bg-white">
       <div className="border-b border-zinc-200 px-6 py-5">
         <input
-          aria-label="Document title"
+          aria-label={messages.titleLabel}
           className="w-full bg-transparent text-2xl font-semibold tracking-normal text-zinc-950 outline-none placeholder:text-zinc-400"
           onChange={(event) => handleTitleChange(event.target.value)}
           value={title}
@@ -169,6 +182,7 @@ export function DocumentEditor({ contentJson, onChange, onSelectionCommand, titl
         />
         <SelectionAiMenu
           hasSelection={selectionMenu !== null}
+          language={language}
           left={selectionMenu?.left}
           onCommand={handleCommand}
           side={selectionMenu?.side}
@@ -176,8 +190,12 @@ export function DocumentEditor({ contentJson, onChange, onSelectionCommand, titl
         />
       </div>
       <footer className="flex items-center justify-end gap-4 border-t border-zinc-200 px-6 py-2 text-xs text-zinc-500">
-        <span>{wordCount} words</span>
-        <span>{characterCount} characters</span>
+        <span>
+          {wordCount} {messages.words}
+        </span>
+        <span>
+          {characterCount} {messages.characters}
+        </span>
       </footer>
     </div>
   );
