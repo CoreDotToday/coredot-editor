@@ -1,12 +1,14 @@
 "use client";
 
 import { BarChart3, Minimize2, Sparkles, Wand2 } from "lucide-react";
-import type { CSSProperties } from "react";
+
+type SelectionAiMenuSide = "top" | "bottom";
 
 type SelectionAiMenuProps = {
   hasSelection: boolean;
   left?: number;
   onCommand: (command: string) => void;
+  side?: SelectionAiMenuSide;
   selectedText?: string;
   top?: number;
 };
@@ -18,30 +20,22 @@ const commands = [
   { command: "Strengthen evidence", icon: BarChart3, label: "Evidence" },
 ];
 
-export function SelectionAiMenu({ hasSelection, left = 16, onCommand, selectedText = "", top = 16 }: SelectionAiMenuProps) {
+export function SelectionAiMenu({ hasSelection, onCommand, side = "top" }: SelectionAiMenuProps) {
   if (!hasSelection) return null;
-
-  const style: CSSProperties = {
-    left,
-    top,
-  };
 
   return (
     <div
       aria-label="Selection AI actions"
-      className="absolute z-20 w-[min(32rem,calc(100%-2rem))] rounded-lg border border-zinc-200 bg-white/95 p-2 shadow-lg shadow-zinc-950/10 backdrop-blur"
+      className="sticky top-0 z-20 flex shrink-0 justify-center bg-white/95 px-4 py-2 backdrop-blur"
+      data-side={side}
       onMouseDown={(event) => event.preventDefault()}
       role="toolbar"
-      style={style}
     >
-      <div className="mb-2 truncate border-b border-zinc-100 px-2 pb-2 text-xs text-zinc-500">
-        {selectedText || "Selected text"}
-      </div>
-      <div className="grid grid-cols-4 gap-1">
+      <div className="inline-flex max-w-full flex-wrap items-center justify-center gap-1 rounded-md border border-zinc-200 bg-white p-1 shadow-lg shadow-zinc-950/10">
         {commands.map(({ command, icon: Icon, label }) => (
           <button
             aria-label={command}
-            className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md px-2 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-100 focus:outline-none focus:ring-2 focus:ring-zinc-950"
+            className="inline-flex h-8 min-w-0 items-center justify-center gap-1.5 rounded px-2.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-100 focus:outline-none focus:ring-2 focus:ring-zinc-950"
             key={command}
             onClick={() => onCommand(command)}
             title={command}

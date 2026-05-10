@@ -487,19 +487,19 @@ describe("SelectionAiMenu", () => {
     expect(event.defaultPrevented).toBe(true);
   });
 
-  it("renders as a floating toolbar with selected text context", () => {
+  it("keeps the floating toolbar outside the document text flow", () => {
     render(
       <SelectionAiMenu
         hasSelection
-        left={120}
         onCommand={() => undefined}
+        side="top"
         selectedText="A selected sentence for review"
-        top={48}
       />,
     );
 
     const toolbar = screen.getByRole("toolbar", { name: "Selection AI actions" });
-    expect(toolbar).toHaveStyle({ left: "120px", top: "48px" });
-    expect(screen.getByText("A selected sentence for review")).toBeInTheDocument();
+    expect(toolbar).toHaveAttribute("data-side", "top");
+    expect(toolbar).toHaveClass("sticky");
+    expect(screen.queryByText("A selected sentence for review")).not.toBeInTheDocument();
   });
 });
