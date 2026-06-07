@@ -29,6 +29,7 @@ Coredot Editor v1 is a working open-source AI document editor starter. The roadm
 - Attach source snippets, page metadata, and citation IDs to AI context.
 - Add citation verification before showing generated citations as trusted.
 - Let templates limit which source collections can be used.
+- Use the Docker RAG verification stack to validate pgvector, vector-store health, and future retrieval integration tests.
 
 ## v1.5: Collaboration, Audit, And Production Controls
 

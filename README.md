@@ -157,6 +157,9 @@ pnpm e2e          # Run Playwright E2E suite with isolated DB
 pnpm check        # Run lint, typecheck, unit tests, and build
 pnpm security:audit # Run dependency audit at moderate severity and above
 pnpm release:check  # Run full local release gate, including E2E and audit
+pnpm docker:rag:up     # Start local Postgres/pgvector and ChromaDB services
+pnpm docker:rag:verify # Verify the local RAG Docker services
+pnpm docker:rag:down   # Stop the local RAG Docker services
 pnpm db:setup     # Run migrations and seed default templates
 pnpm db:generate  # Generate a Drizzle migration from schema changes
 pnpm db:migrate   # Apply Drizzle migrations
@@ -198,6 +201,8 @@ docs/                    Public maintainer and adopter documentation
 ```
 
 Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the data flow and extension points. Read [docs/PLUGINS.md](docs/PLUGINS.md) before adding editor plugins. Read [docs/PROMPTING.md](docs/PROMPTING.md) before replacing prompt templates.
+
+For RAG, citation, and Postgres migration experiments, use [docs/RAG_DOCKER.md](docs/RAG_DOCKER.md). It runs Postgres/pgvector and ChromaDB in Docker while the Next.js app remains local.
 
 Read [docs/ROADMAP.md](docs/ROADMAP.md) for the recommended post-v1 build order.
 
