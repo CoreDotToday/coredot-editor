@@ -43,6 +43,8 @@ pnpm docker:rag:down
 
 Both services are bound to loopback addresses only. The stack does not expose either service on the public network interface.
 
+The example Postgres credentials are `coredot` / `coredot`, and the local Chroma service is unauthenticated. This stack is local-only. Do not expose these ports beyond `127.0.0.1` or reuse the example defaults for shared or production environments.
+
 ## Local Overrides
 
 The verification script uses `.env.docker` when that file exists. If it is missing, the script falls back to `.env.docker.example`.
