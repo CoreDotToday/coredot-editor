@@ -10,6 +10,8 @@ The immediate goal is to add a verification-only Docker stack that lets contribu
 
 Use a dedicated RAG verification stack, not full app Dockerization.
 
+Postgres/pgvector and ChromaDB should run in Docker. The Next.js app should continue to run locally with `pnpm dev` for now. This gives contributors real database and vector-store services for verification while avoiding the extra maintenance cost of packaging the whole app before the runtime architecture is ready.
+
 The stack should provide:
 
 - Postgres with the `pgvector` extension enabled for Postgres migration and vector-search validation.
@@ -46,6 +48,8 @@ This keeps the work useful for RAG and Postgres readiness while avoiding prematu
 - `docs/ROADMAP.md`: clarify that v1.4 retrieval work now has an infrastructure verification baseline.
 
 ## Docker Services
+
+These services are the Docker boundary for this phase. The app does not connect to them by default until future RAG or Postgres migration code is added.
 
 ### Postgres With pgvector
 
