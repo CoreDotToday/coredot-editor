@@ -262,7 +262,9 @@ check_chroma_tcp() {
 
 check_chroma_heartbeat() {
   if command -v curl >/dev/null 2>&1; then
-    curl -fsS "$CHROMA_HEARTBEAT_URL" >/dev/null 2>&1
+    local http_status
+    http_status="$(curl -sS -o /dev/null -w "%{http_code}" "$CHROMA_HEARTBEAT_URL" 2>/dev/null)" || return 1
+    [[ "$http_status" == "200" ]]
   else
     check_chroma_tcp
   fi
