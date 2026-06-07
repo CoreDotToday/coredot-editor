@@ -1,15 +1,12 @@
-name: coredot-rag-verification
-
 services:
   postgres:
     image: ${RAG_POSTGRES_IMAGE:-pgvector/pgvector:pg16}
-    container_name: ${RAG_POSTGRES_CONTAINER:-coredot-rag-postgres}
     environment:
       POSTGRES_USER: ${RAG_POSTGRES_USER:-coredot}
       POSTGRES_PASSWORD: ${RAG_POSTGRES_PASSWORD:-coredot}
       POSTGRES_DB: ${RAG_POSTGRES_DB:-coredot_rag}
     ports:
-      - "${RAG_POSTGRES_PORT:-54329}:5432"
+      - "127.0.0.1:${RAG_POSTGRES_PORT:-54329}:5432"
     volumes:
       - coredot_rag_postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -25,18 +22,15 @@ services:
 
   chroma:
     image: ${RAG_CHROMA_IMAGE:-chromadb/chroma:1.5.3}
-    container_name: ${RAG_CHROMA_CONTAINER:-coredot-rag-chroma}
     ports:
-      - "${RAG_CHROMA_PORT:-8009}:8000"
+      - "127.0.0.1:${RAG_CHROMA_PORT:-8009}:8000"
     volumes:
       - coredot_rag_chroma_data:/data
     healthcheck:
       test:
         [
-          "CMD",
-          "curl",
-          "-f",
-          "http://localhost:8000/api/v2/heartbeat",
+          "CMD-SHELL",
+          "bash -ec 'exec 3<>/dev/tcp/127.0.0.1/8000'",
         ]
       interval: 10s
       timeout: 5s

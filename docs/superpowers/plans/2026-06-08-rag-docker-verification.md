@@ -12,8 +12,8 @@
 
 ## File Structure
 
-- Create `docker-compose.rag.yml`: Compose services, ports, volumes, and health checks for Postgres/pgvector and ChromaDB.
-- Create `.env.docker.example`: non-secret local defaults for Docker service names, ports, and credentials.
+- Create `docker-compose.rag.yml`: Compose services, loopback-bound ports, volumes, and health checks for Postgres/pgvector and ChromaDB.
+- Create `.env.docker.example`: non-secret local defaults for Docker service images, ports, and database credentials.
 - Modify `.gitignore`: keep `.env.docker` ignored while allowing `.env.docker.example` to be committed.
 - Create `.dockerignore`: exclude local dependencies, build outputs, database files, logs, and secrets from future Docker build contexts.
 - Create `scripts/rag/verify-docker-env.sh`: single command verification script for Docker, Compose, pgvector, and Chroma heartbeat.
@@ -35,13 +35,11 @@ Create `.env.docker.example` with:
 
 ```dotenv
 RAG_POSTGRES_IMAGE=pgvector/pgvector:pg16
-RAG_POSTGRES_CONTAINER=coredot-rag-postgres
 RAG_POSTGRES_USER=coredot
 RAG_POSTGRES_PASSWORD=coredot
 RAG_POSTGRES_DB=coredot_rag
 RAG_POSTGRES_PORT=54329
 RAG_CHROMA_IMAGE=chromadb/chroma:1.5.3
-RAG_CHROMA_CONTAINER=coredot-rag-chroma
 RAG_CHROMA_PORT=8009
 ```
 
@@ -71,8 +69,16 @@ coverage
 test-results
 data
 *.db
+*.db-*
 *.sqlite
+*.sqlite-*
 *.tsbuildinfo
+*.pem
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
 .env
 .env.*
 !.env.example
@@ -84,18 +90,15 @@ data
 Create `docker-compose.rag.yml` with:
 
 ```yaml
-name: coredot-rag-verification
-
 services:
   postgres:
     image: ${RAG_POSTGRES_IMAGE:-pgvector/pgvector:pg16}
-    container_name: ${RAG_POSTGRES_CONTAINER:-coredot-rag-postgres}
     environment:
       POSTGRES_USER: ${RAG_POSTGRES_USER:-coredot}
       POSTGRES_PASSWORD: ${RAG_POSTGRES_PASSWORD:-coredot}
       POSTGRES_DB: ${RAG_POSTGRES_DB:-coredot_rag}
     ports:
-      - "${RAG_POSTGRES_PORT:-54329}:5432"
+      - "127.0.0.1:${RAG_POSTGRES_PORT:-54329}:5432"
     volumes:
       - coredot_rag_postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -111,18 +114,15 @@ services:
 
   chroma:
     image: ${RAG_CHROMA_IMAGE:-chromadb/chroma:1.5.3}
-    container_name: ${RAG_CHROMA_CONTAINER:-coredot-rag-chroma}
     ports:
-      - "${RAG_CHROMA_PORT:-8009}:8000"
+      - "127.0.0.1:${RAG_CHROMA_PORT:-8009}:8000"
     volumes:
       - coredot_rag_chroma_data:/data
     healthcheck:
       test:
         [
-          "CMD",
-          "curl",
-          "-f",
-          "http://localhost:8000/api/v2/heartbeat",
+          "CMD-SHELL",
+          "bash -ec 'exec 3<>/dev/tcp/127.0.0.1/8000'",
         ]
       interval: 10s
       timeout: 5s
@@ -210,7 +210,6 @@ set -a
 source "${SELECTED_ENV_FILE}"
 set +a
 
-POSTGRES_CONTAINER="${RAG_POSTGRES_CONTAINER:-coredot-rag-postgres}"
 POSTGRES_USER="${RAG_POSTGRES_USER:-coredot}"
 POSTGRES_DB="${RAG_POSTGRES_DB:-coredot_rag}"
 CHROMA_PORT="${RAG_CHROMA_PORT:-8009}"
@@ -219,7 +218,7 @@ CHROMA_HEARTBEAT_URL="http://localhost:${CHROMA_PORT}/api/v2/heartbeat"
 echo "Starting RAG verification services with ${SELECTED_ENV_FILE}..."
 docker compose --env-file "${SELECTED_ENV_FILE}" -f "${COMPOSE_FILE}" up -d
 
-echo "Waiting for Postgres container ${POSTGRES_CONTAINER}..."
+echo "Waiting for Postgres service..."
 for attempt in {1..60}; do
   if docker compose --env-file "${SELECTED_ENV_FILE}" -f "${COMPOSE_FILE}" exec -T postgres \
     pg_isready -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" >/dev/null 2>&1; then
@@ -261,7 +260,7 @@ for attempt in {1..60}; do
 done
 
 echo "RAG Docker verification passed."
-echo "- Postgres: ${POSTGRES_CONTAINER}, database ${POSTGRES_DB}, pgvector enabled"
+echo "- Postgres: service postgres, database ${POSTGRES_DB}, pgvector enabled"
 echo "- Chroma: ${CHROMA_HEARTBEAT_URL}"
 ```
 
@@ -331,14 +330,14 @@ pnpm docker:rag:verify
 
 ## Services
 
-| Service | Container | Host port | Purpose |
+| Service | Compose service | Host port | Purpose |
 | --- | --- | --- | --- |
-| Postgres/pgvector | `coredot-rag-postgres` | `54329` | Postgres migration and vector-search verification |
-| ChromaDB | `coredot-rag-chroma` | `8009` | Local vector-store comparison target |
+| Postgres/pgvector | `postgres` | `54329` | Postgres migration and vector-search verification |
+| ChromaDB | `chroma` | `8009` | Local vector-store comparison target |
 
 ## Local Overrides
 
-Copy `.env.docker.example` to `.env.docker` to override ports or container names. `.env.docker` is ignored by git.
+Copy `.env.docker.example` to `.env.docker` to override ports, images, or local database credentials. `.env.docker` is ignored by git.
 
 ## Commands
 
@@ -351,9 +350,7 @@ pnpm docker:rag:down
 ## Reset Volumes
 
 ```bash
-pnpm docker:rag:down
-docker volume rm coredot-rag-verification_coredot_rag_postgres_data
-docker volume rm coredot-rag-verification_coredot_rag_chroma_data
+docker compose --env-file .env.docker.example -f docker-compose.rag.yml down -v
 ```
 
 ## Relationship To SQLite
