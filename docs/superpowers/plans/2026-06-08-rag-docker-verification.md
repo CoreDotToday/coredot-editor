@@ -68,6 +68,8 @@ node_modules
 coverage
 test-results
 data
+logs
+secrets
 *.db
 *.db-*
 *.sqlite
@@ -79,8 +81,7 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
-.env
-.env.*
+.env*
 !.env.example
 !.env.docker.example
 ```
@@ -122,7 +123,7 @@ services:
       test:
         [
           "CMD-SHELL",
-          "bash -ec 'exec 3<>/dev/tcp/127.0.0.1/8000'",
+          "bash -ec 'exec 3<>/dev/tcp/127.0.0.1/8000; printf \"GET /api/v2/heartbeat HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\nConnection: close\\r\\n\\r\\n\" >&3; read -r status <&3; [[ \"$${status}\" == *\" 200 \"* ]]'",
         ]
       interval: 10s
       timeout: 5s
