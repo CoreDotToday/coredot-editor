@@ -1,0 +1,16 @@
+.git
+.next
+.vercel
+node_modules
+coverage
+test-results
+data
+*.db
+*.sqlite
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+!.env.docker.example
+Dockerfile*
+docker-compose*.yml
