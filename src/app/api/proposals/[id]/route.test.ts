@@ -6,6 +6,25 @@ vi.mock("@/features/proposals/proposal-repository", () => ({
   updateProposalStatus: vi.fn(),
 }));
 
+function createProposalRecord(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "proposal_1",
+    aiRunId: "run_1",
+    documentId: "doc_1",
+    targetText: "old",
+    replacementText: "new",
+    explanation: "Clearer.",
+    source: "selection",
+    command: "Improve clarity",
+    defaultApplyMode: "replace",
+    appliedMode: null,
+    status: "accepted",
+    createdAt: new Date("2026-01-01T00:00:00.000Z"),
+    updatedAt: new Date("2026-01-01T00:00:00.000Z"),
+    ...overrides,
+  } as Awaited<ReturnType<typeof updateProposalStatus>>;
+}
+
 function createJsonRequest(body: unknown) {
   return new Request("http://localhost/api/proposals/proposal_1", {
     method: "PATCH",
@@ -23,27 +42,40 @@ describe("PATCH /api/proposals/[id]", () => {
   });
 
   it("updates proposal status", async () => {
-    vi.mocked(updateProposalStatus).mockResolvedValueOnce({
-      id: "proposal_1",
-      aiRunId: "run_1",
-      documentId: "doc_1",
-      targetText: "old",
-      replacementText: "new",
-      explanation: "Clearer.",
-      status: "accepted",
-      createdAt: new Date("2026-01-01T00:00:00.000Z"),
-      updatedAt: new Date("2026-01-01T00:00:00.000Z"),
-    });
+    vi.mocked(updateProposalStatus).mockResolvedValueOnce(createProposalRecord());
 
     const response = await PATCH(createJsonRequest({ status: "accepted" }), createContext());
 
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ proposal: { id: "proposal_1", status: "accepted" } });
-    expect(updateProposalStatus).toHaveBeenCalledWith("proposal_1", "accepted");
+    expect(updateProposalStatus).toHaveBeenCalledWith("proposal_1", "accepted", undefined);
+  });
+
+  it("persists the applied mode when accepting a proposal", async () => {
+    vi.mocked(updateProposalStatus).mockResolvedValueOnce(createProposalRecord({ appliedMode: "insert_below" }));
+
+    const response = await PATCH(
+      createJsonRequest({ status: "accepted", appliedMode: "insert_below" }),
+      createContext(),
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      proposal: { id: "proposal_1", status: "accepted", appliedMode: "insert_below" },
+    });
+    expect(updateProposalStatus).toHaveBeenCalledWith("proposal_1", "accepted", "insert_below");
   });
 
   it("rejects invalid statuses", async () => {
     const response = await PATCH(createJsonRequest({ status: "done" }), createContext());
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "Invalid request body" });
+    expect(updateProposalStatus).not.toHaveBeenCalled();
+  });
+
+  it("rejects invalid applied modes", async () => {
+    const response = await PATCH(createJsonRequest({ status: "accepted", appliedMode: "append" }), createContext());
 
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({ error: "Invalid request body" });

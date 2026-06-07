@@ -29,6 +29,23 @@ export function createDocumentRepository(database: DocumentDatabase = db) {
       return rows[0]!;
     },
 
+    async createDocumentFromContent(title: string, contentJson: TiptapJson) {
+      const now = new Date();
+      const rows = await database
+        .insert(documents)
+        .values({
+          title,
+          contentJson,
+          plainText: extractPlainTextFromTiptap(contentJson),
+          status: "draft",
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning();
+
+      return rows[0]!;
+    },
+
     async listDocuments() {
       return database.select().from(documents).where(eq(documents.status, "draft")).orderBy(desc(documents.updatedAt));
     },
@@ -74,6 +91,7 @@ export function createDocumentRepository(database: DocumentDatabase = db) {
 const defaultRepository = createDocumentRepository();
 
 export const createDocumentDraft = defaultRepository.createDocumentDraft;
+export const createDocumentFromContent = defaultRepository.createDocumentFromContent;
 export const listDocuments = defaultRepository.listDocuments;
 export const getDocumentById = defaultRepository.getDocumentById;
 export const updateDocumentContent = defaultRepository.updateDocumentContent;

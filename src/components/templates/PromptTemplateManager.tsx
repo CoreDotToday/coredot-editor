@@ -28,10 +28,10 @@ type FormErrors = Partial<Record<"name" | "description" | "category" | "systemPr
 const NEW_TEMPLATE_ID = "__new_prompt_template__";
 
 const saveStateLabel: Record<SaveState, string> = {
-  saved: "Saved",
-  dirty: "Unsaved",
-  saving: "Saving",
-  failed: "Save failed",
+  saved: "저장됨",
+  dirty: "저장되지 않음",
+  saving: "저장 중",
+  failed: "저장 실패",
 };
 
 function createDraft(template: PromptTemplateRecord): TemplateDraft {
@@ -47,10 +47,10 @@ function createDraft(template: PromptTemplateRecord): TemplateDraft {
 
 function createNewDraft(): TemplateDraft {
   return {
-    name: "Untitled template",
-    description: "Custom prompt template",
+    name: "제목 없는 템플릿",
+    description: "사용자 프롬프트 템플릿",
     category: "custom",
-    systemPrompt: "You are an editorial assistant.",
+    systemPrompt: "당신은 문서 편집 어시스턴트입니다.",
     variableSchemaText: JSON.stringify({ fields: [], required: [] }, null, 2),
     isActive: true,
   };
@@ -101,7 +101,7 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
     selectedTemplate ? createDraft(selectedTemplate) : null,
   );
   const [saveState, setSaveState] = useState<SaveState>("saved");
-  const [statusMessage, setStatusMessage] = useState("Saved");
+  const [statusMessage, setStatusMessage] = useState("저장됨");
   const [formErrors, setFormErrors] = useState<FormErrors>({});
   const [isSaveInFlight, setIsSaveInFlight] = useState(false);
   const isCreating = selectedId === NEW_TEMPLATE_ID;
@@ -114,7 +114,7 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
     return (
       <main className="flex min-h-screen items-center justify-center bg-zinc-50 px-6 text-zinc-950">
         <div className="grid justify-items-center gap-4">
-          <p className="text-sm text-zinc-500">No templates found. Run the seed command.</p>
+          <p className="text-sm text-zinc-500">템플릿이 없습니다. 시드 명령을 실행하세요.</p>
           <button
             className="inline-flex h-9 items-center gap-2 rounded-md bg-zinc-950 px-4 text-sm font-medium text-white transition-colors hover:bg-zinc-800"
             onClick={() => {
@@ -124,13 +124,13 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
               setSelectedId(NEW_TEMPLATE_ID);
               setDraft(createNewDraft());
               setSaveState("dirty");
-              setStatusMessage("New template");
+              setStatusMessage("새 템플릿");
               setFormErrors({});
             }}
             type="button"
           >
             <Plus aria-hidden="true" className="size-4" />
-            New template
+            새 템플릿
           </button>
         </div>
       </main>
@@ -144,7 +144,7 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
     setSelectedId(template.id);
     setDraft(createDraft(template));
     setSaveState("saved");
-    setStatusMessage("Saved");
+    setStatusMessage("저장됨");
     setFormErrors({});
   };
 
@@ -155,7 +155,7 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
     setSelectedId(NEW_TEMPLATE_ID);
     setDraft(createNewDraft());
     setSaveState("dirty");
-    setStatusMessage("New template");
+    setStatusMessage("새 템플릿");
     setFormErrors({});
   };
 
@@ -163,7 +163,7 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
     draftVersionRef.current += 1;
     setDraft((currentDraft) => (currentDraft ? { ...currentDraft, ...nextDraft } : currentDraft));
     setSaveState("dirty");
-    setStatusMessage("Unsaved changes");
+    setStatusMessage("저장되지 않은 변경 사항");
     setFormErrors({});
   };
 
@@ -180,9 +180,9 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
     try {
       variableSchemaJson = JSON.parse(draft.variableSchemaText);
     } catch {
-      setFormErrors({ variableSchemaText: "Variable schema must be valid JSON." });
+      setFormErrors({ variableSchemaText: "변수 스키마는 올바른 JSON이어야 합니다." });
       setSaveState("failed");
-      setStatusMessage("Variable schema must be valid JSON.");
+      setStatusMessage("변수 스키마는 올바른 JSON이어야 합니다.");
       return;
     }
 
@@ -203,7 +203,7 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
       if (!validationResult.success) {
         setFormErrors(validationErrorsFromIssues(validationResult.error.issues));
         setSaveState("failed");
-        setStatusMessage("Fix validation errors");
+        setStatusMessage("검증 오류를 수정하세요");
         return;
       }
 
@@ -211,7 +211,7 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
       saveInFlightRef.current = true;
       setIsSaveInFlight(true);
       setSaveState("saving");
-      setStatusMessage("Saving");
+      setStatusMessage("저장 중");
 
       const response = await fetch(
         isNewTemplate ? "/api/templates" : `/api/templates/${encodeURIComponent(savingSelectedId)}`,
@@ -255,7 +255,7 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
         setSelectedId(body.template.id);
         setDraft(createDraft(body.template));
         setSaveState("saved");
-        setStatusMessage("Saved");
+        setStatusMessage("저장됨");
       }
     } catch {
       if (
@@ -264,7 +264,7 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
         draftVersionRef.current === savingDraftVersion
       ) {
         setSaveState("failed");
-        setStatusMessage("Save failed");
+        setStatusMessage("저장 실패");
       }
     } finally {
       saveInFlightRef.current = false;
@@ -279,7 +279,7 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
 
     const archivedTemplateId = selectedTemplate.id;
     setSaveState("saving");
-    setStatusMessage("Archiving");
+    setStatusMessage("보관 중");
 
     try {
       const response = await fetch(`/api/templates/${encodeURIComponent(archivedTemplateId)}`, {
@@ -302,18 +302,18 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
         setSelectedId(nextTemplate.id);
         setDraft(createDraft(nextTemplate));
         setSaveState("saved");
-        setStatusMessage("Archived");
+        setStatusMessage("보관됨");
       } else {
         selectedIdRef.current = "";
         setSelectedId("");
         setDraft(null);
         setSaveState("saved");
-        setStatusMessage("Archived");
+        setStatusMessage("보관됨");
       }
       setFormErrors({});
     } catch {
       setSaveState("failed");
-      setStatusMessage("Archive failed");
+      setStatusMessage("보관 실패");
     }
   };
 
@@ -322,21 +322,23 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
       <aside className="flex w-80 shrink-0 flex-col border-r border-zinc-200 bg-white">
         <header className="border-b border-zinc-200 px-5 py-5">
           <div className="flex items-center justify-between gap-3">
-            <h1 className="text-base font-semibold">Prompt templates</h1>
+            <h1 className="text-base font-semibold">프롬프트 템플릿</h1>
             <button
               className="inline-flex size-8 items-center justify-center rounded-md border border-zinc-200 text-zinc-700 transition-colors hover:bg-zinc-100"
               onClick={startNewTemplate}
-              title="New template"
+              title="새 템플릿"
               type="button"
             >
               <Plus aria-hidden="true" className="size-4" />
-              <span className="sr-only">New template</span>
+              <span className="sr-only">새 템플릿</span>
             </button>
           </div>
-          <p className="mt-2 text-sm leading-6 text-zinc-500">Manage saved prompts used by document AI actions.</p>
+          <p className="mt-2 text-sm leading-6 text-zinc-500">
+            문서 AI 작업에서 사용하는 저장된 프롬프트를 관리합니다.
+          </p>
         </header>
 
-        <nav aria-label="Prompt templates" className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
+        <nav aria-label="프롬프트 템플릿" className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
           <ul className="space-y-1">
             {managedTemplates.map((template) => {
               const isSelected = template.id === selectedTemplate?.id;
@@ -377,7 +379,7 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
                 type="button"
               >
                 <Archive aria-hidden="true" className="size-4" />
-                Archive
+                보관
               </button>
             ) : null}
             <button
@@ -387,7 +389,7 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
               type="button"
             >
               <Save aria-hidden="true" className="size-4" />
-              {isSaveInFlight || saveState === "saving" ? "Saving..." : "Save"}
+              {isSaveInFlight || saveState === "saving" ? "저장 중..." : "저장"}
             </button>
           </div>
         </header>
@@ -396,7 +398,7 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
           <form className="mx-auto grid max-w-5xl gap-5" onSubmit={(event) => event.preventDefault()}>
             <div className="grid gap-2">
               <label className="text-sm font-medium text-zinc-700" htmlFor="template-name">
-                Name
+                이름
               </label>
               <input
                 aria-describedby={formErrors.name ? "template-name-error" : undefined}
@@ -415,7 +417,7 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
 
             <div className="grid gap-2">
               <label className="text-sm font-medium text-zinc-700" htmlFor="template-description">
-                Description
+                설명
               </label>
               <input
                 aria-describedby={formErrors.description ? "template-description-error" : undefined}
@@ -434,7 +436,7 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
 
             <div className="grid gap-2">
               <label className="text-sm font-medium text-zinc-700" htmlFor="template-category">
-                Category
+                카테고리
               </label>
               <input
                 aria-describedby={formErrors.category ? "template-category-error" : undefined}
@@ -453,7 +455,7 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
 
             <div className="grid gap-2">
               <label className="text-sm font-medium text-zinc-700" htmlFor="template-system-prompt">
-                System prompt
+                시스템 프롬프트
               </label>
               <textarea
                 aria-describedby={formErrors.systemPrompt ? "template-system-prompt-error" : undefined}
@@ -472,7 +474,7 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
 
             <div className="grid gap-2">
               <label className="text-sm font-medium text-zinc-700" htmlFor="template-variable-schema">
-                Variable schema JSON
+                변수 스키마 JSON
               </label>
               <textarea
                 aria-describedby={formErrors.variableSchemaText ? "template-variable-schema-error" : undefined}
@@ -497,7 +499,7 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
                 onChange={(event) => updateDraft({ isActive: event.target.checked })}
                 type="checkbox"
               />
-              Active
+              활성
             </label>
 
             <p className="text-xs font-medium uppercase tracking-normal text-zinc-500">{saveStateLabel[saveState]}</p>

@@ -14,10 +14,13 @@ pnpm typecheck
 pnpm test
 pnpm e2e
 pnpm build
+pnpm security:audit
+git diff --check
 ```
 
 4. Check `git status --short` for generated artifacts.
-5. Tag the release if your fork uses tags.
+5. Check that no real API keys are present outside ignored `.env*` files.
+6. Tag the release if your fork uses tags.
 
 ## Review Priorities
 
@@ -30,6 +33,7 @@ When reviewing pull requests, focus on:
 - Accessibility of editor controls
 - Database migration safety
 - Avoiding committed secrets or local database files
+- Dependency audit output and Dependabot updates
 
 ## Compatibility Policy
 

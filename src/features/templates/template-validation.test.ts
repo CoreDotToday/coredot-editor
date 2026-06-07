@@ -16,8 +16,8 @@ describe("validateTemplateVariables", () => {
 
     expect(result.ok).toBe(false);
     expect(result.errors).toEqual({
-      audience: "Audience is required",
-      tone: "Tone is required",
+      audience: "Audience 필드는 필수입니다.",
+      tone: "Tone 필드는 필수입니다.",
     });
   });
 
@@ -32,7 +32,7 @@ describe("validateTemplateVariables", () => {
 
     expect(result.ok).toBe(false);
     expect(result.errors).toEqual({
-      audience: "Audience is required",
+      audience: "Audience 필드는 필수입니다.",
     });
   });
 });

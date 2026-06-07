@@ -1,20 +1,44 @@
 "use client";
 
 import type { AiProposalRecord } from "@/db/schema";
-import { editorMessages, formatEditorMessage, type EditorMessages } from "@/features/i18n/editor-language";
+import {
+  DEFAULT_EDITOR_LANGUAGE,
+  editorMessages,
+  formatEditorMessage,
+  type EditorMessages,
+} from "@/features/i18n/editor-language";
+import { ProposalRedline } from "./ProposalRedline";
 
 export type AiReviewProposal = Pick<
   AiProposalRecord,
   "id" | "targetText" | "replacementText" | "explanation" | "status"
->;
+> &
+  Partial<
+    Pick<
+      AiProposalRecord,
+      "source" | "command" | "occurrenceIndex" | "targetFrom" | "targetTo" | "defaultApplyMode" | "appliedMode"
+    >
+  >;
 export type AiProposalApplyMode = "replace" | "insert_below";
+export type AiReviewSummary = {
+  findingCount: number;
+  proposalCount: number;
+  skippedProposalCount: number;
+  summary: string;
+};
 
 type AiReviewPanelProps = {
+  ariaLabelledBy?: string;
+  activeProposalId?: string | null;
   errorMessage: string;
+  id?: string;
   isReviewing: boolean;
   messages?: EditorMessages["aiReview"];
   proposals: AiReviewProposal[];
+  reviewSummary?: AiReviewSummary | null;
   selectedTemplateName: string;
+  onBulkUpdateProposalStatus?: (status: "accepted" | "rejected") => void;
+  onFocusProposal?: (proposalId: string) => void;
   onReviewDocument: () => void;
   onUpdateProposalStatus: (
     proposalId: string,
@@ -30,16 +54,29 @@ const statusStyles: Record<AiReviewProposal["status"], string> = {
 };
 
 export function AiReviewPanel({
+  ariaLabelledBy,
+  activeProposalId = null,
   errorMessage,
+  id,
   isReviewing,
-  messages = editorMessages.en.aiReview,
+  onBulkUpdateProposalStatus,
+  onFocusProposal,
+  messages = editorMessages[DEFAULT_EDITOR_LANGUAGE].aiReview,
   onReviewDocument,
   onUpdateProposalStatus,
   proposals,
+  reviewSummary = null,
   selectedTemplateName,
 }: AiReviewPanelProps) {
+  const pendingProposalCount = proposals.filter((proposal) => proposal.status === "pending").length;
+
   return (
-    <section className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
+    <section
+      aria-labelledby={ariaLabelledBy}
+      className="min-h-0 flex-1 overflow-y-auto px-5 py-5"
+      id={id}
+      role={id && ariaLabelledBy ? "tabpanel" : undefined}
+    >
       <div className="flex items-start justify-between gap-4">
         <div>
           <h2 className="text-sm font-semibold text-zinc-950">{messages.title}</h2>
@@ -65,63 +102,140 @@ export function AiReviewPanel({
         </p>
       ) : null}
 
+      {reviewSummary ? (
+        <section className="mt-4 rounded-md border border-zinc-200 bg-zinc-50 px-3 py-3">
+          <h3 className="text-xs font-semibold uppercase tracking-normal text-zinc-500">{messages.reviewSummaryTitle}</h3>
+          {reviewSummary.summary ? (
+            <p className="mt-2 text-sm leading-6 text-zinc-700">{reviewSummary.summary}</p>
+          ) : null}
+          <p className="mt-2 text-xs font-medium text-zinc-500">
+            {formatEditorMessage(messages.summaryCounts, {
+              proposalCount: String(reviewSummary.proposalCount),
+              skippedCount: String(reviewSummary.skippedProposalCount),
+            })}
+          </p>
+        </section>
+      ) : null}
+
       {proposals.length === 0 ? (
-        <p className="mt-5 text-sm leading-6 text-zinc-500">{messages.noProposals}</p>
+        <p className="mt-5 text-sm leading-6 text-zinc-500">
+          {reviewSummary ? messages.noApplicableProposals : messages.noProposals}
+        </p>
       ) : (
-        <ul className="mt-5 space-y-4">
-          {proposals.map((proposal) => (
-            <li key={proposal.id} className="border-t border-zinc-200 pt-4">
-              <div className="flex items-center justify-between gap-3">
-                <span
-                  className={[
-                    "rounded-full border px-2 py-0.5 text-xs font-medium",
-                    statusStyles[proposal.status],
-                  ].join(" ")}
-                >
-                  {messages[proposal.status]}
-                </span>
-                {proposal.status === "pending" ? (
-                  <div className="flex flex-wrap justify-end gap-2">
-                    <button
-                      aria-label={formatEditorMessage(messages.insertBelowProposal, { targetText: proposal.targetText })}
-                      className="rounded-md border border-zinc-300 px-2 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-50"
-                      onClick={() => onUpdateProposalStatus(proposal.id, "accepted", "insert_below")}
-                      type="button"
-                    >
-                      {messages.insertBelow}
-                    </button>
-                    <button
-                      aria-label={formatEditorMessage(messages.replaceProposal, { targetText: proposal.targetText })}
-                      className="rounded-md border border-zinc-300 px-2 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-50"
-                      onClick={() => onUpdateProposalStatus(proposal.id, "accepted", "replace")}
-                      type="button"
-                    >
-                      {messages.replaceAction}
-                    </button>
-                    <button
-                      aria-label={formatEditorMessage(messages.rejectProposal, { targetText: proposal.targetText })}
-                      className="rounded-md border border-zinc-300 px-2 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-50"
-                      onClick={() => onUpdateProposalStatus(proposal.id, "rejected")}
-                      type="button"
-                    >
-                      {messages.reject}
-                    </button>
-                  </div>
-                ) : null}
-              </div>
-              <div className="mt-3 space-y-2 text-sm leading-6">
-                <p className="text-zinc-500">{proposal.explanation}</p>
-                <p className="text-zinc-700">
-                  <span className="font-medium text-zinc-950">{messages.replace}</span> {proposal.targetText}
-                </p>
-                <p className="text-zinc-700">
-                  <span className="font-medium text-zinc-950">{messages.with}</span> {proposal.replacementText}
-                </p>
-              </div>
-            </li>
-          ))}
-        </ul>
+        <div className="mt-5 space-y-4">
+          {pendingProposalCount > 0 && onBulkUpdateProposalStatus ? (
+            <div className="flex flex-wrap justify-end gap-2">
+              <button
+                aria-label={messages.acceptAllPendingProposals}
+                className="rounded-md border border-zinc-300 px-2.5 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-50"
+                onClick={() => onBulkUpdateProposalStatus("accepted")}
+                type="button"
+              >
+                {messages.acceptAllPending}
+              </button>
+              <button
+                aria-label={messages.rejectAllPendingProposals}
+                className="rounded-md border border-zinc-300 px-2.5 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-50"
+                onClick={() => onBulkUpdateProposalStatus("rejected")}
+                type="button"
+              >
+                {messages.rejectAllPending}
+              </button>
+            </div>
+          ) : null}
+
+          <ul className="space-y-4">
+            {proposals.map((proposal) => (
+              <li
+                key={proposal.id}
+                className={[
+                  "border-t pt-4",
+                  activeProposalId === proposal.id ? "border-sky-300 bg-sky-50/40 px-2 pb-2" : "border-zinc-200",
+                ].join(" ")}
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <span
+                    className={[
+                      "rounded-full border px-2 py-0.5 text-xs font-medium",
+                      statusStyles[proposal.status],
+                    ].join(" ")}
+                  >
+                    {messages[proposal.status]}
+                  </span>
+                  {proposal.status === "pending" ? (
+                    <div className="flex flex-wrap justify-end gap-2">
+                      {onFocusProposal ? (
+                        <button
+                          aria-label={formatEditorMessage(messages.showProposalInDocument, {
+                            targetText: proposal.targetText,
+                          })}
+                          className="rounded-md border border-zinc-300 px-2 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-50"
+                          onClick={() => onFocusProposal(proposal.id)}
+                          type="button"
+                        >
+                          {messages.showInDocument}
+                        </button>
+                      ) : null}
+                      <button
+                        aria-label={formatEditorMessage(messages.insertBelowProposal, {
+                          targetText: proposal.targetText,
+                        })}
+                        className="rounded-md border border-zinc-300 px-2 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-50"
+                        onClick={() => onUpdateProposalStatus(proposal.id, "accepted", "insert_below")}
+                        type="button"
+                      >
+                        {messages.insertBelow}
+                      </button>
+                      <button
+                        aria-label={formatEditorMessage(messages.replaceProposal, { targetText: proposal.targetText })}
+                        className="rounded-md border border-zinc-300 px-2 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-50"
+                        onClick={() => onUpdateProposalStatus(proposal.id, "accepted", "replace")}
+                        type="button"
+                      >
+                        {messages.replaceAction}
+                      </button>
+                      <button
+                        aria-label={formatEditorMessage(messages.rejectProposal, { targetText: proposal.targetText })}
+                        className="rounded-md border border-zinc-300 px-2 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-50"
+                        onClick={() => onUpdateProposalStatus(proposal.id, "rejected")}
+                        type="button"
+                      >
+                        {messages.reject}
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+                <div className="mt-3 space-y-2 text-sm leading-6">
+                  <p className="text-zinc-500">{proposal.explanation}</p>
+                  <p className="text-zinc-700">
+                    <span className="font-medium text-zinc-950">{getTargetLabel(proposal, messages)}</span>{" "}
+                    {proposal.targetText}
+                  </p>
+                  <p className="text-zinc-700">
+                    <span className="font-medium text-zinc-950">{getReplacementLabel(proposal, messages)}</span>{" "}
+                    {proposal.replacementText}
+                  </p>
+                  <ProposalRedline
+                    messages={messages}
+                    originalText={proposal.targetText}
+                    replacementText={proposal.replacementText}
+                  />
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
     </section>
   );
+}
+
+function getTargetLabel(proposal: AiReviewProposal, messages: EditorMessages["aiReview"]) {
+  const mode = proposal.appliedMode ?? proposal.defaultApplyMode;
+  return mode === "insert_below" ? messages.insertBelowTarget : messages.replace;
+}
+
+function getReplacementLabel(proposal: AiReviewProposal, messages: EditorMessages["aiReview"]) {
+  const mode = proposal.appliedMode ?? proposal.defaultApplyMode;
+  return mode === "insert_below" ? messages.insertedText : messages.with;
 }

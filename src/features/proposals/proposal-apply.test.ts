@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyProposalToText } from "./proposal-apply";
+import { applyProposalToText, validateProposalTargetOccurrence } from "./proposal-apply";
 
 describe("applyProposalToText", () => {
   it("replaces target text once when it still matches the document", () => {
@@ -36,5 +36,19 @@ describe("applyProposalToText", () => {
       ok: false,
       reason: "ambiguous_target",
     });
+  });
+});
+
+describe("validateProposalTargetOccurrence", () => {
+  it("allows a repeated target when a matching occurrence index is provided", () => {
+    const result = validateProposalTargetOccurrence("Repeat this. Repeat this.", "Repeat this.", 1);
+
+    expect(result).toEqual({ ok: true });
+  });
+
+  it("rejects an occurrence index outside the target matches", () => {
+    const result = validateProposalTargetOccurrence("Repeat this once.", "Repeat this", 1);
+
+    expect(result).toEqual({ ok: false, reason: "target_not_found" });
   });
 });

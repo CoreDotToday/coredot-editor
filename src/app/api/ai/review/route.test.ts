@@ -27,6 +27,17 @@ vi.mock("@/features/ai/ai-run-repository", () => ({
   failAiRun: vi.fn(),
 }));
 
+vi.mock("@/features/ai/ai-settings-repository", () => ({
+  getAiSettings: vi.fn(async () => ({
+    aiBaseUrl: null,
+    aiMaxCompletionTokens: null,
+    aiModel: "stub-editor",
+    aiProvider: "stub",
+    aiReasoningEffort: null,
+    id: "default",
+  })),
+}));
+
 vi.mock("@/features/ai/providers", () => ({
   createAiProvider: vi.fn(() => ({
     name: "stub",
@@ -112,7 +123,10 @@ describe("POST /api/ai/review", () => {
     );
 
     expect(response.status).toBe(400);
-    expect(await response.json()).toEqual({ error: "Invalid template variables", details: { audience: "Audience is required" } });
+    expect(await response.json()).toEqual({
+      error: "Invalid template variables",
+      details: { audience: "Audience 필드는 필수입니다." },
+    });
     expect(createAiRun).not.toHaveBeenCalled();
   });
 
@@ -141,8 +155,8 @@ describe("POST /api/ai/review", () => {
       "run_1",
       expect.stringContaining("Two findings."),
       expect.arrayContaining([
-        expect.objectContaining({ targetText: "growth was good" }),
-        expect.objectContaining({ targetText: "someone should follow up" }),
+        expect.objectContaining({ occurrenceIndex: 0, targetText: "growth was good" }),
+        expect.objectContaining({ occurrenceIndex: 0, targetText: "someone should follow up" }),
       ]),
     );
   });
@@ -191,6 +205,67 @@ describe("POST /api/ai/review", () => {
       expect.stringContaining("Draft finding."),
       [expect.objectContaining({ targetText: "fresh edited body" })],
     );
+  });
+
+  it("reviews an explicitly empty submitted draft instead of falling back to stale persisted text", async () => {
+    vi.mocked(getDocumentById).mockResolvedValueOnce(documentRecord);
+    vi.mocked(getPromptTemplateById).mockResolvedValueOnce(templateRecord);
+
+    const response = await POST(
+      createJsonRequest({
+        documentId: "doc_1",
+        templateId: "tpl_1",
+        command: "Review",
+        variables: {},
+        documentText: "",
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      proposals: [],
+      skippedProposalCount: 3,
+    });
+    expect(createAiRun).toHaveBeenCalledWith(expect.objectContaining({ inputSummaryJson: expect.objectContaining({ documentTextLength: 0 }) }));
+  });
+
+  it("completes reviews with skipped findings when none are safely applicable", async () => {
+    vi.mocked(getDocumentById).mockResolvedValueOnce(documentRecord);
+    vi.mocked(getPromptTemplateById).mockResolvedValueOnce(templateRecord);
+    vi.mocked(createAiProvider).mockReturnValueOnce({
+      name: "stub",
+      model: "stub-editor",
+      generateText: vi.fn(),
+      streamText: vi.fn(),
+      generateReview: vi.fn(async () => ({
+        summary: "Findings were ambiguous.",
+        findings: [
+          {
+            problem: "Duplicate sentence",
+            reason: "The target does not appear exactly once.",
+            targetText: "missing target",
+            replacementText: "safe replacement",
+          },
+        ],
+      })),
+    });
+
+    const response = await POST(
+      createJsonRequest({
+        documentId: "doc_1",
+        templateId: "tpl_1",
+        command: "Review",
+        variables: {},
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      review: { summary: "Findings were ambiguous." },
+      proposals: [],
+      skippedProposalCount: 1,
+    });
+    expect(completeAiRunWithProposals).toHaveBeenCalledWith("run_1", expect.stringContaining("Findings were ambiguous."), []);
   });
 
   it("returns 500 when provider configuration is invalid before a run exists", async () => {

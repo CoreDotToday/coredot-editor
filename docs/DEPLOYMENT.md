@@ -19,13 +19,17 @@ Open [http://localhost:3000](http://localhost:3000).
 | Name | Required | Notes |
 | --- | --- | --- |
 | `DATABASE_URL` | Yes in deployed environments | Use a writable SQLite/libSQL URL. Relative `file:` paths are mainly for local development. |
-| `AI_PROVIDER` | Recommended | Use `stub` for demos/tests, `coredot` for Core.Today proxy calls, and `openai` for direct OpenAI calls. |
+| `AI_PROVIDER` | Recommended | Initial provider seed before `app_settings` exists. Use `stub` for demos/tests, `coredot`, `anthropic`, or `gemini` for Core.Today proxy calls, and `openai` for direct OpenAI calls. |
 | `OPENAI_API_KEY` | Only with `AI_PROVIDER=openai` | Store as a secret, never in source control. |
-| `OPENAI_MODEL` | Optional | Defaults through provider code when omitted. |
-| `COREDOT_API_KEY` | Only with `AI_PROVIDER=coredot` | Store as a secret, never in source control. |
-| `COREDOT_MODEL` | Optional | Defaults to `gpt-5-nano`. |
-| `COREDOT_BASE_URL` | Optional | Defaults to `https://api.core.today/llm/openai/v1`. |
-| `COREDOT_MAX_COMPLETION_TOKENS` | Optional | Defaults to provider behavior when omitted. |
+| `OPENAI_MODEL` | Optional | Initial OpenAI model seed when omitted from saved settings. |
+| `COREDOT_API_KEY` | With Core.Today providers | Required for `coredot`, `anthropic`, and `gemini`. Store as a secret, never in source control. |
+| `COREDOT_MODEL` | Optional | Initial Core.Today model seed. Defaults to `gpt-5-nano`. |
+| `COREDOT_BASE_URL` | Optional | Initial Core.Today Base URL seed. Defaults to `https://api.core.today/llm/openai/v1`. |
+| `COREDOT_ANTHROPIC_MODEL` | Optional | Initial Core.Today Anthropic model seed. Defaults to `claude-sonnet-4.5`. |
+| `COREDOT_ANTHROPIC_BASE_URL` | Optional | Initial Core.Today Anthropic Base URL seed. Defaults to `https://api.core.today/llm/anthropic/v1`. |
+| `COREDOT_GEMINI_MODEL` | Optional | Initial Core.Today Gemini model seed. Defaults to `gemini-2.5-flash`. |
+| `COREDOT_GEMINI_BASE_URL` | Optional | Initial Core.Today Gemini Base URL seed. Defaults to `https://api.core.today/llm/gemini/v1beta`. |
+| `COREDOT_MAX_COMPLETION_TOKENS` | Optional | Initial Core.Today output token seed. Defaults to `32768`. |
 
 ## Database Setup
 
@@ -44,6 +48,20 @@ pnpm db:seed
 
 Run migrations before starting the app. The seed script is idempotent for default prompt templates.
 
+## Runtime LLM Settings
+
+The app stores non-secret model settings in the `app_settings` table and exposes them through the editor header's `LLM 설정` dialog. The dialog can switch between `stub`, `coredot`, `anthropic`, `gemini`, and `openai`, set model names, set Core.Today Base URL and max completion tokens, choose reasoning effort where supported, and run a connection test.
+
+API keys remain server-side environment variables. The settings API returns only boolean secret status such as whether `COREDOT_API_KEY` is configured; it never returns or accepts API key values from the browser.
+
+Core.Today Base URL settings are pinned to the official routes for each provider:
+
+- `coredot`: `https://api.core.today/llm/openai/v1`
+- `anthropic`: `https://api.core.today/llm/anthropic/v1`
+- `gemini`: `https://api.core.today/llm/gemini/v1beta`
+
+The app rejects browser-supplied hosts, explicit ports, credentials, query strings, fragments, and cross-provider paths before using `COREDOT_API_KEY`. If an older database row contains an unsafe Core.Today URL, the runtime settings layer sanitizes it back to the provider default instead of returning it unchanged.
+
 ## Vercel Notes
 
 The app can be deployed to Vercel as a standard Next.js app.
@@ -51,9 +69,9 @@ The app can be deployed to Vercel as a standard Next.js app.
 Before deploying:
 
 1. Configure `DATABASE_URL`.
-2. Configure `AI_PROVIDER`.
+2. Configure `AI_PROVIDER` for the initial settings seed.
 3. Configure `OPENAI_API_KEY` if using OpenAI.
-4. Configure `COREDOT_API_KEY` if using Core.Today.
+4. Configure `COREDOT_API_KEY` if using any Core.Today provider.
 5. Run migrations against the production database.
 6. Seed default templates, or create product-specific templates through the UI.
 
@@ -80,10 +98,16 @@ AI_PROVIDER=coredot
 COREDOT_API_KEY=your_core_today_api_key
 COREDOT_MODEL=gpt-5-nano
 COREDOT_BASE_URL=https://api.core.today/llm/openai/v1
+COREDOT_ANTHROPIC_MODEL=claude-sonnet-4.5
+COREDOT_ANTHROPIC_BASE_URL=https://api.core.today/llm/anthropic/v1
+COREDOT_GEMINI_MODEL=gemini-2.5-flash
+COREDOT_GEMINI_BASE_URL=https://api.core.today/llm/gemini/v1beta
 COREDOT_MAX_COMPLETION_TOKENS=32768
 ```
 
-Core.Today's OpenAI-compatible route lets the app keep the same Vercel AI SDK provider contract while routing requests through `https://api.core.today/llm/openai/v1`.
+Core.Today's proxy routes let the app keep one server-side `COREDOT_API_KEY` while routing OpenAI-compatible requests through `https://api.core.today/llm/openai/v1`, Anthropic messages through `https://api.core.today/llm/anthropic/v1`, and Gemini generateContent requests through `https://api.core.today/llm/gemini/v1beta`.
+
+For GPT-5 style models, configure `max_completion_tokens` through `COREDOT_MAX_COMPLETION_TOKENS` for the initial seed or through `LLM 설정` after deployment. Reasoning effort is saved in `app_settings` and passed through the OpenAI-compatible provider options.
 
 Do not commit real Core.Today keys. Rotate a key if it appears in public logs, screenshots, issues, or chat transcripts.
 
@@ -125,6 +149,7 @@ Stop any manually running `pnpm dev` process before running `pnpm e2e`. Next.js 
 - [ ] `pnpm test` passes.
 - [ ] `pnpm e2e` passes.
 - [ ] `pnpm build` passes.
+- [ ] `pnpm security:audit` passes.
 - [ ] Production `DATABASE_URL` is configured.
 - [ ] AI provider secrets are configured.
 - [ ] Migrations have run.

@@ -27,7 +27,7 @@ Describe what you expected to happen.
 - pnpm:
 - Browser:
 - Database URL type: `file`, `libsql`, other
-- AI provider: `stub`, `openai`, other
+- AI provider: `stub`, `coredot`, `anthropic`, `gemini`, `openai`, other
 
 ## Logs Or Screenshots
 

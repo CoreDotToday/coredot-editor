@@ -1,22 +1,58 @@
 "use client";
 
-import { useCallback, useMemo, useRef, useState } from "react";
-import { AiReviewPanel, type AiProposalApplyMode, type AiReviewProposal } from "@/components/ai/AiReviewPanel";
+import Link from "next/link";
+import {
+  ChevronsLeft,
+  Download,
+  FileText,
+  Library,
+  MessageCircle,
+  MoreHorizontal,
+  PanelLeftOpen,
+  PanelRightClose,
+  PanelRightOpen,
+  PlusCircle,
+} from "lucide-react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type MouseEvent,
+  type MutableRefObject,
+} from "react";
+import type { AiProposalApplyMode, AiReviewProposal, AiReviewSummary } from "@/components/ai/AiReviewPanel";
 import { AiRunHistory, type AiRunHistoryItem } from "@/components/ai/AiRunHistory";
-import { PromptTemplatePanel } from "@/components/templates/PromptTemplatePanel";
+import {
+  AiWorkspacePanel,
+  type AiWorkspaceChangeItem,
+  type AiWorkspaceChatMessage,
+} from "@/components/ai/AiWorkspacePanel";
+import { AiSettingsDialog } from "@/components/settings/AiSettingsDialog";
+import { getTemplateVariableLabel, PromptTemplatePanel } from "@/components/templates/PromptTemplatePanel";
 import type { AiProposalRecord, AiRunRecord, DocumentRecord, PromptTemplateRecord, TiptapJson } from "@/db/schema";
-import { insertTextBelowTargetInTiptapJson, replaceTextInTiptapJson } from "@/features/documents/tiptap-replace";
 import { extractPlainTextFromTiptap } from "@/features/documents/tiptap-text";
 import {
   EDITOR_LANGUAGE_STORAGE_KEY,
+  DEFAULT_EDITOR_LANGUAGE,
   editorLanguageOptions,
   editorMessages,
   formatEditorMessage,
+  getSelectionCommandLabel,
   isEditorLanguage,
   type EditorLanguage,
 } from "@/features/i18n/editor-language";
+import {
+  applyProposalToTiptapDraft,
+  getProposalApplicationOrder,
+  getProposalSelectionRange,
+  type ProposalTransactionContext,
+} from "@/features/proposals/proposal-transaction";
 import { validateTemplateVariables } from "@/features/templates/template-validation";
-import { DocumentEditor } from "./DocumentEditor";
+import { DocumentEditor, type RunningSelectionAiCommand, type SelectionAiCommandContext } from "./DocumentEditor";
+import type { SelectionAiResultPreview } from "./SelectionAiResultPopover";
 
 type ShellDocument = Pick<DocumentRecord, "id" | "title" | "contentJson" | "plainText">;
 type ShellTemplate = Pick<PromptTemplateRecord, "id" | "name" | "category" | "variableSchemaJson">;
@@ -24,7 +60,18 @@ type ShellTemplateField = ShellTemplate["variableSchemaJson"]["fields"][number];
 type ShellAiRun = Pick<AiRunRecord, "id" | "commandType" | "status" | "createdAt">;
 type ShellProposal = Pick<
   AiProposalRecord,
-  "id" | "targetText" | "replacementText" | "explanation" | "status"
+  | "id"
+  | "targetText"
+  | "replacementText"
+  | "explanation"
+  | "source"
+  | "command"
+  | "occurrenceIndex"
+  | "targetFrom"
+  | "targetTo"
+  | "defaultApplyMode"
+  | "appliedMode"
+  | "status"
 >;
 type SaveState = "saved" | "dirty" | "saving" | "failed";
 
@@ -42,9 +89,12 @@ type DraftState = {
 
 type SelectionCommandPayload = {
   command: string;
+  context?: SelectionAiCommandContext;
   selectedText: string;
   contentJson: TiptapJson;
 };
+
+type SelectionProposalContext = ProposalTransactionContext;
 
 type DocumentSnapshot = {
   id: string;
@@ -57,15 +107,51 @@ type AiSnapshot = {
   proposals: ShellProposal[];
 };
 
+type AppliedAiChangeRecord = Omit<AiWorkspaceChangeItem, "canUndo"> & {
+  afterContentSignature: string;
+  beforeDraft: DraftState;
+  proposalId: string;
+  undone: boolean;
+};
+
 type ReviewResponse = {
+  review?: {
+    findings?: unknown[];
+    summary?: string;
+  };
   run?: ShellAiRun;
   proposals?: ShellProposal[];
+  skippedProposalCount?: number;
 };
 
 type RewriteResponse = {
   run?: ShellAiRun;
   proposal?: ShellProposal | null;
 };
+
+const MAX_CONCURRENT_SELECTION_COMMANDS = 5;
+const AUTOSAVE_DEBOUNCE_MS = 1000;
+const COMPACT_WORKSPACE_MEDIA_QUERY = "(max-width: 1279px)";
+
+function subscribeCompactWorkspaceLayout(onStoreChange: () => void) {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+    return () => {};
+  }
+
+  const mediaQuery = window.matchMedia(COMPACT_WORKSPACE_MEDIA_QUERY);
+  mediaQuery.addEventListener("change", onStoreChange);
+  return () => mediaQuery.removeEventListener("change", onStoreChange);
+}
+
+function getCompactWorkspaceLayoutSnapshot() {
+  return typeof window !== "undefined" &&
+    typeof window.matchMedia === "function" &&
+    window.matchMedia(COMPACT_WORKSPACE_MEDIA_QUERY).matches;
+}
+
+function getCompactWorkspaceLayoutServerSnapshot() {
+  return false;
+}
 
 export function DocumentShell({ aiRuns, document, proposals = [], templates }: DocumentShellProps) {
   return (
@@ -104,21 +190,66 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
   const [saveState, setSaveState] = useState<SaveState>("saved");
   const [language, setLanguage] = useState<EditorLanguage>(() => readStoredEditorLanguage());
   const [selectionCommand, setSelectionCommand] = useState<SelectionCommandPayload | null>(null);
+  const [selectionAiResult, setSelectionAiResult] = useState<SelectionAiResultPreview | null>(null);
+  const [selectionApplicationNotice, setSelectionApplicationNotice] = useState("");
+  const [selectionProposalContexts, setSelectionProposalContexts] = useState<Record<string, SelectionProposalContext>>({});
+  const [activeProposalId, setActiveProposalId] = useState<string | null>(null);
+  const [aiChatMessages, setAiChatMessages] = useState<AiWorkspaceChatMessage[]>([]);
+  const [appliedChanges, setAppliedChanges] = useState<AppliedAiChangeRecord[]>([]);
+  const [undoChangeError, setUndoChangeError] = useState("");
+  const [isExportingDocx, setIsExportingDocx] = useState(false);
+  const aiWorkspaceIdRef = useRef(0);
+  const runningSelectionCommandsRef = useRef<RunningSelectionAiCommand[]>([]);
   const [observedDocument, setObservedDocument] = useState<DocumentSnapshot>(incomingDocument);
   const [observedAiSnapshot, setObservedAiSnapshot] = useState<AiSnapshot>({ aiRuns, proposals });
   const [selectedTemplateId, setSelectedTemplateId] = useState(templates[0]?.id ?? "");
   const [reviewProposals, setReviewProposals] = useState<AiReviewProposal[]>(proposals);
   const [reviewRuns, setReviewRuns] = useState<AiRunHistoryItem[]>(aiRuns);
+  const [reviewSummary, setReviewSummary] = useState<AiReviewSummary | null>(null);
   const [isReviewing, setIsReviewing] = useState(false);
   const [reviewError, setReviewError] = useState("");
   const [templateVariables, setTemplateVariables] = useState<Record<string, string>>(initialTemplateVariables);
   const [templateVariableErrors, setTemplateVariableErrors] = useState<Record<string, string>>({});
-  const [isRewritingSelection, setIsRewritingSelection] = useState(false);
+  const [runningSelectionCommands, setRunningSelectionCommands] = useState<RunningSelectionAiCommand[]>([]);
+  const isCompactWorkspace = useSyncExternalStore(
+    subscribeCompactWorkspaceLayout,
+    getCompactWorkspaceLayoutSnapshot,
+    getCompactWorkspaceLayoutServerSnapshot,
+  );
+  const [workspaceOpenOverride, setWorkspaceOpenOverride] = useState<boolean | null>(null);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [isCreatingDocument, setIsCreatingDocument] = useState(false);
   const activeTemplateId = templates.some((template) => template.id === selectedTemplateId)
     ? selectedTemplateId
     : templates[0]?.id ?? "";
   const selectedTemplate = templates.find((template) => template.id === activeTemplateId) ?? null;
   const messages = editorMessages[language];
+  const selectionCommandLabel = selectionCommand ? getSelectionCommandLabel(selectionCommand.command, language) : "";
+  const isRewritingSelection = runningSelectionCommands.length > 0;
+  const isSelectionCommandLimitReached = runningSelectionCommands.length >= MAX_CONCURRENT_SELECTION_COMMANDS;
+  const isInternalNavigationBlocked = saveState !== "saved";
+  const updateRunningSelectionCommands = useCallback(
+    (updater: (commands: RunningSelectionAiCommand[]) => RunningSelectionAiCommand[]) => {
+      const nextCommands = updater(runningSelectionCommandsRef.current);
+      runningSelectionCommandsRef.current = nextCommands;
+      setRunningSelectionCommands(nextCommands);
+    },
+    [],
+  );
+
+  useEffect(() => {
+    runningSelectionCommandsRef.current = runningSelectionCommands;
+  }, [runningSelectionCommands]);
+  const isWorkspaceOpen = workspaceOpenOverride ?? !isCompactWorkspace;
+  const setWorkspaceOpen = useCallback(
+    (nextValue: boolean | ((currentValue: boolean) => boolean)) => {
+      setWorkspaceOpenOverride((currentOverride) => {
+        const currentValue = currentOverride ?? !isCompactWorkspace;
+        return typeof nextValue === "function" ? nextValue(currentValue) : nextValue;
+      });
+    },
+    [isCompactWorkspace],
+  );
 
   if (
     observedDocument.id !== incomingDocument.id ||
@@ -130,21 +261,31 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
     if (saveState === "saved") {
       setDraft(initialDraft);
       setSelectionCommand(null);
+      setSelectionAiResult(null);
+      setSelectionApplicationNotice("");
+      setSelectionProposalContexts({});
+      setActiveProposalId(null);
+      setAiChatMessages([]);
+      setAppliedChanges([]);
+      setUndoChangeError("");
       setSelectedTemplateId(templates[0]?.id ?? "");
       setReviewProposals(proposals);
       setReviewRuns(aiRuns);
+      setReviewSummary(null);
       setIsReviewing(false);
       setReviewError("");
       setTemplateVariables(initialTemplateVariables);
       setTemplateVariableErrors({});
-      setIsRewritingSelection(false);
+      setRunningSelectionCommands([]);
     }
   }
 
   if (observedAiSnapshot.aiRuns !== aiRuns || observedAiSnapshot.proposals !== proposals) {
     setObservedAiSnapshot({ aiRuns, proposals });
     setReviewRuns(aiRuns);
-    setReviewProposals(proposals);
+    if (!reviewSummary) {
+      setReviewProposals(proposals);
+    }
   }
 
   const handleDraftChange = useCallback((nextDraft: DraftState) => {
@@ -162,12 +303,56 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
     window.localStorage.setItem(EDITOR_LANGUAGE_STORAGE_KEY, nextLanguage);
   }, []);
 
-  const handleSelectionCommand = useCallback(async (command: string, selectedText: string) => {
+  const createNewDocument = useCallback(async () => {
+    if (isInternalNavigationBlocked) {
+      return;
+    }
+
+    setIsCreatingDocument(true);
+
+    try {
+      const response = await fetch("/api/documents", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ title: messages.shell.untitledDocument }),
+      });
+
+      if (!response.ok) {
+        throw new Error("Failed to create document");
+      }
+
+      const body = (await response.json()) as { document?: { id?: string } };
+      if (body.document?.id) {
+        window.location.assign(`/documents/${body.document.id}`);
+      }
+    } catch {
+      setReviewError(messages.errors.createDocumentFailed);
+    } finally {
+      setIsCreatingDocument(false);
+    }
+  }, [isInternalNavigationBlocked, messages.errors.createDocumentFailed, messages.shell.untitledDocument]);
+
+  const handleInternalNavigationClick = useCallback((event: MouseEvent<HTMLAnchorElement>) => {
+    if (isInternalNavigationBlocked) {
+      event.preventDefault();
+    }
+  }, [isInternalNavigationBlocked]);
+
+  const handleSelectionCommand = useCallback(async (
+    command: string,
+    selectedText: string,
+    context?: SelectionAiCommandContext,
+  ) => {
     setSelectionCommand({
       command,
+      context,
       selectedText,
       contentJson: draft.contentJson,
     });
+    setSelectionAiResult(null);
+    setSelectionApplicationNotice("");
 
     if (!selectedTemplate) {
       setReviewError(messages.errors.selectTemplateForSelection);
@@ -179,14 +364,38 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
 
     const variableValidation = validateTemplateVariables(selectedTemplate.variableSchemaJson, variablesWithDefaults);
     if (!variableValidation.ok) {
-      setTemplateVariableErrors(variableValidation.errors);
+      setTemplateVariableErrors(localizeTemplateVariableErrors(selectedTemplate, variableValidation.errors, messages));
       setReviewError(messages.errors.fillSelectionVariables);
       return;
     }
 
-    setIsRewritingSelection(true);
+    if (runningSelectionCommandsRef.current.length >= MAX_CONCURRENT_SELECTION_COMMANDS) {
+      setReviewError(messages.errors.selectionConcurrencyLimit);
+      return;
+    }
+
+    const runningCommandId = createWorkspaceClientId(aiWorkspaceIdRef, "selection_job");
+    updateRunningSelectionCommands((currentCommands) => [
+      {
+        anchor: context?.anchor,
+        command,
+        id: runningCommandId,
+      },
+      ...currentCommands,
+    ]);
     setReviewError("");
     setTemplateVariableErrors({});
+    setUndoChangeError("");
+    setAiChatMessages((currentMessages) => [
+      ...currentMessages,
+      {
+        command,
+        content: selectedText,
+        id: createWorkspaceClientId(aiWorkspaceIdRef, "user"),
+        role: "user",
+        scopeLabel: getCommandScopeLabel(context?.scope, messages),
+      },
+    ]);
 
     try {
       const response = await fetch("/api/ai/rewrite", {
@@ -200,6 +409,8 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
           command,
           variables: collectTemplateVariables(selectedTemplate, variablesWithDefaults),
           selectedText,
+          occurrenceIndex: context?.occurrenceIndex,
+          selectionRange: context?.selectionRange,
           documentText: extractPlainTextFromTiptap(draft.contentJson),
           beforeContext: "",
           afterContext: "",
@@ -212,7 +423,36 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
 
       const body = (await response.json()) as RewriteResponse;
       if (body.proposal) {
+        const proposalSelectionRange = getProposalSelectionRange(body.proposal, context);
         setReviewProposals((currentProposals) => [body.proposal!, ...currentProposals]);
+        setSelectionProposalContexts((currentContexts) => ({
+          ...currentContexts,
+          [body.proposal!.id]: {
+            occurrenceIndex: body.proposal!.occurrenceIndex ?? context?.occurrenceIndex,
+            selectionRange: proposalSelectionRange,
+          },
+        }));
+        setSelectionAiResult({
+          anchor: context?.anchor,
+          command,
+          defaultApplyMode:
+            body.proposal.source === "selection"
+              ? body.proposal.defaultApplyMode ?? getDefaultApplyModeForCommand(command)
+              : getDefaultApplyModeForCommand(command),
+          explanation: body.proposal.explanation,
+          proposalId: body.proposal.id,
+          replacementText: body.proposal.replacementText,
+          targetText: body.proposal.targetText,
+        });
+        setAiChatMessages((currentMessages) => [
+          ...currentMessages,
+          {
+            command,
+            content: body.proposal!.replacementText,
+            id: createWorkspaceClientId(aiWorkspaceIdRef, "assistant"),
+            role: "assistant",
+          },
+        ]);
       }
       if (body.run) {
         setReviewRuns((currentRuns) => [body.run!, ...currentRuns]);
@@ -220,9 +460,11 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
     } catch {
       setReviewError(messages.errors.selectionRewriteFailed);
     } finally {
-      setIsRewritingSelection(false);
+      updateRunningSelectionCommands((currentCommands) =>
+        currentCommands.filter((runningCommand) => runningCommand.id !== runningCommandId),
+      );
     }
-  }, [document.id, draft.contentJson, messages.errors, selectedTemplate, templateVariables]);
+  }, [document.id, draft.contentJson, messages, selectedTemplate, templateVariables, updateRunningSelectionCommands]);
 
   const saveDraft = useCallback(async () => {
     const savingVersion = draftVersionRef.current;
@@ -248,6 +490,66 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
       setSaveState((currentState) => (draftVersionRef.current === savingVersion ? "failed" : currentState));
     }
   }, [document.id, draft]);
+
+  useEffect(() => {
+    if (saveState !== "dirty") {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      void saveDraft();
+    }, AUTOSAVE_DEBOUNCE_MS);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [saveDraft, saveState]);
+
+  useEffect(() => {
+    if (saveState !== "dirty" && saveState !== "failed" && saveState !== "saving") {
+      return;
+    }
+
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [saveState]);
+
+  const exportDocxDraft = useCallback(async () => {
+    setIsExportingDocx(true);
+
+    try {
+      const response = await fetch(`/api/documents/${encodeURIComponent(document.id)}/export`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          title: draft.title,
+          contentJson: draft.contentJson,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error("Failed to export DOCX");
+      }
+
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = window.document.createElement("a");
+      link.href = url;
+      link.download = `${sanitizeDownloadFileName(draft.title)}.docx`;
+      link.click();
+      URL.revokeObjectURL(url);
+      setReviewError("");
+    } catch {
+      setReviewError(messages.errors.exportDocxFailed);
+    } finally {
+      setIsExportingDocx(false);
+    }
+  }, [document.id, draft.contentJson, draft.title, messages.errors.exportDocxFailed]);
 
   const selectTemplate = useCallback((templateId: string) => {
     const nextTemplate = templates.find((template) => template.id === templateId) ?? null;
@@ -277,13 +579,16 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
 
     const variableValidation = validateTemplateVariables(selectedTemplate.variableSchemaJson, variablesWithDefaults);
     if (!variableValidation.ok) {
-      setTemplateVariableErrors(variableValidation.errors);
+      setTemplateVariableErrors(localizeTemplateVariableErrors(selectedTemplate, variableValidation.errors, messages));
       setReviewError(messages.errors.fillReviewVariables);
       return;
     }
 
     setIsReviewing(true);
     setReviewError("");
+    setActiveProposalId(null);
+    setReviewProposals([]);
+    setReviewSummary(null);
     setTemplateVariableErrors({});
 
     try {
@@ -307,6 +612,12 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
 
       const body = (await response.json()) as ReviewResponse;
       setReviewProposals(body.proposals ?? []);
+      setReviewSummary({
+        findingCount: body.review?.findings?.length ?? body.proposals?.length ?? 0,
+        proposalCount: body.proposals?.length ?? 0,
+        skippedProposalCount: body.skippedProposalCount ?? 0,
+        summary: body.review?.summary ?? "",
+      });
       if (body.run) {
         setReviewRuns((currentRuns) => [body.run!, ...currentRuns]);
       }
@@ -315,7 +626,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
     } finally {
       setIsReviewing(false);
     }
-  }, [document.id, draft.contentJson, messages.errors, selectedTemplate, templateVariables]);
+  }, [document.id, draft.contentJson, messages, selectedTemplate, templateVariables]);
 
   const updateProposalStatus = useCallback(async (
     proposalId: string,
@@ -330,29 +641,39 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
     const previousDraft = draft;
     const previousSaveState = saveState;
     let appliedDraftVersion: number | null = null;
+    let appliedChange: AppliedAiChangeRecord | null = null;
+    const isSelectionProposal = proposalId in selectionProposalContexts;
 
     if (status === "accepted") {
-      const appliedDraft =
-        applyMode === "insert_below"
-          ? insertTextBelowTargetInTiptapJson(
-              draft.contentJson,
-              previousProposal.targetText,
-              previousProposal.replacementText,
-            )
-          : replaceTextInTiptapJson(draft.contentJson, previousProposal.targetText, previousProposal.replacementText);
+      const proposalContext = selectionProposalContexts[proposalId];
+      const appliedDraft = applyProposalToTiptapDraft(draft.contentJson, previousProposal, proposalContext, applyMode);
 
       if (!appliedDraft.ok) {
-        setReviewError(messages.errors.updateProposalFailed);
+        setReviewError(
+          appliedDraft.reason === "stale_selection" ? messages.errors.staleSelection : messages.errors.updateProposalFailed,
+        );
         return;
       }
 
       appliedDraftVersion = draftVersionRef.current + 1;
       draftVersionRef.current = appliedDraftVersion;
+      appliedChange = {
+        appliedAt: new Date(),
+        appliedMode: applyMode,
+        afterContentSignature: JSON.stringify(appliedDraft.contentJson),
+        beforeDraft: previousDraft,
+        id: createWorkspaceClientId(aiWorkspaceIdRef, "change"),
+        proposalId,
+        replacementText: previousProposal.replacementText,
+        targetText: previousProposal.targetText,
+        undone: false,
+      };
       setDraft({
         title: draft.title,
         contentJson: appliedDraft.contentJson,
       });
       setSaveState("dirty");
+      setAppliedChanges((currentChanges) => [appliedChange!, ...currentChanges]);
     }
 
     setReviewError("");
@@ -366,7 +687,10 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ status }),
+        body: JSON.stringify({
+          status,
+          appliedMode: status === "accepted" ? applyMode : undefined,
+        }),
       });
 
       if (!response.ok) {
@@ -379,6 +703,16 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
           currentProposals.map((proposal) => (proposal.id === proposalId ? body.proposal! : proposal)),
         );
       }
+      if (status === "accepted" && isSelectionProposal) {
+        setSelectionApplicationNotice(messages.selectionResult.appliedNotice);
+      }
+      setUndoChangeError("");
+      if (selectionAiResult?.proposalId === proposalId) {
+        setSelectionAiResult(null);
+      }
+      if (activeProposalId === proposalId) {
+        setActiveProposalId(null);
+      }
     } catch {
       setReviewProposals((currentProposals) =>
         currentProposals.map((proposal) => (proposal.id === proposalId ? previousProposal : proposal)),
@@ -386,10 +720,23 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
       if (appliedDraftVersion !== null && draftVersionRef.current === appliedDraftVersion) {
         setDraft(previousDraft);
         setSaveState(previousSaveState);
+        if (appliedChange) {
+          setAppliedChanges((currentChanges) => currentChanges.filter((change) => change.id !== appliedChange!.id));
+        }
       }
+      setSelectionApplicationNotice("");
       setReviewError(messages.errors.updateProposalFailed);
     }
-  }, [draft, messages.errors, reviewProposals, saveState]);
+  }, [
+    draft,
+    messages.errors,
+    messages.selectionResult.appliedNotice,
+    reviewProposals,
+    saveState,
+    selectionAiResult,
+    selectionProposalContexts,
+    activeProposalId,
+  ]);
 
   const updateProposalStatusLocally = useCallback((
     proposalId: string,
@@ -399,16 +746,295 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
     void updateProposalStatus(proposalId, status, applyMode);
   }, [updateProposalStatus]);
 
+  const updatePendingProposalStatuses = useCallback(async (status: "accepted" | "rejected") => {
+    const pendingProposals = reviewProposals.filter((proposal) => proposal.status === "pending");
+    if (pendingProposals.length === 0) {
+      return;
+    }
+
+    const previousDraft = draft;
+    const previousProposals = reviewProposals;
+    const previousSaveState = saveState;
+    const previousChanges = appliedChanges;
+    const appliedModes = new Map<string, AiProposalApplyMode>();
+    let appliedDraftVersion: number | null = null;
+    const nextAppliedChanges: AppliedAiChangeRecord[] = [];
+    let nextContentJson = draft.contentJson;
+
+    if (status === "accepted") {
+      const proposalsToApply = getProposalApplicationOrder(pendingProposals, selectionProposalContexts);
+      for (const proposal of proposalsToApply) {
+        const applyMode = proposal.defaultApplyMode ?? "replace";
+        const beforeProposalDraft: DraftState = { title: draft.title, contentJson: nextContentJson };
+        const appliedDraft = applyProposalToTiptapDraft(
+          nextContentJson,
+          proposal,
+          selectionProposalContexts[proposal.id],
+          applyMode,
+        );
+
+        if (!appliedDraft.ok) {
+          setReviewError(
+            appliedDraft.reason === "stale_selection" ? messages.errors.staleSelection : messages.errors.updateProposalFailed,
+          );
+          return;
+        }
+
+        nextContentJson = appliedDraft.contentJson;
+        appliedModes.set(proposal.id, applyMode);
+        nextAppliedChanges.push({
+          appliedAt: new Date(),
+          appliedMode: applyMode,
+          afterContentSignature: JSON.stringify(appliedDraft.contentJson),
+          beforeDraft: beforeProposalDraft,
+          id: createWorkspaceClientId(aiWorkspaceIdRef, "change"),
+          proposalId: proposal.id,
+          replacementText: proposal.replacementText,
+          targetText: proposal.targetText,
+          undone: false,
+        });
+      }
+
+      appliedDraftVersion = draftVersionRef.current + 1;
+      draftVersionRef.current = appliedDraftVersion;
+      setDraft({ title: draft.title, contentJson: nextContentJson });
+      setSaveState("dirty");
+      if (nextAppliedChanges.length > 0) {
+        setAppliedChanges((currentChanges) => [...[...nextAppliedChanges].reverse(), ...currentChanges]);
+      }
+    }
+
+    setReviewError("");
+    setReviewProposals((currentProposals) =>
+      currentProposals.map((proposal) =>
+        appliedModes.has(proposal.id) || pendingProposals.some((pendingProposal) => pendingProposal.id === proposal.id)
+          ? {
+              ...proposal,
+              appliedMode: status === "accepted" ? appliedModes.get(proposal.id) ?? proposal.appliedMode : null,
+              status,
+            }
+          : proposal,
+      ),
+    );
+
+    try {
+      const updatedProposals = await Promise.all(
+        pendingProposals.map(async (proposal) => {
+          const appliedMode = status === "accepted" ? appliedModes.get(proposal.id) ?? "replace" : undefined;
+          const response = await fetch(`/api/proposals/${encodeURIComponent(proposal.id)}`, {
+            method: "PATCH",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              status,
+              appliedMode,
+            }),
+          });
+
+          if (!response.ok) {
+            throw new Error("Failed to update proposal status");
+          }
+
+          const body = (await response.json()) as { proposal?: AiReviewProposal };
+          return body.proposal ?? null;
+        }),
+      );
+
+      const proposalsById = new Map(
+        updatedProposals.filter((proposal): proposal is AiReviewProposal => proposal !== null).map((proposal) => [
+          proposal.id,
+          proposal,
+        ]),
+      );
+      setReviewProposals((currentProposals) =>
+        currentProposals.map((proposal) => proposalsById.get(proposal.id) ?? proposal),
+      );
+      setUndoChangeError("");
+      setActiveProposalId(null);
+    } catch {
+      if (appliedDraftVersion !== null && draftVersionRef.current === appliedDraftVersion) {
+        setDraft(previousDraft);
+        setSaveState(previousSaveState);
+        setAppliedChanges(previousChanges);
+      }
+      setReviewProposals(previousProposals);
+      setReviewError(messages.errors.updateProposalFailed);
+    }
+  }, [
+    appliedChanges,
+    draft,
+    messages.errors.staleSelection,
+    messages.errors.updateProposalFailed,
+    reviewProposals,
+    saveState,
+    selectionProposalContexts,
+  ]);
+
+  const retrySelectionAiResult = useCallback(() => {
+    if (!selectionCommand) {
+      return;
+    }
+
+    void handleSelectionCommand(selectionCommand.command, selectionCommand.selectedText, selectionCommand.context);
+  }, [handleSelectionCommand, selectionCommand]);
+
+  const undoAppliedChange = useCallback(async (changeId: string) => {
+    const change = appliedChanges.find((item) => item.id === changeId);
+    if (!change || change.undone) {
+      return;
+    }
+
+    if (JSON.stringify(draft.contentJson) !== change.afterContentSignature) {
+      setUndoChangeError(messages.aiWorkspace.undoConflict);
+      return;
+    }
+
+    const previousDraft = draft;
+    const previousSaveState = saveState;
+    const previousProposals = reviewProposals;
+    const previousChanges = appliedChanges;
+
+    draftVersionRef.current += 1;
+    setDraft({ title: draft.title, contentJson: change.beforeDraft.contentJson });
+    setSaveState("dirty");
+    setUndoChangeError("");
+    setReviewProposals((currentProposals) =>
+      currentProposals.map((proposal) =>
+        proposal.id === change.proposalId ? { ...proposal, appliedMode: null, status: "pending" } : proposal,
+      ),
+    );
+    setAppliedChanges((currentChanges) =>
+      currentChanges.map((item) => (item.id === changeId ? { ...item, undone: true } : item)),
+    );
+
+    try {
+      const response = await fetch(`/api/proposals/${encodeURIComponent(change.proposalId)}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ status: "pending" }),
+      });
+
+      if (!response.ok) {
+        throw new Error("Failed to undo proposal status");
+      }
+
+      const body = (await response.json()) as { proposal?: AiReviewProposal };
+      if (body.proposal) {
+        setReviewProposals((currentProposals) =>
+          currentProposals.map((proposal) => (proposal.id === change.proposalId ? body.proposal! : proposal)),
+        );
+      }
+    } catch {
+      setDraft(previousDraft);
+      setSaveState(previousSaveState);
+      setReviewProposals(previousProposals);
+      setAppliedChanges(previousChanges);
+      setUndoChangeError(messages.errors.updateProposalFailed);
+    }
+  }, [appliedChanges, draft, messages.aiWorkspace.undoConflict, messages.errors.updateProposalFailed, reviewProposals, saveState]);
+
   const selectedTemplateName = selectedTemplate?.name ?? "";
+  const inlineSuggestions = useMemo(
+    () =>
+      reviewProposals
+        .filter((proposal) => proposal.status === "pending")
+        .map((proposal) => {
+          const proposalContext = selectionProposalContexts[proposal.id];
+          return {
+            id: proposal.id,
+            active: proposal.id === activeProposalId,
+            occurrenceIndex: proposal.occurrenceIndex ?? proposalContext?.occurrenceIndex ?? null,
+            selectionRange: getProposalSelectionRange(proposal, proposalContext),
+            source: proposal.source ?? "review",
+            targetText: proposal.targetText,
+          };
+        }),
+    [activeProposalId, reviewProposals, selectionProposalContexts],
+  );
+  const draftContentSignature = useMemo(() => JSON.stringify(draft.contentJson), [draft.contentJson]);
+  const changeItems = useMemo(
+    () =>
+      appliedChanges.map((change) => ({
+        ...change,
+        canUndo: !change.undone && change.afterContentSignature === draftContentSignature,
+      })),
+    [appliedChanges, draftContentSignature],
+  );
+  const sidebarNavigationClassName = [
+    "flex h-9 items-center gap-2 rounded-md px-2.5",
+    isInternalNavigationBlocked
+      ? "cursor-not-allowed text-zinc-400"
+      : "text-zinc-700 hover:bg-zinc-100",
+  ].join(" ");
+  const renderSidebarContent = () => (
+    <>
+      <section className="flex h-14 shrink-0 items-center gap-2 border-b border-zinc-200 px-4">
+        <div className="flex size-7 items-center justify-center rounded-full bg-zinc-950 text-xs font-semibold text-white">
+          K
+        </div>
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-sm font-medium text-zinc-950">Kyunghoon K...</p>
+        </div>
+        <button
+          aria-label={messages.shell.closeSidebar}
+          className="inline-flex size-7 items-center justify-center rounded text-zinc-500 hover:bg-zinc-100 hover:text-zinc-950"
+          onClick={() => setIsSidebarOpen(false)}
+          type="button"
+        >
+          <ChevronsLeft aria-hidden="true" className="size-4" />
+        </button>
+      </section>
 
-  return (
-    <main className="flex h-screen min-h-[720px] bg-zinc-50 text-zinc-950">
-      <aside className="flex w-72 shrink-0 flex-col border-r border-zinc-200 bg-zinc-50">
-        <section className="border-b border-zinc-200 px-4 py-5">
-          <h2 className="text-sm font-semibold text-zinc-950">{messages.outline.title}</h2>
-          <p className="mt-3 text-sm leading-6 text-zinc-500">{messages.outline.empty}</p>
-        </section>
+      <nav className="shrink-0 space-y-1 px-3 py-4 text-sm font-medium">
+        <button
+          className="flex h-9 w-full items-center gap-2 rounded-md px-2.5 text-left text-indigo-600 hover:bg-indigo-50 disabled:cursor-not-allowed disabled:text-indigo-300"
+          disabled={isCreatingDocument || isInternalNavigationBlocked}
+          onClick={createNewDocument}
+          type="button"
+        >
+          <PlusCircle aria-hidden="true" className="size-4" />
+          {messages.shell.newDocument}
+        </button>
+        <Link
+          aria-disabled={isInternalNavigationBlocked}
+          className={sidebarNavigationClassName}
+          href="/documents"
+          onClick={handleInternalNavigationClick}
+        >
+          <FileText aria-hidden="true" className="size-4" />
+          {messages.shell.documents}
+        </Link>
+        <Link
+          aria-disabled={isInternalNavigationBlocked}
+          className={sidebarNavigationClassName}
+          href="/templates"
+          onClick={handleInternalNavigationClick}
+        >
+          <Library aria-hidden="true" className="size-4" />
+          {messages.shell.library}
+        </Link>
+        <button
+          className="flex h-9 w-full items-center gap-2 rounded-md px-2.5 text-left text-zinc-700 hover:bg-zinc-100"
+          onClick={() => {
+            setWorkspaceOpen(true);
+            setIsSidebarOpen(false);
+          }}
+          type="button"
+        >
+          <MessageCircle aria-hidden="true" className="size-4" />
+          {messages.shell.aiChat}
+        </button>
+      </nav>
 
+      <section className="shrink-0 border-t border-zinc-200 px-4 py-4">
+        <h2 className="text-xs font-semibold uppercase tracking-normal text-zinc-500">{messages.outline.title}</h2>
+        <p className="mt-2 line-clamp-2 text-xs leading-5 text-zinc-500">{messages.outline.empty}</p>
+      </section>
+
+      <div className="min-h-0 flex-1 overflow-hidden border-t border-zinc-200">
         <PromptTemplatePanel
           messages={messages.templates}
           onSelectTemplate={selectTemplate}
@@ -418,22 +1044,140 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
           variableErrors={templateVariableErrors}
           variableValues={templateVariables}
         />
+      </div>
 
+      <div className="max-h-52 shrink-0 overflow-y-auto border-t border-zinc-200">
         <AiRunHistory language={language} messages={messages.history} runs={reviewRuns} />
+      </div>
+    </>
+  );
+  const renderWorkspacePanel = (layout: "drawer" | "side", onClose?: () => void) => (
+    <AiWorkspacePanel
+      activeProposalId={activeProposalId}
+      changeItems={changeItems}
+      chatMessages={aiChatMessages}
+      errorMessage={reviewError}
+      isReviewing={isReviewing}
+      isRunningCommand={isRewritingSelection}
+      language={language}
+      layout={layout}
+      messages={messages.aiWorkspace}
+      onBulkUpdateProposalStatus={updatePendingProposalStatuses}
+      onClose={onClose}
+      onFocusProposal={setActiveProposalId}
+      onReviewDocument={runDocumentReview}
+      onUndoChange={undoAppliedChange}
+      onUpdateProposalStatus={updateProposalStatusLocally}
+      proposals={reviewProposals}
+      reviewMessages={messages.aiReview}
+      reviewSummary={reviewSummary}
+      selectedTemplateName={selectedTemplateName}
+      undoErrorMessage={undoChangeError}
+    >
+      <section className="px-5 py-5">
+        <h3 className="text-xs font-medium uppercase tracking-normal text-zinc-500">
+          {messages.selectionCommand.title}
+        </h3>
+        <p className="mt-3 text-sm leading-6 text-zinc-600">
+          {selectionCommand
+            ? formatEditorMessage(
+                isRewritingSelection ? messages.selectionCommand.running : messages.selectionCommand.last,
+                { command: selectionCommandLabel },
+              )
+            : messages.selectionCommand.empty}
+        </p>
+        {runningSelectionCommands.length > 0 ? (
+          <p
+            className="mt-2 rounded-md border border-indigo-100 bg-indigo-50 px-3 py-2 text-xs leading-5 text-indigo-700"
+            role="status"
+          >
+            {formatEditorMessage(messages.selectionCommand.runningCount, {
+              count: String(runningSelectionCommands.length),
+              limit: String(MAX_CONCURRENT_SELECTION_COMMANDS),
+            })}
+          </p>
+        ) : null}
+        {selectionCommand ? (
+          <p className="mt-2 truncate text-xs leading-5 text-zinc-500">
+            {formatEditorMessage(messages.selectionCommand.selected, { selectedText: selectionCommand.selectedText })}
+          </p>
+        ) : null}
+        {selectionApplicationNotice ? (
+          <p
+            aria-label={messages.selectionResult.applicationStatus}
+            className="mt-3 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs leading-5 text-emerald-700"
+            role="status"
+          >
+            {selectionApplicationNotice}
+          </p>
+        ) : null}
+      </section>
+    </AiWorkspacePanel>
+  );
+
+  return (
+    <main className="flex h-dvh min-h-0 w-full min-w-0 overflow-hidden bg-white text-zinc-950">
+      <aside className="hidden w-60 shrink-0 flex-col border-r border-zinc-200 bg-zinc-50/80 lg:flex">
+        {renderSidebarContent()}
       </aside>
 
-      <section className="flex min-w-0 flex-1 flex-col">
-        <header className="flex h-14 shrink-0 items-center justify-between border-b border-zinc-200 bg-white px-6">
-          <div aria-live="polite" className="text-xs font-medium uppercase tracking-normal text-zinc-500" role="status">
-            {messages.saveState[saveState]}
+      {isSidebarOpen ? (
+        <div className="fixed inset-0 z-50 flex bg-zinc-950/20 lg:hidden">
+          <aside className="relative z-10 flex h-full w-[min(18rem,100vw)] shrink-0 flex-col border-r border-zinc-200 bg-zinc-50 shadow-2xl shadow-zinc-950/20">
+            {renderSidebarContent()}
+          </aside>
+          <button
+            aria-label={messages.shell.closeSidebar}
+            className="min-w-0 flex-1 cursor-default"
+            onClick={() => setIsSidebarOpen(false)}
+            type="button"
+          />
+        </div>
+      ) : null}
+
+      <section aria-label={messages.editor.workspaceLabel} className="flex min-w-0 flex-1 flex-col bg-white">
+        <header className="flex min-h-14 shrink-0 flex-col gap-2 border-b border-zinc-200 bg-white px-3 py-2 sm:h-14 sm:flex-row sm:items-center sm:justify-between sm:px-4 sm:py-0">
+          <div className="flex min-w-0 items-center gap-3">
+            <button
+              aria-label={messages.shell.openSidebar}
+              className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-zinc-600 hover:bg-zinc-100 hover:text-zinc-950 lg:hidden"
+              onClick={() => setIsSidebarOpen(true)}
+              type="button"
+            >
+              <PanelLeftOpen aria-hidden="true" className="size-4" />
+            </button>
+            <p className="max-w-[34rem] truncate text-sm font-medium text-zinc-800">
+              {draft.title || messages.shell.untitledDocument}
+            </p>
+            <div
+              aria-label={messages.header.saveStatus}
+              aria-live="polite"
+              className="shrink-0 text-xs font-medium text-zinc-500"
+              role="status"
+            >
+              {messages.saveState[saveState]}
+            </div>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex w-full min-w-0 items-center gap-2 overflow-x-auto pb-1 sm:w-auto sm:overflow-visible sm:pb-0">
+            <button
+              aria-label={isExportingDocx ? messages.header.exportingDocx : messages.header.exportDocx}
+              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-zinc-200 bg-white px-2.5 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-400"
+              disabled={isExportingDocx}
+              onClick={exportDocxDraft}
+              type="button"
+            >
+              <Download aria-hidden="true" className="size-4" />
+              <span className="hidden whitespace-nowrap 2xl:inline">
+                {isExportingDocx ? messages.header.exportingDocx : messages.header.exportDocx}
+              </span>
+            </button>
+            <AiSettingsDialog />
             <label className="sr-only" htmlFor="editor-language">
               {messages.header.language}
             </label>
             <select
               aria-label={messages.header.language}
-              className="h-9 rounded-md border border-zinc-300 bg-white px-2 text-sm text-zinc-700 outline-none transition-colors focus:border-zinc-500"
+              className="h-8 shrink-0 rounded-md border border-zinc-200 bg-white px-2 text-sm text-zinc-700 outline-none transition-colors focus:border-zinc-500"
               id="editor-language"
               onChange={(event) => handleLanguageChange(event.currentTarget.value)}
               value={language}
@@ -445,12 +1189,38 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
               ))}
             </select>
             <button
-              className="inline-flex h-9 items-center justify-center rounded-md bg-zinc-950 px-4 text-sm font-medium text-white transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-300"
+              aria-label={messages.shell.review}
+              aria-pressed={isWorkspaceOpen}
+              className={[
+                "inline-flex h-8 items-center gap-1.5 whitespace-nowrap rounded-md border px-2.5 text-sm font-medium transition-colors",
+                isWorkspaceOpen
+                  ? "border-zinc-950 bg-zinc-950 text-white hover:bg-zinc-800"
+                  : "border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50",
+              ].join(" ")}
+              onClick={() => setWorkspaceOpen((currentValue) => !currentValue)}
+              type="button"
+            >
+              {isWorkspaceOpen ? (
+                <PanelRightClose aria-hidden="true" className="size-4" />
+              ) : (
+                <PanelRightOpen aria-hidden="true" className="size-4" />
+              )}
+              <span className="hidden 2xl:inline">{messages.shell.review}</span>
+            </button>
+            <button
+              className="inline-flex h-8 shrink-0 items-center justify-center rounded-md bg-zinc-950 px-3 text-sm font-medium text-white transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-300"
               disabled={saveState === "saved" || saveState === "saving"}
               onClick={saveDraft}
               type="button"
             >
               {saveState === "saving" ? messages.header.saving : messages.header.save}
+            </button>
+            <button
+              aria-label={messages.shell.more}
+              className="inline-flex size-8 items-center justify-center rounded-md text-zinc-600 hover:bg-zinc-100 hover:text-zinc-950"
+              type="button"
+            >
+              <MoreHorizontal aria-hidden="true" className="size-4" />
             </button>
           </div>
         </header>
@@ -458,45 +1228,42 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
         <DocumentEditor
           key={document.id}
           contentJson={draft.contentJson}
+          isSelectionCommandLimitReached={isSelectionCommandLimitReached}
           isSelectionCommandRunning={isRewritingSelection}
+          inlineSuggestions={inlineSuggestions}
           language={language}
           messages={messages.editor}
           onChange={handleDraftChange}
+          onApplySelectionAiResult={(proposalId, applyMode) =>
+            updateProposalStatusLocally(proposalId, "accepted", applyMode)
+          }
+          onDismissSelectionAiResult={() => setSelectionAiResult(null)}
+          onRetrySelectionAiResult={retrySelectionAiResult}
           onSelectionCommand={handleSelectionCommand}
           runningSelectionCommand={selectionCommand?.command}
+          runningSelectionCommandLimit={MAX_CONCURRENT_SELECTION_COMMANDS}
+          runningSelectionCommands={runningSelectionCommands}
+          selectionAiResult={selectionAiResult}
           title={draft.title}
         />
       </section>
 
-      <aside className="flex w-80 shrink-0 flex-col border-l border-zinc-200 bg-white">
-        <AiReviewPanel
-          errorMessage={reviewError}
-          isReviewing={isReviewing}
-          messages={messages.aiReview}
-          onReviewDocument={runDocumentReview}
-          onUpdateProposalStatus={updateProposalStatusLocally}
-          proposals={reviewProposals}
-          selectedTemplateName={selectedTemplateName}
-        />
-        <section className="px-5 py-5">
-          <h3 className="text-xs font-medium uppercase tracking-normal text-zinc-500">
-            {messages.selectionCommand.title}
-          </h3>
-          <p className="mt-3 text-sm leading-6 text-zinc-600">
-            {selectionCommand
-              ? formatEditorMessage(
-                  isRewritingSelection ? messages.selectionCommand.running : messages.selectionCommand.last,
-                  { command: selectionCommand.command },
-                )
-              : messages.selectionCommand.empty}
-          </p>
-          {selectionCommand ? (
-            <p className="mt-2 truncate text-xs leading-5 text-zinc-500">
-              {formatEditorMessage(messages.selectionCommand.selected, { selectedText: selectionCommand.selectedText })}
-            </p>
+      {isWorkspaceOpen ? (
+        <>
+          {renderWorkspacePanel("side")}
+          {isCompactWorkspace ? (
+            <div className="fixed inset-0 z-50 flex justify-end bg-zinc-950/20 xl:hidden">
+              <button
+                aria-label={messages.aiWorkspace.close}
+                className="min-w-0 flex-1 cursor-default"
+                onClick={() => setWorkspaceOpen(false)}
+                type="button"
+              />
+              {renderWorkspacePanel("drawer", () => setWorkspaceOpen(false))}
+            </div>
           ) : null}
-        </section>
-      </aside>
+        </>
+      ) : null}
     </main>
   );
 }
@@ -508,13 +1275,46 @@ function collectTemplateVariables(template: ShellTemplate, values: Record<string
   }, {});
 }
 
+function localizeTemplateVariableErrors(
+  template: ShellTemplate,
+  errors: Record<string, string>,
+  messages: (typeof editorMessages)[EditorLanguage],
+) {
+  return template.variableSchemaJson.fields.reduce<Record<string, string>>((localizedErrors, field) => {
+    if (errors[field.name]) {
+      localizedErrors[field.name] = formatEditorMessage(messages.errors.requiredTemplateVariable, {
+        fieldName: getTemplateVariableLabel(field, messages.templates),
+      });
+    }
+
+    return localizedErrors;
+  }, {});
+}
+
+function createWorkspaceClientId(ref: MutableRefObject<number>, prefix: string) {
+  ref.current += 1;
+  return `${prefix}_${ref.current}`;
+}
+
+function sanitizeDownloadFileName(value: string) {
+  return value.replace(/[\\/:*?"<>|]/g, "").trim() || "document";
+}
+
+function getCommandScopeLabel(
+  scope: SelectionAiCommandContext["scope"] | undefined,
+  messages: (typeof editorMessages)[EditorLanguage],
+) {
+  const normalizedScope = scope ?? "selection";
+  return messages.aiCommandBar.scopeLabels[normalizedScope];
+}
+
 function readStoredEditorLanguage(): EditorLanguage {
   if (typeof window === "undefined") {
-    return "en";
+    return DEFAULT_EDITOR_LANGUAGE;
   }
 
   const storedLanguage = window.localStorage.getItem(EDITOR_LANGUAGE_STORAGE_KEY);
-  return isEditorLanguage(storedLanguage) ? storedLanguage : "en";
+  return isEditorLanguage(storedLanguage) ? storedLanguage : DEFAULT_EDITOR_LANGUAGE;
 }
 
 function mergeMissingTemplateVariableDefaults(template: ShellTemplate | null, values: Record<string, string>) {
@@ -558,4 +1358,11 @@ function getTemplateVariableDefaultValue(field: ShellTemplateField) {
   }
 
   return field.type === "textarea" ? "Use the current document context and preserve the author's intent." : "General";
+}
+
+function getDefaultApplyModeForCommand(command: string): AiProposalApplyMode {
+  const normalizedCommand = command.toLowerCase();
+  return normalizedCommand.includes("translate") || normalizedCommand.includes("continue writing")
+    ? "insert_below"
+    : "replace";
 }

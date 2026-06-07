@@ -19,7 +19,7 @@ vi.mock("ai", async (importOriginal) => {
   return {
     ...actual,
     generateObject: vi.fn(),
-    generateText: vi.fn(),
+    generateText: vi.fn(async () => ({ text: "openai text" })),
     streamText: vi.fn(() => ({
       toTextStreamResponse: () => new Response("openai stream"),
     })),
@@ -71,12 +71,40 @@ describe("AI providers", () => {
     }
   });
 
-  it("throws a configuration error for unsupported provider names", () => {
+  it("returns continuation-only stub text for continue writing commands", async () => {
     const originalProvider = process.env.AI_PROVIDER;
-    process.env.AI_PROVIDER = "anthropic";
+    delete process.env.AI_PROVIDER;
 
     try {
-      expect(() => createAiProvider()).toThrow("Unsupported AI_PROVIDER: anthropic");
+      const provider = createAiProvider();
+      const messages = buildAiMessages({
+        command: "Continue writing",
+        systemPrompt: "You are an editor.",
+        variables: {},
+        selectedText: "The renewal risk is material.",
+        beforeContext: "",
+        afterContext: "",
+        documentText: "The renewal risk is material.",
+      });
+
+      await expect(provider.generateText({ messages })).resolves.toBe(
+        "Stub continuation: Add the next sentence or paragraph here.",
+      );
+    } finally {
+      if (originalProvider === undefined) {
+        delete process.env.AI_PROVIDER;
+      } else {
+        process.env.AI_PROVIDER = originalProvider;
+      }
+    }
+  });
+
+  it("throws a configuration error for unsupported provider names", () => {
+    const originalProvider = process.env.AI_PROVIDER;
+    process.env.AI_PROVIDER = "bad-provider";
+
+    try {
+      expect(() => createAiProvider()).toThrow("Unsupported AI_PROVIDER: bad-provider");
     } finally {
       if (originalProvider === undefined) {
         delete process.env.AI_PROVIDER;
@@ -162,6 +190,159 @@ describe("AI providers", () => {
     }
   });
 
+  it("uses saved Core.Today model settings over environment defaults", async () => {
+    const { generateText } = await import("ai");
+    const originalProvider = process.env.AI_PROVIDER;
+    const originalApiKey = process.env.COREDOT_API_KEY;
+    const originalModel = process.env.COREDOT_MODEL;
+    const originalBaseUrl = process.env.COREDOT_BASE_URL;
+    const originalMaxCompletionTokens = process.env.COREDOT_MAX_COMPLETION_TOKENS;
+    process.env.AI_PROVIDER = "stub";
+    process.env.COREDOT_API_KEY = "test_core_today_key";
+    process.env.COREDOT_MODEL = "gpt-env-model";
+      process.env.COREDOT_BASE_URL = "https://api.core.today/llm/openai/v1";
+    process.env.COREDOT_MAX_COMPLETION_TOKENS = "123";
+    createOpenAIMock.mockClear();
+    vi.mocked(generateText).mockClear();
+
+    try {
+      const provider = createAiProvider({
+        aiBaseUrl: "https://api.core.today/llm/openai/v1/",
+        aiMaxCompletionTokens: 64000,
+        aiModel: "gpt-5.4-mini",
+        aiProvider: "coredot",
+        aiReasoningEffort: "medium",
+      });
+      const text = await provider.generateText({ messages: [{ role: "user", content: "Configured generation." }] });
+
+      expect(text).toBe("openai text");
+      expect(provider.name).toBe("coredot");
+      expect(provider.model).toBe("gpt-5.4-mini");
+      expect(createOpenAIMock).toHaveBeenCalledWith({
+        apiKey: "test_core_today_key",
+        baseURL: "https://api.core.today/llm/openai/v1",
+      });
+      expect(generateText).toHaveBeenCalledWith(
+        expect.objectContaining({
+          maxOutputTokens: 64000,
+          providerOptions: { openai: { reasoningEffort: "medium" } },
+        }),
+      );
+    } finally {
+      if (originalProvider === undefined) {
+        delete process.env.AI_PROVIDER;
+      } else {
+        process.env.AI_PROVIDER = originalProvider;
+      }
+
+      if (originalApiKey === undefined) {
+        delete process.env.COREDOT_API_KEY;
+      } else {
+        process.env.COREDOT_API_KEY = originalApiKey;
+      }
+
+      if (originalModel === undefined) {
+        delete process.env.COREDOT_MODEL;
+      } else {
+        process.env.COREDOT_MODEL = originalModel;
+      }
+
+      if (originalBaseUrl === undefined) {
+        delete process.env.COREDOT_BASE_URL;
+      } else {
+        process.env.COREDOT_BASE_URL = originalBaseUrl;
+      }
+
+      if (originalMaxCompletionTokens === undefined) {
+        delete process.env.COREDOT_MAX_COMPLETION_TOKENS;
+      } else {
+        process.env.COREDOT_MAX_COMPLETION_TOKENS = originalMaxCompletionTokens;
+      }
+    }
+  });
+
+  it("calls the Core.Today Anthropic proxy when the saved provider is anthropic", async () => {
+    const originalApiKey = process.env.COREDOT_API_KEY;
+    process.env.COREDOT_API_KEY = "test_core_today_key";
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          content: [{ type: "text", text: "anthropic text" }],
+        }),
+      ),
+    );
+
+    try {
+      const provider = createAiProvider({
+        aiBaseUrl: "https://api.core.today/llm/anthropic/v1",
+        aiMaxCompletionTokens: 8192,
+        aiModel: "claude-sonnet-4.5",
+        aiProvider: "anthropic",
+        aiReasoningEffort: null,
+      });
+      const text = await provider.generateText({ messages: [{ role: "user", content: "Use Anthropic." }] });
+
+      expect(provider.name).toBe("anthropic");
+      expect(provider.model).toBe("claude-sonnet-4.5");
+      expect(text).toBe("anthropic text");
+      expect(fetchMock).toHaveBeenCalledWith(
+        "https://api.core.today/llm/anthropic/v1/messages",
+        expect.objectContaining({
+          body: expect.stringContaining('"max_tokens":8192'),
+          method: "POST",
+        }),
+      );
+    } finally {
+      fetchMock.mockRestore();
+      if (originalApiKey === undefined) {
+        delete process.env.COREDOT_API_KEY;
+      } else {
+        process.env.COREDOT_API_KEY = originalApiKey;
+      }
+    }
+  });
+
+  it("calls the Core.Today Gemini proxy when the saved provider is gemini", async () => {
+    const originalApiKey = process.env.COREDOT_API_KEY;
+    process.env.COREDOT_API_KEY = "test_core_today_key";
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          candidates: [{ content: { parts: [{ text: "gemini text" }] } }],
+        }),
+      ),
+    );
+
+    try {
+      const provider = createAiProvider({
+        aiBaseUrl: "https://api.core.today/llm/gemini/v1beta",
+        aiMaxCompletionTokens: 4096,
+        aiModel: "gemini-2.5-flash",
+        aiProvider: "gemini",
+        aiReasoningEffort: null,
+      });
+      const text = await provider.generateText({ messages: [{ role: "user", content: "Use Gemini." }] });
+
+      expect(provider.name).toBe("gemini");
+      expect(provider.model).toBe("gemini-2.5-flash");
+      expect(text).toBe("gemini text");
+      expect(fetchMock).toHaveBeenCalledWith(
+        "https://api.core.today/llm/gemini/v1beta/models/gemini-2.5-flash:generateContent",
+        expect.objectContaining({
+          body: expect.stringContaining('"maxOutputTokens":4096'),
+          method: "POST",
+        }),
+      );
+    } finally {
+      fetchMock.mockRestore();
+      if (originalApiKey === undefined) {
+        delete process.env.COREDOT_API_KEY;
+      } else {
+        process.env.COREDOT_API_KEY = originalApiKey;
+      }
+    }
+  });
+
   it("requires COREDOT_API_KEY for the Core.Today provider", () => {
     const originalProvider = process.env.AI_PROVIDER;
     const originalApiKey = process.env.COREDOT_API_KEY;
@@ -177,6 +358,41 @@ describe("AI providers", () => {
         process.env.AI_PROVIDER = originalProvider;
       }
 
+      if (originalApiKey === undefined) {
+        delete process.env.COREDOT_API_KEY;
+      } else {
+        process.env.COREDOT_API_KEY = originalApiKey;
+      }
+    }
+  });
+
+  it("rejects non-Core.Today proxy URLs before using the Core.Today API key", () => {
+    const originalApiKey = process.env.COREDOT_API_KEY;
+    delete process.env.COREDOT_API_KEY;
+    createOpenAIMock.mockClear();
+
+    try {
+      expect(() =>
+        createAiProvider({
+          aiBaseUrl: "https://attacker.example.test/llm/openai/v1",
+          aiMaxCompletionTokens: 32768,
+          aiModel: "gpt-5-nano",
+          aiProvider: "coredot",
+          aiReasoningEffort: null,
+        }),
+      ).toThrow("Invalid Core.Today base URL");
+      expect(createOpenAIMock).not.toHaveBeenCalled();
+
+      expect(() =>
+        createAiProvider({
+          aiBaseUrl: "https://api.core.today/llm/openai/v1",
+          aiMaxCompletionTokens: 8192,
+          aiModel: "claude-sonnet-4.5",
+          aiProvider: "anthropic",
+          aiReasoningEffort: null,
+        }),
+      ).toThrow("Invalid Core.Today base URL");
+    } finally {
       if (originalApiKey === undefined) {
         delete process.env.COREDOT_API_KEY;
       } else {

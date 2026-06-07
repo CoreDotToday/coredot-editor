@@ -1,7 +1,12 @@
 "use client";
 
 import type { AiRunRecord } from "@/db/schema";
-import { editorMessages, type EditorLanguage, type EditorMessages } from "@/features/i18n/editor-language";
+import {
+  DEFAULT_EDITOR_LANGUAGE,
+  editorMessages,
+  type EditorLanguage,
+  type EditorMessages,
+} from "@/features/i18n/editor-language";
 
 export type AiRunHistoryItem = Pick<AiRunRecord, "id" | "commandType" | "status" | "createdAt">;
 
@@ -24,7 +29,11 @@ function formatRunDate(value: Date | string | number, language: EditorLanguage) 
   }).format(new Date(value));
 }
 
-export function AiRunHistory({ language = "en", messages = editorMessages.en.history, runs }: AiRunHistoryProps) {
+export function AiRunHistory({
+  language = DEFAULT_EDITOR_LANGUAGE,
+  messages = editorMessages[DEFAULT_EDITOR_LANGUAGE].history,
+  runs,
+}: AiRunHistoryProps) {
   return (
     <section className="px-4 py-5">
       <h2 className="text-sm font-semibold text-zinc-950">{messages.title}</h2>

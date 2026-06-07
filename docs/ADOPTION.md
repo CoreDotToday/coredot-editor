@@ -38,6 +38,12 @@ Each template has:
 
 The schema drives both the prompt template panel and route validation. Keep required variables explicit so users understand what they need to provide before running review.
 
+Prompt templates also need to preserve the AI output contract. Review prompts must request exact `targetText` values from the provided document and drop-in `replacementText` edits. Rewrite and translation prompts must return only replacement text, because the returned string is stored directly as the proposal body. See [PROMPTING.md](PROMPTING.md) before replacing templates.
+
+The editor renders pending proposals as inline highlights. If your fork changes the editor schema, custom nodes, or collaboration model, keep proposal range metadata (`occurrenceIndex`, `targetFrom`, `targetTo`) aligned with the way your editor maps document positions.
+
+For contract review products, start from the seeded `Contract Review` template rather than writing a generic legal prompt. Replace its playbook variables, clause categories, and risk language with your own review standards, then validate that findings still return exact `targetText` values and redline-ready `replacementText` values.
+
 ### AI Provider
 
 The provider contract lives in `src/features/ai/providers.ts`.
@@ -46,7 +52,11 @@ The built-in provider modes are:
 
 - `stub`: deterministic local output for tests and demos
 - `coredot`: Core.Today OpenAI-compatible LLM proxy
+- `anthropic`: Core.Today Anthropic messages proxy
+- `gemini`: Core.Today Gemini generateContent proxy
 - `openai`: direct OpenAI provider
+
+Non-secret provider settings are stored in `app_settings` and can be changed from the editor's `LLM 설정` dialog. Keep provider API keys in server environment variables, not in UI state, localStorage, or the database.
 
 If your product uses another provider, add it behind the same interface:
 
@@ -95,6 +105,16 @@ For collaboration, introduce a sync layer deliberately:
 
 Keep AI review routes operating on explicit document snapshots so AI runs remain reproducible.
 
+## Spellbook-Style Expansion Path
+
+This starter implements a web-editor version of the core review loop: playbook-driven review, inline source highlights, redline previews, and accept/reject controls. To move closer to a full Spellbook-style legal workflow, extend in this order:
+
+1. Add customer/vendor playbooks and clause libraries as first-class database tables.
+2. Store organization-approved fallback clauses and preferred negotiation positions.
+3. Add benchmark checks backed by your own precedents or licensed market data.
+4. Review the built-in `.docx` import/export MVP against your document corpus, then extend it for comments, tracked changes, or an Office.js Word add-in if lawyers need those workflows directly in Word.
+5. Add audit logs for accepted edits, rejected edits, provider responses, and user overrides.
+
 ## Keep E2E Tests Isolated
 
 `pnpm e2e` prepares `data/e2e/coredot-e2e.db` and starts the app with:
@@ -112,8 +132,8 @@ If you change database paths or Playwright config, preserve this isolation. E2E 
 - [ ] Confirm license and copyright line.
 - [ ] Set up `.env.local`.
 - [ ] Run `pnpm db:setup`.
-- [ ] Replace default prompt templates.
-- [ ] Decide provider mode: `stub`, `coredot`, `openai`, or custom.
+- [ ] Replace default prompt templates and run through the checklist in `docs/PROMPTING.md`.
+- [ ] Decide provider mode: `stub`, `coredot`, `anthropic`, `gemini`, `openai`, or custom.
 - [ ] Run `pnpm check`.
 - [ ] Run `pnpm e2e`.
 - [ ] Review `SECURITY.md` and vulnerability reporting path.

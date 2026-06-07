@@ -5,7 +5,7 @@ type TiptapNode = {
   content?: unknown[];
 };
 
-const blockTypes = new Set(["paragraph", "heading", "blockquote", "listItem"]);
+const blockTypes = new Set(["paragraph", "heading", "blockquote", "codeBlock", "listItem", "taskItem"]);
 
 function collectText(node: TiptapNode, lines: string[], current: string[]): void {
   if (node.text) {

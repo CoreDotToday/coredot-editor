@@ -1,38 +1,149 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type FocusEvent, type MouseEvent } from "react";
 import CharacterCount from "@tiptap/extension-character-count";
-import Link from "@tiptap/extension-link";
 import Placeholder from "@tiptap/extension-placeholder";
-import TaskItem from "@tiptap/extension-task-item";
-import TaskList from "@tiptap/extension-task-list";
-import Typography from "@tiptap/extension-typography";
 import { EditorContent, useEditor } from "@tiptap/react";
-import StarterKit from "@tiptap/starter-kit";
 import type { JSONContent } from "@tiptap/core";
+import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
+import {
+  Bold,
+  Code2,
+  Italic,
+  List,
+  ListOrdered,
+  Loader2,
+  Quote,
+  Redo2,
+  Strikethrough,
+  Type,
+  Undo2,
+} from "lucide-react";
 import type { TiptapJson } from "@/db/schema";
-import { editorMessages, type EditorLanguage, type EditorMessages } from "@/features/i18n/editor-language";
+import {
+  convertListItemToTopLevelParagraphInTiptapJson,
+  moveListItemInTiptapJson,
+  moveListItemToTopLevelInTiptapJson,
+  moveTopLevelBlockBetweenListItemsInTiptapJson,
+  moveTopLevelBlockInTiptapJson,
+  moveTopLevelBlockToListItemInTiptapJson,
+} from "@/features/documents/tiptap-blocks";
+import {
+  DEFAULT_EDITOR_LANGUAGE,
+  editorMessages,
+  formatEditorMessage,
+  type EditorLanguage,
+  type EditorMessages,
+} from "@/features/i18n/editor-language";
+import type { EditorPluginContributions } from "@/plugins/types";
+import type { EditorSelectionCommand } from "@/plugins/types";
+import { useEditorPlugins } from "@/plugins/use-editor-plugins";
+import { AiSuggestionHighlight, setAiSuggestionHighlights, type AiSuggestionHighlightInput } from "./ai-suggestion-highlight";
+import {
+  BlockGutterControls,
+  type SelectionBlockAction,
+  type SelectionBlockDragPoint,
+} from "./BlockGutterControls";
+import { DocumentAiCommandBar } from "./DocumentAiCommandBar";
+import {
+  countTextOccurrences,
+  type AiCommandScope,
+  getEditorAiCommandTarget,
+  getEditorAiCommandTargetFromTargets,
+  getEditorAiCommandTargets,
+} from "./editor-command-targets";
+import { NotionModASelection } from "./notion-mod-a-selection";
 import { SelectionAiMenu } from "./SelectionAiMenu";
+import { SelectionAiResultPopover, type SelectionAiResultPreview } from "./SelectionAiResultPopover";
+import { SlashCommandMenu } from "./SlashCommandMenu";
 
 type DocumentEditorProps = {
   title: string;
   contentJson: TiptapJson;
   isSelectionCommandRunning?: boolean;
+  isSelectionCommandLimitReached?: boolean;
+  inlineSuggestions?: AiSuggestionHighlightInput[];
   language?: EditorLanguage;
   messages?: EditorMessages["editor"];
   onChange: (draft: { title: string; contentJson: TiptapJson }) => void;
-  onSelectionCommand?: (command: string, selectedText: string) => void;
+  onApplySelectionAiResult?: (proposalId: string, applyMode: "replace" | "insert_below") => void;
+  onDismissSelectionAiResult?: () => void;
+  onRetrySelectionAiResult?: () => void;
+  onSelectionCommand?: (command: string, selectedText: string, context: SelectionAiCommandContext) => void;
   runningSelectionCommand?: string;
+  runningSelectionCommandLimit?: number;
+  runningSelectionCommands?: RunningSelectionAiCommand[];
+  selectionAiResult?: SelectionAiResultPreview | null;
+  pluginContributions?: Partial<EditorPluginContributions>;
 };
 
 type SelectionMenuState = {
+  blockIndex?: number | null;
   left: number;
   selectedText: string;
   side: SelectionMenuSide;
   top: number;
 };
 
+type BlockGutterState = {
+  blockIndex: number;
+  left: number;
+  target: BlockActionRange;
+  top: number;
+};
+
+type TopLevelBlockRange = {
+  from: number;
+  index: number;
+  node: ProseMirrorNode;
+  to: number;
+};
+
+type BlockActionRange = {
+  from: number;
+  kind: "listItem" | "topLevel";
+  listItemIndex?: number;
+  listItemPath?: number[];
+  node: ProseMirrorNode;
+  to: number;
+  topLevelIndex: number;
+};
+
+type BlockDropTarget = {
+  action?: "indent" | "outdent";
+  dropIndex: number;
+  indicator: BlockDropIndicator;
+  kind: "betweenListItems" | "listItem" | "listLevel" | "topLevel";
+  listItemPath?: number[];
+  topLevelIndex?: number;
+};
+
+type BlockDropIndicator = {
+  left: number;
+  top: number;
+  width: number;
+};
+
+export type RunningSelectionAiCommand = {
+  anchor?: SelectionAiAnchor;
+  command: string;
+  id: string;
+};
+
 type SelectionMenuSide = "top" | "bottom";
+
+export type SelectionAiAnchor = {
+  left: number;
+  side: SelectionMenuSide;
+  top: number;
+};
+
+export type SelectionAiCommandContext = {
+  anchor: SelectionAiAnchor;
+  occurrenceIndex: number;
+  scope?: AiCommandScope;
+  selectionRange: { from: number; to: number };
+};
 
 type SelectionRect = Pick<DOMRect, "bottom" | "left" | "right" | "top">;
 
@@ -45,20 +156,46 @@ type SelectionMenuPositionInput = {
 };
 
 const SELECTION_MENU_GAP = 8;
-const SELECTION_MENU_HEIGHT = 44;
+const SELECTION_MENU_HEIGHT = 84;
+const BLOCK_GUTTER_WIDTH = 58;
+const BLOCK_GUTTER_EDGE_GAP = 8;
+const BLOCK_GUTTER_HORIZONTAL_OFFSET = 68;
+const BLOCK_GUTTER_MIN_TEXT_GAP = 4;
+const LIST_BLOCK_GUTTER_TEXT_GAP = 16;
+const LIST_CONTENT_DROP_X_TOLERANCE = 8;
+const LIST_LEVEL_DRAG_THRESHOLD = 48;
+const LIST_LEVEL_VERTICAL_TOLERANCE = 28;
+const LIST_SOURCE_PARENT_DROP_MARGIN = 16;
+type RuntimeEditor = NonNullable<ReturnType<typeof useEditor>>;
 
 export function DocumentEditor({
   contentJson,
+  inlineSuggestions = [],
+  isSelectionCommandLimitReached = false,
   isSelectionCommandRunning = false,
-  language = "en",
-  messages = editorMessages.en.editor,
+  language = DEFAULT_EDITOR_LANGUAGE,
+  messages = editorMessages[DEFAULT_EDITOR_LANGUAGE].editor,
   onChange,
+  onApplySelectionAiResult,
+  onDismissSelectionAiResult,
+  onRetrySelectionAiResult,
   onSelectionCommand,
+  pluginContributions,
   runningSelectionCommand = "",
+  runningSelectionCommandLimit = 5,
+  runningSelectionCommands = [],
+  selectionAiResult = null,
   title,
 }: DocumentEditorProps) {
   const [selectionMenu, setSelectionMenu] = useState<SelectionMenuState | null>(null);
-  const editorFrameRef = useRef<HTMLDivElement>(null);
+  const [blockGutter, setBlockGutter] = useState<BlockGutterState | null>(null);
+  const [blockDropIndicator, setBlockDropIndicator] = useState<BlockDropIndicator | null>(null);
+  const [editorFrameElement, setEditorFrameElement] = useState<HTMLDivElement | null>(null);
+  const [preferredCommandScope, setPreferredCommandScope] = useState<AiCommandScope | null>(null);
+  const editorFrameRef = useRef<HTMLDivElement | null>(null);
+  const blockGutterTargetRef = useRef<BlockActionRange | null>(null);
+  const draggingBlockRef = useRef<BlockActionRange | null>(null);
+  const blockDropTargetRef = useRef<BlockDropTarget | null>(null);
   const titleRef = useRef(title);
   const onChangeRef = useRef(onChange);
   const onSelectionCommandRef = useRef(onSelectionCommand);
@@ -76,26 +213,33 @@ export function DocumentEditor({
     titleRef.current = title;
   }, [title]);
 
+  const updateBlockGutter = useCallback((nextBlockGutter: BlockGutterState | null) => {
+    blockGutterTargetRef.current = nextBlockGutter?.target ?? null;
+    setBlockGutter(nextBlockGutter);
+  }, []);
+
+  const handleEditorFrameRef = useCallback((element: HTMLDivElement | null) => {
+    editorFrameRef.current = element;
+    setEditorFrameElement(element);
+  }, []);
+
+  const defaultPluginContributions = useEditorPlugins(language);
+  const resolvedPluginContributions = useMemo(
+    () => mergeEditorPluginContributions(defaultPluginContributions, pluginContributions),
+    [defaultPluginContributions, pluginContributions],
+  );
+
   const extensions = useMemo(
     () => [
-      StarterKit.configure({
-        link: false,
-      }),
+      ...resolvedPluginContributions.tiptapExtensions,
       Placeholder.configure({
         placeholder: messages.placeholder,
       }),
-      Link.configure({
-        autolink: true,
-        openOnClick: false,
-      }),
-      TaskList,
-      TaskItem.configure({
-        nested: true,
-      }),
-      Typography,
       CharacterCount,
+      AiSuggestionHighlight,
+      NotionModASelection,
     ],
-    [messages.placeholder],
+    [messages.placeholder, resolvedPluginContributions.tiptapExtensions],
   );
 
   const editor = useEditor(
@@ -112,18 +256,25 @@ export function DocumentEditor({
       immediatelyRender: false,
       onSelectionUpdate: ({ editor: currentEditor }) => {
         const { empty, from, to } = currentEditor.state.selection;
+        const blockRange = getCurrentBlockActionRange(currentEditor);
+
         if (empty) {
+          updateBlockGutter(readBlockGutterPosition(currentEditor, editorFrameRef.current, blockRange));
           setSelectionMenu(null);
           return;
         }
 
+        updateBlockGutter(null);
         const selectedText = currentEditor.state.doc.textBetween(from, to, "\n").trim();
         if (!selectedText) {
           setSelectionMenu(null);
           return;
         }
 
-        setSelectionMenu(readSelectionMenuPosition(currentEditor, editorFrameRef.current, selectedText));
+        setSelectionMenu({
+          ...readSelectionMenuPosition(currentEditor, editorFrameRef.current, selectedText),
+          blockIndex: blockRange?.topLevelIndex ?? null,
+        });
       },
       onUpdate: ({ editor: currentEditor }) => {
         onChangeRef.current({
@@ -132,7 +283,7 @@ export function DocumentEditor({
         });
       },
     },
-    [extensions, messages.bodyLabel],
+    [extensions, messages.bodyLabel, updateBlockGutter],
   );
 
   useEffect(() => {
@@ -143,6 +294,26 @@ export function DocumentEditor({
       editor.commands.setContent(contentJson as JSONContent, { emitUpdate: false });
     }
   }, [contentJson, contentJsonSignature, editor]);
+
+  useEffect(() => {
+    if (!editor) return;
+
+    setAiSuggestionHighlights(editor, inlineSuggestions);
+  }, [editor, inlineSuggestions]);
+
+  useEffect(() => {
+    const activeSuggestionId = inlineSuggestions.find((suggestion) => suggestion.active)?.id;
+    if (!activeSuggestionId || !editorFrameRef.current) return;
+
+    const timeout = window.setTimeout(() => {
+      const activeSuggestionElement = editorFrameRef.current?.querySelector<HTMLElement>(
+        `[data-ai-proposal-id="${escapeCssAttributeValue(activeSuggestionId)}"]`,
+      );
+      activeSuggestionElement?.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" });
+    }, 0);
+
+    return () => window.clearTimeout(timeout);
+  }, [inlineSuggestions]);
 
   const handleTitleChange = useCallback(
     (value: string) => {
@@ -161,41 +332,384 @@ export function DocumentEditor({
 
       const { from, to } = editor.state.selection;
       const selectedText = selectionMenu?.selectedText ?? editor.state.doc.textBetween(from, to, "\n").trim();
-      onSelectionCommandRef.current?.(command, selectedText);
+      if (!selectedText) return;
+
+      const anchor: SelectionAiAnchor = selectionMenu
+        ? { left: selectionMenu.left, side: selectionMenu.side, top: selectionMenu.top }
+        : { left: 16, side: "bottom", top: 16 };
+      const context: SelectionAiCommandContext = {
+        anchor,
+        occurrenceIndex: countTextOccurrences(editor.state.doc.textBetween(0, from, "\n"), selectedText),
+        scope: "selection",
+        selectionRange: { from, to },
+      };
+
+      onSelectionCommandRef.current?.(command, selectedText, context);
     },
-    [editor, selectionMenu?.selectedText],
+    [editor, selectionMenu],
+  );
+
+  const handleFreeformCommand = useCallback(
+    (command: string) => {
+      if (!editor) return;
+
+      const target = getEditorAiCommandTarget(editor, preferredCommandScope);
+      if (!target) return;
+
+      const anchor = readCommandBarResultAnchor(editorFrameRef.current);
+      onSelectionCommandRef.current?.(command, target.selectedText, {
+        anchor,
+        occurrenceIndex: target.occurrenceIndex,
+        scope: target.scope,
+        selectionRange: target.selectionRange,
+      });
+    },
+    [editor, preferredCommandScope],
+  );
+
+  const handleAddBlockBelow = useCallback(() => {
+    insertBlockBelow(editor, blockGutter?.target);
+  }, [blockGutter?.target, editor]);
+
+  const handleBlockAction = useCallback(
+    (action: SelectionBlockAction) => {
+      if (!editor) return;
+      const targetBlock =
+        blockGutterTargetRef.current ?? blockGutter?.target ?? getTopLevelBlockActionRangeByIndex(editor, selectionMenu?.blockIndex);
+
+      if (action === "addBelow") {
+        insertBlockBelow(editor, targetBlock);
+        return;
+      }
+
+      if (action === "duplicate") {
+        duplicateBlock(editor, targetBlock);
+        return;
+      }
+
+      if (action === "moveUp" || action === "moveDown") {
+        moveBlock(editor, targetBlock, action === "moveUp" ? "up" : "down");
+        return;
+      }
+
+      if (action === "indentListItem" || action === "outdentListItem") {
+        changeListItemLevel(editor, targetBlock, action === "indentListItem" ? "indent" : "outdent");
+        return;
+      }
+
+      if (action === "convertListItemToText") {
+        convertListItemToText(editor, targetBlock);
+        return;
+      }
+
+      deleteBlock(editor, targetBlock);
+    },
+    [blockGutter?.target, editor, selectionMenu?.blockIndex],
+  );
+
+  const handleEditorFocus = useCallback((event: FocusEvent<HTMLDivElement>) => {
+    if (!editor) return;
+    if ((event.target as HTMLElement).closest("[data-block-gutter='true']")) return;
+
+    if (!editor.state.selection.empty) {
+      updateBlockGutter(null);
+      return;
+    }
+
+    updateBlockGutter(readBlockGutterPosition(editor, editorFrameRef.current, getCurrentBlockActionRange(editor)));
+  }, [editor, updateBlockGutter]);
+
+  const handleEditorMouseMove = useCallback(
+    (event: MouseEvent<HTMLDivElement>) => {
+      if (!editor) return;
+      if ((event.target as HTMLElement).closest("[data-block-gutter='true']")) return;
+      if (
+        draggingBlockRef.current === null &&
+        (!editor.state.selection.empty || hasActiveEditorTextSelection(editor.view.dom))
+      ) {
+        updateBlockGutter(null);
+        return;
+      }
+
+      const domBlockRange = getBlockActionRangeFromDomTarget(editor, event.target, event.clientY);
+      if (domBlockRange) {
+        updateBlockGutter(readBlockGutterPosition(editor, editorFrameRef.current, domBlockRange));
+        return;
+      }
+
+      const pointBlockRange = getBlockActionRangeAtViewportY(editor, event.clientY);
+      if (pointBlockRange) {
+        updateBlockGutter(readBlockGutterPosition(editor, editorFrameRef.current, pointBlockRange));
+        return;
+      }
+
+      let position: { pos: number } | null = null;
+      try {
+        position = editor.view.posAtCoords({ left: event.clientX, top: event.clientY });
+      } catch {
+        return;
+      }
+
+      if (!position) return;
+
+      const blockRange = getBlockActionRangeAtPosition(editor, position.pos);
+      updateBlockGutter(readBlockGutterPosition(editor, editorFrameRef.current, blockRange));
+    },
+    [editor, updateBlockGutter],
+  );
+
+  const handleBlockDragStart = useCallback(() => {
+    if (!editor) return;
+
+    draggingBlockRef.current =
+      blockGutterTargetRef.current ??
+      blockGutter?.target ??
+      getTopLevelBlockActionRangeByIndex(editor, selectionMenu?.blockIndex) ??
+      getCurrentBlockActionRange(editor);
+    blockDropTargetRef.current = null;
+    setBlockDropIndicator(null);
+  }, [blockGutter?.target, editor, selectionMenu?.blockIndex]);
+
+  const handleBlockDragEnd = useCallback(() => {
+    draggingBlockRef.current = null;
+    blockDropTargetRef.current = null;
+    setBlockDropIndicator(null);
+  }, []);
+
+  const handleBlockDragOver = useCallback((event: DragEvent<HTMLDivElement>) => {
+    if (draggingBlockRef.current === null) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = "move";
+  }, []);
+
+  const handleBlockPointerDragMove = useCallback(
+    (point: SelectionBlockDragPoint) => {
+      if (!editor || !editorFrameRef.current || !draggingBlockRef.current) return;
+
+      const dropTarget = getBlockDropTarget(editor, editorFrameRef.current, draggingBlockRef.current, point);
+      blockDropTargetRef.current = dropTarget;
+      setBlockDropIndicator(dropTarget?.indicator ?? null);
+    },
+    [editor],
+  );
+
+  const moveDraggedBlockAtPoint = useCallback(
+    (point: SelectionBlockDragPoint) => {
+      const source = draggingBlockRef.current;
+      const cachedDropTarget = blockDropTargetRef.current;
+      draggingBlockRef.current = null;
+      blockDropTargetRef.current = null;
+      setBlockDropIndicator(null);
+      if (!editor || !editorFrameRef.current || !source) return;
+
+      const dropTarget = cachedDropTarget ?? getBlockDropTarget(editor, editorFrameRef.current, source, point);
+      if (!dropTarget) return;
+
+      if (dropTarget.kind === "listLevel" && dropTarget.action) {
+        changeListItemLevel(editor, source, dropTarget.action);
+        return;
+      }
+
+      const currentContent = editor.getJSON() as TiptapJson;
+      const sourceListItemIndex = getListItemOwnIndex(source);
+      const sourceParentPath = getListItemParentPath(source);
+      const focusTarget =
+        source.kind === "listItem" && typeof sourceListItemIndex === "number"
+          ? dropTarget.kind === "listItem"
+            ? {
+                kind: "listItem" as const,
+                listItemPath: getMovedListItemPath({
+                  dropIndex: dropTarget.dropIndex,
+                  isSameTopLevelList: source.topLevelIndex === dropTarget.topLevelIndex,
+                  sourceIndex: sourceListItemIndex,
+                  sourceParentPath,
+                  targetParentPath: dropTarget.listItemPath ?? [],
+                }),
+                topLevelIndex: getMovedListItemTopLevelIndex(currentContent, source, dropTarget),
+              }
+            : {
+                kind: "topLevel" as const,
+                topLevelIndex: getMovedTopLevelIndex(source.topLevelIndex, dropTarget.dropIndex, currentContent),
+              }
+          : dropTarget.kind === "listItem" && typeof dropTarget.topLevelIndex === "number"
+            ? {
+                kind: "listItem" as const,
+                listItemPath: [...(dropTarget.listItemPath ?? []), dropTarget.dropIndex],
+                topLevelIndex: getTopLevelIndexAfterRemovingSource(dropTarget.topLevelIndex, source.topLevelIndex),
+              }
+          : dropTarget.kind === "betweenListItems" && typeof dropTarget.topLevelIndex === "number"
+            ? {
+                kind: "topLevel" as const,
+                topLevelIndex: getMovedTopLevelIndexInsideSplitList(currentContent, {
+                  dropIndex: dropTarget.dropIndex,
+                  listIndex: dropTarget.topLevelIndex,
+                  sourceIndex: source.topLevelIndex,
+                }),
+              }
+          : {
+              kind: "topLevel" as const,
+              topLevelIndex: getMovedTopLevelIndex(source.topLevelIndex, dropTarget.dropIndex, currentContent),
+            };
+      const result =
+        source.kind === "listItem" && typeof sourceListItemIndex === "number"
+          ? dropTarget.kind === "listItem"
+            ? moveListItemInTiptapJson(currentContent, {
+                dropIndex: dropTarget.dropIndex,
+                listIndex: source.topLevelIndex,
+                sourceIndex: sourceListItemIndex,
+                sourceParentPath,
+                targetListIndex:
+                  typeof dropTarget.topLevelIndex === "number" ? dropTarget.topLevelIndex : source.topLevelIndex,
+                targetParentPath: dropTarget.listItemPath ?? [],
+              })
+            : moveListItemToTopLevelInTiptapJson(currentContent, {
+                dropIndex: dropTarget.dropIndex,
+                listIndex: source.topLevelIndex,
+                sourceIndex: sourceListItemIndex,
+                sourceParentPath,
+              })
+          : dropTarget.kind === "listItem" && typeof dropTarget.topLevelIndex === "number"
+            ? moveTopLevelBlockToListItemInTiptapJson(currentContent, {
+                dropIndex: dropTarget.dropIndex,
+                listIndex: dropTarget.topLevelIndex,
+                sourceIndex: source.topLevelIndex,
+                targetParentPath: dropTarget.listItemPath ?? [],
+              })
+          : dropTarget.kind === "betweenListItems" && typeof dropTarget.topLevelIndex === "number"
+            ? moveTopLevelBlockBetweenListItemsInTiptapJson(currentContent, {
+                dropIndex: dropTarget.dropIndex,
+                listIndex: dropTarget.topLevelIndex,
+                sourceIndex: source.topLevelIndex,
+              })
+          : moveTopLevelBlockInTiptapJson(currentContent, source.topLevelIndex, dropTarget.dropIndex);
+      if (!result.changed) return;
+
+      preserveEditorFrameScroll(editorFrameRef.current, () => {
+        executeEditorCommand(editor, "setContent", result.contentJson as JSONContent);
+        focusMovedBlock(editor, focusTarget);
+      });
+    },
+    [editor],
+  );
+
+  const handleBlockDrop = useCallback(
+    (event: DragEvent<HTMLDivElement>) => {
+      if (draggingBlockRef.current === null) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+      moveDraggedBlockAtPoint({ clientX: event.clientX, clientY: event.clientY });
+    },
+    [moveDraggedBlockAtPoint],
   );
 
   const characterCount = editor?.storage.characterCount.characters() ?? 0;
   const wordCount = editor?.storage.characterCount.words() ?? 0;
+  const commandTargets = editor ? getEditorAiCommandTargets(editor) : [];
+  const commandTarget = getEditorAiCommandTargetFromTargets(commandTargets, preferredCommandScope);
+  const shouldShowSelectionMenu = selectionMenu !== null && !isSelectionCommandLimitReached && !selectionAiResult;
+  const shouldShowBlockGutter = blockGutter !== null && selectionMenu === null;
+  const visibleRunningCommands =
+    runningSelectionCommands.length > 0
+      ? runningSelectionCommands
+      : isSelectionCommandRunning && runningSelectionCommand
+        ? [{ command: runningSelectionCommand, id: "active-selection-command" }]
+        : [];
 
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-white">
-      <div className="border-b border-zinc-200 px-6 py-5">
-        <input
-          aria-label={messages.titleLabel}
-          className="w-full bg-transparent text-2xl font-semibold tracking-normal text-zinc-950 outline-none placeholder:text-zinc-400"
-          onChange={(event) => handleTitleChange(event.target.value)}
-          value={title}
-        />
+      <EditorToolbar editor={editor} messages={messages.toolbar} />
+      <div className="px-4 pt-6 pb-2 sm:pt-8 sm:pr-8 sm:pl-16 lg:pl-20">
+        <div className="mx-auto w-full max-w-[54rem]">
+          <input
+            aria-label={messages.titleLabel}
+            className="w-full bg-transparent text-2xl font-semibold leading-tight tracking-normal text-zinc-950 outline-none placeholder:text-zinc-400 sm:text-3xl"
+            onChange={(event) => handleTitleChange(event.target.value)}
+            value={title}
+          />
+        </div>
       </div>
-      <div className="relative min-h-0 flex-1 overflow-y-auto px-6 py-6" ref={editorFrameRef}>
-        <EditorContent
-          className="min-h-full [&_.tiptap]:min-h-[52rem] [&_.tiptap]:max-w-3xl [&_.tiptap]:outline-none [&_.tiptap]:text-base [&_.tiptap]:leading-7 [&_.tiptap]:text-zinc-900 [&_.tiptap_a]:text-zinc-950 [&_.tiptap_a]:underline [&_.tiptap_blockquote]:border-l-2 [&_.tiptap_blockquote]:border-zinc-300 [&_.tiptap_blockquote]:pl-4 [&_.tiptap_h1]:text-3xl [&_.tiptap_h1]:font-semibold [&_.tiptap_h2]:text-2xl [&_.tiptap_h2]:font-semibold [&_.tiptap_h3]:text-xl [&_.tiptap_h3]:font-semibold [&_.tiptap_li]:my-1 [&_.tiptap_p.is-editor-empty:first-child::before]:pointer-events-none [&_.tiptap_p.is-editor-empty:first-child::before]:float-left [&_.tiptap_p.is-editor-empty:first-child::before]:h-0 [&_.tiptap_p.is-editor-empty:first-child::before]:text-zinc-400 [&_.tiptap_p.is-editor-empty:first-child::before]:content-[attr(data-placeholder)] [&_.tiptap_p]:my-3 [&_.tiptap_ul]:my-3 [&_.tiptap_ul]:list-disc [&_.tiptap_ul]:pl-6"
-          editor={editor}
-        />
-        <SelectionAiMenu
-          hasSelection={selectionMenu !== null}
-          isRunning={isSelectionCommandRunning}
-          language={language}
-          left={selectionMenu?.left}
-          onCommand={handleCommand}
-          runningCommand={runningSelectionCommand}
-          side={selectionMenu?.side}
-          top={selectionMenu?.top}
-        />
+      <div className="relative min-h-0 flex-1">
+        <div
+          className="relative h-full overflow-y-auto px-4 pt-2 pb-32 sm:pr-8 sm:pl-16 lg:pl-20"
+          onDragOverCapture={handleBlockDragOver}
+          onDropCapture={handleBlockDrop}
+          onFocusCapture={handleEditorFocus}
+          onMouseMove={handleEditorMouseMove}
+          ref={handleEditorFrameRef}
+        >
+          <EditorContent
+            className="mx-auto min-h-full w-full max-w-[54rem] [&_.tiptap]:min-h-[52rem] [&_.tiptap]:w-full [&_.tiptap]:break-words [&_.tiptap]:outline-none [&_.tiptap]:text-base [&_.tiptap]:leading-7 [&_.tiptap]:text-zinc-900 [&_.tiptap_.tableWrapper]:my-5 [&_.tiptap_.tableWrapper]:overflow-x-auto [&_.tiptap_a]:text-zinc-950 [&_.tiptap_a]:underline [&_.tiptap_blockquote]:border-l-2 [&_.tiptap_blockquote]:border-zinc-300 [&_.tiptap_blockquote]:pl-4 [&_.tiptap_h1]:text-3xl [&_.tiptap_h1]:font-semibold [&_.tiptap_h2]:text-2xl [&_.tiptap_h2]:font-semibold [&_.tiptap_h3]:text-xl [&_.tiptap_h3]:font-semibold [&_.tiptap_li]:my-1 [&_.tiptap_ol]:my-3 [&_.tiptap_ol]:list-decimal [&_.tiptap_ol]:pl-6 [&_.tiptap_p.is-editor-empty:first-child::before]:pointer-events-none [&_.tiptap_p.is-editor-empty:first-child::before]:float-left [&_.tiptap_p.is-editor-empty:first-child::before]:h-0 [&_.tiptap_p.is-editor-empty:first-child::before]:text-zinc-400 [&_.tiptap_p.is-editor-empty:first-child::before]:content-[attr(data-placeholder)] [&_.tiptap_p]:my-3 [&_.tiptap_table]:my-5 [&_.tiptap_table]:w-full [&_.tiptap_table]:border-collapse [&_.tiptap_table]:text-sm [&_.tiptap_td]:border [&_.tiptap_td]:border-zinc-200 [&_.tiptap_td]:px-3 [&_.tiptap_td]:py-2 [&_.tiptap_td]:align-top [&_.tiptap_th]:border [&_.tiptap_th]:border-zinc-300 [&_.tiptap_th]:bg-zinc-100 [&_.tiptap_th]:px-3 [&_.tiptap_th]:py-2 [&_.tiptap_th]:text-left [&_.tiptap_th]:font-semibold [&_.tiptap_ul]:my-3 [&_.tiptap_ul]:list-disc [&_.tiptap_ul]:pl-6"
+            editor={editor}
+          />
+          <BlockGutterControls
+            isListItem={blockGutter?.target.kind === "listItem"}
+            isVisible={shouldShowBlockGutter}
+            language={language}
+            left={blockGutter?.left ?? 0}
+            onAddBlock={handleAddBlockBelow}
+            onBlockAction={handleBlockAction}
+            onBlockDragEnd={handleBlockDragEnd}
+            onBlockDragStart={handleBlockDragStart}
+            onBlockPointerDragEnd={moveDraggedBlockAtPoint}
+            onBlockPointerDragMove={handleBlockPointerDragMove}
+            top={blockGutter?.top ?? 0}
+          />
+          <BlockDropIndicator indicator={blockDropIndicator} />
+          <SelectionAiMenu
+            commands={resolvedPluginContributions.selectionCommands}
+            hasSelection={shouldShowSelectionMenu}
+            language={language}
+            left={selectionMenu?.left}
+            onCommand={handleCommand}
+            side={selectionMenu?.side}
+            top={selectionMenu?.top}
+          />
+          <SlashCommandMenu
+            editor={editor}
+            frameRef={editorFrameRef}
+            language={language}
+            onAiCommand={handleFreeformCommand}
+            slashCommands={resolvedPluginContributions.slashCommands}
+          />
+          {visibleRunningCommands.map((runningCommand, index) => (
+            <SelectionAiRunningStatus
+              anchor={offsetRunningAnchor(runningCommand.anchor, index)}
+              command={runningCommand.command}
+              isVisible={Boolean(runningCommand.anchor)}
+              key={runningCommand.id}
+              language={language}
+              selectionCommands={resolvedPluginContributions.selectionCommands}
+            />
+          ))}
+          <SelectionAiResultPopover
+            frame={editorFrameElement}
+            language={language}
+            onApply={(proposalId, applyMode) => onApplySelectionAiResult?.(proposalId, applyMode)}
+            onDismiss={() => onDismissSelectionAiResult?.()}
+            onRetry={onRetrySelectionAiResult}
+            result={selectionAiResult}
+          />
+        </div>
+        <div className="pointer-events-none absolute inset-x-0 bottom-5 z-20 px-3 sm:px-4">
+          <DocumentAiCommandBar
+            availableScopes={commandTargets.map((target) => target.scope)}
+            disabled={!commandTarget}
+            isAtCapacity={isSelectionCommandLimitReached}
+            isRunning={isSelectionCommandRunning}
+            language={language}
+            messages={editorMessages[language].aiCommandBar}
+            onScopeChange={setPreferredCommandScope}
+            onSubmit={handleFreeformCommand}
+            runningCount={runningSelectionCommands.length}
+            runningLimit={runningSelectionCommandLimit}
+            scope={commandTarget?.scope ?? "document"}
+          />
+        </div>
       </div>
-      <footer className="flex items-center justify-end gap-4 border-t border-zinc-200 px-6 py-2 text-xs text-zinc-500">
+      <footer className="flex items-center justify-end gap-4 border-t border-zinc-200 px-4 py-2 text-xs text-zinc-500 sm:px-6">
         <span>
           {wordCount} {messages.words}
         </span>
@@ -205,6 +719,1484 @@ export function DocumentEditor({
       </footer>
     </div>
   );
+}
+
+function EditorToolbar({
+  editor,
+  messages,
+}: {
+  editor: RuntimeEditor | null;
+  messages: EditorMessages["editor"]["toolbar"];
+}) {
+  const blockStyle = editor ? getActiveBlockStyle(editor) : "paragraph";
+
+  return (
+    <div className="flex h-11 shrink-0 items-center gap-2 overflow-x-auto border-b border-zinc-200 bg-white px-2 sm:px-4">
+      <div aria-label={messages.toolbarLabel} className="flex min-w-max items-center gap-1" role="toolbar">
+        <ToolbarButton
+          disabled={!editor}
+          icon={Undo2}
+          label={messages.undo}
+          onClick={() => executeEditorCommand(editor, "undo")}
+        />
+        <ToolbarButton
+          disabled={!editor}
+          icon={Redo2}
+          label={messages.redo}
+          onClick={() => executeEditorCommand(editor, "redo")}
+        />
+        <span className="mx-1 h-5 w-px bg-zinc-200" />
+        <label className="inline-flex h-8 items-center gap-1.5 rounded px-2 text-sm font-medium text-zinc-700 hover:bg-zinc-100">
+          <Type aria-hidden="true" className="size-4" />
+          <span className="sr-only">{messages.style}</span>
+          <select
+            aria-label={messages.style}
+            className="w-28 bg-transparent text-sm font-medium outline-none disabled:cursor-not-allowed"
+            disabled={!editor}
+            onChange={(event) => applyBlockStyle(editor, event.currentTarget.value)}
+            value={blockStyle}
+          >
+            <option value="paragraph">{messages.paragraph}</option>
+            <option value="heading1">{messages.heading1}</option>
+            <option value="heading2">{messages.heading2}</option>
+            <option value="heading3">{messages.heading3}</option>
+          </select>
+        </label>
+        <span className="mx-1 h-5 w-px bg-zinc-200" />
+        <ToolbarButton
+          active={editor?.isActive("bold")}
+          disabled={!editor}
+          icon={Bold}
+          label={messages.bold}
+          onClick={() => executeEditorCommand(editor, "toggleBold")}
+        />
+        <ToolbarButton
+          active={editor?.isActive("italic")}
+          disabled={!editor}
+          icon={Italic}
+          label={messages.italic}
+          onClick={() => executeEditorCommand(editor, "toggleItalic")}
+        />
+        <ToolbarButton
+          active={editor?.isActive("strike")}
+          disabled={!editor}
+          icon={Strikethrough}
+          label={messages.strike}
+          onClick={() => executeEditorCommand(editor, "toggleStrike")}
+        />
+        <ToolbarButton
+          active={editor?.isActive("code")}
+          disabled={!editor}
+          icon={Code2}
+          label={messages.code}
+          onClick={() => executeEditorCommand(editor, "toggleCode")}
+        />
+        <span className="mx-1 h-5 w-px bg-zinc-200" />
+        <ToolbarButton
+          active={editor?.isActive("bulletList")}
+          disabled={!editor}
+          icon={List}
+          label={messages.bulletList}
+          onClick={() => executeEditorCommand(editor, "toggleBulletList")}
+        />
+        <ToolbarButton
+          active={editor?.isActive("orderedList")}
+          disabled={!editor}
+          icon={ListOrdered}
+          label={messages.orderedList}
+          onClick={() => executeEditorCommand(editor, "toggleOrderedList")}
+        />
+        <ToolbarButton
+          active={editor?.isActive("blockquote")}
+          disabled={!editor}
+          icon={Quote}
+          label={messages.blockquote}
+          onClick={() => executeEditorCommand(editor, "toggleBlockquote")}
+        />
+      </div>
+    </div>
+  );
+}
+
+function ToolbarButton({
+  active = false,
+  disabled = false,
+  icon: Icon,
+  label,
+  onClick,
+}: {
+  active?: boolean;
+  disabled?: boolean;
+  icon: typeof Bold;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      aria-label={label}
+      aria-pressed={active}
+      className={[
+        "inline-flex size-8 items-center justify-center rounded text-zinc-700 transition-colors hover:bg-zinc-100 hover:text-zinc-950 focus:outline-none focus:ring-2 focus:ring-zinc-950 disabled:cursor-not-allowed disabled:text-zinc-300",
+        active ? "bg-zinc-100 text-zinc-950" : "",
+      ].join(" ")}
+      disabled={disabled}
+      onClick={onClick}
+      title={label}
+      type="button"
+    >
+      <Icon aria-hidden="true" className="size-4" />
+    </button>
+  );
+}
+
+function BlockDropIndicator({ indicator }: { indicator: BlockDropIndicator | null }) {
+  if (!indicator) return null;
+
+  return (
+    <div
+      aria-hidden="true"
+      className="pointer-events-none absolute z-40 h-0.5 rounded-full bg-sky-500/80"
+      data-block-drop-indicator="true"
+      style={{ left: indicator.left, top: indicator.top, width: indicator.width }}
+    >
+      <span className="absolute left-0 top-1/2 size-1.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-sky-500/80" />
+    </div>
+  );
+}
+
+function getActiveBlockStyle(editor: RuntimeEditor) {
+  if (editor.isActive("heading", { level: 1 })) return "heading1";
+  if (editor.isActive("heading", { level: 2 })) return "heading2";
+  if (editor.isActive("heading", { level: 3 })) return "heading3";
+  return "paragraph";
+}
+
+function applyBlockStyle(editor: RuntimeEditor | null, value: string) {
+  if (!editor) return;
+
+  if (value === "heading1") {
+    executeEditorCommand(editor, "toggleHeading", { level: 1 });
+    return;
+  }
+
+  if (value === "heading2") {
+    executeEditorCommand(editor, "toggleHeading", { level: 2 });
+    return;
+  }
+
+  if (value === "heading3") {
+    executeEditorCommand(editor, "toggleHeading", { level: 3 });
+    return;
+  }
+
+  executeEditorCommand(editor, "setParagraph");
+}
+
+function insertBlockBelow(editor: RuntimeEditor | null, target?: BlockActionRange | null) {
+  if (!editor) return;
+
+  const range = target ?? getCurrentBlockActionRange(editor);
+  if (range?.kind === "listItem") {
+    insertListItemBelow(editor, range);
+    return;
+  }
+
+  const insertAt = range?.to ?? editor.state.selection.to;
+  executeEditorCommand(editor, "insertContentAt", insertAt, { type: "paragraph" });
+  executeEditorCommand(editor, "focus", insertAt + 1);
+}
+
+function duplicateBlock(editor: RuntimeEditor, target?: BlockActionRange | null) {
+  const range = target ?? getCurrentBlockActionRange(editor);
+  if (!range) return;
+
+  executeEditorCommand(editor, "insertContentAt", range.to, range.node.toJSON());
+  executeEditorCommand(editor, "focus", range.kind === "listItem" ? range.to + 2 : range.to + 1);
+}
+
+function deleteBlock(editor: RuntimeEditor, target?: BlockActionRange | null) {
+  const range = target ?? getCurrentBlockActionRange(editor);
+  if (!range) return;
+
+  if (range.kind === "topLevel" && editor.state.doc.childCount <= 1) {
+    executeEditorCommand(editor, "setContent", { type: "doc", content: [{ type: "paragraph" }] });
+    executeEditorCommand(editor, "focus", "end");
+    return;
+  }
+
+  executeEditorCommand(editor, "deleteRange", { from: range.from, to: range.to });
+  executeEditorCommand(editor, "focus", Math.max(1, range.from));
+}
+
+function moveBlock(editor: RuntimeEditor, target: BlockActionRange | null | undefined, direction: "down" | "up") {
+  const range = target ?? getCurrentBlockActionRange(editor);
+  if (!range) return;
+
+  const currentContent = editor.getJSON() as TiptapJson;
+  const result =
+    range.kind === "listItem"
+      ? moveListItemBlock(currentContent, range, direction)
+      : moveTopLevelBlockInTiptapJson(
+          currentContent,
+          range.topLevelIndex,
+          direction === "up" ? range.topLevelIndex - 1 : range.topLevelIndex + 2,
+        );
+
+  if (!result.changed) return;
+
+  executeEditorCommand(editor, "setContent", result.contentJson as JSONContent);
+  if (range.kind === "listItem") {
+    const sourceIndex = getListItemOwnIndex(range);
+    const sourceParentPath = getListItemParentPath(range);
+    if (typeof sourceIndex === "number") {
+      focusMovedBlock(editor, {
+        kind: "listItem",
+        listItemPath: getMovedListItemPath({
+          dropIndex: direction === "up" ? sourceIndex - 1 : sourceIndex + 2,
+          sourceIndex,
+          sourceParentPath,
+          targetParentPath: sourceParentPath,
+        }),
+        topLevelIndex: range.topLevelIndex,
+      });
+      return;
+    }
+  }
+
+  focusMovedBlock(editor, {
+    kind: "topLevel",
+    topLevelIndex: getMovedTopLevelIndex(
+      range.topLevelIndex,
+      direction === "up" ? range.topLevelIndex - 1 : range.topLevelIndex + 2,
+      currentContent,
+    ),
+  });
+}
+
+function moveListItemBlock(contentJson: TiptapJson, range: BlockActionRange, direction: "down" | "up") {
+  const sourceIndex = getListItemOwnIndex(range);
+  if (typeof sourceIndex !== "number") {
+    return { changed: false, contentJson };
+  }
+
+  const sourceParentPath = getListItemParentPath(range);
+  return moveListItemInTiptapJson(contentJson, {
+    dropIndex: direction === "up" ? sourceIndex - 1 : sourceIndex + 2,
+    listIndex: range.topLevelIndex,
+    sourceIndex,
+    sourceParentPath,
+    targetParentPath: sourceParentPath,
+  });
+}
+
+function changeListItemLevel(
+  editor: RuntimeEditor,
+  target: BlockActionRange | null | undefined,
+  direction: "indent" | "outdent",
+) {
+  const range = target ?? getCurrentBlockActionRange(editor);
+  if (range?.kind !== "listItem") return;
+
+  if (direction === "outdent" && outdentListItem(editor, range)) {
+    return;
+  }
+
+  const selectionPosition = clamp(range.from + 2, 1, Math.max(1, Math.min(range.to - 1, editor.state.doc.content.size)));
+  const commands = editor.commands as unknown as Record<string, (...commandArgs: unknown[]) => boolean>;
+  editor.view.focus();
+  commands.setTextSelection?.(selectionPosition);
+  commands[direction === "indent" ? "sinkListItem" : "liftListItem"]?.(range.node.type.name);
+}
+
+function convertListItemToText(editor: RuntimeEditor, target: BlockActionRange | null | undefined) {
+  const range = target ?? getCurrentBlockActionRange(editor);
+  if (range?.kind !== "listItem") return;
+
+  const sourceIndex = getListItemOwnIndex(range);
+  const sourceParentPath = getListItemParentPath(range);
+  if (typeof sourceIndex !== "number" || sourceParentPath.length > 0) {
+    return;
+  }
+
+  const result = convertListItemToTopLevelParagraphInTiptapJson(editor.getJSON() as TiptapJson, {
+    listIndex: range.topLevelIndex,
+    sourceIndex,
+  });
+  if (!result.changed) return;
+
+  const focusTopLevelIndex = getConvertedListItemTopLevelIndex(range.topLevelIndex, sourceIndex);
+  executeEditorCommand(editor, "setContent", result.contentJson as JSONContent);
+  focusMovedBlock(editor, {
+    kind: "topLevel",
+    topLevelIndex: focusTopLevelIndex,
+  });
+}
+
+function outdentListItem(editor: RuntimeEditor, range: BlockActionRange) {
+  const sourceIndex = getListItemOwnIndex(range);
+  const sourceParentPath = getListItemParentPath(range);
+  if (typeof sourceIndex !== "number" || sourceParentPath.length === 0) {
+    return false;
+  }
+
+  const parentIndex = sourceParentPath[sourceParentPath.length - 1]!;
+  const targetParentPath = sourceParentPath.slice(0, -1);
+  const result = moveListItemInTiptapJson(editor.getJSON() as TiptapJson, {
+    dropIndex: parentIndex + 1,
+    listIndex: range.topLevelIndex,
+    sourceIndex,
+    sourceParentPath,
+    targetParentPath,
+  });
+  if (!result.changed) {
+    return false;
+  }
+
+  executeEditorCommand(editor, "setContent", result.contentJson as JSONContent);
+  focusMovedBlock(editor, {
+    kind: "listItem",
+    listItemPath: getMovedListItemPath({
+      dropIndex: parentIndex + 1,
+      sourceIndex,
+      sourceParentPath,
+      targetParentPath,
+    }),
+    topLevelIndex: range.topLevelIndex,
+  });
+  return true;
+}
+
+function insertListItemBelow(editor: RuntimeEditor, range: BlockActionRange) {
+  editor
+    .chain()
+    .focus()
+    .insertContentAt(range.to, {
+      attrs: range.node.type.name === "taskItem" ? { checked: false } : undefined,
+      content: [{ type: "paragraph" }],
+      type: range.node.type.name,
+    })
+    .setTextSelection(range.to + 2)
+    .run();
+}
+
+function getCurrentBlockActionRange(editor: RuntimeEditor) {
+  return getBlockActionRangeAtPosition(editor, editor.state.selection.from);
+}
+
+function getTopLevelBlockRangeAtPosition(editor: RuntimeEditor, position: number) {
+  const targetIndex = getTopLevelBlockIndexAtPosition(editor, position);
+  return targetIndex === null ? null : getTopLevelBlockRangeByIndex(editor, targetIndex);
+}
+
+export function getBlockActionRangeAtPosition(editor: RuntimeEditor, position: number): BlockActionRange | null {
+  const resolvedPosition = editor.state.doc.resolve(clamp(position, 0, editor.state.doc.content.size));
+  const listItemRange = getListItemBlockActionRange(editor, resolvedPosition);
+  if (listItemRange) return listItemRange;
+
+  const topLevelRange = getTopLevelBlockRangeAtPosition(editor, position);
+  return topLevelRange ? toTopLevelBlockActionRange(topLevelRange) : null;
+}
+
+function getBlockActionRangeFromDomTarget(
+  editor: RuntimeEditor,
+  target: EventTarget | null,
+  clientY?: number,
+): BlockActionRange | null {
+  if (!(target instanceof HTMLElement) || !editor.view.dom.contains(target)) return null;
+
+  const topLevelElements = Array.from(editor.view.dom.children);
+  const topLevelElement = topLevelElements.find((child) => child === target || child.contains(target));
+  if (!(topLevelElement instanceof HTMLElement)) return null;
+
+  const topLevelIndex = topLevelElements.indexOf(topLevelElement);
+  if (isListDomElement(topLevelElement) && typeof clientY === "number") {
+    const listItemElementAtY = getListItemElementAtViewportY(topLevelElement, clientY);
+    if (listItemElementAtY) {
+      const nestedRange = getListItemBlockActionRangeFromElement(editor, topLevelIndex, topLevelElement, listItemElementAtY);
+      if (nestedRange) return nestedRange;
+    }
+  }
+
+  const listItemElement = target.closest("li");
+  if (listItemElement instanceof HTMLElement && topLevelElement.contains(listItemElement)) {
+    const nestedRange = getListItemBlockActionRangeFromElement(editor, topLevelIndex, topLevelElement, listItemElement);
+    if (nestedRange) return nestedRange;
+
+    const directListItemElement = Array.from(topLevelElement.children).find(
+      (child) => child === listItemElement || child.contains(listItemElement),
+    );
+    const listItemIndex = Array.from(topLevelElement.children).indexOf(directListItemElement ?? listItemElement);
+    return getListItemBlockActionRangeByIndex(editor, topLevelIndex, listItemIndex);
+  }
+  return getTopLevelBlockActionRangeByIndex(editor, topLevelIndex);
+}
+
+function getBlockActionRangeAtViewportY(editor: RuntimeEditor, clientY: number): BlockActionRange | null {
+  const topLevelElements = Array.from(editor.view.dom.children).filter(
+    (child): child is HTMLElement => child instanceof HTMLElement,
+  );
+
+  for (let topLevelIndex = 0; topLevelIndex < topLevelElements.length; topLevelIndex += 1) {
+    const topLevelElement = topLevelElements[topLevelIndex];
+    const rect = topLevelElement.getBoundingClientRect();
+    if (clientY < rect.top - 4 || clientY > rect.bottom + 4) {
+      continue;
+    }
+
+    if (isListDomElement(topLevelElement)) {
+      const listItemElementAtY = getListItemElementAtViewportY(topLevelElement, clientY);
+      if (listItemElementAtY) {
+        const nestedRange = getListItemBlockActionRangeFromElement(editor, topLevelIndex, topLevelElement, listItemElementAtY);
+        if (nestedRange) return nestedRange;
+      }
+    }
+
+    return getTopLevelBlockActionRangeByIndex(editor, topLevelIndex);
+  }
+
+  return null;
+}
+
+function getListItemBlockActionRangeFromElement(
+  editor: RuntimeEditor,
+  topLevelIndex: number,
+  topLevelElement: HTMLElement,
+  listItemElement: HTMLElement,
+) {
+  const listItemPath = getListItemDomPath(topLevelElement, listItemElement);
+  return listItemPath ? getListItemBlockActionRangeByPath(editor, topLevelIndex, listItemPath) : null;
+}
+
+function getListItemBlockActionRange(
+  editor: RuntimeEditor,
+  resolvedPosition: ReturnType<RuntimeEditor["state"]["doc"]["resolve"]>,
+): BlockActionRange | null {
+  for (let depth = resolvedPosition.depth; depth > 0; depth -= 1) {
+    const node = resolvedPosition.node(depth);
+    if (node.type.name !== "listItem" && node.type.name !== "taskItem") continue;
+
+    const topLevelIndex = getTopLevelBlockIndexByStart(editor, resolvedPosition.before(1));
+    if (topLevelIndex === null) return null;
+
+    return {
+      from: resolvedPosition.before(depth),
+      kind: "listItem",
+      listItemIndex: resolvedPosition.index(depth - 1),
+      listItemPath: getListItemPathAtResolvedPosition(resolvedPosition, depth),
+      node,
+      to: resolvedPosition.after(depth),
+      topLevelIndex,
+    };
+  }
+
+  return null;
+}
+
+function getListItemPathAtResolvedPosition(
+  resolvedPosition: ReturnType<RuntimeEditor["state"]["doc"]["resolve"]>,
+  targetDepth: number,
+) {
+  const path: number[] = [];
+
+  for (let depth = 1; depth <= targetDepth; depth += 1) {
+    const node = resolvedPosition.node(depth);
+    if (node.type.name !== "listItem" && node.type.name !== "taskItem") continue;
+
+    path.push(resolvedPosition.index(depth - 1));
+  }
+
+  return path;
+}
+
+function getListItemBlockActionRangeByIndex(
+  editor: RuntimeEditor,
+  topLevelIndex: number,
+  listItemIndex: number,
+): BlockActionRange | null {
+  return getListItemBlockActionRangeByPath(editor, topLevelIndex, [listItemIndex]);
+}
+
+function getListItemBlockActionRangeByPath(
+  editor: RuntimeEditor,
+  topLevelIndex: number,
+  listItemPath: number[],
+): BlockActionRange | null {
+  const topLevelRange = getTopLevelBlockRangeByIndex(editor, topLevelIndex);
+  if (!topLevelRange || listItemPath.length === 0) return null;
+
+  let listNode = topLevelRange.node;
+  let itemOffset = topLevelRange.from + 1;
+  for (let pathIndex = 0; pathIndex < listItemPath.length; pathIndex += 1) {
+    const listItemIndex = listItemPath[pathIndex]!;
+    if (!isListNodeName(listNode.type.name) || listItemIndex < 0 || listItemIndex >= listNode.childCount) {
+      return null;
+    }
+
+    for (let index = 0; index < listItemIndex; index += 1) {
+      itemOffset += listNode.child(index).nodeSize;
+    }
+
+    const node = listNode.child(listItemIndex);
+    if (!node || (node.type.name !== "listItem" && node.type.name !== "taskItem")) return null;
+
+    const itemFrom = itemOffset;
+    const itemTo = itemFrom + node.nodeSize;
+    if (pathIndex === listItemPath.length - 1) {
+      return {
+        from: itemFrom,
+        kind: "listItem",
+        listItemIndex,
+        listItemPath,
+        node,
+        to: itemTo,
+        topLevelIndex,
+      };
+    }
+
+    const nestedList = getNestedListChild(node, itemFrom);
+    if (!nestedList) return null;
+    listNode = nestedList.node;
+    itemOffset = nestedList.from + 1;
+  }
+
+  return null;
+}
+
+function getNestedListChild(node: ProseMirrorNode, nodeFrom: number) {
+  let childOffset = nodeFrom + 1;
+  for (let childIndex = 0; childIndex < node.childCount; childIndex += 1) {
+    const child = node.child(childIndex);
+    if (isListNodeName(child.type.name)) {
+      return { from: childOffset, node: child };
+    }
+
+    childOffset += child.nodeSize;
+  }
+
+  return null;
+}
+
+function getTopLevelBlockActionRangeByIndex(
+  editor: RuntimeEditor,
+  targetIndex: number | null | undefined,
+): BlockActionRange | null {
+  if (typeof targetIndex !== "number") return null;
+
+  const range = getTopLevelBlockRangeByIndex(editor, targetIndex);
+  return range ? toTopLevelBlockActionRange(range) : null;
+}
+
+function toTopLevelBlockActionRange(range: TopLevelBlockRange): BlockActionRange {
+  return {
+    from: range.from,
+    kind: "topLevel",
+    node: range.node,
+    to: range.to,
+    topLevelIndex: range.index,
+  };
+}
+
+export function readBlockGutterPosition(
+  editor: RuntimeEditor,
+  frame: HTMLDivElement | null,
+  range: BlockActionRange | null,
+): BlockGutterState | null {
+  if (!frame || !range) return null;
+
+  try {
+    const frameRect = frame.getBoundingClientRect();
+    const blockRect = readBlockGutterAnchorRect(editor, range);
+    const blockLeft = blockRect.left - frameRect.left;
+    const horizontalOffset =
+      range.kind === "listItem"
+        ? BLOCK_GUTTER_WIDTH + LIST_BLOCK_GUTTER_TEXT_GAP
+        : BLOCK_GUTTER_HORIZONTAL_OFFSET;
+    const maxLeft = Math.max(0, frame.clientWidth - BLOCK_GUTTER_WIDTH);
+    const left =
+      blockLeft < BLOCK_GUTTER_WIDTH + BLOCK_GUTTER_MIN_TEXT_GAP
+        ? Math.max(0, frame.clientWidth - BLOCK_GUTTER_WIDTH - BLOCK_GUTTER_EDGE_GAP)
+        : clamp(blockLeft - horizontalOffset, 0, maxLeft);
+    const top = Math.max(0, blockRect.top - frameRect.top + frame.scrollTop - 2);
+
+    return {
+      blockIndex: range.topLevelIndex,
+      left,
+      target: range,
+      top,
+    };
+  } catch {
+    return {
+      blockIndex: range.topLevelIndex,
+      left: 8,
+      target: range,
+      top: Math.max(0, frame.scrollTop),
+    };
+  }
+}
+
+function readBlockGutterAnchorRect(
+  editor: RuntimeEditor,
+  range: BlockActionRange,
+): Pick<DOMRect, "bottom" | "height" | "left" | "right" | "top"> {
+  if (range.kind === "listItem") {
+    const rangeElement = readListItemDomElement(editor, range) ?? editor.view.nodeDOM(range.from);
+    if (rangeElement instanceof HTMLElement) {
+      const contentElement = readListItemContentElement(rangeElement);
+      return (contentElement ?? rangeElement).getBoundingClientRect();
+    }
+  }
+
+  return readTopLevelBlockDomRect(editor, range);
+}
+
+function readTopLevelBlockDomRect(
+  editor: RuntimeEditor,
+  range: BlockActionRange,
+): Pick<DOMRect, "bottom" | "height" | "left" | "right" | "top"> {
+  if (range.kind === "listItem") {
+    const rangeElement = readListItemDomElement(editor, range) ?? editor.view.nodeDOM(range.from);
+    if (rangeElement instanceof HTMLElement) {
+      return rangeElement.getBoundingClientRect();
+    }
+  }
+
+  const blockElement = editor.view.dom.children.item(range.topLevelIndex);
+  if (blockElement instanceof HTMLElement) {
+    return blockElement.getBoundingClientRect();
+  }
+
+  const fallbackRect = editor.view.coordsAtPos(Math.min(range.from + 1, editor.state.doc.content.size));
+  return {
+    ...fallbackRect,
+    height: fallbackRect.bottom - fallbackRect.top,
+  };
+}
+
+function readListItemDomElement(editor: RuntimeEditor, range: BlockActionRange) {
+  if (range.kind !== "listItem" || typeof range.listItemIndex !== "number") {
+    return null;
+  }
+
+  const listElement = editor.view.dom.children.item(range.topLevelIndex);
+  if (listElement instanceof HTMLElement && isListDomElement(listElement)) {
+    if (range.listItemPath) {
+      const pathElement = getListItemDomElementByPath(listElement, range.listItemPath);
+      if (pathElement) {
+        return pathElement;
+      }
+    }
+
+    const indexedElement =
+      Array.from(listElement.children).filter((child): child is HTMLElement => child instanceof HTMLElement)[
+        range.listItemIndex
+      ] ?? null;
+    if (indexedElement) {
+      return indexedElement;
+    }
+  }
+
+  const rangeElement = editor.view.nodeDOM(range.from);
+  if (rangeElement instanceof HTMLElement && rangeElement.matches("li")) {
+    return rangeElement;
+  }
+
+  return null;
+}
+
+function isListDomElement(element: HTMLElement) {
+  return element.matches("ul, ol");
+}
+
+function getListItemDomPath(topLevelElement: HTMLElement, listItemElement: HTMLElement) {
+  const path: number[] = [];
+  let currentListItem: HTMLElement | null = listItemElement;
+
+  while (currentListItem && currentListItem !== topLevelElement) {
+    const parentList: HTMLElement | null = currentListItem.parentElement;
+    if (!(parentList instanceof HTMLElement) || !isListDomElement(parentList)) {
+      return null;
+    }
+
+    const siblings = Array.from(parentList.children).filter((child): child is HTMLElement => child instanceof HTMLElement);
+    const itemIndex = siblings.indexOf(currentListItem);
+    if (itemIndex < 0) return null;
+    path.unshift(itemIndex);
+
+    if (parentList === topLevelElement) {
+      return path;
+    }
+
+    currentListItem = parentList.parentElement?.closest("li") ?? null;
+  }
+
+  return null;
+}
+
+function getListItemDomElementByPath(topLevelElement: HTMLElement, listItemPath: number[]) {
+  let currentList: HTMLElement | null = topLevelElement;
+  let currentItem: HTMLElement | null = null;
+
+  for (const itemIndex of listItemPath) {
+    if (!currentList || !isListDomElement(currentList)) return null;
+
+    currentItem =
+      Array.from(currentList.children).filter((child): child is HTMLElement => child instanceof HTMLElement)[itemIndex] ?? null;
+    if (!currentItem) return null;
+
+    currentList = Array.from(currentItem.children).find(
+      (child): child is HTMLElement => child instanceof HTMLElement && isListDomElement(child),
+    ) ?? null;
+  }
+
+  return currentItem;
+}
+
+function isListNodeName(nodeName: string) {
+  return nodeName === "bulletList" || nodeName === "orderedList" || nodeName === "taskList";
+}
+
+function getListItemElementAtViewportY(listElement: HTMLElement, clientY: number) {
+  const listItems = Array.from(listElement.querySelectorAll<HTMLElement>("li"));
+  const directListItem = getDirectListItemElementAtViewportY(listElement, clientY);
+  const matchingItems = listItems.filter((listItem) => {
+    const rect = (readListItemContentElement(listItem) ?? listItem).getBoundingClientRect();
+    return clientY >= rect.top - 4 && clientY <= rect.bottom + 4;
+  });
+
+  return matchingItems.sort((left, right) => getElementDepth(right) - getElementDepth(left))[0] ?? directListItem;
+}
+
+function getDirectListItemElementAtViewportY(listElement: HTMLElement, clientY: number) {
+  const listItemIndex = getListItemIndexAtViewportY(listElement, clientY);
+  return listItemIndex === null
+    ? null
+    : Array.from(listElement.children).filter((child): child is HTMLElement => child instanceof HTMLElement)[listItemIndex] ?? null;
+}
+
+function getListItemIndexAtViewportY(listElement: HTMLElement, clientY: number) {
+  const listItems = Array.from(listElement.children).filter((child): child is HTMLElement => child instanceof HTMLElement);
+  if (listItems.length === 0) return null;
+
+  for (let index = 0; index < listItems.length; index += 1) {
+    const rect = readBlockDropRect(listItems[index]);
+    if (clientY >= rect.top - 4 && clientY <= rect.bottom + 4) {
+      return index;
+    }
+  }
+
+  return getDropSlotByY(listItems, clientY)?.index ?? null;
+}
+
+function readListItemContentElement(listItem: HTMLElement) {
+  const directContentElement = Array.from(listItem.children).find(
+    (child): child is HTMLElement =>
+      child instanceof HTMLElement && child.matches("p, h1, h2, h3, pre, blockquote"),
+  );
+  if (directContentElement) return directContentElement;
+
+  for (const child of Array.from(listItem.children)) {
+    if (!(child instanceof HTMLElement) || isListDomElement(child)) {
+      continue;
+    }
+
+    const nestedContentElement = child.querySelector<HTMLElement>("p, h1, h2, h3, pre, blockquote");
+    if (nestedContentElement) {
+      return nestedContentElement;
+    }
+  }
+
+  return null;
+}
+
+function getElementDepth(element: HTMLElement) {
+  let depth = 0;
+  let currentElement: HTMLElement | null = element;
+  while (currentElement?.parentElement) {
+    depth += 1;
+    currentElement = currentElement.parentElement;
+  }
+
+  return depth;
+}
+
+function hasActiveEditorTextSelection(editorDom: HTMLElement) {
+  const selection = editorDom.ownerDocument.getSelection();
+  if (!selection || selection.isCollapsed || selection.rangeCount === 0) return false;
+
+  const anchorNode = selection.anchorNode;
+  const focusNode = selection.focusNode;
+  return Boolean(
+    anchorNode &&
+      focusNode &&
+      editorDom.contains(anchorNode) &&
+      editorDom.contains(focusNode),
+  );
+}
+
+function getBlockDropTarget(
+  editor: RuntimeEditor,
+  frame: HTMLDivElement,
+  source: BlockActionRange,
+  point: SelectionBlockDragPoint,
+): BlockDropTarget | null {
+  const filterTarget = (target: BlockDropTarget | null) => (target && !isNoopBlockDropTarget(source, target) ? target : null);
+
+  if (source.kind === "listItem") {
+    const levelDropTarget = getListItemLevelDropTarget(editor, frame, source, point);
+    if (levelDropTarget) return filterTarget(levelDropTarget);
+
+    const sourceParentDropTarget = getSourceParentListItemDropTarget(editor, frame, source, point);
+    if (sourceParentDropTarget) return filterTarget(sourceParentDropTarget);
+
+    if (isPointInsideSourceList(editor, source, point.clientY)) {
+      return filterTarget(getListItemDropTarget(editor, frame, source, point));
+    }
+
+    const externalListItemDropTarget = getListItemDropTargetAtPoint(editor, frame, source, point);
+    if (externalListItemDropTarget) return filterTarget(externalListItemDropTarget);
+
+    return filterTarget(getTopLevelBlockDropTarget(editor, frame, point));
+  }
+
+  const splitListDropTarget = getTopLevelBlockBetweenListItemsDropTargetAtPoint(editor, frame, source, point);
+  if (splitListDropTarget) return filterTarget(splitListDropTarget);
+
+  const listItemDropTarget = getListItemDropTargetAtPoint(editor, frame, source, point);
+  if (listItemDropTarget) return filterTarget(listItemDropTarget);
+
+  return filterTarget(getTopLevelBlockDropTarget(editor, frame, point));
+}
+
+function isNoopBlockDropTarget(source: BlockActionRange, target: BlockDropTarget) {
+  if (target.kind === "listLevel") return false;
+
+  if (source.kind === "topLevel" && target.kind === "topLevel") {
+    return target.dropIndex === source.topLevelIndex || target.dropIndex === source.topLevelIndex + 1;
+  }
+
+  if (source.kind !== "listItem" || target.kind !== "listItem") {
+    return false;
+  }
+
+  const sourceIndex = getListItemOwnIndex(source);
+  if (typeof sourceIndex !== "number" || target.topLevelIndex !== source.topLevelIndex) {
+    return false;
+  }
+
+  const sourceParentPath = getListItemParentPath(source);
+  const targetParentPath = target.listItemPath ?? [];
+  return samePath(sourceParentPath, targetParentPath) && (target.dropIndex === sourceIndex || target.dropIndex === sourceIndex + 1);
+}
+
+function isPointInsideSourceList(editor: RuntimeEditor, source: BlockActionRange, clientY: number) {
+  const listElement = editor.view.dom.children.item(source.topLevelIndex);
+  if (!(listElement instanceof HTMLElement)) return false;
+
+  const rect = listElement.getBoundingClientRect();
+  return clientY >= rect.top - 8 && clientY <= rect.bottom + 8;
+}
+
+function getListItemLevelDropTarget(
+  editor: RuntimeEditor,
+  frame: HTMLDivElement,
+  source: BlockActionRange,
+  point: SelectionBlockDragPoint,
+): BlockDropTarget | null {
+  const deltaX = point.deltaX ?? 0;
+  const deltaY = point.deltaY ?? 0;
+  if (Math.abs(deltaY) > LIST_LEVEL_VERTICAL_TOLERANCE) {
+    return null;
+  }
+
+  const sourceIndex = getListItemOwnIndex(source);
+  const sourceParentPath = getListItemParentPath(source);
+  const action =
+    deltaX <= -LIST_LEVEL_DRAG_THRESHOLD && sourceParentPath.length > 0
+      ? "outdent"
+      : deltaX >= LIST_LEVEL_DRAG_THRESHOLD && typeof sourceIndex === "number" && sourceIndex > 0
+        ? "indent"
+        : null;
+
+  if (!action) {
+    return null;
+  }
+
+  const indicator = createListLevelDropIndicator(editor, frame, source, action);
+  return {
+    action,
+    dropIndex: sourceIndex ?? 0,
+    indicator,
+    kind: "listLevel",
+    listItemPath: sourceParentPath,
+    topLevelIndex: source.topLevelIndex,
+  };
+}
+
+function getListItemDropTarget(
+  editor: RuntimeEditor,
+  frame: HTMLDivElement,
+  source: BlockActionRange,
+  point: SelectionBlockDragPoint,
+): BlockDropTarget | null {
+  const listElement = editor.view.dom.children.item(source.topLevelIndex);
+  if (!(listElement instanceof HTMLElement)) {
+    return null;
+  }
+
+  return getListItemDropTargetForList(editor, frame, source.topLevelIndex, listElement, source, point);
+}
+
+function getSourceParentListItemDropTarget(
+  editor: RuntimeEditor,
+  frame: HTMLDivElement,
+  source: BlockActionRange,
+  point: SelectionBlockDragPoint,
+): BlockDropTarget | null {
+  if (source.kind !== "listItem") return null;
+
+  const listElement = editor.view.dom.children.item(source.topLevelIndex);
+  if (!(listElement instanceof HTMLElement) || !isListDomElement(listElement)) {
+    return null;
+  }
+
+  const sourceParentPath = getListItemParentPath(source);
+  const sourceParentList = getListDomElementByParentPath(listElement, sourceParentPath);
+  if (!sourceParentList) return null;
+
+  const listItems = getDirectListItemElements(sourceParentList);
+  if (!isPointInsideListDropBand(listItems, point.clientY)) {
+    return null;
+  }
+
+  return createListItemDropTargetForParentList(editor, frame, source.topLevelIndex, sourceParentList, sourceParentPath, source, point);
+}
+
+function getListItemDropTargetAtPoint(
+  editor: RuntimeEditor,
+  frame: HTMLDivElement,
+  source: BlockActionRange,
+  point: SelectionBlockDragPoint,
+): BlockDropTarget | null {
+  const topLevelElements = Array.from(editor.view.dom.children).filter(
+    (child): child is HTMLElement => child instanceof HTMLElement,
+  );
+
+  for (let topLevelIndex = 0; topLevelIndex < topLevelElements.length; topLevelIndex += 1) {
+    if (topLevelIndex === source.topLevelIndex) continue;
+
+    const listElement = topLevelElements[topLevelIndex];
+    if (!isListDomElement(listElement)) continue;
+
+    const listRect = listElement.getBoundingClientRect();
+    if (point.clientY < listRect.top - 8 || point.clientY > listRect.bottom + 8) continue;
+
+    const target = getListItemDropTargetForList(editor, frame, topLevelIndex, listElement, source, point);
+    if (target) return target;
+  }
+
+  return null;
+}
+
+function getTopLevelBlockBetweenListItemsDropTargetAtPoint(
+  editor: RuntimeEditor,
+  frame: HTMLDivElement,
+  source: BlockActionRange,
+  point: SelectionBlockDragPoint,
+): BlockDropTarget | null {
+  if (source.kind === "listItem") return null;
+
+  const topLevelElements = Array.from(editor.view.dom.children).filter(
+    (child): child is HTMLElement => child instanceof HTMLElement,
+  );
+
+  for (let topLevelIndex = 0; topLevelIndex < topLevelElements.length; topLevelIndex += 1) {
+    if (topLevelIndex === source.topLevelIndex) continue;
+
+    const listElement = topLevelElements[topLevelIndex];
+    if (!isListDomElement(listElement)) continue;
+
+    const listRect = listElement.getBoundingClientRect();
+    if (point.clientY < listRect.top - 8 || point.clientY > listRect.bottom + 8) continue;
+
+    const targetListItem = getDirectListItemElementAtViewportY(listElement, point.clientY);
+    if (!targetListItem) continue;
+
+    const contentElement = readListItemContentElement(targetListItem);
+    const contentRect = contentElement?.getBoundingClientRect();
+    if (contentRect && point.clientX >= contentRect.left - LIST_CONTENT_DROP_X_TOLERANCE) {
+      continue;
+    }
+
+    const listItems = Array.from(listElement.children).filter((child): child is HTMLElement => child instanceof HTMLElement);
+    const dropSlot = getDropSlotByY(listItems, point.clientY);
+    if (!dropSlot) continue;
+
+    const editorRect = editor.view.dom.getBoundingClientRect();
+    return {
+      dropIndex: dropSlot.index + (dropSlot.side === "after" ? 1 : 0),
+      indicator: createDropIndicator(
+        frame,
+        dropSlot.side === "after" ? dropSlot.rect.bottom : dropSlot.rect.top,
+        editorRect.left,
+        editorRect.right,
+      ),
+      kind: "betweenListItems",
+      topLevelIndex,
+    };
+  }
+
+  return null;
+}
+
+function getListItemDropTargetForList(
+  editor: RuntimeEditor,
+  frame: HTMLDivElement,
+  topLevelIndex: number,
+  listElement: HTMLElement,
+  source: BlockActionRange,
+  point: SelectionBlockDragPoint,
+): BlockDropTarget | null {
+  const targetListItem = getListItemElementAtViewportY(listElement, point.clientY);
+  if (!targetListItem) return null;
+
+  const targetPath = getListItemDomPath(listElement, targetListItem);
+  if (!targetPath) return null;
+
+  const parentList = targetListItem.parentElement;
+  if (!(parentList instanceof HTMLElement) || !isListDomElement(parentList)) {
+    return null;
+  }
+
+  const targetParentPath = targetPath.slice(0, -1);
+  return createListItemDropTargetForParentList(editor, frame, topLevelIndex, parentList, targetParentPath, source, point);
+}
+
+function createListItemDropTargetForParentList(
+  editor: RuntimeEditor,
+  frame: HTMLDivElement,
+  topLevelIndex: number,
+  parentList: HTMLElement,
+  targetParentPath: number[],
+  source: BlockActionRange,
+  point: SelectionBlockDragPoint,
+): BlockDropTarget | null {
+  const listItems = getDirectListItemElements(parentList);
+  const dropSlot = getDropSlotByY(listItems, point.clientY);
+  if (!dropSlot) return null;
+
+  if (isListItemDropInsideSourceDescendant(source, topLevelIndex, targetParentPath)) {
+    return null;
+  }
+
+  const editorRect = editor.view.dom.getBoundingClientRect();
+  return {
+    dropIndex: dropSlot.index + (dropSlot.side === "after" ? 1 : 0),
+    indicator: createDropIndicator(
+      frame,
+      dropSlot.side === "after" ? dropSlot.rect.bottom : dropSlot.rect.top,
+      dropSlot.rect.left,
+      editorRect.right,
+    ),
+    kind: "listItem",
+    listItemPath: targetParentPath,
+    topLevelIndex,
+  };
+}
+
+function getDirectListItemElements(listElement: HTMLElement) {
+  return Array.from(listElement.children).filter((child): child is HTMLElement => child instanceof HTMLElement);
+}
+
+function getListDomElementByParentPath(topLevelElement: HTMLElement, parentPath: number[]): HTMLElement | null {
+  let currentList: HTMLElement | null = topLevelElement;
+
+  for (const itemIndex of parentPath) {
+    const currentItem: HTMLElement | null = getDirectListItemElements(currentList)[itemIndex] ?? null;
+    if (!currentItem) return null;
+
+    currentList =
+      Array.from(currentItem.children).find(
+        (child): child is HTMLElement => child instanceof HTMLElement && isListDomElement(child),
+      ) ?? null;
+    if (!currentList) return null;
+  }
+
+  return currentList;
+}
+
+function isPointInsideListDropBand(listItems: HTMLElement[], clientY: number) {
+  if (listItems.length === 0) return false;
+
+  const firstRect = readBlockDropRect(listItems[0]);
+  const lastRect = readBlockDropRect(listItems[listItems.length - 1]);
+  return clientY >= firstRect.top - LIST_SOURCE_PARENT_DROP_MARGIN && clientY <= lastRect.bottom + LIST_SOURCE_PARENT_DROP_MARGIN;
+}
+
+function isListItemDropInsideSourceDescendant(
+  source: BlockActionRange,
+  targetTopLevelIndex: number,
+  targetParentPath: number[],
+) {
+  if (source.kind !== "listItem" || source.topLevelIndex !== targetTopLevelIndex) {
+    return false;
+  }
+
+  const sourceItemPath = source.listItemPath;
+  return Boolean(sourceItemPath && startsWithPath(targetParentPath, sourceItemPath));
+}
+
+function getTopLevelBlockDropTarget(
+  editor: RuntimeEditor,
+  frame: HTMLDivElement,
+  point: SelectionBlockDragPoint,
+): BlockDropTarget | null {
+  const topLevelBlocks = Array.from(editor.view.dom.children).filter(
+    (child): child is HTMLElement => child instanceof HTMLElement,
+  );
+  const dropSlot = getDropSlotByY(topLevelBlocks, point.clientY);
+  if (!dropSlot) return null;
+
+  const editorRect = editor.view.dom.getBoundingClientRect();
+  return {
+    dropIndex: dropSlot.index + (dropSlot.side === "after" ? 1 : 0),
+    indicator: createDropIndicator(
+      frame,
+      dropSlot.side === "after" ? dropSlot.rect.bottom : dropSlot.rect.top,
+      editorRect.left,
+      editorRect.right,
+    ),
+    kind: "topLevel",
+  };
+}
+
+function getDropSlotByY(elements: HTMLElement[], clientY: number) {
+  if (elements.length === 0) return null;
+
+  for (let index = 0; index < elements.length; index += 1) {
+    const rect = readBlockDropRect(elements[index]);
+    const midpoint = rect.top + rect.height / 2;
+    if (clientY <= midpoint) {
+      return { index, rect, side: "before" as const };
+    }
+
+    if (clientY <= rect.bottom) {
+      return { index, rect, side: "after" as const };
+    }
+  }
+
+  const lastIndex = elements.length - 1;
+  return {
+    index: lastIndex,
+    rect: readBlockDropRect(elements[lastIndex]),
+    side: "after" as const,
+  };
+}
+
+function readBlockDropRect(element: HTMLElement): Pick<DOMRect, "bottom" | "height" | "left" | "right" | "top"> {
+  const contentElement = element.matches("li") ? readListItemContentElement(element) : null;
+  const rect = (contentElement ?? element).getBoundingClientRect();
+  const elementRect = element.getBoundingClientRect();
+
+  return {
+    bottom: rect.bottom,
+    height: rect.bottom - rect.top,
+    left: elementRect.left,
+    right: elementRect.right,
+    top: rect.top,
+  };
+}
+
+function getListItemOwnIndex(range: BlockActionRange) {
+  if (range.kind !== "listItem") return null;
+  if (range.listItemPath && range.listItemPath.length > 0) {
+    return range.listItemPath[range.listItemPath.length - 1]!;
+  }
+
+  return typeof range.listItemIndex === "number" ? range.listItemIndex : null;
+}
+
+function getListItemParentPath(range: BlockActionRange) {
+  if (range.kind !== "listItem" || !range.listItemPath) {
+    return [];
+  }
+
+  return range.listItemPath.slice(0, -1);
+}
+
+type MovedBlockFocusTarget =
+  | { kind: "listItem"; listItemPath: number[]; topLevelIndex: number }
+  | { kind: "topLevel"; topLevelIndex: number };
+
+function focusMovedBlock(editor: RuntimeEditor, target: MovedBlockFocusTarget) {
+  const range =
+    target.kind === "listItem"
+      ? getListItemBlockActionRangeByPath(editor, target.topLevelIndex, target.listItemPath)
+      : getTopLevelBlockActionRangeByIndex(editor, target.topLevelIndex);
+  if (!range) {
+    editor.view.focus();
+    return;
+  }
+
+  focusBlockRange(editor, range);
+}
+
+function focusBlockRange(editor: RuntimeEditor, range: BlockActionRange) {
+  const position = findTextSelectionPositionInRange(editor, range.from, range.to);
+  if (position === null) {
+    editor.view.focus();
+    return;
+  }
+
+  const commands = editor.commands as unknown as Record<string, (...commandArgs: unknown[]) => boolean>;
+  editor.view.focus();
+  commands.setTextSelection?.(position);
+}
+
+function preserveEditorFrameScroll(frame: HTMLDivElement, action: () => void) {
+  const scrollTop = frame.scrollTop;
+  action();
+  restoreEditorFrameScroll(frame, scrollTop);
+
+  requestAnimationFrame(() => {
+    restoreEditorFrameScroll(frame, scrollTop);
+  });
+}
+
+function restoreEditorFrameScroll(frame: HTMLDivElement, scrollTop: number) {
+  try {
+    frame.scrollTop = scrollTop;
+  } catch {
+    // Some test DOM descriptors expose scrollTop as readonly; browsers keep it writable.
+  }
+}
+
+function findTextSelectionPositionInRange(editor: RuntimeEditor, from: number, to: number) {
+  let textSelectionPosition: number | null = null;
+
+  editor.state.doc.nodesBetween(from, to, (node, position) => {
+    if (textSelectionPosition !== null) {
+      return false;
+    }
+
+    if (node.isTextblock) {
+      textSelectionPosition = Math.min(position + 1, editor.state.doc.content.size);
+      return false;
+    }
+
+    return true;
+  });
+
+  return textSelectionPosition;
+}
+
+function getMovedTopLevelIndex(sourceIndex: number, dropIndex: number, contentJson: TiptapJson) {
+  const contentLength = Array.isArray(contentJson.content) ? contentJson.content.length : 0;
+  const clampedDropIndex = clamp(dropIndex, 0, contentLength);
+  return sourceIndex < clampedDropIndex ? clampedDropIndex - 1 : clampedDropIndex;
+}
+
+function getMovedTopLevelIndexInsideSplitList(
+  contentJson: TiptapJson,
+  { dropIndex, listIndex, sourceIndex }: { dropIndex: number; listIndex: number; sourceIndex: number },
+) {
+  const content = Array.isArray(contentJson.content) ? contentJson.content : [];
+  const listNode = content[listIndex] as { content?: unknown[] } | undefined;
+  const listContentLength = Array.isArray(listNode?.content) ? listNode.content.length : 0;
+  const clampedDropIndex = clamp(dropIndex, 0, listContentLength);
+  const adjustedListIndex = sourceIndex < listIndex ? listIndex - 1 : listIndex;
+  return adjustedListIndex + (clampedDropIndex > 0 ? 1 : 0);
+}
+
+function getConvertedListItemTopLevelIndex(listIndex: number, sourceIndex: number) {
+  return listIndex + (sourceIndex > 0 ? 1 : 0);
+}
+
+function getTopLevelIndexAfterRemovingSource(targetIndex: number, sourceIndex: number) {
+  return sourceIndex < targetIndex ? targetIndex - 1 : targetIndex;
+}
+
+function getMovedListItemTopLevelIndex(
+  contentJson: TiptapJson,
+  source: BlockActionRange,
+  target: BlockDropTarget,
+) {
+  if (target.kind !== "listItem" || typeof target.topLevelIndex !== "number" || source.topLevelIndex === target.topLevelIndex) {
+    return source.topLevelIndex;
+  }
+
+  return willRemoveSourceTopLevelList(contentJson, source)
+    ? getTopLevelIndexAfterRemovingSource(target.topLevelIndex, source.topLevelIndex)
+    : target.topLevelIndex;
+}
+
+function willRemoveSourceTopLevelList(contentJson: TiptapJson, source: BlockActionRange) {
+  if (source.kind !== "listItem" || getListItemParentPath(source).length > 0) {
+    return false;
+  }
+
+  const content = Array.isArray(contentJson.content) ? contentJson.content : [];
+  const sourceListNode = content[source.topLevelIndex] as { content?: unknown[] } | undefined;
+  return Array.isArray(sourceListNode?.content) && sourceListNode.content.length === 1;
+}
+
+function getMovedListItemPath({
+  dropIndex,
+  isSameTopLevelList = true,
+  sourceIndex,
+  sourceParentPath,
+  targetParentPath,
+}: {
+  dropIndex: number;
+  isSameTopLevelList?: boolean;
+  sourceIndex: number;
+  sourceParentPath: number[];
+  targetParentPath: number[];
+}) {
+  const adjustedTargetParentPath = isSameTopLevelList
+    ? adjustListParentPathAfterRemoval(targetParentPath, sourceParentPath, sourceIndex)
+    : targetParentPath;
+  const targetIndex =
+    isSameTopLevelList && samePath(sourceParentPath, targetParentPath) && sourceIndex < dropIndex
+      ? dropIndex - 1
+      : dropIndex;
+  return [...adjustedTargetParentPath, Math.max(0, targetIndex)];
+}
+
+function adjustListParentPathAfterRemoval(targetParentPath: number[], sourceParentPath: number[], sourceIndex: number) {
+  if (targetParentPath.length <= sourceParentPath.length || !startsWithPath(targetParentPath, sourceParentPath)) {
+    return targetParentPath;
+  }
+
+  const affectedIndex = targetParentPath[sourceParentPath.length]!;
+  if (affectedIndex <= sourceIndex) {
+    return targetParentPath;
+  }
+
+  return targetParentPath.map((value, index) => (index === sourceParentPath.length ? value - 1 : value));
+}
+
+function samePath(left: number[], right: number[]) {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function startsWithPath(path: number[], prefix: number[]) {
+  return path.length >= prefix.length && prefix.every((value, index) => path[index] === value);
+}
+
+function createDropIndicator(frame: HTMLDivElement, viewportTop: number, viewportLeft: number, viewportRight: number) {
+  const frameRect = frame.getBoundingClientRect();
+  return {
+    left: Math.max(8, viewportLeft - frameRect.left),
+    top: Math.max(0, viewportTop - frameRect.top + frame.scrollTop - 1),
+    width: Math.max(24, viewportRight - viewportLeft),
+  };
+}
+
+function createListLevelDropIndicator(
+  editor: RuntimeEditor,
+  frame: HTMLDivElement,
+  source: BlockActionRange,
+  action: "indent" | "outdent",
+) {
+  const editorRect = editor.view.dom.getBoundingClientRect();
+  const sourceRect = readBlockGutterAnchorRect(editor, source);
+  const levelOffset = action === "indent" ? 28 : -28;
+  const indicatorLeft = clamp(sourceRect.left + levelOffset, editorRect.left, editorRect.right - 32);
+
+  return createDropIndicator(frame, sourceRect.top, indicatorLeft, editorRect.right);
+}
+
+function getTopLevelBlockIndexAtPosition(editor: RuntimeEditor, position: number) {
+  if (editor.state.doc.childCount === 0) return null;
+
+  const resolvedPosition = editor.state.doc.resolve(clamp(position, 0, editor.state.doc.content.size));
+  if (resolvedPosition.depth < 1) return 0;
+
+  return getTopLevelBlockIndexByStart(editor, resolvedPosition.before(1));
+}
+
+function getTopLevelBlockIndexByStart(editor: RuntimeEditor, start: number) {
+  let foundIndex: number | null = null;
+
+  editor.state.doc.forEach((_node, offset, index) => {
+    if (offset === start) {
+      foundIndex = index;
+    }
+  });
+
+  return foundIndex;
+}
+
+function getTopLevelBlockRangeByIndex(editor: RuntimeEditor, targetIndex: number): TopLevelBlockRange | null {
+  let result: TopLevelBlockRange | null = null;
+
+  editor.state.doc.forEach((node, offset, index) => {
+    if (index === targetIndex) {
+      result = { from: offset, index, node, to: offset + node.nodeSize };
+    }
+  });
+
+  return result;
+}
+
+function executeEditorCommand(editor: RuntimeEditor | null, commandName: string, ...args: unknown[]) {
+  if (!editor) return;
+
+  editor.view.focus();
+  const commands = editor.commands as unknown as Record<string, (...commandArgs: unknown[]) => boolean>;
+  commands[commandName]?.(...args);
+}
+
+function SelectionAiRunningStatus({
+  anchor,
+  command,
+  isVisible,
+  language,
+  selectionCommands,
+}: {
+  anchor?: SelectionAiAnchor;
+  command: string;
+  isVisible: boolean;
+  language: EditorLanguage;
+  selectionCommands: EditorSelectionCommand[];
+}) {
+  if (!isVisible || !anchor) return null;
+
+  const messages = editorMessages[language].selectionMenu;
+  const commandLabel = getSelectionRunningCommandLabel(command, selectionCommands);
+
+  return (
+    <div
+      aria-label={messages.runningStatusLabel}
+      className="pointer-events-none absolute z-30 w-[min(20rem,calc(100%-2rem))]"
+      data-side={anchor.side}
+      role="status"
+      style={{ left: anchor.left, top: anchor.top }}
+    >
+      <div className="inline-flex max-w-full items-center gap-2 rounded-md border border-zinc-200 bg-white/95 px-3 py-2 shadow-lg shadow-zinc-950/10 backdrop-blur">
+        <Loader2 aria-hidden="true" className="size-4 shrink-0 animate-spin text-zinc-500" />
+        <span className="min-w-0">
+          <span className="block truncate text-xs font-medium text-zinc-800">
+            {formatEditorMessage(messages.running, { command: commandLabel })}
+          </span>
+          <span className="block truncate text-[11px] leading-4 text-zinc-500">{messages.runningPinned}</span>
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function getSelectionRunningCommandLabel(command: string, selectionCommands: EditorSelectionCommand[]) {
+  return selectionCommands.find((item) => item.command === command)?.ariaLabel ?? (command || "AI");
+}
+
+function offsetRunningAnchor(anchor: SelectionAiAnchor | undefined, index: number): SelectionAiAnchor | undefined {
+  if (!anchor) return undefined;
+
+  return {
+    ...anchor,
+    top: anchor.top + index * 48,
+  };
 }
 
 function readSelectionMenuPosition(
@@ -218,16 +2210,39 @@ function readSelectionMenuPosition(
 
   try {
     const { from, to } = currentEditor.state.selection;
+    const selectionRects = readBrowserSelectionRects(currentEditor.view.dom);
     return getSelectionMenuPosition({
       frameRect: frame.getBoundingClientRect(),
       scrollTop: frame.scrollTop,
       selectedText,
-      selectionEnd: currentEditor.view.coordsAtPos(to),
-      selectionStart: currentEditor.view.coordsAtPos(from),
+      selectionEnd: selectionRects?.end ?? currentEditor.view.coordsAtPos(to),
+      selectionStart: selectionRects?.start ?? currentEditor.view.coordsAtPos(from),
     });
   } catch {
     return getFallbackSelectionMenuPosition(selectedText);
   }
+}
+
+function readBrowserSelectionRects(editorDom: HTMLElement): { end: SelectionRect; start: SelectionRect } | null {
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0) return null;
+
+  const range = selection.getRangeAt(0);
+  const anchor =
+    range.commonAncestorContainer instanceof HTMLElement
+      ? range.commonAncestorContainer
+      : range.commonAncestorContainer.parentElement;
+  if (!anchor || !editorDom.contains(anchor)) return null;
+
+  const rects = Array.from(range.getClientRects()).filter((rect) => rect.width > 0 && rect.height > 0);
+  if (rects.length === 0) return null;
+  const firstRect = rects[0]!;
+  const lastRect = rects[rects.length - 1]!;
+
+  return {
+    end: toSelectionRect(lastRect),
+    start: toSelectionRect(firstRect),
+  };
 }
 
 export function getSelectionMenuPosition({
@@ -244,14 +2259,20 @@ export function getSelectionMenuPosition({
   const left = clamp(selectionCenter - menuWidth / 2, 16, Math.max(16, frameRect.width - menuWidth - 16));
   const selectionTop = Math.min(selectionStart.top, selectionEnd.top) - frameRect.top + scrollTop;
   const selectionBottom = Math.max(selectionStart.bottom, selectionEnd.bottom) - frameRect.top + scrollTop;
+  const firstVisibleLineBottom = Math.min(selectionStart.bottom, selectionEnd.bottom) - frameRect.top + scrollTop;
   const topCandidate = selectionTop - SELECTION_MENU_HEIGHT - SELECTION_MENU_GAP;
 
   if (topCandidate < SELECTION_MENU_GAP) {
+    const viewportBottom = scrollTop + frameRect.height - SELECTION_MENU_GAP;
     return {
       left,
       selectedText,
       side: "bottom",
-      top: selectionBottom + SELECTION_MENU_GAP,
+      top: clamp(
+        selectionBottom + SELECTION_MENU_GAP,
+        firstVisibleLineBottom + SELECTION_MENU_GAP,
+        Math.max(SELECTION_MENU_GAP, viewportBottom - SELECTION_MENU_HEIGHT),
+      ),
     };
   }
 
@@ -263,10 +2284,53 @@ export function getSelectionMenuPosition({
   };
 }
 
+function toSelectionRect(rect: SelectionRect): SelectionRect {
+  return {
+    bottom: rect.bottom,
+    left: rect.left,
+    right: rect.right,
+    top: rect.top,
+  };
+}
+
 function getFallbackSelectionMenuPosition(selectedText: string): SelectionMenuState {
   return { left: 16, selectedText, side: "top", top: 16 };
 }
 
+function readCommandBarResultAnchor(frame: HTMLDivElement | null): SelectionAiAnchor {
+  if (!frame) {
+    return { left: 16, side: "top", top: 16 };
+  }
+
+  const popoverWidth = Math.min(448, Math.max(280, frame.clientWidth - 32));
+  return {
+    left: clamp(frame.clientWidth / 2 - popoverWidth / 2, 16, Math.max(16, frame.clientWidth - popoverWidth - 16)),
+    side: "top",
+    top: Math.max(16, frame.scrollTop + frame.clientHeight - 320),
+  };
+}
+
+function mergeEditorPluginContributions(
+  base: EditorPluginContributions,
+  additional?: Partial<EditorPluginContributions>,
+): EditorPluginContributions {
+  if (!additional) return base;
+
+  return {
+    blockActions: [...base.blockActions, ...(additional.blockActions ?? [])],
+    selectionCommands: [...base.selectionCommands, ...(additional.selectionCommands ?? [])],
+    settingsSections: [...base.settingsSections, ...(additional.settingsSections ?? [])],
+    slashCommands: [...base.slashCommands, ...(additional.slashCommands ?? [])],
+    tiptapExtensions: [...base.tiptapExtensions, ...(additional.tiptapExtensions ?? [])],
+    toolbarItems: [...base.toolbarItems, ...(additional.toolbarItems ?? [])],
+    workspacePanels: [...base.workspacePanels, ...(additional.workspacePanels ?? [])],
+  };
+}
+
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
+}
+
+function escapeCssAttributeValue(value: string) {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }

@@ -45,3 +45,6 @@ jobs:
 
       - name: Build
         run: pnpm build
+
+      - name: Security audit
+        run: pnpm security:audit

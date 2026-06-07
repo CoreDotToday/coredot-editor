@@ -1,6 +1,6 @@
 {
   "name": "coredot-editor",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Open-source AI document editor starter built with Next.js, Tiptap, Drizzle, SQLite, and the Vercel AI SDK.",
   "license": "MIT",
   "private": true,
@@ -33,23 +33,31 @@
     "db:seed": "tsx src/db/seed.ts",
     "db:setup": "pnpm db:migrate && pnpm db:seed",
     "e2e:prepare": "tsx scripts/e2e/prepare.ts",
-    "e2e": "pnpm e2e:prepare && playwright test"
+    "e2e": "pnpm e2e:prepare && playwright test",
+    "security:audit": "pnpm audit --audit-level moderate",
+    "release:check": "pnpm lint && pnpm typecheck && pnpm test && pnpm e2e && pnpm build && pnpm security:audit"
   },
   "dependencies": {
     "@ai-sdk/openai": "^3.0.63",
     "@libsql/client": "^0.17.3",
+    "@tiptap/core": "^3.23.1",
     "@tiptap/extension-character-count": "^3.23.1",
     "@tiptap/extension-link": "^3.23.1",
     "@tiptap/extension-placeholder": "^3.23.1",
+    "@tiptap/extension-table": "^3.23.1",
     "@tiptap/extension-task-item": "^3.23.1",
     "@tiptap/extension-task-list": "^3.23.1",
     "@tiptap/extension-typography": "^3.23.1",
+    "@tiptap/html": "^3.23.1",
     "@tiptap/pm": "^3.23.1",
     "@tiptap/react": "^3.23.1",
     "@tiptap/starter-kit": "^3.23.1",
     "ai": "^6.0.176",
+    "docx": "^9.6.1",
     "drizzle-orm": "^0.45.2",
+    "happy-dom": "^20.9.0",
     "lucide-react": "^1.14.0",
+    "mammoth": "^1.12.0",
     "nanoid": "^5.1.11",
     "next": "16.2.6",
     "react": "19.2.4",
@@ -75,5 +83,12 @@
     "tsx": "^4.21.0",
     "typescript": "^5",
     "vitest": "^4.1.5"
+  },
+  "pnpm": {
+    "overrides": {
+      "esbuild": "^0.25.12",
+      "postcss": "^8.5.14",
+      "ws": "^8.20.1"
+    }
   }
 }

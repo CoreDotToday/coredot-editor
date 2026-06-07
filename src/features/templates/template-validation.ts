@@ -13,7 +13,7 @@ const variableFieldSchema = z
     if (field.type === "select" && (!field.options || field.options.length === 0)) {
       context.addIssue({
         code: "custom",
-        message: "Select fields require at least one option",
+        message: "선택 필드에는 옵션이 하나 이상 필요합니다.",
         path: ["options"],
       });
     }
@@ -31,7 +31,7 @@ export const promptVariableSchema = z
       if (fieldNames.has(field.name)) {
         context.addIssue({
           code: "custom",
-          message: "Variable field names must be unique",
+          message: "변수 필드 이름은 고유해야 합니다.",
           path: ["fields", index, "name"],
         });
       }
@@ -43,7 +43,7 @@ export const promptVariableSchema = z
       if (!fieldNames.has(requiredField)) {
         context.addIssue({
           code: "custom",
-          message: "Required variables must be declared fields",
+          message: "필수 변수는 필드에 선언되어 있어야 합니다.",
           path: ["required", index],
         });
       }
@@ -51,10 +51,10 @@ export const promptVariableSchema = z
   });
 
 export const promptTemplatePayloadSchema = z.object({
-  name: z.string().trim().min(1, "Name is required"),
-  description: z.string().trim().min(1, "Description is required"),
-  category: z.string().trim().min(1, "Category is required"),
-  systemPrompt: z.string().trim().min(1, "System prompt is required"),
+  name: z.string().trim().min(1, "이름은 필수입니다."),
+  description: z.string().trim().min(1, "설명은 필수입니다."),
+  category: z.string().trim().min(1, "카테고리는 필수입니다."),
+  systemPrompt: z.string().trim().min(1, "시스템 프롬프트는 필수입니다."),
   variableSchemaJson: promptVariableSchema,
 });
 
@@ -77,7 +77,7 @@ export function validateTemplateVariables(
     const value = values[field.name];
     const isMissing = value === undefined || value === null || String(value).trim() === "";
     if ((field.required || requiredFields.has(field.name)) && isMissing) {
-      errors[field.name] = `${field.label} is required`;
+      errors[field.name] = `${field.label} 필드는 필수입니다.`;
     }
   }
 

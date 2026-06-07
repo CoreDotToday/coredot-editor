@@ -19,4 +19,16 @@ describe("extractPlainTextFromTiptap", () => {
 
     expect(text).toBe("Market Entry\nTarget enterprise buyers");
   });
+
+  it("separates adjacent code blocks with line breaks", () => {
+    const text = extractPlainTextFromTiptap({
+      type: "doc",
+      content: [
+        { type: "codeBlock", attrs: { language: "ts" }, content: [{ type: "text", text: "let a = 1;" }] },
+        { type: "codeBlock", attrs: { language: "ts" }, content: [{ type: "text", text: "let b = 2;" }] },
+      ],
+    });
+
+    expect(text).toBe("let a = 1;\nlet b = 2;");
+  });
 });

@@ -27,6 +27,17 @@ vi.mock("@/features/ai/ai-run-repository", () => ({
   failAiRun: vi.fn(async (id, errorMessage) => ({ id, errorMessage, status: "failed" })),
 }));
 
+vi.mock("@/features/ai/ai-settings-repository", () => ({
+  getAiSettings: vi.fn(async () => ({
+    aiBaseUrl: null,
+    aiMaxCompletionTokens: null,
+    aiModel: "stub-editor",
+    aiProvider: "stub",
+    aiReasoningEffort: null,
+    id: "default",
+  })),
+}));
+
 vi.mock("@/features/ai/providers", () => ({
   createAiProvider: vi.fn(() => ({
     name: "stub",
@@ -152,6 +163,132 @@ describe("POST /api/ai/rewrite", () => {
     );
   });
 
+  it("uses a selection-rewrite system prompt even when the selected template is a review template", async () => {
+    const generateText = vi.fn(async () => "Improved text");
+    vi.mocked(getDocumentById).mockResolvedValueOnce(documentRecord);
+    vi.mocked(getPromptTemplateById).mockResolvedValueOnce({
+      ...templateRecord,
+      category: "contract_review",
+      name: "Contract Review",
+      systemPrompt: "Return only the structured review result requested by the API schema.",
+    });
+    vi.mocked(createAiProvider).mockReturnValueOnce({
+      name: "stub",
+      model: "stub-editor",
+      generateText,
+      streamText: vi.fn(),
+      generateReview: vi.fn(),
+    });
+
+    const response = await POST(createJsonRequest(validBody));
+
+    expect(response.status).toBe(200);
+    expect(generateText).toHaveBeenCalledWith({
+      messages: expect.arrayContaining([
+        expect.objectContaining({
+          role: "system",
+          content: expect.stringContaining("Selection rewrite mode"),
+        }),
+      ]),
+    });
+    expect(generateText).toHaveBeenCalledWith({
+      messages: expect.arrayContaining([
+        expect.objectContaining({
+          role: "system",
+          content: expect.stringContaining("Return only the replacement text"),
+        }),
+      ]),
+    });
+  });
+
+  it("extracts replacement text if a model returns a structured review JSON during selection rewrite", async () => {
+    vi.mocked(getDocumentById).mockResolvedValueOnce(documentRecord);
+    vi.mocked(getPromptTemplateById).mockResolvedValueOnce({
+      ...templateRecord,
+      category: "contract_review",
+      name: "Contract Review",
+      systemPrompt: "Return only the structured review result requested by the API schema.",
+    });
+    vi.mocked(createAiProvider).mockReturnValueOnce({
+      name: "stub",
+      model: "stub-editor",
+      generateText: vi.fn(async () =>
+        JSON.stringify({
+          findings: [
+            {
+              problem: "Ambiguity",
+              reason: "The wording is underspecified.",
+              targetText: "Old text",
+              replacementText: "Old text with objective written evidence requirements.",
+            },
+          ],
+          summary: "One issue.",
+        }),
+      ),
+      streamText: vi.fn(),
+      generateReview: vi.fn(),
+    });
+
+    const response = await POST(createJsonRequest(validBody));
+
+    expect(response.status).toBe(200);
+    expect(completeAiRunWithProposals).toHaveBeenCalledWith(
+      "run_1",
+      "Old text with objective written evidence requirements.",
+      [
+        expect.objectContaining({
+          replacementText: "Old text with objective written evidence requirements.",
+          targetText: "Old text",
+        }),
+      ],
+    );
+  });
+
+  it("treats continue writing as an insert-below continuation command", async () => {
+    const generateText = vi.fn(async () => "Next paragraph that continues the selected context.");
+    vi.mocked(getDocumentById).mockResolvedValueOnce(documentRecord);
+    vi.mocked(getPromptTemplateById).mockResolvedValueOnce(templateRecord);
+    vi.mocked(createAiProvider).mockReturnValueOnce({
+      name: "stub",
+      model: "stub-editor",
+      generateText,
+      streamText: vi.fn(),
+      generateReview: vi.fn(),
+    });
+
+    const response = await POST(createJsonRequest({ ...validBody, command: "Continue writing" }));
+
+    expect(response.status).toBe(200);
+    expect(generateText).toHaveBeenCalledWith({
+      messages: expect.arrayContaining([
+        expect.objectContaining({
+          role: "system",
+          content: expect.stringContaining("Write only new continuation text"),
+        }),
+      ]),
+    });
+    expect(generateText).toHaveBeenCalledWith({
+      messages: expect.arrayContaining([
+        expect.objectContaining({
+          role: "system",
+          content: expect.stringContaining("Do not repeat the selected text"),
+        }),
+      ]),
+    });
+    expect(completeAiRunWithProposals).toHaveBeenCalledWith(
+      "run_1",
+      "Next paragraph that continues the selected context.",
+      [
+        expect.objectContaining({
+          command: "Continue writing",
+          defaultApplyMode: "insert_below",
+          replacementText: "Next paragraph that continues the selected context.",
+          targetText: "Old text",
+        }),
+      ],
+    );
+  });
+
   it("validates selected text against the reviewed draft text when provided", async () => {
     vi.mocked(getDocumentById).mockResolvedValueOnce({
       ...documentRecord,
@@ -189,6 +326,91 @@ describe("POST /api/ai/rewrite", () => {
 
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({ error: "Selected text must match exactly once in the document" });
+    expect(createAiRun).not.toHaveBeenCalled();
+    expect(completeAiRunWithProposals).not.toHaveBeenCalled();
+  });
+
+  it("allows repeated selected text when a valid occurrence index is provided", async () => {
+    vi.mocked(getDocumentById).mockResolvedValueOnce({
+      ...documentRecord,
+      plainText: "Old text appears twice. Old text appears twice.",
+    });
+    vi.mocked(getPromptTemplateById).mockResolvedValueOnce(templateRecord);
+
+    const response = await POST(createJsonRequest({ ...validBody, occurrenceIndex: 1 }));
+
+    expect(response.status).toBe(200);
+    expect(completeAiRunWithProposals).toHaveBeenCalledWith(
+      "run_1",
+      "Improved text",
+      [
+        expect.objectContaining({
+          command: "Rewrite for clarity",
+          defaultApplyMode: "replace",
+          source: "selection",
+          targetText: "Old text",
+        }),
+      ],
+    );
+  });
+
+  it("validates selected text against an explicitly empty submitted draft", async () => {
+    vi.mocked(getDocumentById).mockResolvedValueOnce({
+      ...documentRecord,
+      plainText: "Old text appears in the stale saved document.",
+    });
+    vi.mocked(getPromptTemplateById).mockResolvedValueOnce(templateRecord);
+
+    const response = await POST(createJsonRequest({ ...validBody, documentText: "" }));
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "Selected text must match exactly once in the document" });
+    expect(createAiRun).not.toHaveBeenCalled();
+    expect(completeAiRunWithProposals).not.toHaveBeenCalled();
+  });
+
+  it("persists captured selection range metadata on selection proposals", async () => {
+    vi.mocked(getDocumentById).mockResolvedValueOnce(documentRecord);
+    vi.mocked(getPromptTemplateById).mockResolvedValueOnce(templateRecord);
+
+    const response = await POST(
+      createJsonRequest({
+        ...validBody,
+        selectionRange: { from: 1, to: 9 },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(createAiRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        inputSummaryJson: expect.objectContaining({
+          selectionRange: { from: 1, to: 9 },
+        }),
+      }),
+    );
+    expect(completeAiRunWithProposals).toHaveBeenCalledWith(
+      "run_1",
+      "Improved text",
+      [
+        expect.objectContaining({
+          targetFrom: 1,
+          targetTo: 9,
+        }),
+      ],
+    );
+  });
+
+  it("returns 400 when occurrence index is outside the selected text matches", async () => {
+    vi.mocked(getDocumentById).mockResolvedValueOnce({
+      ...documentRecord,
+      plainText: "Old text appears once.",
+    });
+    vi.mocked(getPromptTemplateById).mockResolvedValueOnce(templateRecord);
+
+    const response = await POST(createJsonRequest({ ...validBody, occurrenceIndex: 2 }));
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "Selected text occurrence was not found in the document" });
     expect(createAiRun).not.toHaveBeenCalled();
     expect(completeAiRunWithProposals).not.toHaveBeenCalled();
   });

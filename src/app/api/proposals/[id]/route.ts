@@ -4,6 +4,7 @@ import { updateProposalStatus } from "@/features/proposals/proposal-repository";
 
 const proposalStatusPayloadSchema = z.object({
   status: z.enum(["pending", "accepted", "rejected"]),
+  appliedMode: z.enum(["replace", "insert_below"]).optional(),
 });
 
 type ProposalRouteContext = {
@@ -17,7 +18,7 @@ export async function PATCH(request: Request, context: ProposalRouteContext) {
   }
 
   const { id } = await context.params;
-  const proposal = await updateProposalStatus(id, result.data.status);
+  const proposal = await updateProposalStatus(id, result.data.status, result.data.appliedMode);
   if (!proposal) {
     return NextResponse.json({ error: "Proposal not found" }, { status: 404 });
   }

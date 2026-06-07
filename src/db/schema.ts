@@ -68,6 +68,13 @@ export const aiProposals = sqliteTable(
     targetText: text("target_text").notNull(),
     replacementText: text("replacement_text").notNull(),
     explanation: text("explanation").notNull(),
+    source: text("source", { enum: ["selection", "review"] }).notNull().default("review"),
+    command: text("command"),
+    occurrenceIndex: integer("occurrence_index"),
+    targetFrom: integer("target_from"),
+    targetTo: integer("target_to"),
+    defaultApplyMode: text("default_apply_mode", { enum: ["replace", "insert_below"] }).notNull().default("replace"),
+    appliedMode: text("applied_mode", { enum: ["replace", "insert_below"] }),
     status: text("status", { enum: ["pending", "accepted", "rejected"] }).notNull().default("pending"),
     createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
     updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
@@ -75,7 +82,45 @@ export const aiProposals = sqliteTable(
   (table) => [
     index("ai_proposals_ai_run_id_idx").on(table.aiRunId),
     index("ai_proposals_document_id_idx").on(table.documentId),
+    check("ai_proposals_source_check", sql`${table.source} in ('selection', 'review')`),
+    check("ai_proposals_default_apply_mode_check", sql`${table.defaultApplyMode} in ('replace', 'insert_below')`),
+    check(
+      "ai_proposals_applied_mode_check",
+      sql`${table.appliedMode} is null or ${table.appliedMode} in ('replace', 'insert_below')`,
+    ),
     check("ai_proposals_status_check", sql`${table.status} in ('pending', 'accepted', 'rejected')`),
+  ],
+);
+
+export const appSettings = sqliteTable(
+  "app_settings",
+  {
+    id: text("id").primaryKey(),
+    aiProvider: text("ai_provider", { enum: ["stub", "openai", "coredot", "anthropic", "gemini"] })
+      .notNull()
+      .default("stub"),
+    aiModel: text("ai_model").notNull().default("stub-editor"),
+    aiBaseUrl: text("ai_base_url"),
+    aiMaxCompletionTokens: integer("ai_max_completion_tokens"),
+    aiReasoningEffort: text("ai_reasoning_effort", {
+      enum: ["none", "minimal", "low", "medium", "high", "xhigh"],
+    }),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+    updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+  },
+  (table) => [
+    check(
+      "app_settings_ai_provider_check",
+      sql`${table.aiProvider} in ('stub', 'openai', 'coredot', 'anthropic', 'gemini')`,
+    ),
+    check(
+      "app_settings_ai_reasoning_effort_check",
+      sql`${table.aiReasoningEffort} is null or ${table.aiReasoningEffort} in ('none', 'minimal', 'low', 'medium', 'high', 'xhigh')`,
+    ),
+    check(
+      "app_settings_ai_max_completion_tokens_check",
+      sql`${table.aiMaxCompletionTokens} is null or ${table.aiMaxCompletionTokens} > 0`,
+    ),
   ],
 );
 
@@ -98,3 +143,5 @@ export type AiRunRecord = typeof aiRuns.$inferSelect;
 export type NewAiRunRecord = typeof aiRuns.$inferInsert;
 export type AiProposalRecord = typeof aiProposals.$inferSelect;
 export type NewAiProposalRecord = typeof aiProposals.$inferInsert;
+export type AppSettingsRecord = typeof appSettings.$inferSelect;
+export type NewAppSettingsRecord = typeof appSettings.$inferInsert;

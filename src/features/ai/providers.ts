@@ -1,9 +1,18 @@
 import { createOpenAI, openai } from "@ai-sdk/openai";
 import { generateObject, generateText, streamText as streamAiText } from "ai";
+import type { AiReasoningEffort } from "./ai-settings-repository";
+import { normalizeCoreTodayBaseUrl } from "./core-today-base-url";
 import type { AiMessage, ReviewResult } from "./types";
 import { reviewResultSchema } from "./types";
 
-export type AiProviderName = "stub" | "openai" | "coredot";
+export type AiProviderName = "stub" | "openai" | "coredot" | "anthropic" | "gemini";
+export type AiProviderSettings = {
+  aiBaseUrl?: string | null;
+  aiMaxCompletionTokens?: number | null;
+  aiModel?: string | null;
+  aiProvider?: AiProviderName | null;
+  aiReasoningEffort?: AiReasoningEffort | null;
+};
 
 export type AiProvider = {
   name: AiProviderName;
@@ -13,26 +22,35 @@ export type AiProvider = {
   generateReview(input: { messages: AiMessage[] }): Promise<ReviewResult>;
 };
 
-export function createAiProvider(): AiProvider {
-  const provider = process.env.AI_PROVIDER ?? "stub";
+export function createAiProvider(settings?: AiProviderSettings): AiProvider {
+  const provider = settings?.aiProvider ?? process.env.AI_PROVIDER ?? "stub";
 
   if (provider === "stub") {
     return createStubAiProvider();
   }
 
   if (provider === "openai") {
-    return createOpenAiProvider();
+    return createOpenAiProvider(settings);
   }
 
   if (provider === "coredot") {
-    return createCoreDotProvider();
+    return createCoreDotProvider(settings);
+  }
+
+  if (provider === "anthropic") {
+    return createCoreDotAnthropicProvider(settings);
+  }
+
+  if (provider === "gemini") {
+    return createCoreDotGeminiProvider(settings);
   }
 
   throw new Error(`Unsupported AI_PROVIDER: ${provider}`);
 }
 
-function createOpenAiProvider(): AiProvider {
-  const model = process.env.OPENAI_MODEL ?? "gpt-4.1-mini";
+function createOpenAiProvider(settings?: AiProviderSettings): AiProvider {
+  const model = settings?.aiModel ?? process.env.OPENAI_MODEL ?? "gpt-4.1-mini";
+  const generationSettings = createGenerationSettings(undefined, settings?.aiReasoningEffort);
 
   return {
     name: "openai",
@@ -41,6 +59,7 @@ function createOpenAiProvider(): AiProvider {
       const result = await generateText({
         model: openai(model),
         messages: input.messages,
+        ...generationSettings,
       });
       return result.text;
     },
@@ -48,6 +67,7 @@ function createOpenAiProvider(): AiProvider {
       const result = streamAiText({
         model: openai(model),
         messages: input.messages,
+        ...generationSettings,
       });
       return result.toTextStreamResponse();
     },
@@ -56,23 +76,24 @@ function createOpenAiProvider(): AiProvider {
         model: openai(model),
         messages: input.messages,
         schema: reviewResultSchema,
+        ...generationSettings,
       });
       return result.object;
     },
   };
 }
 
-function createCoreDotProvider(): AiProvider {
-  const apiKey = process.env.COREDOT_API_KEY;
-  if (!apiKey) {
-    throw new Error("COREDOT_API_KEY is required when AI_PROVIDER=coredot");
-  }
+function createCoreDotProvider(settings?: AiProviderSettings): AiProvider {
+  const baseURL = normalizeCoreTodayBaseUrl("coredot", settings?.aiBaseUrl ?? process.env.COREDOT_BASE_URL);
+  const apiKey = requireCoreDotApiKey("coredot");
 
-  const model = process.env.COREDOT_MODEL ?? "gpt-5-nano";
-  const maxOutputTokens = readOptionalPositiveInteger(process.env.COREDOT_MAX_COMPLETION_TOKENS);
+  const model = settings?.aiModel ?? process.env.COREDOT_MODEL ?? "gpt-5-nano";
+  const maxOutputTokens =
+    settings?.aiMaxCompletionTokens ?? readOptionalPositiveInteger(process.env.COREDOT_MAX_COMPLETION_TOKENS);
+  const generationSettings = createGenerationSettings(maxOutputTokens, settings?.aiReasoningEffort);
   const coreOpenAi = createOpenAI({
     apiKey,
-    baseURL: process.env.COREDOT_BASE_URL ?? "https://api.core.today/llm/openai/v1",
+    baseURL,
   });
 
   return {
@@ -82,7 +103,7 @@ function createCoreDotProvider(): AiProvider {
       const result = await generateText({
         model: coreOpenAi(model),
         messages: input.messages,
-        maxOutputTokens,
+        ...generationSettings,
       });
       return result.text;
     },
@@ -90,7 +111,7 @@ function createCoreDotProvider(): AiProvider {
       const result = streamAiText({
         model: coreOpenAi(model),
         messages: input.messages,
-        maxOutputTokens,
+        ...generationSettings,
       });
       return result.toTextStreamResponse();
     },
@@ -99,10 +120,68 @@ function createCoreDotProvider(): AiProvider {
         model: coreOpenAi(model),
         messages: input.messages,
         schema: reviewResultSchema,
-        maxOutputTokens,
+        ...generationSettings,
       });
       return result.object;
     },
+  };
+}
+
+function createCoreDotAnthropicProvider(settings?: AiProviderSettings): AiProvider {
+  const baseUrl = normalizeCoreTodayBaseUrl(
+    "anthropic",
+    settings?.aiBaseUrl ?? process.env.COREDOT_ANTHROPIC_BASE_URL,
+  );
+  const apiKey = requireCoreDotApiKey("anthropic");
+  const model = settings?.aiModel ?? process.env.COREDOT_ANTHROPIC_MODEL ?? "claude-sonnet-4.5";
+  const maxOutputTokens =
+    settings?.aiMaxCompletionTokens ?? readOptionalPositiveInteger(process.env.COREDOT_MAX_COMPLETION_TOKENS) ?? 32768;
+
+  return {
+    name: "anthropic",
+    model,
+    async generateText(input) {
+      return postAnthropicMessage({ apiKey, baseUrl, input, maxOutputTokens, model });
+    },
+    async streamText(input) {
+      return new Response(await postAnthropicMessage({ apiKey, baseUrl, input, maxOutputTokens, model }), {
+        headers: { "content-type": "text/plain; charset=utf-8" },
+      });
+    },
+    async generateReview(input) {
+      return parseReviewResult(await postAnthropicMessage({ apiKey, baseUrl, input, maxOutputTokens, model }));
+    },
+  };
+}
+
+function createCoreDotGeminiProvider(settings?: AiProviderSettings): AiProvider {
+  const baseUrl = normalizeCoreTodayBaseUrl("gemini", settings?.aiBaseUrl ?? process.env.COREDOT_GEMINI_BASE_URL);
+  const apiKey = requireCoreDotApiKey("gemini");
+  const model = settings?.aiModel ?? process.env.COREDOT_GEMINI_MODEL ?? "gemini-2.5-flash";
+  const maxOutputTokens =
+    settings?.aiMaxCompletionTokens ?? readOptionalPositiveInteger(process.env.COREDOT_MAX_COMPLETION_TOKENS) ?? 32768;
+
+  return {
+    name: "gemini",
+    model,
+    async generateText(input) {
+      return postGeminiMessage({ apiKey, baseUrl, input, maxOutputTokens, model });
+    },
+    async streamText(input) {
+      return new Response(await postGeminiMessage({ apiKey, baseUrl, input, maxOutputTokens, model }), {
+        headers: { "content-type": "text/plain; charset=utf-8" },
+      });
+    },
+    async generateReview(input) {
+      return parseReviewResult(await postGeminiMessage({ apiKey, baseUrl, input, maxOutputTokens, model }));
+    },
+  };
+}
+
+function createGenerationSettings(maxOutputTokens?: number, reasoningEffort?: AiReasoningEffort | null) {
+  return {
+    ...(maxOutputTokens ? { maxOutputTokens } : {}),
+    ...(reasoningEffort ? { providerOptions: { openai: { reasoningEffort } } } : {}),
   };
 }
 
@@ -110,6 +189,10 @@ function createStubAiProvider(): AiProvider {
   const generateStubText = (input: { messages: AiMessage[] }) => {
     const selectedText = extractSection(input.messages, "Selected text") || extractSection(input.messages, "Document text");
     const command = extractSection(input.messages, "Command") || "Rewrite";
+    if (command.toLowerCase().includes("continue writing")) {
+      return "Stub continuation: Add the next sentence or paragraph here.";
+    }
+
     return `Stub rewrite: ${selectedText || "No selected text provided."}\n\n[Command: ${command}]`;
   };
 
@@ -141,6 +224,157 @@ function createStubAiProvider(): AiProvider {
       };
     },
   };
+}
+
+async function postAnthropicMessage(input: {
+  apiKey: string;
+  baseUrl: string;
+  input: { messages: AiMessage[] };
+  maxOutputTokens: number;
+  model: string;
+}) {
+  const system = input.input.messages
+    .filter((message) => message.role === "system")
+    .map((message) => message.content)
+    .join("\n\n");
+  const messages = input.input.messages
+    .filter((message) => message.role !== "system")
+    .map((message) => ({ role: "user", content: message.content }));
+
+  const response = await fetch(joinUrl(input.baseUrl, "messages"), {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${input.apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: input.model,
+      max_tokens: input.maxOutputTokens,
+      ...(system ? { system } : {}),
+      messages: messages.length > 0 ? messages : [{ role: "user", content: "" }],
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Core.Today Anthropic request failed with status ${response.status}`);
+  }
+
+  return parseAnthropicText(await response.json());
+}
+
+async function postGeminiMessage(input: {
+  apiKey: string;
+  baseUrl: string;
+  input: { messages: AiMessage[] };
+  maxOutputTokens: number;
+  model: string;
+}) {
+  const system = input.input.messages
+    .filter((message) => message.role === "system")
+    .map((message) => message.content)
+    .join("\n\n");
+  const userText = input.input.messages
+    .filter((message) => message.role !== "system")
+    .map((message) => message.content)
+    .join("\n\n");
+
+  const response = await fetch(joinUrl(input.baseUrl, `models/${encodeURIComponent(input.model)}:generateContent`), {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${input.apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      ...(system ? { systemInstruction: { parts: [{ text: system }] } } : {}),
+      contents: [{ role: "user", parts: [{ text: userText }] }],
+      generationConfig: { maxOutputTokens: input.maxOutputTokens },
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Core.Today Gemini request failed with status ${response.status}`);
+  }
+
+  return parseGeminiText(await response.json());
+}
+
+function parseAnthropicText(value: unknown) {
+  if (!value || typeof value !== "object" || !("content" in value) || !Array.isArray(value.content)) {
+    throw new Error("Invalid Core.Today Anthropic response");
+  }
+
+  const text = value.content
+    .map((part) => (part && typeof part === "object" && "text" in part && typeof part.text === "string" ? part.text : ""))
+    .join("");
+
+  if (!text) {
+    throw new Error("Core.Today Anthropic response did not include text");
+  }
+
+  return text;
+}
+
+function parseGeminiText(value: unknown) {
+  if (!value || typeof value !== "object" || !("candidates" in value) || !Array.isArray(value.candidates)) {
+    throw new Error("Invalid Core.Today Gemini response");
+  }
+
+  const text = value.candidates
+    .flatMap((candidate) => {
+      if (!candidate || typeof candidate !== "object" || !("content" in candidate)) {
+        return [];
+      }
+
+      const content = candidate.content;
+      if (!content || typeof content !== "object" || !("parts" in content) || !Array.isArray(content.parts)) {
+        return [];
+      }
+
+      return content.parts.map((part: unknown) =>
+        part && typeof part === "object" && "text" in part && typeof part.text === "string" ? part.text : "",
+      );
+    })
+    .join("");
+
+  if (!text) {
+    throw new Error("Core.Today Gemini response did not include text");
+  }
+
+  return text;
+}
+
+function parseReviewResult(text: string) {
+  const parsed = parseJsonFromText(text);
+  const result = reviewResultSchema.safeParse(parsed);
+  if (!result.success) {
+    throw new Error("AI review response did not match the expected schema");
+  }
+
+  return result.data;
+}
+
+function parseJsonFromText(text: string) {
+  const stripped = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "");
+  const startIndex = stripped.indexOf("{");
+  const endIndex = stripped.lastIndexOf("}");
+  if (startIndex === -1 || endIndex === -1 || endIndex <= startIndex) {
+    throw new Error("AI response did not include JSON");
+  }
+
+  return JSON.parse(stripped.slice(startIndex, endIndex + 1));
+}
+
+function joinUrl(baseUrl: string, path: string) {
+  return `${baseUrl.replace(/\/+$/, "")}/${path.replace(/^\/+/, "")}`;
+}
+
+function requireCoreDotApiKey(provider: AiProviderName) {
+  const apiKey = process.env.COREDOT_API_KEY;
+  if (!apiKey) {
+    throw new Error(`COREDOT_API_KEY is required when AI_PROVIDER=${provider}`);
+  }
+
+  return apiKey;
 }
 
 function extractSection(messages: AiMessage[], section: string): string {

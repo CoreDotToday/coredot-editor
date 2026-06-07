@@ -6,6 +6,14 @@ export const aiCommandPayloadSchema = z.object({
   command: z.string().min(1),
   variables: z.record(z.string(), z.unknown()).default({}),
   selectedText: z.string().default(""),
+  occurrenceIndex: z.number().int().nonnegative().optional(),
+  selectionRange: z
+    .object({
+      from: z.number().int().nonnegative(),
+      to: z.number().int().nonnegative(),
+    })
+    .refine((range) => range.to >= range.from)
+    .optional(),
   beforeContext: z.string().default(""),
   afterContext: z.string().default(""),
   documentText: z.string().default(""),

@@ -12,7 +12,13 @@ type CreateAiRunInput = Pick<
 type FinalizeAiRunProposalInput = Pick<
   NewAiProposalRecord,
   "documentId" | "targetText" | "replacementText" | "explanation"
->;
+> &
+  Partial<
+    Pick<
+      NewAiProposalRecord,
+      "source" | "command" | "occurrenceIndex" | "targetFrom" | "targetTo" | "defaultApplyMode"
+    >
+  >;
 
 export function createAiRunRepository(database: AiRunDatabase = db) {
   return {

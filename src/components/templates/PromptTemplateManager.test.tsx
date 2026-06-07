@@ -68,9 +68,9 @@ describe("PromptTemplateManager", () => {
       />,
     );
 
-    await user.clear(screen.getByLabelText("Name"));
-    await user.type(screen.getByLabelText("Name"), "Strategy Review v2");
-    await user.click(screen.getByRole("button", { name: "Save" }));
+    await user.clear(screen.getByLabelText("이름"));
+    await user.type(screen.getByLabelText("이름"), "Strategy Review v2");
+    await user.click(screen.getByRole("button", { name: "저장" }));
     await user.click(screen.getByRole("button", { name: /Board Review/ }));
 
     await act(async () => {
@@ -84,7 +84,7 @@ describe("PromptTemplateManager", () => {
       await deferredSave.promise;
     });
 
-    expect(screen.getByLabelText("Name")).toHaveValue("Board Review");
+    expect(screen.getByLabelText("이름")).toHaveValue("Board Review");
     expect(screen.getByDisplayValue("You are a board editor.")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Strategy Review v2/ })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Strategy Review/ })).toBeInTheDocument();
@@ -106,14 +106,14 @@ describe("PromptTemplateManager", () => {
 
     render(<PromptTemplateManager templates={[createTemplate()]} />);
 
-    await user.click(screen.getByRole("button", { name: "New template" }));
-    await user.clear(screen.getByLabelText("Name"));
-    await user.type(screen.getByLabelText("Name"), "Board Brief");
-    await user.clear(screen.getByLabelText("Description"));
-    await user.type(screen.getByLabelText("Description"), "Draft board brief");
-    await user.clear(screen.getByLabelText("System prompt"));
-    await user.type(screen.getByLabelText("System prompt"), "You write board briefs.");
-    await user.click(screen.getByRole("button", { name: "Save" }));
+    await user.click(screen.getByRole("button", { name: "새 템플릿" }));
+    await user.clear(screen.getByLabelText("이름"));
+    await user.type(screen.getByLabelText("이름"), "Board Brief");
+    await user.clear(screen.getByLabelText("설명"));
+    await user.type(screen.getByLabelText("설명"), "Draft board brief");
+    await user.clear(screen.getByLabelText("시스템 프롬프트"));
+    await user.type(screen.getByLabelText("시스템 프롬프트"), "You write board briefs.");
+    await user.click(screen.getByRole("button", { name: "저장" }));
 
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/templates",
@@ -121,7 +121,7 @@ describe("PromptTemplateManager", () => {
         method: "POST",
       }),
     );
-    expect(screen.getByLabelText("Name")).toHaveValue("Board Brief");
+    expect(screen.getByLabelText("이름")).toHaveValue("Board Brief");
   });
 
   it("continues saving a pending created template with PUT after local edits", async () => {
@@ -147,13 +147,13 @@ describe("PromptTemplateManager", () => {
 
     render(<PromptTemplateManager templates={[createTemplate()]} />);
 
-    await user.click(screen.getByRole("button", { name: "New template" }));
-    await user.clear(screen.getByLabelText("Name"));
-    await user.type(screen.getByLabelText("Name"), "Board Brief");
-    await user.clear(screen.getByLabelText("System prompt"));
-    await user.type(screen.getByLabelText("System prompt"), "You write board briefs.");
-    await user.click(screen.getByRole("button", { name: "Save" }));
-    await user.type(screen.getByLabelText("Name"), " v2");
+    await user.click(screen.getByRole("button", { name: "새 템플릿" }));
+    await user.clear(screen.getByLabelText("이름"));
+    await user.type(screen.getByLabelText("이름"), "Board Brief");
+    await user.clear(screen.getByLabelText("시스템 프롬프트"));
+    await user.type(screen.getByLabelText("시스템 프롬프트"), "You write board briefs.");
+    await user.click(screen.getByRole("button", { name: "저장" }));
+    await user.type(screen.getByLabelText("이름"), " v2");
 
     await act(async () => {
       deferredCreate.resolve(
@@ -174,7 +174,7 @@ describe("PromptTemplateManager", () => {
       await deferredCreate.promise;
     });
 
-    await user.click(screen.getByRole("button", { name: "Save" }));
+    await user.click(screen.getByRole("button", { name: "저장" }));
 
     expect(fetchMock).toHaveBeenNthCalledWith(1, "/api/templates", expect.objectContaining({ method: "POST" }));
     expect(fetchMock).toHaveBeenNthCalledWith(
@@ -191,15 +191,15 @@ describe("PromptTemplateManager", () => {
 
     render(<PromptTemplateManager templates={[createTemplate()]} />);
 
-    await user.click(screen.getByRole("button", { name: "New template" }));
-    await user.clear(screen.getByLabelText("Name"));
-    await user.type(screen.getByLabelText("Name"), "Board Brief");
-    await user.clear(screen.getByLabelText("System prompt"));
-    await user.type(screen.getByLabelText("System prompt"), "You write board briefs.");
-    await user.click(screen.getByRole("button", { name: "Save" }));
-    await user.type(screen.getByLabelText("Name"), " v2");
+    await user.click(screen.getByRole("button", { name: "새 템플릿" }));
+    await user.clear(screen.getByLabelText("이름"));
+    await user.type(screen.getByLabelText("이름"), "Board Brief");
+    await user.clear(screen.getByLabelText("시스템 프롬프트"));
+    await user.type(screen.getByLabelText("시스템 프롬프트"), "You write board briefs.");
+    await user.click(screen.getByRole("button", { name: "저장" }));
+    await user.type(screen.getByLabelText("이름"), " v2");
 
-    const saveButton = screen.getByRole("button", { name: /Save|Saving/ });
+    const saveButton = screen.getByRole("button", { name: /저장|저장 중/ });
     expect(saveButton).toBeDisabled();
 
     await user.click(saveButton);
@@ -213,10 +213,10 @@ describe("PromptTemplateManager", () => {
 
     render(<PromptTemplateManager templates={[createTemplate()]} />);
 
-    await user.clear(screen.getByLabelText("Name"));
-    await user.clear(screen.getByLabelText("System prompt"));
-    await user.clear(screen.getByLabelText("Variable schema JSON"));
-    fireEvent.change(screen.getByLabelText("Variable schema JSON"), {
+    await user.clear(screen.getByLabelText("이름"));
+    await user.clear(screen.getByLabelText("시스템 프롬프트"));
+    await user.clear(screen.getByLabelText("변수 스키마 JSON"));
+    fireEvent.change(screen.getByLabelText("변수 스키마 JSON"), {
       target: {
         value: JSON.stringify({
           fields: [{ name: "tone", label: "Tone", type: "select", required: false }],
@@ -224,11 +224,11 @@ describe("PromptTemplateManager", () => {
         }),
       },
     });
-    await user.click(screen.getByRole("button", { name: "Save" }));
+    await user.click(screen.getByRole("button", { name: "저장" }));
 
-    expect(screen.getByText("Name is required")).toBeInTheDocument();
-    expect(screen.getByText("System prompt is required")).toBeInTheDocument();
-    expect(screen.getByText("Select fields require at least one option")).toBeInTheDocument();
+    expect(screen.getByText("이름은 필수입니다.")).toBeInTheDocument();
+    expect(screen.getByText("시스템 프롬프트는 필수입니다.")).toBeInTheDocument();
+    expect(screen.getByText("선택 필드에는 옵션이 하나 이상 필요합니다.")).toBeInTheDocument();
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -267,10 +267,10 @@ describe("PromptTemplateManager", () => {
     );
 
     await user.click(screen.getByRole("button", { name: /Strategy Review/ }));
-    await user.click(screen.getByRole("button", { name: "Archive" }));
+    await user.click(screen.getByRole("button", { name: "보관" }));
 
     expect(fetchMock).toHaveBeenCalledWith("/api/templates/tpl_1", expect.objectContaining({ method: "DELETE" }));
     expect(screen.queryByRole("button", { name: /Strategy Review/ })).not.toBeInTheDocument();
-    expect(screen.getByLabelText("Name")).toHaveValue("Board Review");
+    expect(screen.getByLabelText("이름")).toHaveValue("Board Review");
   });
 });

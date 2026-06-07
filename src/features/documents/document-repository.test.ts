@@ -52,6 +52,30 @@ describe("document repository", () => {
     expect(documents.some((item) => item.id === document.id)).toBe(true);
   });
 
+  it("creates a document from converted Tiptap content and derives plain text", async () => {
+    const db = await createIsolatedDocumentDb();
+    const { createDocumentFromContent } = createDocumentRepository(db);
+
+    const document = await createDocumentFromContent("Imported Contract", {
+      type: "doc",
+      content: [
+        { type: "heading", attrs: { level: 1 }, content: [{ type: "text", text: "Contract" }] },
+        { type: "paragraph", content: [{ type: "text", text: "Imported body" }] },
+      ],
+    });
+
+    expect(document.title).toBe("Imported Contract");
+    expect(document.contentJson).toMatchObject({
+      type: "doc",
+      content: [
+        { type: "heading", attrs: { level: 1 }, content: [{ type: "text", text: "Contract" }] },
+        { type: "paragraph", content: [{ type: "text", text: "Imported body" }] },
+      ],
+    });
+    expect(document.plainText).toBe("Contract\nImported body");
+    expect(document.status).toBe("draft");
+  });
+
   it("archives an existing document and removes it from draft listings", async () => {
     const db = await createIsolatedDocumentDb();
     const { archiveDocument, createDocumentDraft, getDocumentById, listDocuments } = createDocumentRepository(db);

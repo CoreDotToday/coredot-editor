@@ -1,7 +1,7 @@
 "use client";
 
 import type { PromptTemplateRecord } from "@/db/schema";
-import { editorMessages, type EditorMessages } from "@/features/i18n/editor-language";
+import { DEFAULT_EDITOR_LANGUAGE, editorMessages, type EditorMessages } from "@/features/i18n/editor-language";
 
 export type PromptTemplateOption = Pick<PromptTemplateRecord, "id" | "name" | "category" | "variableSchemaJson">;
 
@@ -16,7 +16,7 @@ type PromptTemplatePanelProps = {
 };
 
 export function PromptTemplatePanel({
-  messages = editorMessages.en.templates,
+  messages = editorMessages[DEFAULT_EDITOR_LANGUAGE].templates,
   onSelectTemplate,
   onVariableChange,
   selectedTemplateId,
@@ -131,7 +131,7 @@ export function PromptTemplatePanel({
   );
 }
 
-function getTemplateVariableLabel(
+export function getTemplateVariableLabel(
   field: PromptTemplateOption["variableSchemaJson"]["fields"][number],
   messages: EditorMessages["templates"],
 ) {
@@ -140,6 +140,22 @@ function getTemplateVariableLabel(
 
   if (normalizedName.includes("audience") || normalizedLabel.includes("audience")) {
     return messages.variableLabels.audience;
+  }
+
+  if (
+    normalizedName.includes("partyperspective") ||
+    normalizedLabel.includes("party perspective") ||
+    normalizedLabel.includes("perspective")
+  ) {
+    return messages.variableLabels.partyPerspective;
+  }
+
+  if (normalizedName.includes("contracttype") || normalizedLabel.includes("contract type")) {
+    return messages.variableLabels.contractType;
+  }
+
+  if (normalizedName.includes("risktolerance") || normalizedLabel.includes("risk tolerance")) {
+    return messages.variableLabels.riskTolerance;
   }
 
   if (

@@ -7,7 +7,13 @@ type ProposalDatabase = typeof db;
 type CreateProposalInput = Pick<
   NewAiProposalRecord,
   "aiRunId" | "documentId" | "targetText" | "replacementText" | "explanation"
->;
+> &
+  Partial<
+    Pick<
+      NewAiProposalRecord,
+      "source" | "command" | "occurrenceIndex" | "targetFrom" | "targetTo" | "defaultApplyMode"
+    >
+  >;
 
 export function createProposalRepository(database: ProposalDatabase = db) {
   return {
@@ -34,10 +40,15 @@ export function createProposalRepository(database: ProposalDatabase = db) {
         .orderBy(desc(aiProposals.createdAt));
     },
 
-    async updateProposalStatus(id: string, status: "pending" | "accepted" | "rejected") {
+    async updateProposalStatus(
+      id: string,
+      status: "pending" | "accepted" | "rejected",
+      appliedMode?: "replace" | "insert_below",
+    ) {
       const [proposal] = await database
         .update(aiProposals)
         .set({
+          appliedMode: status === "accepted" ? appliedMode ?? null : null,
           status,
           updatedAt: new Date(),
         })
