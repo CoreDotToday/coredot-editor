@@ -89,13 +89,13 @@ Add these scripts:
 
 ```json
 {
-  "docker:rag:up": "docker compose --env-file .env.docker.example -f docker-compose.rag.yml up -d",
-  "docker:rag:down": "docker compose --env-file .env.docker.example -f docker-compose.rag.yml down",
-  "docker:rag:verify": "bash scripts/rag/verify-docker-env.sh"
+  "docker:rag:up": "bash scripts/rag/verify-docker-env.sh up",
+  "docker:rag:down": "bash scripts/rag/verify-docker-env.sh down",
+  "docker:rag:verify": "bash scripts/rag/verify-docker-env.sh verify"
 }
 ```
 
-The verification script can read `.env.docker` when present and fall back to `.env.docker.example`. This lets contributors override ports without modifying tracked files.
+All three modes use `.env.docker` when present and fall back to `.env.docker.example`. This lets contributors override ports without modifying tracked files while keeping `up`, `down`, and `verify` consistent.
 
 ## Data And Secrets
 
