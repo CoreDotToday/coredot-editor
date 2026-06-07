@@ -199,6 +199,8 @@ docs/                    Public maintainer and adopter documentation
 
 Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the data flow and extension points. Read [docs/PLUGINS.md](docs/PLUGINS.md) before adding editor plugins. Read [docs/PROMPTING.md](docs/PROMPTING.md) before replacing prompt templates.
 
+Read [docs/ROADMAP.md](docs/ROADMAP.md) for the recommended post-v1 build order.
+
 ## Using This In Another Project
 
 Start with [docs/ADOPTION.md](docs/ADOPTION.md). The short version:

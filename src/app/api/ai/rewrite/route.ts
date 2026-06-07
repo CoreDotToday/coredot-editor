@@ -81,7 +81,8 @@ export async function POST(request: Request) {
       documentText: reviewedText,
       systemPrompt: buildSelectionRewriteSystemPrompt(template.systemPrompt, body.command),
     });
-    const replacementText = normalizeSelectionRewriteText(await provider.generateText({ messages }));
+    const rewriteResult = normalizeSelectionRewriteResult(await provider.generateText({ messages }));
+    const { explanation, replacementText } = rewriteResult;
     const finalizedRun = await completeAiRunWithProposals(run.id, replacementText, [
       {
         command: body.command,
@@ -93,7 +94,7 @@ export async function POST(request: Request) {
         targetFrom: body.selectionRange?.from,
         targetTo: body.selectionRange?.to,
         replacementText,
-        explanation: "AI rewrite suggestion.",
+        explanation,
       },
     ]);
 
@@ -106,7 +107,11 @@ export async function POST(request: Request) {
 
 function getDefaultApplyModeForCommand(command: string) {
   const normalizedCommand = command.toLowerCase();
-  return normalizedCommand.includes("translate") || normalizedCommand.includes("continue writing")
+  return normalizedCommand.includes("translate") ||
+    normalizedCommand.includes("continue writing") ||
+    normalizedCommand.includes("summarize") ||
+    normalizedCommand.includes("outline") ||
+    normalizedCommand.includes("key risks")
     ? "insert_below"
     : "replace";
 }
@@ -125,8 +130,10 @@ function buildSelectionRewriteSystemPrompt(templateSystemPrompt: string, command
     [
       "## Selection rewrite mode",
       "You are editing selected document text for this request.",
-      "Return only the replacement text for the selected text.",
-      "Do not return JSON, findings, summary, markdown fences, labels, explanations, or acceptance instructions.",
+      "Return only a compact JSON object with this shape: {\"replacementText\":\"...\",\"explanation\":\"...\"}.",
+      "Use replacementText for the exact text that should be proposed in the document.",
+      "Use explanation for one short sentence explaining why the edit helps.",
+      "Do not return markdown fences, labels, findings, summary, or acceptance instructions.",
       "Use the selected prompt template below only for domain context, terminology, risk criteria, and tone.",
       "Any template instruction that asks for a review schema, findings, summary, or structured API output is superseded for this selection rewrite request.",
     ].join("\n"),
@@ -135,11 +142,14 @@ function buildSelectionRewriteSystemPrompt(templateSystemPrompt: string, command
   ].filter(Boolean).join("\n\n");
 }
 
-function normalizeSelectionRewriteText(rawText: string) {
+function normalizeSelectionRewriteResult(rawText: string) {
   const parsed = parsePossibleJsonObject(stripJsonFence(rawText.trim()));
-  const replacementText = getStructuredReplacementText(parsed);
+  const structuredResult = getStructuredRewriteResult(parsed);
 
-  return replacementText ?? rawText;
+  return structuredResult ?? {
+    explanation: "AI rewrite suggestion.",
+    replacementText: rawText,
+  };
 }
 
 function stripJsonFence(text: string) {
@@ -158,13 +168,19 @@ function parsePossibleJsonObject(text: string): unknown {
   }
 }
 
-function getStructuredReplacementText(value: unknown) {
+function getStructuredRewriteResult(value: unknown): { explanation: string; replacementText: string } | null {
   if (!value || typeof value !== "object") {
     return null;
   }
 
   if ("replacementText" in value && typeof value.replacementText === "string") {
-    return value.replacementText;
+    return {
+      explanation:
+        "explanation" in value && typeof value.explanation === "string" && value.explanation.trim()
+          ? value.explanation
+          : "AI rewrite suggestion.",
+      replacementText: value.replacementText,
+    };
   }
 
   if (!("findings" in value) || !Array.isArray(value.findings)) {
@@ -172,9 +188,16 @@ function getStructuredReplacementText(value: unknown) {
   }
 
   const finding = value.findings.find(
-    (item): item is { replacementText: string } =>
+    (item): item is { problem?: string; reason?: string; replacementText: string } =>
       Boolean(item) && typeof item === "object" && "replacementText" in item && typeof item.replacementText === "string",
   );
 
-  return finding?.replacementText ?? null;
+  if (!finding) {
+    return null;
+  }
+
+  return {
+    explanation: finding.reason?.trim() || finding.problem?.trim() || "AI rewrite suggestion.",
+    replacementText: finding.replacementText,
+  };
 }

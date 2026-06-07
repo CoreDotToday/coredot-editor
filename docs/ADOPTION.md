@@ -38,7 +38,7 @@ Each template has:
 
 The schema drives both the prompt template panel and route validation. Keep required variables explicit so users understand what they need to provide before running review.
 
-Prompt templates also need to preserve the AI output contract. Review prompts must request exact `targetText` values from the provided document and drop-in `replacementText` edits. Rewrite and translation prompts must return only replacement text, because the returned string is stored directly as the proposal body. See [PROMPTING.md](PROMPTING.md) before replacing templates.
+Prompt templates also need to preserve the AI output contract. Review prompts must request exact `targetText` values from the provided document and drop-in `replacementText` edits. Rewrite and translation prompts should return `{ replacementText, explanation }` when possible, while plain text remains a backward-compatible fallback. See [PROMPTING.md](PROMPTING.md) before replacing templates.
 
 The editor renders pending proposals as inline highlights. If your fork changes the editor schema, custom nodes, or collaboration model, keep proposal range metadata (`occurrenceIndex`, `targetFrom`, `targetTo`) aligned with the way your editor maps document positions.
 

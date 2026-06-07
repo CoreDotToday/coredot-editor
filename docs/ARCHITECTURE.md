@@ -89,7 +89,7 @@ Templates store:
 
 The variable schema drives both UI input rendering and server-side validation.
 
-Prompt templates are also part of the proposal contract. Review prompts must produce exact document substrings as `targetText` and direct replacement text as `replacementText`. Rewrite and translation prompts must return only the replacement text. See [PROMPTING.md](PROMPTING.md) for the template checklist.
+Prompt templates are also part of the proposal contract. Review prompts must produce exact document substrings as `targetText` and direct replacement text as `replacementText`. Rewrite and translation prompts should return structured `{ replacementText, explanation }` output when possible, while the route still accepts plain text for provider compatibility. See [PROMPTING.md](PROMPTING.md) for the template checklist.
 
 ### AI Provider Layer
 

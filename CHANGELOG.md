@@ -4,6 +4,18 @@ All notable changes to Coredot Editor will be documented here.
 
 This project uses a simple human-written changelog. Keep entries concise and grouped by release.
 
+## Unreleased
+
+### Added
+
+- Added scope-aware quick action presets to the bottom AI command bar.
+- Added a public roadmap for post-v1 AI editor improvements.
+
+### Changed
+
+- Selection rewrite prompts now prefer structured `{ replacementText, explanation }` output while preserving plain text fallback behavior.
+- Rewrite proposals now persist model-provided explanations when available.
+
 ## 1.0.0 - 2026-06-07
 
 First v1 release of Coredot Editor as an open-source AI document editor starter.

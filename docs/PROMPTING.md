@@ -1,6 +1,6 @@
 # Prompt Template Guide
 
-Coredot Editor stores prompt templates as editable product configuration. The default templates are seeded from `src/db/seed.ts`, then sent as the system message for review and rewrite requests.
+Coredot Editor stores prompt templates as editable product configuration. The default templates are seeded from `src/db/seed.ts`, then used as the review system prompt or embedded as rewrite-domain context depending on the route.
 
 This guide documents the contract downstream projects should preserve when replacing prompts.
 
@@ -8,7 +8,7 @@ This guide documents the contract downstream projects should preserve when repla
 
 `buildAiMessages` sends two messages:
 
-- `system`: the selected template's `systemPrompt`
+- `system`: the selected template's `systemPrompt` for review calls. Rewrite calls use a selection-rewrite system prompt that embeds the selected template as domain context.
 - `user`: stable sections for `Command`, `Template variables`, `Before context`, `Selected text`, `After context`, and `Document text`
 
 Review calls use structured output with this schema:
@@ -20,7 +20,12 @@ Review calls use structured output with this schema:
 - `targetText`
 - `replacementText`
 
-Rewrite and translation calls are plain text. Whatever the model returns becomes the proposed replacement text.
+Rewrite and translation calls prefer a compact structured object:
+
+- `replacementText`
+- `explanation`
+
+The route still accepts plain text for backward compatibility. Plain text becomes the proposed replacement text and receives a fallback explanation.
 
 ## Default Template Set
 
@@ -70,8 +75,10 @@ Contract review templates should also:
 Rewrite and translation templates must tell the model to:
 
 - Operate only on the selected text unless the command explicitly asks for document-level work.
-- Return only replacement text.
-- Exclude explanations, labels, markdown fences, and acceptance instructions.
+- Prefer returning only `{ "replacementText": "...", "explanation": "..." }`.
+- Keep `replacementText` as the exact proposed document text.
+- Keep `explanation` to one short sentence that helps a reviewer decide whether to apply the proposal.
+- Exclude labels, markdown fences, findings arrays, summaries, and acceptance instructions.
 - Preserve factual claims and business meaning.
 - For Continue writing, return only the new continuation text that should follow the selected text; do not repeat the selected text.
 - For Korean and English translation, preserve names, numbers, dates, citations, product names, and domain terms.

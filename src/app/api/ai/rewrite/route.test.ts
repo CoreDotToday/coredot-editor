@@ -195,7 +195,7 @@ describe("POST /api/ai/rewrite", () => {
       messages: expect.arrayContaining([
         expect.objectContaining({
           role: "system",
-          content: expect.stringContaining("Return only the replacement text"),
+          content: expect.stringContaining("Return only a compact JSON object"),
         }),
       ]),
     });
@@ -237,7 +237,95 @@ describe("POST /api/ai/rewrite", () => {
       "Old text with objective written evidence requirements.",
       [
         expect.objectContaining({
+          explanation: "The wording is underspecified.",
           replacementText: "Old text with objective written evidence requirements.",
+          targetText: "Old text",
+        }),
+      ],
+    );
+  });
+
+  it("persists explanation when a model returns structured rewrite JSON", async () => {
+    vi.mocked(getDocumentById).mockResolvedValueOnce(documentRecord);
+    vi.mocked(getPromptTemplateById).mockResolvedValueOnce(templateRecord);
+    vi.mocked(createAiProvider).mockReturnValueOnce({
+      name: "stub",
+      model: "stub-editor",
+      generateText: vi.fn(async () =>
+        JSON.stringify({
+          explanation: "Clarifies ownership and removes vague wording.",
+          replacementText: "Old text with clearer ownership.",
+        }),
+      ),
+      streamText: vi.fn(),
+      generateReview: vi.fn(),
+    });
+
+    const response = await POST(createJsonRequest(validBody));
+
+    expect(response.status).toBe(200);
+    expect(completeAiRunWithProposals).toHaveBeenCalledWith(
+      "run_1",
+      "Old text with clearer ownership.",
+      [
+        expect.objectContaining({
+          explanation: "Clarifies ownership and removes vague wording.",
+          replacementText: "Old text with clearer ownership.",
+          targetText: "Old text",
+        }),
+      ],
+    );
+  });
+
+  it("parses fenced structured rewrite JSON", async () => {
+    vi.mocked(getDocumentById).mockResolvedValueOnce(documentRecord);
+    vi.mocked(getPromptTemplateById).mockResolvedValueOnce(templateRecord);
+    vi.mocked(createAiProvider).mockReturnValueOnce({
+      name: "stub",
+      model: "stub-editor",
+      generateText: vi.fn(async () =>
+        [
+          "```json",
+          JSON.stringify({
+            explanation: "Makes the selected sentence more direct.",
+            replacementText: "Old text stated directly.",
+          }),
+          "```",
+        ].join("\n"),
+      ),
+      streamText: vi.fn(),
+      generateReview: vi.fn(),
+    });
+
+    const response = await POST(createJsonRequest(validBody));
+
+    expect(response.status).toBe(200);
+    expect(completeAiRunWithProposals).toHaveBeenCalledWith(
+      "run_1",
+      "Old text stated directly.",
+      [
+        expect.objectContaining({
+          explanation: "Makes the selected sentence more direct.",
+          replacementText: "Old text stated directly.",
+        }),
+      ],
+    );
+  });
+
+  it("keeps plain text rewrite responses backward compatible with a fallback explanation", async () => {
+    vi.mocked(getDocumentById).mockResolvedValueOnce(documentRecord);
+    vi.mocked(getPromptTemplateById).mockResolvedValueOnce(templateRecord);
+
+    const response = await POST(createJsonRequest(validBody));
+
+    expect(response.status).toBe(200);
+    expect(completeAiRunWithProposals).toHaveBeenCalledWith(
+      "run_1",
+      "Improved text",
+      [
+        expect.objectContaining({
+          explanation: "AI rewrite suggestion.",
+          replacementText: "Improved text",
           targetText: "Old text",
         }),
       ],
@@ -283,6 +371,27 @@ describe("POST /api/ai/rewrite", () => {
           command: "Continue writing",
           defaultApplyMode: "insert_below",
           replacementText: "Next paragraph that continues the selected context.",
+          targetText: "Old text",
+        }),
+      ],
+    );
+  });
+
+  it("treats document-output commands as insert-below proposals", async () => {
+    vi.mocked(getDocumentById).mockResolvedValueOnce(documentRecord);
+    vi.mocked(getPromptTemplateById).mockResolvedValueOnce(templateRecord);
+
+    const response = await POST(createJsonRequest({ ...validBody, command: "Summarize document" }));
+
+    expect(response.status).toBe(200);
+    expect(completeAiRunWithProposals).toHaveBeenCalledWith(
+      "run_1",
+      "Improved text",
+      [
+        expect.objectContaining({
+          command: "Summarize document",
+          defaultApplyMode: "insert_below",
+          replacementText: "Improved text",
           targetText: "Old text",
         }),
       ],

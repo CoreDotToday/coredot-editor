@@ -37,7 +37,7 @@ When reviewing pull requests, focus on:
 
 ## Compatibility Policy
 
-Until `1.0.0`, treat public APIs as the documented app boundaries rather than semver-stable package exports.
+Coredot Editor is an application starter, not a published component package. Treat public APIs as documented app boundaries rather than semver-stable package exports unless a downstream fork explicitly publishes a package API.
 
 Important boundaries:
 

@@ -50,6 +50,25 @@ export const editorMessages = {
       inputLabel: "AI command",
       noTarget: "Write or select document text first.",
       placeholder: "What can I change?",
+      quickAction: "Run quick action: {command}",
+      presets: {
+        currentBlock: [
+          { command: "Improve clarity", label: "Improve" },
+          { command: "Strengthen evidence", label: "Evidence" },
+          { command: "Continue writing", label: "Continue" },
+        ],
+        document: [
+          { command: "Summarize document", label: "Summarize" },
+          { command: "Create outline", label: "Outline" },
+          { command: "Review key risks", label: "Risks" },
+        ],
+        selection: [
+          { command: "Improve clarity", label: "Improve" },
+          { command: "Make concise", label: "Concise" },
+          { command: "Translate to Korean", label: "Korean" },
+          { command: "Translate to English", label: "English" },
+        ],
+      },
       running: "Working...",
       scopeInputLabel: "AI target scope",
       scopeLabels: {
@@ -291,6 +310,25 @@ export const editorMessages = {
       inputLabel: "AI 명령",
       noTarget: "먼저 문서 내용을 작성하거나 텍스트를 선택하세요.",
       placeholder: "무엇을 변경할까요?",
+      quickAction: "빠른 명령 실행: {command}",
+      presets: {
+        currentBlock: [
+          { command: "Improve clarity", label: "개선" },
+          { command: "Strengthen evidence", label: "근거 강화" },
+          { command: "Continue writing", label: "이어서 쓰기" },
+        ],
+        document: [
+          { command: "Summarize document", label: "요약" },
+          { command: "Create outline", label: "목차 만들기" },
+          { command: "Review key risks", label: "위험 검토" },
+        ],
+        selection: [
+          { command: "Improve clarity", label: "개선" },
+          { command: "Make concise", label: "간결" },
+          { command: "Translate to Korean", label: "한국어로 번역" },
+          { command: "Translate to English", label: "영어로 번역" },
+        ],
+      },
       running: "작업 중...",
       scopeInputLabel: "AI 적용 범위",
       scopeLabels: {
