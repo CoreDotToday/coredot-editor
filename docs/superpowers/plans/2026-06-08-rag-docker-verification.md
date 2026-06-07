@@ -176,89 +176,153 @@ Create `scripts/rag/verify-docker-env.sh` with:
 #!/usr/bin/env bash
 set -euo pipefail
 
-COMPOSE_FILE="docker-compose.rag.yml"
-ENV_FILE=".env.docker"
-DEFAULT_ENV_FILE=".env.docker.example"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-if ! command -v docker >/dev/null 2>&1; then
-  echo "Docker is required. Install Docker Desktop or start a shell with docker available." >&2
+cd "$REPO_ROOT"
+
+die() {
+  echo "Error: $*" >&2
   exit 1
+}
+
+trim() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "$value"
+}
+
+load_env_file() {
+  local env_file="$1"
+  local line key value
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="$(trim "$line")"
+
+    [[ -z "$line" || "${line:0:1}" == "#" ]] && continue
+
+    if [[ "$line" == export[[:space:]]* ]]; then
+      line="${line#export}"
+      line="$(trim "$line")"
+    fi
+
+    [[ "$line" == *=* ]] || die "Invalid env line in ${env_file}: ${line}"
+
+    key="$(trim "${line%%=*}")"
+    value="$(trim "${line#*=}")"
+
+    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "Invalid env key in ${env_file}: ${key}"
+
+    if [[ ${#value} -ge 2 && "$value" == \"*\" && "$value" == *\" ]]; then
+      value="${value:1:${#value}-2}"
+    elif [[ ${#value} -ge 2 && "$value" == \'*\' && "$value" == *\' ]]; then
+      value="${value:1:${#value}-2}"
+    fi
+
+    export "$key=$value"
+  done < "$env_file"
+}
+
+print_logs() {
+  local service="$1"
+  "${COMPOSE[@]}" logs --tail=80 "$service" >&2 || true
+}
+
+wait_for_postgres() {
+  local attempt
+
+  for attempt in $(seq 1 60); do
+    if "${COMPOSE[@]}" exec -T postgres pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" >/dev/null 2>&1; then
+      return 0
+    fi
+
+    sleep 1
+  done
+
+  echo "Timed out waiting for Postgres service 'postgres'." >&2
+  print_logs postgres
+  return 1
+}
+
+check_chroma_tcp() {
+  local status
+
+  if ! exec 3<>"/dev/tcp/localhost/${CHROMA_PORT}"; then
+    return 1
+  fi
+
+  printf 'GET /api/v2/heartbeat HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3
+  IFS= read -r status <&3 || true
+  exec 3<&-
+  exec 3>&-
+
+  [[ "$status" == *" 200 "* ]]
+}
+
+check_chroma_heartbeat() {
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsS "$CHROMA_HEARTBEAT_URL" >/dev/null 2>&1
+  else
+    check_chroma_tcp
+  fi
+}
+
+wait_for_chroma() {
+  local attempt
+
+  for attempt in $(seq 1 60); do
+    if check_chroma_heartbeat; then
+      return 0
+    fi
+
+    sleep 1
+  done
+
+  echo "Timed out waiting for Chroma heartbeat at ${CHROMA_HEARTBEAT_URL}." >&2
+  print_logs chroma
+  return 1
+}
+
+command -v docker >/dev/null 2>&1 || die "docker command was not found."
+docker compose version >/dev/null 2>&1 || die "docker compose is not available."
+docker info >/dev/null 2>&1 || die "Docker daemon is not available."
+
+SELECTED_ENV_FILE=".env.docker"
+if [[ ! -f "$SELECTED_ENV_FILE" ]]; then
+  SELECTED_ENV_FILE=".env.docker.example"
 fi
 
-if ! docker compose version >/dev/null 2>&1; then
-  echo "Docker Compose is required. Install Docker Desktop with Compose v2." >&2
-  exit 1
-fi
+[[ -f "$SELECTED_ENV_FILE" ]] || die "Selected env file is missing: ${SELECTED_ENV_FILE}"
 
-if ! docker info >/dev/null 2>&1; then
-  echo "Docker daemon is not running. Start Docker Desktop and retry." >&2
-  exit 1
-fi
-
-if [[ -f "${ENV_FILE}" ]]; then
-  SELECTED_ENV_FILE="${ENV_FILE}"
-else
-  SELECTED_ENV_FILE="${DEFAULT_ENV_FILE}"
-fi
-
-if [[ ! -f "${SELECTED_ENV_FILE}" ]]; then
-  echo "Missing ${SELECTED_ENV_FILE}. Copy ${DEFAULT_ENV_FILE} or restore it from git." >&2
-  exit 1
-fi
-
-set -a
-# shellcheck disable=SC1090
-source "${SELECTED_ENV_FILE}"
-set +a
+load_env_file "$SELECTED_ENV_FILE"
 
 POSTGRES_USER="${RAG_POSTGRES_USER:-coredot}"
 POSTGRES_DB="${RAG_POSTGRES_DB:-coredot_rag}"
 CHROMA_PORT="${RAG_CHROMA_PORT:-8009}"
 CHROMA_HEARTBEAT_URL="http://localhost:${CHROMA_PORT}/api/v2/heartbeat"
 
-echo "Starting RAG verification services with ${SELECTED_ENV_FILE}..."
-docker compose --env-file "${SELECTED_ENV_FILE}" -f "${COMPOSE_FILE}" up -d
+COMPOSE=(docker compose --env-file "$SELECTED_ENV_FILE" -f docker-compose.rag.yml)
 
-echo "Waiting for Postgres service..."
-for attempt in {1..60}; do
-  if docker compose --env-file "${SELECTED_ENV_FILE}" -f "${COMPOSE_FILE}" exec -T postgres \
-    pg_isready -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" >/dev/null 2>&1; then
-    break
-  fi
+"${COMPOSE[@]}" up -d
 
-  if [[ "${attempt}" -eq 60 ]]; then
-    echo "Postgres did not become ready in time. Recent logs:" >&2
-    docker compose --env-file "${SELECTED_ENV_FILE}" -f "${COMPOSE_FILE}" logs --tail=80 postgres >&2
-    exit 1
-  fi
+wait_for_postgres
 
-  sleep 2
-done
+PGVECTOR_RESULT="$(
+  "${COMPOSE[@]}" exec -T postgres psql \
+    -v ON_ERROR_STOP=1 \
+    -U "$POSTGRES_USER" \
+    -d "$POSTGRES_DB" \
+    -tAc "CREATE EXTENSION IF NOT EXISTS vector; SELECT extname FROM pg_extension WHERE extname = 'vector';"
+)"
 
-echo "Enabling and verifying pgvector..."
-PGVECTOR_RESULT="$(docker compose --env-file "${SELECTED_ENV_FILE}" -f "${COMPOSE_FILE}" exec -T postgres \
-  psql -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" -tAc \
-  "CREATE EXTENSION IF NOT EXISTS vector; SELECT extname FROM pg_extension WHERE extname = 'vector';")"
-
-if [[ "${PGVECTOR_RESULT}" != *"vector"* ]]; then
-  echo "pgvector extension verification failed. Result: ${PGVECTOR_RESULT}" >&2
+if [[ "$PGVECTOR_RESULT" != *vector* ]]; then
+  echo "Postgres extension verification failed; expected pgvector result to contain 'vector'." >&2
+  print_logs postgres
   exit 1
 fi
 
-echo "Waiting for Chroma heartbeat at ${CHROMA_HEARTBEAT_URL}..."
-for attempt in {1..60}; do
-  if curl -fsS "${CHROMA_HEARTBEAT_URL}" >/dev/null 2>&1; then
-    break
-  fi
-
-  if [[ "${attempt}" -eq 60 ]]; then
-    echo "Chroma did not respond to heartbeat in time. Recent logs:" >&2
-    docker compose --env-file "${SELECTED_ENV_FILE}" -f "${COMPOSE_FILE}" logs --tail=80 chroma >&2
-    exit 1
-  fi
-
-  sleep 2
-done
+wait_for_chroma
 
 echo "RAG Docker verification passed."
 echo "- Postgres: service postgres, database ${POSTGRES_DB}, pgvector enabled"
