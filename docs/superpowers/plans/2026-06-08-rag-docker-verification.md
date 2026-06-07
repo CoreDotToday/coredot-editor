@@ -63,6 +63,8 @@ Create `.dockerignore` with:
 ```dockerignore
 .git
 .next
+out
+build
 .vercel
 node_modules
 coverage
@@ -75,8 +77,6 @@ data
 .env.*
 !.env.example
 !.env.docker.example
-Dockerfile*
-docker-compose*.yml
 ```
 
 - [ ] **Step 4: Add the RAG Docker Compose stack**
