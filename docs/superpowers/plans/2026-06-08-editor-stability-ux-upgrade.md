@@ -38,7 +38,7 @@ Expected: confirm this work remains inside client components and keeps accessibl
 Create or modify these files:
 
 - Create: `src/components/document/editor-block-ranges.ts`
-  - Owns block action range types, block range resolution, list DOM path helpers used by gutter positioning, and `readBlockGutterPosition`.
+  - Owns block action range types, pointer-to-range hit testing, list DOM path helpers used by gutter positioning, and `readBlockGutterPosition`.
 - Create: `src/components/document/editor-block-drop-targets.ts`
   - Owns `BlockDropTarget`, `BlockDropIndicator`, target classification, no-op suppression, and indicator calculation.
 - Create: `src/components/document/editor-block-drag-session.ts`
@@ -136,6 +136,8 @@ export const LIST_BLOCK_GUTTER_TEXT_GAP = 16;
 Move the existing implementations from `DocumentEditor.tsx` into this file without behavioral changes:
 
 - `getBlockActionRangeAtPosition`
+- `getBlockActionRangeFromDomTarget`
+- `getBlockActionRangeAtViewportY`
 - `readBlockGutterPosition`
 - `readTopLevelBlockRangeAtPosition`
 - `getListItemActionRangeAtPosition`
@@ -510,14 +512,15 @@ const [blockDragPreview, setBlockDragPreview] = useState<{
 } | null>(null);
 ```
 
-On drag start:
+On drag start, preserve the existing current-block fallback and capture the live editor JSON:
 
 ```ts
 const source =
   blockGutterTargetRef.current ??
   blockGutter?.target ??
-  getTopLevelBlockActionRangeByIndex(editor, selectionMenu?.blockIndex);
-blockDragSessionRef.current = source ? createEditorBlockDragSession(contentJson, source) : null;
+  getTopLevelBlockActionRangeByIndex(editor, selectionMenu?.blockIndex) ??
+  getCurrentBlockActionRange(editor);
+blockDragSessionRef.current = source ? createEditorBlockDragSession(editor.getJSON() as TiptapJson, source) : null;
 blockDropTargetRef.current = null;
 setBlockDropIndicator(null);
 setBlockDragPreview(null);
@@ -540,11 +543,13 @@ On pointer drag end, before applying a transform:
 const session = blockDragSessionRef.current;
 blockDragSessionRef.current = null;
 setBlockDragPreview(null);
-if (!session || isEditorBlockDragSessionStale(session, contentJson)) {
+if (!session || isEditorBlockDragSessionStale(session, editor.getJSON() as TiptapJson)) {
   return;
 }
 const source = session.source;
 ```
+
+Also update `handleBlockDragEnd`, pointer cancel, suppressed click, native drag over, and native drop paths so every drag exit clears `blockDragSessionRef`, `blockDropTargetRef`, `blockDropIndicator`, and `blockDragPreview`.
 
 - [ ] **Step 5: Render preview**
 
@@ -668,10 +673,22 @@ import {
 } from "@/features/proposals/proposal-transaction";
 ```
 
-Before calling `applyProposalToTiptapDraft` in both single accept and bulk accept paths:
+Before calling `applyProposalToTiptapDraft` in the single accept path:
 
 ```ts
 if (isProposalSnapshotStale(proposalContext, draft.contentJson)) {
+  setReviewError(messages.errors.staleSelection);
+  return;
+}
+```
+
+For bulk accept, preflight every snapshot-backed pending proposal against the original `draft.contentJson` before the loop mutates `nextContentJson`:
+
+```ts
+const staleSnapshotProposal = pendingProposals.find((proposal) =>
+  isProposalSnapshotStale(selectionProposalContexts[proposal.id], draft.contentJson),
+);
+if (staleSnapshotProposal) {
   setReviewError(messages.errors.staleSelection);
   return;
 }
@@ -823,4 +840,3 @@ git status --short
 ```
 
 Expected: no uncommitted files after all task commits.
-

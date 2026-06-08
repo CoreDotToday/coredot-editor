@@ -5,10 +5,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { TiptapJson } from "@/db/schema";
 import { createDocumentSchemaExtensions } from "@/features/documents/tiptap-extensions";
 import {
-  DocumentEditor,
   getBlockActionRangeAtPosition,
-  getSelectionMenuPosition,
   readBlockGutterPosition,
+} from "./editor-block-ranges";
+import {
+  DocumentEditor,
+  getSelectionMenuPosition,
 } from "./DocumentEditor";
 
 const editors: Editor[] = [];
