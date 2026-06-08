@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   applyProposalToTiptapDraft,
   createProposalApplyOptions,
+  createProposalContentSignature,
   getProposalApplicationOrder,
   getProposalSelectionRange,
+  isProposalSnapshotStale,
 } from "./proposal-transaction";
 
 const documentWithTarget = {
@@ -38,6 +40,16 @@ describe("getProposalSelectionRange", () => {
     );
 
     expect(range).toEqual({ from: 10, to: 22 });
+  });
+});
+
+describe("proposal operation snapshots", () => {
+  it("detects stale proposal snapshots from content signatures", () => {
+    const contentSignature = createProposalContentSignature(documentWithTarget);
+
+    expect(isProposalSnapshotStale({ contentSignature }, documentWithTarget)).toBe(false);
+    expect(isProposalSnapshotStale({ contentSignature }, staleSelectionDocument)).toBe(true);
+    expect(isProposalSnapshotStale(undefined, staleSelectionDocument)).toBe(false);
   });
 });
 

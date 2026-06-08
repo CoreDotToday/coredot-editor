@@ -900,6 +900,37 @@ describe("DocumentShell", () => {
     expect(screen.getByTestId("mock-document-body")).toHaveTextContent("repeat revenue grew 8%");
   });
 
+  it("does not apply a current-session selection proposal after the draft content changes", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          run: createAiRun("run_rewrite"),
+          proposal: createProposal("proposal_rewrite", "pending", "selected text"),
+        }),
+      ),
+    );
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "selected text in document")}
+        templates={[createTemplate("tpl_1", "Rewrite template")]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Mock selection command" }));
+    const preview = await screen.findByRole("region", { name: "선택 AI 결과" });
+
+    await user.click(screen.getByRole("button", { name: "Mock body edit" }));
+    await user.click(within(preview).getByRole("button", { name: "교체" }));
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("mock-document-body")).toHaveTextContent("fresh edited body");
+    expect(screen.getByTestId("mock-document-body")).not.toHaveTextContent("revenue grew 8%");
+    expect(screen.getByText("선택 위치가 변경되어 제안을 적용할 수 없습니다. 다시 실행해 주세요.")).toBeInTheDocument();
+  });
+
   it("runs selection rewrite commands immediately with default template variables", async () => {
     const user = userEvent.setup();
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(

@@ -19,10 +19,16 @@ export type ProposalApplyOptions = {
   selectionRange?: ProposalSelectionRange;
 };
 
-export type ProposalTransactionContext = {
+export type ProposalOperationSnapshot = {
+  command?: string;
+  contentSignature?: string;
   occurrenceIndex?: number;
+  scope?: "selection" | "currentBlock" | "document";
+  selectedText?: string;
   selectionRange?: ProposalSelectionRange;
 };
+
+export type ProposalTransactionContext = ProposalOperationSnapshot;
 
 export type ProposalTransactionProposal = {
   defaultApplyMode?: ProposalApplyMode | null;
@@ -55,6 +61,17 @@ export function createProposalApplyOptions(
   return occurrenceIndex === null || occurrenceIndex === undefined
     ? selectionRange ? { requireSelectionRangeMatch, selectionRange } : undefined
     : { occurrenceIndex, ...(selectionRange ? { requireSelectionRangeMatch, selectionRange } : {}) };
+}
+
+export function createProposalContentSignature(contentJson: TiptapJson) {
+  return JSON.stringify(contentJson);
+}
+
+export function isProposalSnapshotStale(
+  context: ProposalOperationSnapshot | undefined,
+  contentJson: TiptapJson,
+) {
+  return Boolean(context?.contentSignature && context.contentSignature !== createProposalContentSignature(contentJson));
 }
 
 export function getProposalApplicationOrder<TProposal extends { id: string; targetFrom?: number | null; targetTo?: number | null }>(

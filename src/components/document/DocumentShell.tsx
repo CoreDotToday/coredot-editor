@@ -46,8 +46,10 @@ import {
 } from "@/features/i18n/editor-language";
 import {
   applyProposalToTiptapDraft,
+  createProposalContentSignature,
   getProposalApplicationOrder,
   getProposalSelectionRange,
+  isProposalSnapshotStale,
   type ProposalTransactionContext,
 } from "@/features/proposals/proposal-transaction";
 import { validateTemplateVariables } from "@/features/templates/template-validation";
@@ -428,7 +430,11 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
         setSelectionProposalContexts((currentContexts) => ({
           ...currentContexts,
           [body.proposal!.id]: {
+            command,
+            contentSignature: createProposalContentSignature(draft.contentJson),
             occurrenceIndex: body.proposal!.occurrenceIndex ?? context?.occurrenceIndex,
+            scope: context?.scope,
+            selectedText,
             selectionRange: proposalSelectionRange,
           },
         }));
@@ -646,6 +652,10 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
 
     if (status === "accepted") {
       const proposalContext = selectionProposalContexts[proposalId];
+      if (isProposalSnapshotStale(proposalContext, draft.contentJson)) {
+        setReviewError(messages.errors.staleSelection);
+        return;
+      }
       const appliedDraft = applyProposalToTiptapDraft(draft.contentJson, previousProposal, proposalContext, applyMode);
 
       if (!appliedDraft.ok) {
@@ -762,6 +772,14 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
     let nextContentJson = draft.contentJson;
 
     if (status === "accepted") {
+      const staleSnapshotProposal = pendingProposals.find((proposal) =>
+        isProposalSnapshotStale(selectionProposalContexts[proposal.id], draft.contentJson),
+      );
+      if (staleSnapshotProposal) {
+        setReviewError(messages.errors.staleSelection);
+        return;
+      }
+
       const proposalsToApply = getProposalApplicationOrder(pendingProposals, selectionProposalContexts);
       for (const proposal of proposalsToApply) {
         const applyMode = proposal.defaultApplyMode ?? "replace";
