@@ -8,6 +8,7 @@ import {
   getBlockActionRangeAtPosition,
   readBlockGutterPosition,
 } from "./editor-block-ranges";
+import { isNoopBlockDropTarget } from "./editor-block-drop-targets";
 import {
   DocumentEditor,
   getSelectionMenuPosition,
@@ -771,6 +772,38 @@ describe("DocumentEditor", () => {
     fireEvent.pointerMove(dragHandle, { buttons: 1, clientX: 120, clientY: 188, pointerId: 1 });
 
     expect(frame.querySelector("[data-block-drop-indicator='true']")).not.toBeInTheDocument();
+  });
+
+  it("classifies same-slot list drops as no-op targets", () => {
+    const source = {
+      from: 1,
+      kind: "listItem" as const,
+      listItemIndex: 1,
+      listItemPath: [1],
+      node: {} as never,
+      to: 2,
+      topLevelIndex: 0,
+    };
+
+    expect(
+      isNoopBlockDropTarget(source, {
+        dropIndex: 1,
+        indicator: { left: 0, top: 0, width: 100 },
+        kind: "listItem",
+        listItemPath: [],
+        topLevelIndex: 0,
+      }),
+    ).toBe(true);
+
+    expect(
+      isNoopBlockDropTarget(source, {
+        dropIndex: 3,
+        indicator: { left: 0, top: 0, width: 100 },
+        kind: "listItem",
+        listItemPath: [],
+        topLevelIndex: 0,
+      }),
+    ).toBe(false);
   });
 
   it("positions the selection toolbar below text near the top of the editor", () => {

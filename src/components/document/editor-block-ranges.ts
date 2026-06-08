@@ -28,11 +28,10 @@ export type BlockGutterState = {
 };
 
 export const BLOCK_GUTTER_WIDTH = 58;
-
-const BLOCK_GUTTER_EDGE_GAP = 8;
-const BLOCK_GUTTER_HORIZONTAL_OFFSET = 68;
-const BLOCK_GUTTER_MIN_TEXT_GAP = 4;
-const LIST_BLOCK_GUTTER_TEXT_GAP = 16;
+export const BLOCK_GUTTER_EDGE_GAP = 8;
+export const BLOCK_GUTTER_HORIZONTAL_OFFSET = 68;
+export const BLOCK_GUTTER_MIN_TEXT_GAP = 4;
+export const LIST_BLOCK_GUTTER_TEXT_GAP = 16;
 
 export function getBlockActionRangeAtPosition(editor: RuntimeEditor, position: number): BlockActionRange | null {
   const resolvedPosition = editor.state.doc.resolve(clamp(position, 0, editor.state.doc.content.size));
