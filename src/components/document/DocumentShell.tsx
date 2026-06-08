@@ -14,6 +14,7 @@ import {
   PanelRightOpen,
   PlusCircle,
 } from "lucide-react";
+import { nanoid } from "nanoid";
 import {
   useCallback,
   useEffect,
@@ -35,6 +36,11 @@ import {
 import { AiSettingsDialog } from "@/components/settings/AiSettingsDialog";
 import { getTemplateVariableLabel, PromptTemplatePanel } from "@/components/templates/PromptTemplatePanel";
 import type { AiProposalRecord, AiRunRecord, DocumentRecord, PromptTemplateRecord, TiptapJson } from "@/db/schema";
+import {
+  archiveAiWorkspaceSession,
+  readAiWorkspaceSessionsForDocument,
+  writeAiWorkspaceSessionsForDocument,
+} from "@/features/ai/ai-workspace-session-store";
 import { extractPlainTextFromTiptap } from "@/features/documents/tiptap-text";
 import {
   EDITOR_LANGUAGE_STORAGE_KEY,
@@ -56,6 +62,9 @@ import {
 } from "@/features/proposals/proposal-transaction";
 import { validateTemplateVariables } from "@/features/templates/template-validation";
 import { DocumentEditor, type RunningSelectionAiCommand, type SelectionAiCommandContext } from "./DocumentEditor";
+import { DocumentCommandPalette } from "./DocumentCommandPalette";
+import { DocumentSourceView } from "./DocumentSourceView";
+import { buildDocumentCommandRegistry } from "./commands/document-command-registry";
 import type { SelectionAiResultPreview } from "./SelectionAiResultPopover";
 
 type ShellDocument = Pick<DocumentRecord, "id" | "title" | "contentJson" | "plainText">;
@@ -77,8 +86,8 @@ type ShellProposal = Pick<
   | "appliedMode"
   | "status"
 >;
-type SaveState = "saved" | "dirty" | "saving" | "failed";
-type EditorSurface = "editor" | "source";
+export type SaveState = "saved" | "dirty" | "saving" | "failed";
+export type EditorSurface = "editor" | "source";
 
 type DocumentShellProps = {
   document: ShellDocument;
@@ -132,13 +141,6 @@ type ReviewResponse = {
 type RewriteResponse = {
   run?: ShellAiRun;
   proposal?: ShellProposal | null;
-};
-
-type CommandPaletteAction = {
-  action: () => void;
-  id: string;
-  keywords: string[];
-  label: string;
 };
 
 const MAX_CONCURRENT_SELECTION_COMMANDS = 5;
@@ -207,7 +209,9 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
   const [selectionProposalContexts, setSelectionProposalContexts] = useState<Record<string, SelectionProposalContext>>({});
   const [activeProposalId, setActiveProposalId] = useState<string | null>(null);
   const [aiChatMessages, setAiChatMessages] = useState<AiWorkspaceChatMessage[]>([]);
-  const [aiChatSessions, setAiChatSessions] = useState<AiWorkspaceChatSession[]>([]);
+  const [aiChatSessions, setAiChatSessions] = useState<AiWorkspaceChatSession[]>(() =>
+    restoreAiWorkspaceChatSessions(document.id),
+  );
   const [appliedChanges, setAppliedChanges] = useState<AppliedAiChangeRecord[]>([]);
   const [undoChangeError, setUndoChangeError] = useState("");
   const [isExportingDocx, setIsExportingDocx] = useState(false);
@@ -255,6 +259,11 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
   useEffect(() => {
     runningSelectionCommandsRef.current = runningSelectionCommands;
   }, [runningSelectionCommands]);
+
+  useEffect(() => {
+    writeAiWorkspaceSessionsForDocument(document.id, aiChatSessions);
+  }, [aiChatSessions, document.id]);
+
   const isWorkspaceOpen = workspaceOpenOverride ?? !isCompactWorkspace;
   const setWorkspaceOpen = useCallback(
     (nextValue: boolean | ((currentValue: boolean) => boolean)) => {
@@ -295,7 +304,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
       setSelectionProposalContexts({});
       setActiveProposalId(null);
       setAiChatMessages([]);
-      setAiChatSessions([]);
+      setAiChatSessions(restoreAiWorkspaceChatSessions(incomingDocument.id));
       setAppliedChanges([]);
       setUndoChangeError("");
       setEditorSurface("editor");
@@ -412,6 +421,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
     const chatUserMessage: AiWorkspaceChatMessage = {
       command,
       content: selectedText,
+      createdAt: chatSessionCreatedAt,
       id: createWorkspaceClientId(aiWorkspaceIdRef, "user"),
       role: "user",
       scopeLabel: getCommandScopeLabel(context?.scope, messages),
@@ -434,6 +444,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
         createdAt: chatSessionCreatedAt,
         id: chatSessionId,
         messages: [chatUserMessage],
+        status: "running",
         title: getSelectionCommandLabel(command, language),
         updatedAt: chatSessionCreatedAt,
       },
@@ -491,13 +502,16 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
           replacementText: body.proposal.replacementText,
           targetText: body.proposal.targetText,
         });
+        const chatSessionUpdatedAt = new Date();
         const chatAssistantMessage: AiWorkspaceChatMessage = {
           command,
           content: body.proposal.replacementText,
+          createdAt: chatSessionUpdatedAt,
           id: createWorkspaceClientId(aiWorkspaceIdRef, "assistant"),
+          proposalId: body.proposal.id,
           role: "assistant",
+          runId: body.run?.id,
         };
-        const chatSessionUpdatedAt = new Date();
         setAiChatMessages((currentMessages) => [...currentMessages, chatAssistantMessage]);
         setAiChatSessions((currentSessions) =>
           currentSessions.map((session) =>
@@ -505,6 +519,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
               ? {
                   ...session,
                   messages: [...session.messages, chatAssistantMessage],
+                  status: "idle",
                   updatedAt: chatSessionUpdatedAt,
                 }
               : session,
@@ -514,7 +529,16 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
       if (body.run) {
         setReviewRuns((currentRuns) => [body.run!, ...currentRuns]);
       }
+      setAiChatSessions((currentSessions) =>
+        currentSessions.map((session) => (session.id === chatSessionId ? { ...session, status: "idle" } : session)),
+      );
     } catch {
+      const failedAt = new Date();
+      setAiChatSessions((currentSessions) =>
+        currentSessions.map((session) =>
+          session.id === chatSessionId ? { ...session, status: "failed", updatedAt: failedAt } : session,
+        ),
+      );
       setReviewError(messages.errors.selectionRewriteFailed);
     } finally {
       updateRunningSelectionCommands((currentCommands) =>
@@ -1005,6 +1029,10 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
     }
   }, [appliedChanges, draft, messages.aiWorkspace.undoConflict, messages.errors.updateProposalFailed, reviewProposals, saveState]);
 
+  const archiveAiChatSession = useCallback((sessionId: string) => {
+    setAiChatSessions((currentSessions) => archiveAiWorkspaceSession(currentSessions, sessionId));
+  }, []);
+
   const selectedTemplateName = selectedTemplate?.name ?? "";
   const inlineSuggestions = useMemo(
     () =>
@@ -1032,55 +1060,20 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
       })),
     [appliedChanges, draftContentSignature],
   );
-  const commandPaletteActions = useMemo<CommandPaletteAction[]>(
-    () => [
-      {
-        action: () => {
-          setWorkspaceOpen(true);
-        },
-        id: "open-workspace",
-        keywords: ["ai", "workspace", "chat", "review"],
-        label: messages.commandPalette.commands.openWorkspace,
-      },
-      {
-        action: () => {
-          setWorkspaceOpen(true);
-          void runDocumentReview();
-        },
-        id: "review-document",
-        keywords: ["ai", "review", "document", "검토"],
-        label: messages.commandPalette.commands.reviewDocument,
-      },
-      {
-        action: () => setEditorSurface("source"),
-        id: "show-source",
-        keywords: ["source", "raw", "json", "markdown"],
-        label: messages.commandPalette.commands.showSource,
-      },
-      {
-        action: () => setEditorSurface("editor"),
-        id: "show-editor",
-        keywords: ["editor", "write", "edit", "편집"],
-        label: messages.commandPalette.commands.showEditor,
-      },
-      {
-        action: () => {
-          void saveDraft();
-        },
-        id: "save-document",
-        keywords: ["save", "저장"],
-        label: messages.commandPalette.commands.save,
-      },
-      {
-        action: () => {
-          void exportDocxDraft();
-        },
-        id: "export-docx",
-        keywords: ["docx", "export", "download"],
-        label: messages.commandPalette.commands.exportDocx,
-      },
-    ],
-    [exportDocxDraft, messages.commandPalette.commands, runDocumentReview, saveDraft, setWorkspaceOpen],
+  const commandPaletteActions = useMemo(
+    () =>
+      buildDocumentCommandRegistry({
+        editorSurface,
+        exportDocxDraft,
+        isExportingDocx,
+        messages: messages.commandPalette,
+        runDocumentReview,
+        saveDraft,
+        saveState,
+        setEditorSurface,
+        setWorkspaceOpen,
+      }),
+    [editorSurface, exportDocxDraft, isExportingDocx, messages.commandPalette, runDocumentReview, saveDraft, saveState, setWorkspaceOpen],
   );
   const sidebarNavigationClassName = [
     "flex h-9 items-center gap-2 rounded-md px-2.5",
@@ -1182,6 +1175,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
       language={language}
       layout={layout}
       messages={messages.aiWorkspace}
+      onArchiveChatSession={archiveAiChatSession}
       onBulkUpdateProposalStatus={updatePendingProposalStatuses}
       onClose={onClose}
       onFocusProposal={setActiveProposalId}
@@ -1413,7 +1407,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
             title={draft.title}
           />
         ) : (
-          <DocumentSourceView draft={draft} messages={messages.sourceView} />
+          <DocumentSourceView contentJson={draft.contentJson} messages={messages.sourceView} title={draft.title} />
         )}
       </section>
 
@@ -1444,120 +1438,6 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
   );
 }
 
-function DocumentCommandPalette({
-  actions,
-  messages,
-  onClose,
-}: {
-  actions: CommandPaletteAction[];
-  messages: (typeof editorMessages)[EditorLanguage]["commandPalette"];
-  onClose: () => void;
-}) {
-  const [query, setQuery] = useState("");
-  const inputRef = useRef<HTMLInputElement>(null);
-  const normalizedQuery = query.trim().toLowerCase();
-  const filteredActions = normalizedQuery
-    ? actions.filter((action) => `${action.label} ${action.keywords.join(" ")}`.toLowerCase().includes(normalizedQuery))
-    : actions;
-
-  useEffect(() => {
-    inputRef.current?.focus();
-
-    const handleEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        onClose();
-      }
-    };
-
-    window.addEventListener("keydown", handleEscape);
-    return () => window.removeEventListener("keydown", handleEscape);
-  }, [onClose]);
-
-  return (
-    <div className="fixed inset-0 z-[70] flex items-start justify-center bg-zinc-950/20 px-4 pt-[12vh]">
-      <button aria-label={messages.title} className="absolute inset-0 cursor-default" onClick={onClose} type="button" />
-      <section
-        aria-label={messages.title}
-        aria-modal="true"
-        className="relative z-10 w-full max-w-xl overflow-hidden rounded-lg border border-zinc-200 bg-white shadow-2xl shadow-zinc-950/20"
-        role="dialog"
-      >
-        <div className="border-b border-zinc-200 p-3">
-          <label className="sr-only" htmlFor="document-command-palette-query">
-            {messages.searchLabel}
-          </label>
-          <input
-            aria-label={messages.searchLabel}
-            autoComplete="off"
-            className="h-10 w-full rounded-md border border-zinc-200 px-3 text-sm outline-none transition-colors placeholder:text-zinc-400 focus:border-zinc-500"
-            id="document-command-palette-query"
-            onChange={(event) => setQuery(event.currentTarget.value)}
-            placeholder={messages.placeholder}
-            ref={inputRef}
-            type="text"
-            value={query}
-          />
-        </div>
-        <div className="max-h-80 overflow-y-auto p-2" role="listbox">
-          {filteredActions.length > 0 ? (
-            filteredActions.map((action) => (
-              <button
-                aria-selected="false"
-                className="flex w-full items-center justify-between rounded-md px-3 py-2 text-left text-sm font-medium text-zinc-800 hover:bg-zinc-100"
-                key={action.id}
-                onClick={() => {
-                  onClose();
-                  action.action();
-                }}
-                role="option"
-                type="button"
-              >
-                {action.label}
-              </button>
-            ))
-          ) : (
-            <p className="px-3 py-6 text-center text-sm text-zinc-500">{messages.empty}</p>
-          )}
-        </div>
-      </section>
-    </div>
-  );
-}
-
-function DocumentSourceView({
-  draft,
-  messages,
-}: {
-  draft: DraftState;
-  messages: (typeof editorMessages)[EditorLanguage]["sourceView"];
-}) {
-  const plainText = extractPlainTextFromTiptap(draft.contentJson);
-
-  return (
-    <section
-      aria-label={messages.regionLabel}
-      className="min-h-0 flex-1 overflow-y-auto bg-zinc-50 px-4 py-6"
-      role="region"
-    >
-      <div className="mx-auto flex w-full max-w-5xl flex-col gap-4">
-        <section className="rounded-md border border-zinc-200 bg-white p-4">
-          <h2 className="text-sm font-semibold text-zinc-950">{messages.plainTextTitle}</h2>
-          <pre className="mt-3 whitespace-pre-wrap rounded-md bg-zinc-50 p-3 font-mono text-sm leading-6 text-zinc-700">
-            {plainText || messages.empty}
-          </pre>
-        </section>
-        <section className="rounded-md border border-zinc-200 bg-white p-4">
-          <h2 className="text-sm font-semibold text-zinc-950">{messages.jsonTitle}</h2>
-          <pre className="mt-3 overflow-x-auto rounded-md bg-zinc-950 p-3 font-mono text-xs leading-5 text-zinc-50">
-            {JSON.stringify(draft.contentJson, null, 2)}
-          </pre>
-        </section>
-      </div>
-    </section>
-  );
-}
-
 function collectTemplateVariables(template: ShellTemplate, values: Record<string, string>) {
   return template.variableSchemaJson.fields.reduce<Record<string, string>>((variables, field) => {
     variables[field.name] = values[field.name] ?? "";
@@ -1583,7 +1463,15 @@ function localizeTemplateVariableErrors(
 
 function createWorkspaceClientId(ref: MutableRefObject<number>, prefix: string) {
   ref.current += 1;
-  return `${prefix}_${ref.current}`;
+  return `${prefix}_${ref.current}_${nanoid(8)}`;
+}
+
+function restoreAiWorkspaceChatSessions(documentId: string): AiWorkspaceChatSession[] {
+  return readAiWorkspaceSessionsForDocument(documentId).map((session) => ({
+    ...session,
+    createdAt: new Date(session.createdAt),
+    updatedAt: new Date(session.updatedAt),
+  }));
 }
 
 function sanitizeDownloadFileName(value: string) {

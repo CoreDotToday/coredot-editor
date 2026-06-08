@@ -16,8 +16,11 @@ import { AiReviewPanel, type AiProposalApplyMode, type AiReviewProposal, type Ai
 export type AiWorkspaceChatMessage = {
   command?: string;
   content: string;
+  createdAt?: Date | string;
   id: string;
+  proposalId?: string;
   role: "user" | "assistant";
+  runId?: string;
   scopeLabel?: string;
 };
 
@@ -31,10 +34,12 @@ export type AiWorkspaceChangeItem = {
 };
 
 export type AiWorkspaceChatSession = {
+  archived?: boolean;
   command: string;
   createdAt: Date;
   id: string;
   messages: AiWorkspaceChatMessage[];
+  status?: "failed" | "idle" | "running";
   title: string;
   updatedAt: Date;
 };
@@ -51,6 +56,7 @@ type AiWorkspacePanelProps = {
   language?: EditorLanguage;
   layout?: "drawer" | "side";
   messages?: EditorMessages["aiWorkspace"];
+  onArchiveChatSession?: (sessionId: string) => void;
   onBulkUpdateProposalStatus?: (status: "accepted" | "rejected") => void;
   onClose?: () => void;
   onFocusProposal?: (proposalId: string) => void;
@@ -88,6 +94,7 @@ export function AiWorkspacePanel({
   language = DEFAULT_EDITOR_LANGUAGE,
   layout = "side",
   messages = editorMessages[DEFAULT_EDITOR_LANGUAGE].aiWorkspace,
+  onArchiveChatSession,
   onBulkUpdateProposalStatus,
   onClose,
   onFocusProposal,
@@ -103,8 +110,10 @@ export function AiWorkspacePanel({
   const [activeTab, setActiveTab] = useState<WorkspaceTab>("review");
   const [activeChatSessionId, setActiveChatSessionId] = useState<string>("");
   const workspaceId = useId();
-  const activeChatSession = chatSessions.find((session) => session.id === activeChatSessionId) ?? chatSessions[0] ?? null;
-  const activeChatMessages = activeChatSession?.messages ?? chatMessages;
+  const visibleChatSessions = chatSessions.filter((session) => !session.archived);
+  const activeChatSession =
+    visibleChatSessions.find((session) => session.id === activeChatSessionId) ?? visibleChatSessions[0] ?? null;
+  const activeChatMessages = activeChatSession ? activeChatSession.messages : chatSessions.length > 0 ? [] : chatMessages;
   const panelClassName =
     layout === "drawer"
       ? "flex h-full w-[min(100vw,24rem)] shrink-0 flex-col border-l border-zinc-200 bg-white shadow-2xl shadow-zinc-950/20"
@@ -207,13 +216,13 @@ export function AiWorkspacePanel({
           role="tabpanel"
         >
           <h2 className="text-sm font-semibold text-zinc-950">{messages.chatTitle}</h2>
-          {chatSessions.length > 0 ? (
+          {visibleChatSessions.length > 0 ? (
             <div
               aria-label={messages.conversationList}
               className="mt-4 flex gap-2 overflow-x-auto pb-1"
               role="tablist"
             >
-              {chatSessions.map((session) => (
+              {visibleChatSessions.map((session) => (
                 <button
                   aria-controls={`${workspaceId}-chat-session-${session.id}`}
                   aria-selected={activeChatSession?.id === session.id}
@@ -232,6 +241,20 @@ export function AiWorkspacePanel({
                   {session.title}
                 </button>
               ))}
+            </div>
+          ) : null}
+          {activeChatSession && onArchiveChatSession ? (
+            <div className="mt-3 flex items-center justify-between gap-3">
+              <p className="truncate text-xs text-zinc-500">
+                {activeChatSession.status === "failed" ? messages.failed : messages.saved}
+              </p>
+              <button
+                className="inline-flex h-7 shrink-0 items-center rounded-md border border-zinc-200 px-2 text-xs font-medium text-zinc-600 hover:bg-zinc-50 hover:text-zinc-950"
+                onClick={() => onArchiveChatSession(activeChatSession.id)}
+                type="button"
+              >
+                {messages.archiveChat}
+              </button>
             </div>
           ) : null}
           {activeChatMessages.length === 0 ? (

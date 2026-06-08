@@ -830,6 +830,65 @@ describe("DocumentShell", () => {
     expect(screen.getByRole("tabpanel", { name: "한국어로 번역" })).toHaveTextContent("선택된 텍스트");
   });
 
+  it("restores document-scoped AI command conversations and can hide a session", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            run: createAiRun("run_rewrite"),
+            proposal: createProposal("proposal_rewrite", "pending", "selected text"),
+          }),
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            run: createAiRun("run_translate"),
+            proposal: {
+              ...createProposal("proposal_translate", "pending", "selected text"),
+              replacementText: "선택된 텍스트",
+            },
+          }),
+        ),
+      );
+
+    const rendered = render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "selected text in document")}
+        templates={[createTemplate("tpl_1", "Rewrite template")]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Mock selection command" }));
+    await screen.findByRole("region", { name: "선택 AI 결과" });
+    rendered.unmount();
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "selected text in document")}
+        templates={[createTemplate("tpl_1", "Rewrite template")]}
+      />,
+    );
+
+    await user.click(screen.getByRole("tab", { name: "대화" }));
+    expect(screen.getByRole("tab", { name: "명확하게 개선" })).toBeInTheDocument();
+    expect(screen.getByRole("tabpanel", { name: "명확하게 개선" })).toHaveTextContent("revenue grew 8%");
+
+    await user.click(screen.getByRole("button", { name: "Mock translation command" }));
+    await waitFor(() => expect(screen.getAllByText("선택된 텍스트").length).toBeGreaterThan(0));
+
+    await user.click(screen.getByRole("tab", { name: "명확하게 개선" }));
+    expect(screen.getByRole("tabpanel", { name: "명확하게 개선" })).toHaveTextContent("revenue grew 8%");
+    expect(screen.getByRole("tabpanel", { name: "명확하게 개선" })).not.toHaveTextContent("선택된 텍스트");
+
+    await user.click(screen.getByRole("button", { name: "대화 숨기기" }));
+    expect(screen.queryByRole("tab", { name: "명확하게 개선" })).not.toBeInTheDocument();
+    expect(screen.queryByText("revenue grew 8%")).not.toBeInTheDocument();
+  });
+
   it("shows the current draft in source view and switches back to rich editing", async () => {
     const user = userEvent.setup();
 

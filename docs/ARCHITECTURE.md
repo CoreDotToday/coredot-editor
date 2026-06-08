@@ -49,6 +49,8 @@ Route handlers should validate input with Zod, return predictable status codes, 
 
 `DocumentShell` owns transient client state such as the current draft, selected template, template variables, review status, editor language, chat entries, reversible local change records, and proposal status updates.
 
+Host-level commands are exposed through a typed command registry rather than hard-coded palette rows. `src/components/document/commands/document-command-registry.ts` receives the current shell state and returns grouped commands with labels, keywords, shortcuts, enabled states, and executable handlers. `DocumentCommandPalette` renders those commands with fuzzy search and keyboard navigation, so downstream apps can add host actions without rewriting the shell layout.
+
 The bottom command bar is intentionally an entry point, not a mutation surface. It resolves the target in this order: selected text, current text block, then whole document. The command then uses the existing selection rewrite route so all AI edits still become proposals with redline previews.
 
 Selection AI progress is tied to the captured command context, not the browser's live selection state. When a user runs a command, the editor stores the selected text, Tiptap range, occurrence index, and floating anchor from that moment. The inline progress badge and right workspace status continue to show the active job even if the user clicks elsewhere or selects another block. This matches legal drafting expectations: the source is fixed, the user can keep reviewing, and the result returns as an accept/reject proposal rather than an automatic mutation.
@@ -129,10 +131,16 @@ The review panel renders pending proposals as an attorney-assist review queue. E
 The right AI workspace separates three user jobs:
 
 - `Review`: proposal queue and document review execution.
-- `Chat`: a running conversation log for selection and command-bar requests.
+- `Chat`: document-scoped conversation sessions for selection and command-bar requests.
 - `Changes`: accepted AI applications that can be locally undone while the draft still matches the post-apply snapshot.
 
+Chat sessions are currently persisted through `src/features/ai/ai-workspace-session-store.ts`, a document-scoped localStorage adapter. It serializes conversation metadata and messages, normalizes interrupted `running` sessions back to `idle` on reload, and keeps archive state so old chats can be hidden without data loss. The type shape intentionally mirrors a future database split into `ai_workspace_conversations` and `ai_workspace_messages`, with nullable links back to `ai_runs` and `ai_proposals`.
+
 Undo is conservative. The client stores the draft snapshot immediately before a proposal is accepted and the content signature immediately after applying it. If the user edits the document later, the undo button is disabled for that item rather than overwriting newer work.
+
+### Source Inspection
+
+`DocumentSourceView` is a read-only inspection surface for the current unsaved draft. It uses `buildDocumentSourceSnapshot()` to derive plain text, pretty Tiptap JSON, JSON validity, and a stable download filename from the in-memory draft. This keeps Source mode low-risk for v1 while leaving a clear extension point for a future editable raw/Markdown mode with explicit parse and roundtrip tests.
 
 ### Proposal Applicability
 

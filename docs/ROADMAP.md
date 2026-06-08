@@ -4,7 +4,8 @@ Coredot Editor v1 is a working open-source AI document editor starter. The roadm
 
 ## v1.1: AI Command Usability And Trust
 
-- Add scope-aware quick actions to the bottom AI command bar so users can run common edits without inventing prompts.
+- Maintain scope-aware quick actions in the bottom AI command bar so users can run common edits without inventing prompts.
+- Extend the typed command registry with app-specific host commands, command analytics hooks, and optional AI command mode.
 - Persist non-generic rewrite explanations when a provider returns structured `{ replacementText, explanation }` output.
 - Keep plain text provider responses backward compatible.
 - Show command scope and source snippets consistently in the AI workspace.
@@ -12,9 +13,9 @@ Coredot Editor v1 is a working open-source AI document editor starter. The roadm
 ## v1.2: AI Work Context And Run Metadata
 
 - Show command scope, selected/source snippet, provider, model, status, elapsed time, and failure reason in the AI workspace.
-- Persist useful chat/run context instead of keeping all conversation state client-only.
+- Move document-scoped AI workspace sessions from the client adapter to database-backed conversation and message tables.
 - Group active and completed AI work so users can keep editing without losing track of long-running requests.
-- Add “show source” and “copy prompt context” affordances for debugging and trust.
+- Add “show source” and “copy prompt context” affordances for debugging and trust, building on the Source inspection snapshot.
 
 ## v1.3: Inline Autocomplete
 
