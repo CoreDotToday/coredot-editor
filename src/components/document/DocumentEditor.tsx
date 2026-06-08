@@ -52,7 +52,6 @@ import {
   getEditorAiCommandTargets,
 } from "./editor-command-targets";
 import {
-  BLOCK_GUTTER_WIDTH,
   clamp,
   getBlockActionRangeAtPosition,
   getBlockActionRangeAtViewportY,
