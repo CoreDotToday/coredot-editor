@@ -482,10 +482,16 @@ export function DocumentEditor({
       if (!editor || !frame || !session) return;
 
       const frameRect = frame.getBoundingClientRect();
+      const previewLeft = clamp(point.clientX - frameRect.left + 12, 8, Math.max(8, frame.clientWidth - 240));
+      const previewTop = clamp(
+        point.clientY - frameRect.top + frame.scrollTop + 12,
+        frame.scrollTop + 8,
+        Math.max(frame.scrollTop + 8, frame.scrollTop + frame.clientHeight - 72),
+      );
       setBlockDragPreview({
-        left: point.clientX - frameRect.left + 12,
+        left: previewLeft,
         text: session.sourceText || blockControlMessages.draggingBlock,
-        top: point.clientY - frameRect.top + frame.scrollTop + 12,
+        top: previewTop,
         type: session.sourceType,
       });
 

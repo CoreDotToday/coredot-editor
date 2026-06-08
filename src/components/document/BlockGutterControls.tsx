@@ -204,12 +204,25 @@ export function BlockGutterControls({
           }}
           onPointerUp={(event) => {
             const dragState = blockPointerDragRef.current;
-            if (!dragState || dragState.pointerId !== event.pointerId) return;
+            if (!dragState) {
+              onBlockDragEnd?.();
+              return;
+            }
+
+            if (dragState.pointerId !== event.pointerId) {
+              blockPointerDragRef.current = null;
+              setIsBlockDragging(false);
+              onBlockDragEnd?.();
+              return;
+            }
 
             blockPointerDragRef.current = null;
             event.currentTarget.releasePointerCapture?.(event.pointerId);
             setIsBlockDragging(false);
-            if (!dragState.isDragging) return;
+            if (!dragState.isDragging) {
+              onBlockDragEnd?.();
+              return;
+            }
 
             suppressNextClickRef.current = true;
             event.preventDefault();

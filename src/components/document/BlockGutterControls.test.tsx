@@ -64,6 +64,34 @@ describe("BlockGutterControls", () => {
     expect(handlePointerDragEnd).toHaveBeenCalledWith(expect.objectContaining({ clientX: 116, clientY: 132, deltaX: 16, deltaY: 32 }));
   });
 
+  it("clears parent drag state when pointer up happens before the drag threshold", () => {
+    const handleDragEnd = vi.fn();
+    const handleDragStart = vi.fn();
+    const handlePointerDragEnd = vi.fn();
+    const handlePointerDragMove = vi.fn();
+
+    render(
+      <BlockGutterControls
+        isVisible
+        left={0}
+        onBlockDragEnd={handleDragEnd}
+        onBlockDragStart={handleDragStart}
+        onBlockPointerDragEnd={handlePointerDragEnd}
+        onBlockPointerDragMove={handlePointerDragMove}
+        top={0}
+      />,
+    );
+
+    const dragHandle = screen.getByRole("button", { name: "블록 메뉴 열기" });
+    fireEvent.pointerDown(dragHandle, { button: 0, clientX: 100, clientY: 100, pointerId: 1 });
+    fireEvent.pointerUp(dragHandle, { clientX: 100, clientY: 100, pointerId: 1 });
+
+    expect(handleDragStart).toHaveBeenCalledTimes(1);
+    expect(handleDragEnd).toHaveBeenCalledTimes(1);
+    expect(handlePointerDragMove).not.toHaveBeenCalled();
+    expect(handlePointerDragEnd).not.toHaveBeenCalled();
+  });
+
   it("moves focus through the block action menu and returns focus on Escape", async () => {
     const user = userEvent.setup();
 
