@@ -73,6 +73,11 @@ import {
   type BlockDropIndicator,
   type BlockDropTarget,
 } from "./editor-block-drop-targets";
+import {
+  createEditorBlockDragSession,
+  isEditorBlockDragSessionStale,
+  type EditorBlockDragSession,
+} from "./editor-block-drag-session";
 import { NotionModASelection } from "./notion-mod-a-selection";
 import { SelectionAiMenu } from "./SelectionAiMenu";
 import { SelectionAiResultPopover, type SelectionAiResultPreview } from "./SelectionAiResultPopover";
@@ -162,11 +167,17 @@ export function DocumentEditor({
   const [selectionMenu, setSelectionMenu] = useState<SelectionMenuState | null>(null);
   const [blockGutter, setBlockGutter] = useState<BlockGutterState | null>(null);
   const [blockDropIndicator, setBlockDropIndicator] = useState<BlockDropIndicator | null>(null);
+  const [blockDragPreview, setBlockDragPreview] = useState<{
+    left: number;
+    text: string;
+    top: number;
+    type: "listItem" | "topLevel";
+  } | null>(null);
   const [editorFrameElement, setEditorFrameElement] = useState<HTMLDivElement | null>(null);
   const [preferredCommandScope, setPreferredCommandScope] = useState<AiCommandScope | null>(null);
   const editorFrameRef = useRef<HTMLDivElement | null>(null);
   const blockGutterTargetRef = useRef<BlockActionRange | null>(null);
-  const draggingBlockRef = useRef<BlockActionRange | null>(null);
+  const blockDragSessionRef = useRef<EditorBlockDragSession | null>(null);
   const blockDropTargetRef = useRef<BlockDropTarget | null>(null);
   const titleRef = useRef(title);
   const onChangeRef = useRef(onChange);
@@ -190,12 +201,20 @@ export function DocumentEditor({
     setBlockGutter(nextBlockGutter);
   }, []);
 
+  const clearBlockDragState = useCallback(() => {
+    blockDragSessionRef.current = null;
+    blockDropTargetRef.current = null;
+    setBlockDropIndicator(null);
+    setBlockDragPreview(null);
+  }, []);
+
   const handleEditorFrameRef = useCallback((element: HTMLDivElement | null) => {
     editorFrameRef.current = element;
     setEditorFrameElement(element);
   }, []);
 
   const defaultPluginContributions = useEditorPlugins(language);
+  const blockControlMessages = editorMessages[language].selectionMenu.blockControls;
   const resolvedPluginContributions = useMemo(
     () => mergeEditorPluginContributions(defaultPluginContributions, pluginContributions),
     [defaultPluginContributions, pluginContributions],
@@ -396,7 +415,7 @@ export function DocumentEditor({
       if (!editor) return;
       if ((event.target as HTMLElement).closest("[data-block-gutter='true']")) return;
       if (
-        draggingBlockRef.current === null &&
+        blockDragSessionRef.current === null &&
         (!editor.state.selection.empty || hasActiveEditorTextSelection(editor.view.dom))
       ) {
         updateBlockGutter(null);
@@ -433,23 +452,23 @@ export function DocumentEditor({
   const handleBlockDragStart = useCallback(() => {
     if (!editor) return;
 
-    draggingBlockRef.current =
+    const source =
       blockGutterTargetRef.current ??
       blockGutter?.target ??
       getTopLevelBlockActionRangeByIndex(editor, selectionMenu?.blockIndex) ??
       getCurrentBlockActionRange(editor);
+    blockDragSessionRef.current = source ? createEditorBlockDragSession(editor.getJSON() as TiptapJson, source) : null;
     blockDropTargetRef.current = null;
     setBlockDropIndicator(null);
+    setBlockDragPreview(null);
   }, [blockGutter?.target, editor, selectionMenu?.blockIndex]);
 
   const handleBlockDragEnd = useCallback(() => {
-    draggingBlockRef.current = null;
-    blockDropTargetRef.current = null;
-    setBlockDropIndicator(null);
-  }, []);
+    clearBlockDragState();
+  }, [clearBlockDragState]);
 
   const handleBlockDragOver = useCallback((event: DragEvent<HTMLDivElement>) => {
-    if (draggingBlockRef.current === null) return;
+    if (blockDragSessionRef.current === null) return;
 
     event.preventDefault();
     event.stopPropagation();
@@ -458,24 +477,34 @@ export function DocumentEditor({
 
   const handleBlockPointerDragMove = useCallback(
     (point: SelectionBlockDragPoint) => {
-      if (!editor || !editorFrameRef.current || !draggingBlockRef.current) return;
+      const session = blockDragSessionRef.current;
+      const frame = editorFrameRef.current;
+      if (!editor || !frame || !session) return;
 
-      const dropTarget = getBlockDropTarget(editor, editorFrameRef.current, draggingBlockRef.current, point);
+      const frameRect = frame.getBoundingClientRect();
+      setBlockDragPreview({
+        left: point.clientX - frameRect.left + 12,
+        text: session.sourceText || blockControlMessages.draggingBlock,
+        top: point.clientY - frameRect.top + frame.scrollTop + 12,
+        type: session.sourceType,
+      });
+
+      const dropTarget = getBlockDropTarget(editor, frame, session.source, point);
       blockDropTargetRef.current = dropTarget;
       setBlockDropIndicator(dropTarget?.indicator ?? null);
     },
-    [editor],
+    [blockControlMessages.draggingBlock, editor],
   );
 
   const moveDraggedBlockAtPoint = useCallback(
     (point: SelectionBlockDragPoint) => {
-      const source = draggingBlockRef.current;
+      const session = blockDragSessionRef.current;
       const cachedDropTarget = blockDropTargetRef.current;
-      draggingBlockRef.current = null;
-      blockDropTargetRef.current = null;
-      setBlockDropIndicator(null);
-      if (!editor || !editorFrameRef.current || !source) return;
+      clearBlockDragState();
+      if (!editor || !editorFrameRef.current || !session) return;
+      if (isEditorBlockDragSessionStale(session, editor.getJSON() as TiptapJson)) return;
 
+      const source = session.source;
       const dropTarget = cachedDropTarget ?? getBlockDropTarget(editor, editorFrameRef.current, source, point);
       if (!dropTarget) return;
 
@@ -563,12 +592,12 @@ export function DocumentEditor({
         focusMovedBlock(editor, focusTarget);
       });
     },
-    [editor],
+    [clearBlockDragState, editor],
   );
 
   const handleBlockDrop = useCallback(
     (event: DragEvent<HTMLDivElement>) => {
-      if (draggingBlockRef.current === null) return;
+      if (blockDragSessionRef.current === null) return;
 
       event.preventDefault();
       event.stopPropagation();
@@ -630,6 +659,21 @@ export function DocumentEditor({
             top={blockGutter?.top ?? 0}
           />
           <BlockDropIndicator indicator={blockDropIndicator} />
+          {blockDragPreview ? (
+            <div
+              aria-label={blockControlMessages.dragPreviewLabel}
+              className="pointer-events-none absolute z-40 max-w-56 rounded-md border border-zinc-200 bg-white/95 px-2.5 py-1.5 text-xs text-zinc-600 shadow-lg shadow-zinc-950/10"
+              role="status"
+              style={{ left: blockDragPreview.left, top: blockDragPreview.top }}
+            >
+              <span className="font-medium text-zinc-900">
+                {blockDragPreview.type === "listItem"
+                  ? blockControlMessages.listItem
+                  : blockControlMessages.block}
+              </span>
+              {blockDragPreview.text ? <span className="ml-1">{blockDragPreview.text}</span> : null}
+            </div>
+          ) : null}
           <SelectionAiMenu
             commands={resolvedPluginContributions.selectionCommands}
             hasSelection={shouldShowSelectionMenu}

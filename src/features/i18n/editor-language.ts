@@ -193,10 +193,14 @@ export const editorMessages = {
     selectionMenu: {
       blockControls: {
         addBelow: "Add block below",
+        block: "Block",
         convertListItemToText: "Turn into text",
         deleteBlock: "Delete block",
+        dragPreviewLabel: "Block drag preview",
+        draggingBlock: "Moving block",
         duplicateBlock: "Duplicate block",
         indentListItem: "Indent",
+        listItem: "List item",
         menuLabel: "Block actions",
         moveDown: "Move block down",
         moveUp: "Move block up",
@@ -453,10 +457,14 @@ export const editorMessages = {
     selectionMenu: {
       blockControls: {
         addBelow: "아래에 블록 추가",
+        block: "블록",
         convertListItemToText: "텍스트로 전환",
         deleteBlock: "블록 삭제",
+        dragPreviewLabel: "블록 이동 미리보기",
+        draggingBlock: "블록 이동 중",
         duplicateBlock: "블록 복제",
         indentListItem: "들여쓰기",
+        listItem: "리스트",
         menuLabel: "블록 작업",
         moveDown: "블록 아래로 이동",
         moveUp: "블록 위로 이동",

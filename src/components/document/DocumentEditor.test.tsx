@@ -806,6 +806,83 @@ describe("DocumentEditor", () => {
     ).toBe(false);
   });
 
+  it("shows a lightweight block drag preview while dragging", async () => {
+    render(
+      <DocumentEditor
+        contentJson={createFlatListDocument(["1", "2", "3"])}
+        onChange={() => undefined}
+        title="Drag preview test"
+      />,
+    );
+
+    const editorBody = await screen.findByRole("textbox", { name: "문서 본문" });
+    const frame = editorBody.closest(".overflow-y-auto") as HTMLDivElement;
+    Object.defineProperty(frame, "clientWidth", { value: 900 });
+    Object.defineProperty(frame, "scrollTop", { value: 0 });
+    mockElementMetrics(frame, { bottom: 700, height: 700, left: 0, right: 900, top: 0, width: 900 });
+    mockElementMetrics(editorBody, { bottom: 700, height: 700, left: 100, right: 800, top: 0, width: 700 });
+    mockRenderedFlatListMetrics(editorBody);
+
+    fireEvent.mouseMove(screen.getByText("2"), { clientX: 200, clientY: 176 });
+    const dragHandle = await screen.findByRole("button", { name: "블록 메뉴 열기" });
+    dragHandle.setPointerCapture = vi.fn();
+    dragHandle.releasePointerCapture = vi.fn();
+
+    fireEvent.pointerDown(dragHandle, { button: 0, clientX: 120, clientY: 176, pointerId: 1 });
+    fireEvent.pointerMove(dragHandle, { buttons: 1, clientX: 140, clientY: 220, pointerId: 1 });
+
+    expect(screen.getByRole("status", { name: "블록 이동 미리보기" })).toHaveTextContent("2");
+
+    fireEvent.pointerUp(dragHandle, { clientX: 140, clientY: 220, pointerId: 1 });
+
+    await waitFor(() => {
+      expect(screen.queryByRole("status", { name: "블록 이동 미리보기" })).not.toBeInTheDocument();
+    });
+  });
+
+  it("cancels a block drop when the live editor document changed during dragging", async () => {
+    const handleChange = vi.fn();
+
+    const { rerender } = render(
+      <DocumentEditor
+        contentJson={createFlatListDocument(["1", "2", "3"])}
+        onChange={handleChange}
+        title="Stale drag test"
+      />,
+    );
+
+    const editorBody = await screen.findByRole("textbox", { name: "문서 본문" });
+    const frame = editorBody.closest(".overflow-y-auto") as HTMLDivElement;
+    Object.defineProperty(frame, "clientWidth", { value: 900 });
+    Object.defineProperty(frame, "scrollTop", { value: 0 });
+    mockElementMetrics(frame, { bottom: 700, height: 700, left: 0, right: 900, top: 0, width: 900 });
+    mockElementMetrics(editorBody, { bottom: 700, height: 700, left: 100, right: 800, top: 0, width: 700 });
+    mockRenderedFlatListMetrics(editorBody);
+
+    fireEvent.mouseMove(screen.getByText("2"), { clientX: 200, clientY: 176 });
+    const dragHandle = await screen.findByRole("button", { name: "블록 메뉴 열기" });
+    dragHandle.setPointerCapture = vi.fn();
+    dragHandle.releasePointerCapture = vi.fn();
+
+    fireEvent.pointerDown(dragHandle, { button: 0, clientX: 120, clientY: 176, pointerId: 1 });
+    rerender(
+      <DocumentEditor
+        contentJson={createFlatListDocument(["1", "changed", "3"])}
+        onChange={handleChange}
+        title="Stale drag test"
+      />,
+    );
+    await waitFor(() => {
+      expect(screen.getByText("changed")).toBeInTheDocument();
+    });
+    handleChange.mockClear();
+
+    fireEvent.pointerMove(dragHandle, { buttons: 1, clientX: 120, clientY: 240, pointerId: 1 });
+    fireEvent.pointerUp(dragHandle, { clientX: 120, clientY: 240, pointerId: 1 });
+
+    expect(handleChange).not.toHaveBeenCalled();
+  });
+
   it("positions the selection toolbar below text near the top of the editor", () => {
     const position = getSelectionMenuPosition({
       frameRect: { height: 520, left: 200, top: 120, width: 720 },
