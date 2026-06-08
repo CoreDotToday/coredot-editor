@@ -30,11 +30,21 @@ export type AiWorkspaceChangeItem = {
   targetText: string;
 };
 
+export type AiWorkspaceChatSession = {
+  command: string;
+  createdAt: Date;
+  id: string;
+  messages: AiWorkspaceChatMessage[];
+  title: string;
+  updatedAt: Date;
+};
+
 type AiWorkspacePanelProps = {
   activeProposalId?: string | null;
   changeItems: AiWorkspaceChangeItem[];
   children?: ReactNode;
   chatMessages: AiWorkspaceChatMessage[];
+  chatSessions?: AiWorkspaceChatSession[];
   errorMessage: string;
   isReviewing: boolean;
   isRunningCommand?: boolean;
@@ -71,6 +81,7 @@ export function AiWorkspacePanel({
   changeItems,
   children,
   chatMessages,
+  chatSessions = [],
   errorMessage,
   isReviewing,
   isRunningCommand = false,
@@ -90,7 +101,10 @@ export function AiWorkspacePanel({
   undoErrorMessage = "",
 }: AiWorkspacePanelProps) {
   const [activeTab, setActiveTab] = useState<WorkspaceTab>("review");
+  const [activeChatSessionId, setActiveChatSessionId] = useState<string>("");
   const workspaceId = useId();
+  const activeChatSession = chatSessions.find((session) => session.id === activeChatSessionId) ?? chatSessions[0] ?? null;
+  const activeChatMessages = activeChatSession?.messages ?? chatMessages;
   const panelClassName =
     layout === "drawer"
       ? "flex h-full w-[min(100vw,24rem)] shrink-0 flex-col border-l border-zinc-200 bg-white shadow-2xl shadow-zinc-950/20"
@@ -193,11 +207,45 @@ export function AiWorkspacePanel({
           role="tabpanel"
         >
           <h2 className="text-sm font-semibold text-zinc-950">{messages.chatTitle}</h2>
-          {chatMessages.length === 0 ? (
+          {chatSessions.length > 0 ? (
+            <div
+              aria-label={messages.conversationList}
+              className="mt-4 flex gap-2 overflow-x-auto pb-1"
+              role="tablist"
+            >
+              {chatSessions.map((session) => (
+                <button
+                  aria-controls={`${workspaceId}-chat-session-${session.id}`}
+                  aria-selected={activeChatSession?.id === session.id}
+                  className={[
+                    "inline-flex h-8 shrink-0 items-center rounded-full border px-3 text-xs font-medium transition-colors",
+                    activeChatSession?.id === session.id
+                      ? "border-zinc-950 bg-zinc-950 text-white"
+                      : "border-zinc-200 bg-white text-zinc-600 hover:border-zinc-300 hover:text-zinc-950",
+                  ].join(" ")}
+                  id={`${workspaceId}-chat-session-${session.id}-tab`}
+                  key={session.id}
+                  onClick={() => setActiveChatSessionId(session.id)}
+                  role="tab"
+                  type="button"
+                >
+                  {session.title}
+                </button>
+              ))}
+            </div>
+          ) : null}
+          {activeChatMessages.length === 0 ? (
             <p className="mt-3 text-sm leading-6 text-zinc-500">{messages.chatEmpty}</p>
           ) : (
-            <ul className="mt-4 space-y-4">
-              {chatMessages.map((message) => (
+            <ul
+              aria-labelledby={
+                activeChatSession ? `${workspaceId}-chat-session-${activeChatSession.id}-tab` : undefined
+              }
+              className="mt-4 space-y-4"
+              id={activeChatSession ? `${workspaceId}-chat-session-${activeChatSession.id}` : undefined}
+              role={activeChatSession ? "tabpanel" : undefined}
+            >
+              {activeChatMessages.map((message) => (
                 <li key={message.id}>
                   <div className="flex items-center justify-between gap-3">
                     <span className="text-xs font-semibold uppercase tracking-normal text-zinc-500">

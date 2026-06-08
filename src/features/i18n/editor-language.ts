@@ -86,6 +86,7 @@ export const editorMessages = {
       chatEmpty: "Use the command bar below the editor to ask for changes.",
       chatTitle: "Conversation",
       close: "Close AI workspace",
+      conversationList: "AI conversation sessions",
       focusProposal: "Show proposal in document",
       running: "AI is creating a proposal...",
       tabs: {
@@ -99,6 +100,20 @@ export const editorMessages = {
       undoChange: "Undo change for {targetText}",
       undoConflict: "This change cannot be undone after newer local edits.",
       user: "User",
+    },
+    commandPalette: {
+      commands: {
+        exportDocx: "Export DOCX",
+        openWorkspace: "Open AI workspace",
+        reviewDocument: "Review document",
+        save: "Save document",
+        showEditor: "Show editor",
+        showSource: "Show Source",
+      },
+      empty: "No commands found.",
+      placeholder: "Search commands...",
+      searchLabel: "Search commands",
+      title: "Command palette",
     },
     editor: {
       bodyLabel: "Document body",
@@ -139,12 +154,14 @@ export const editorMessages = {
       updateProposalFailed: "Could not update proposal status.",
     },
     header: {
+      editorView: "Show editor",
       exportDocx: "Export DOCX",
       exportingDocx: "Exporting...",
       language: "Language",
       save: "Save",
       saveStatus: "Document save status",
       saving: "Saving...",
+      sourceView: "Show Source",
     },
     history: {
       commandTypes: {
@@ -189,6 +206,15 @@ export const editorMessages = {
       runningCount: "{count}/{limit} selection AI commands running",
       selected: "Selected: {selectedText}",
       title: "Selection command",
+    },
+    sourceView: {
+      editorTab: "Editor",
+      empty: "No plain text.",
+      jsonTitle: "Tiptap JSON",
+      plainTextTitle: "Plain text",
+      regionLabel: "Document Source",
+      sourceTab: "Source",
+      viewTabs: "Document view",
     },
     selectionMenu: {
       blockControls: {
@@ -350,6 +376,7 @@ export const editorMessages = {
       chatEmpty: "에디터 하단 입력창에서 변경 요청을 입력하세요.",
       chatTitle: "대화",
       close: "AI 작업 영역 닫기",
+      conversationList: "AI 대화 세션",
       focusProposal: "본문에서 제안 보기",
       running: "AI가 제안을 생성하는 중입니다...",
       tabs: {
@@ -363,6 +390,20 @@ export const editorMessages = {
       undoChange: "{targetText} 변경 되돌리기",
       undoConflict: "이후 로컬 편집이 있어 이 변경은 자동으로 되돌릴 수 없습니다.",
       user: "사용자",
+    },
+    commandPalette: {
+      commands: {
+        exportDocx: "DOCX 내보내기",
+        openWorkspace: "AI 작업 영역 열기",
+        reviewDocument: "문서 검토",
+        save: "문서 저장",
+        showEditor: "편집 보기",
+        showSource: "Source 보기",
+      },
+      empty: "일치하는 명령이 없습니다.",
+      placeholder: "명령 검색...",
+      searchLabel: "명령 검색",
+      title: "명령 팔레트",
     },
     editor: {
       bodyLabel: "문서 본문",
@@ -403,12 +444,14 @@ export const editorMessages = {
       updateProposalFailed: "제안 상태를 업데이트하지 못했습니다.",
     },
     header: {
+      editorView: "편집 보기",
       exportDocx: "DOCX 내보내기",
       exportingDocx: "내보내는 중...",
       language: "언어",
       save: "저장",
       saveStatus: "문서 저장 상태",
       saving: "저장 중...",
+      sourceView: "Source 보기",
     },
     history: {
       commandTypes: {
@@ -453,6 +496,15 @@ export const editorMessages = {
       runningCount: "선택 AI 명령 {count}/{limit}개 실행 중",
       selected: "선택됨: {selectedText}",
       title: "선택 명령",
+    },
+    sourceView: {
+      editorTab: "편집",
+      empty: "추출된 일반 텍스트가 없습니다.",
+      jsonTitle: "Tiptap JSON",
+      plainTextTitle: "일반 텍스트",
+      regionLabel: "문서 Source",
+      sourceTab: "Source",
+      viewTabs: "문서 보기",
     },
     selectionMenu: {
       blockControls: {

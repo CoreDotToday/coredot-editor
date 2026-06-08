@@ -3,6 +3,7 @@
 import Link from "next/link";
 import {
   ChevronsLeft,
+  Code2,
   Download,
   FileText,
   Library,
@@ -29,6 +30,7 @@ import {
   AiWorkspacePanel,
   type AiWorkspaceChangeItem,
   type AiWorkspaceChatMessage,
+  type AiWorkspaceChatSession,
 } from "@/components/ai/AiWorkspacePanel";
 import { AiSettingsDialog } from "@/components/settings/AiSettingsDialog";
 import { getTemplateVariableLabel, PromptTemplatePanel } from "@/components/templates/PromptTemplatePanel";
@@ -76,6 +78,7 @@ type ShellProposal = Pick<
   | "status"
 >;
 type SaveState = "saved" | "dirty" | "saving" | "failed";
+type EditorSurface = "editor" | "source";
 
 type DocumentShellProps = {
   document: ShellDocument;
@@ -129,6 +132,13 @@ type ReviewResponse = {
 type RewriteResponse = {
   run?: ShellAiRun;
   proposal?: ShellProposal | null;
+};
+
+type CommandPaletteAction = {
+  action: () => void;
+  id: string;
+  keywords: string[];
+  label: string;
 };
 
 const MAX_CONCURRENT_SELECTION_COMMANDS = 5;
@@ -197,6 +207,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
   const [selectionProposalContexts, setSelectionProposalContexts] = useState<Record<string, SelectionProposalContext>>({});
   const [activeProposalId, setActiveProposalId] = useState<string | null>(null);
   const [aiChatMessages, setAiChatMessages] = useState<AiWorkspaceChatMessage[]>([]);
+  const [aiChatSessions, setAiChatSessions] = useState<AiWorkspaceChatSession[]>([]);
   const [appliedChanges, setAppliedChanges] = useState<AppliedAiChangeRecord[]>([]);
   const [undoChangeError, setUndoChangeError] = useState("");
   const [isExportingDocx, setIsExportingDocx] = useState(false);
@@ -221,6 +232,8 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
   const [workspaceOpenOverride, setWorkspaceOpenOverride] = useState<boolean | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isCreatingDocument, setIsCreatingDocument] = useState(false);
+  const [editorSurface, setEditorSurface] = useState<EditorSurface>("editor");
+  const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
   const activeTemplateId = templates.some((template) => template.id === selectedTemplateId)
     ? selectedTemplateId
     : templates[0]?.id ?? "";
@@ -253,6 +266,20 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
     [isCompactWorkspace],
   );
 
+  useEffect(() => {
+    const handleCommandPaletteShortcut = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "k") {
+        return;
+      }
+
+      event.preventDefault();
+      setIsCommandPaletteOpen(true);
+    };
+
+    window.addEventListener("keydown", handleCommandPaletteShortcut);
+    return () => window.removeEventListener("keydown", handleCommandPaletteShortcut);
+  }, []);
+
   if (
     observedDocument.id !== incomingDocument.id ||
     observedDocument.title !== incomingDocument.title ||
@@ -268,8 +295,11 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
       setSelectionProposalContexts({});
       setActiveProposalId(null);
       setAiChatMessages([]);
+      setAiChatSessions([]);
       setAppliedChanges([]);
       setUndoChangeError("");
+      setEditorSurface("editor");
+      setIsCommandPaletteOpen(false);
       setSelectedTemplateId(templates[0]?.id ?? "");
       setReviewProposals(proposals);
       setReviewRuns(aiRuns);
@@ -377,6 +407,15 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
     }
 
     const runningCommandId = createWorkspaceClientId(aiWorkspaceIdRef, "selection_job");
+    const chatSessionId = createWorkspaceClientId(aiWorkspaceIdRef, "chat_session");
+    const chatSessionCreatedAt = new Date();
+    const chatUserMessage: AiWorkspaceChatMessage = {
+      command,
+      content: selectedText,
+      id: createWorkspaceClientId(aiWorkspaceIdRef, "user"),
+      role: "user",
+      scopeLabel: getCommandScopeLabel(context?.scope, messages),
+    };
     updateRunningSelectionCommands((currentCommands) => [
       {
         anchor: context?.anchor,
@@ -388,15 +427,17 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
     setReviewError("");
     setTemplateVariableErrors({});
     setUndoChangeError("");
-    setAiChatMessages((currentMessages) => [
-      ...currentMessages,
+    setAiChatMessages((currentMessages) => [...currentMessages, chatUserMessage]);
+    setAiChatSessions((currentSessions) => [
       {
         command,
-        content: selectedText,
-        id: createWorkspaceClientId(aiWorkspaceIdRef, "user"),
-        role: "user",
-        scopeLabel: getCommandScopeLabel(context?.scope, messages),
+        createdAt: chatSessionCreatedAt,
+        id: chatSessionId,
+        messages: [chatUserMessage],
+        title: getSelectionCommandLabel(command, language),
+        updatedAt: chatSessionCreatedAt,
       },
+      ...currentSessions,
     ]);
 
     try {
@@ -450,15 +491,25 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
           replacementText: body.proposal.replacementText,
           targetText: body.proposal.targetText,
         });
-        setAiChatMessages((currentMessages) => [
-          ...currentMessages,
-          {
-            command,
-            content: body.proposal!.replacementText,
-            id: createWorkspaceClientId(aiWorkspaceIdRef, "assistant"),
-            role: "assistant",
-          },
-        ]);
+        const chatAssistantMessage: AiWorkspaceChatMessage = {
+          command,
+          content: body.proposal.replacementText,
+          id: createWorkspaceClientId(aiWorkspaceIdRef, "assistant"),
+          role: "assistant",
+        };
+        const chatSessionUpdatedAt = new Date();
+        setAiChatMessages((currentMessages) => [...currentMessages, chatAssistantMessage]);
+        setAiChatSessions((currentSessions) =>
+          currentSessions.map((session) =>
+            session.id === chatSessionId
+              ? {
+                  ...session,
+                  messages: [...session.messages, chatAssistantMessage],
+                  updatedAt: chatSessionUpdatedAt,
+                }
+              : session,
+          ),
+        );
       }
       if (body.run) {
         setReviewRuns((currentRuns) => [body.run!, ...currentRuns]);
@@ -470,7 +521,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
         currentCommands.filter((runningCommand) => runningCommand.id !== runningCommandId),
       );
     }
-  }, [document.id, draft.contentJson, messages, selectedTemplate, templateVariables, updateRunningSelectionCommands]);
+  }, [document.id, draft.contentJson, language, messages, selectedTemplate, templateVariables, updateRunningSelectionCommands]);
 
   const saveDraft = useCallback(async () => {
     const savingVersion = draftVersionRef.current;
@@ -981,6 +1032,56 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
       })),
     [appliedChanges, draftContentSignature],
   );
+  const commandPaletteActions = useMemo<CommandPaletteAction[]>(
+    () => [
+      {
+        action: () => {
+          setWorkspaceOpen(true);
+        },
+        id: "open-workspace",
+        keywords: ["ai", "workspace", "chat", "review"],
+        label: messages.commandPalette.commands.openWorkspace,
+      },
+      {
+        action: () => {
+          setWorkspaceOpen(true);
+          void runDocumentReview();
+        },
+        id: "review-document",
+        keywords: ["ai", "review", "document", "검토"],
+        label: messages.commandPalette.commands.reviewDocument,
+      },
+      {
+        action: () => setEditorSurface("source"),
+        id: "show-source",
+        keywords: ["source", "raw", "json", "markdown"],
+        label: messages.commandPalette.commands.showSource,
+      },
+      {
+        action: () => setEditorSurface("editor"),
+        id: "show-editor",
+        keywords: ["editor", "write", "edit", "편집"],
+        label: messages.commandPalette.commands.showEditor,
+      },
+      {
+        action: () => {
+          void saveDraft();
+        },
+        id: "save-document",
+        keywords: ["save", "저장"],
+        label: messages.commandPalette.commands.save,
+      },
+      {
+        action: () => {
+          void exportDocxDraft();
+        },
+        id: "export-docx",
+        keywords: ["docx", "export", "download"],
+        label: messages.commandPalette.commands.exportDocx,
+      },
+    ],
+    [exportDocxDraft, messages.commandPalette.commands, runDocumentReview, saveDraft, setWorkspaceOpen],
+  );
   const sidebarNavigationClassName = [
     "flex h-9 items-center gap-2 rounded-md px-2.5",
     isInternalNavigationBlocked
@@ -1074,6 +1175,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
       activeProposalId={activeProposalId}
       changeItems={changeItems}
       chatMessages={aiChatMessages}
+      chatSessions={aiChatSessions}
       errorMessage={reviewError}
       isReviewing={isReviewing}
       isRunningCommand={isRewritingSelection}
@@ -1178,6 +1280,17 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
           </div>
           <div className="flex w-full min-w-0 items-center gap-2 overflow-x-auto pb-1 sm:w-auto sm:overflow-visible sm:pb-0">
             <button
+              aria-label={editorSurface === "source" ? messages.header.editorView : messages.header.sourceView}
+              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-zinc-200 bg-white px-2.5 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50"
+              onClick={() => setEditorSurface((currentSurface) => (currentSurface === "source" ? "editor" : "source"))}
+              type="button"
+            >
+              <Code2 aria-hidden="true" className="size-4" />
+              <span className="hidden whitespace-nowrap 2xl:inline">
+                {editorSurface === "source" ? messages.header.editorView : messages.header.sourceView}
+              </span>
+            </button>
+            <button
               aria-label={isExportingDocx ? messages.header.exportingDocx : messages.header.exportDocx}
               className="inline-flex h-8 items-center gap-1.5 rounded-md border border-zinc-200 bg-white px-2.5 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-400"
               disabled={isExportingDocx}
@@ -1236,6 +1349,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
             <button
               aria-label={messages.shell.more}
               className="inline-flex size-8 items-center justify-center rounded-md text-zinc-600 hover:bg-zinc-100 hover:text-zinc-950"
+              onClick={() => setIsCommandPaletteOpen(true)}
               type="button"
             >
               <MoreHorizontal aria-hidden="true" className="size-4" />
@@ -1243,27 +1357,64 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
           </div>
         </header>
 
-        <DocumentEditor
-          key={document.id}
-          contentJson={draft.contentJson}
-          isSelectionCommandLimitReached={isSelectionCommandLimitReached}
-          isSelectionCommandRunning={isRewritingSelection}
-          inlineSuggestions={inlineSuggestions}
-          language={language}
-          messages={messages.editor}
-          onChange={handleDraftChange}
-          onApplySelectionAiResult={(proposalId, applyMode) =>
-            updateProposalStatusLocally(proposalId, "accepted", applyMode)
-          }
-          onDismissSelectionAiResult={() => setSelectionAiResult(null)}
-          onRetrySelectionAiResult={retrySelectionAiResult}
-          onSelectionCommand={handleSelectionCommand}
-          runningSelectionCommand={selectionCommand?.command}
-          runningSelectionCommandLimit={MAX_CONCURRENT_SELECTION_COMMANDS}
-          runningSelectionCommands={runningSelectionCommands}
-          selectionAiResult={selectionAiResult}
-          title={draft.title}
-        />
+        <div className="flex shrink-0 justify-center border-b border-zinc-100 px-4 py-2">
+          <div
+            aria-label={messages.sourceView.viewTabs}
+            className="inline-grid grid-cols-2 rounded-md bg-zinc-100 p-1"
+            role="tablist"
+          >
+            <button
+              aria-selected={editorSurface === "editor"}
+              className={[
+                "h-8 rounded px-3 text-sm font-medium transition-colors",
+                editorSurface === "editor" ? "bg-white text-zinc-950 shadow-sm" : "text-zinc-600 hover:text-zinc-950",
+              ].join(" ")}
+              onClick={() => setEditorSurface("editor")}
+              role="tab"
+              type="button"
+            >
+              {messages.sourceView.editorTab}
+            </button>
+            <button
+              aria-selected={editorSurface === "source"}
+              className={[
+                "h-8 rounded px-3 text-sm font-medium transition-colors",
+                editorSurface === "source" ? "bg-white text-zinc-950 shadow-sm" : "text-zinc-600 hover:text-zinc-950",
+              ].join(" ")}
+              onClick={() => setEditorSurface("source")}
+              role="tab"
+              type="button"
+            >
+              {messages.sourceView.sourceTab}
+            </button>
+          </div>
+        </div>
+
+        {editorSurface === "editor" ? (
+          <DocumentEditor
+            key={document.id}
+            contentJson={draft.contentJson}
+            isSelectionCommandLimitReached={isSelectionCommandLimitReached}
+            isSelectionCommandRunning={isRewritingSelection}
+            inlineSuggestions={inlineSuggestions}
+            language={language}
+            messages={messages.editor}
+            onChange={handleDraftChange}
+            onApplySelectionAiResult={(proposalId, applyMode) =>
+              updateProposalStatusLocally(proposalId, "accepted", applyMode)
+            }
+            onDismissSelectionAiResult={() => setSelectionAiResult(null)}
+            onRetrySelectionAiResult={retrySelectionAiResult}
+            onSelectionCommand={handleSelectionCommand}
+            runningSelectionCommand={selectionCommand?.command}
+            runningSelectionCommandLimit={MAX_CONCURRENT_SELECTION_COMMANDS}
+            runningSelectionCommands={runningSelectionCommands}
+            selectionAiResult={selectionAiResult}
+            title={draft.title}
+          />
+        ) : (
+          <DocumentSourceView draft={draft} messages={messages.sourceView} />
+        )}
       </section>
 
       {isWorkspaceOpen ? (
@@ -1282,7 +1433,128 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
           ) : null}
         </>
       ) : null}
+      {isCommandPaletteOpen ? (
+        <DocumentCommandPalette
+          actions={commandPaletteActions}
+          messages={messages.commandPalette}
+          onClose={() => setIsCommandPaletteOpen(false)}
+        />
+      ) : null}
     </main>
+  );
+}
+
+function DocumentCommandPalette({
+  actions,
+  messages,
+  onClose,
+}: {
+  actions: CommandPaletteAction[];
+  messages: (typeof editorMessages)[EditorLanguage]["commandPalette"];
+  onClose: () => void;
+}) {
+  const [query, setQuery] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
+  const normalizedQuery = query.trim().toLowerCase();
+  const filteredActions = normalizedQuery
+    ? actions.filter((action) => `${action.label} ${action.keywords.join(" ")}`.toLowerCase().includes(normalizedQuery))
+    : actions;
+
+  useEffect(() => {
+    inputRef.current?.focus();
+
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onClose();
+      }
+    };
+
+    window.addEventListener("keydown", handleEscape);
+    return () => window.removeEventListener("keydown", handleEscape);
+  }, [onClose]);
+
+  return (
+    <div className="fixed inset-0 z-[70] flex items-start justify-center bg-zinc-950/20 px-4 pt-[12vh]">
+      <button aria-label={messages.title} className="absolute inset-0 cursor-default" onClick={onClose} type="button" />
+      <section
+        aria-label={messages.title}
+        aria-modal="true"
+        className="relative z-10 w-full max-w-xl overflow-hidden rounded-lg border border-zinc-200 bg-white shadow-2xl shadow-zinc-950/20"
+        role="dialog"
+      >
+        <div className="border-b border-zinc-200 p-3">
+          <label className="sr-only" htmlFor="document-command-palette-query">
+            {messages.searchLabel}
+          </label>
+          <input
+            aria-label={messages.searchLabel}
+            autoComplete="off"
+            className="h-10 w-full rounded-md border border-zinc-200 px-3 text-sm outline-none transition-colors placeholder:text-zinc-400 focus:border-zinc-500"
+            id="document-command-palette-query"
+            onChange={(event) => setQuery(event.currentTarget.value)}
+            placeholder={messages.placeholder}
+            ref={inputRef}
+            type="text"
+            value={query}
+          />
+        </div>
+        <div className="max-h-80 overflow-y-auto p-2" role="listbox">
+          {filteredActions.length > 0 ? (
+            filteredActions.map((action) => (
+              <button
+                aria-selected="false"
+                className="flex w-full items-center justify-between rounded-md px-3 py-2 text-left text-sm font-medium text-zinc-800 hover:bg-zinc-100"
+                key={action.id}
+                onClick={() => {
+                  onClose();
+                  action.action();
+                }}
+                role="option"
+                type="button"
+              >
+                {action.label}
+              </button>
+            ))
+          ) : (
+            <p className="px-3 py-6 text-center text-sm text-zinc-500">{messages.empty}</p>
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function DocumentSourceView({
+  draft,
+  messages,
+}: {
+  draft: DraftState;
+  messages: (typeof editorMessages)[EditorLanguage]["sourceView"];
+}) {
+  const plainText = extractPlainTextFromTiptap(draft.contentJson);
+
+  return (
+    <section
+      aria-label={messages.regionLabel}
+      className="min-h-0 flex-1 overflow-y-auto bg-zinc-50 px-4 py-6"
+      role="region"
+    >
+      <div className="mx-auto flex w-full max-w-5xl flex-col gap-4">
+        <section className="rounded-md border border-zinc-200 bg-white p-4">
+          <h2 className="text-sm font-semibold text-zinc-950">{messages.plainTextTitle}</h2>
+          <pre className="mt-3 whitespace-pre-wrap rounded-md bg-zinc-50 p-3 font-mono text-sm leading-6 text-zinc-700">
+            {plainText || messages.empty}
+          </pre>
+        </section>
+        <section className="rounded-md border border-zinc-200 bg-white p-4">
+          <h2 className="text-sm font-semibold text-zinc-950">{messages.jsonTitle}</h2>
+          <pre className="mt-3 overflow-x-auto rounded-md bg-zinc-950 p-3 font-mono text-xs leading-5 text-zinc-50">
+            {JSON.stringify(draft.contentJson, null, 2)}
+          </pre>
+        </section>
+      </div>
+    </section>
   );
 }
 

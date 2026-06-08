@@ -43,7 +43,9 @@ Before deploying a fork with real users, make the product-specific decisions tha
 - Review API that creates proposal records from structured AI findings
 - Rewrite API for exact-match selected text proposals, translations, and continue-writing insertions
 - SuperDoc-style bottom AI command bar for natural-language edits against the current selection, current block, or whole document
-- Right-side AI workspace with review, conversation, and change-history tabs
+- Right-side AI workspace with review, sessionized AI conversations, and change-history tabs
+- Command palette for workspace actions, opened with `Cmd/Ctrl+K` or the editor header's more menu
+- Read-only Source mode for inspecting the current unsaved draft as plain text and Tiptap JSON
 - Inline pending proposal highlights inspired by Tiptap Content AI suggestions
 - Redline-style proposal previews with inserted/deleted text labels for contract review workflows
 - DOCX import/export MVP for core document structure: headings, paragraphs, lists, links, and common inline marks
@@ -104,6 +106,8 @@ With the example environment, the first saved LLM setting uses `stub`, so the AI
 
 In the editor, use the bottom `무엇을 변경할까요?` command bar for freeform AI requests. The command targets selected text first, then the current block, then the full document. AI output is saved as a proposal instead of immediately overwriting text; review it in the right workspace's `검토`, `대화`, and `변경내역` tabs.
 
+Open the command palette with `Cmd/Ctrl+K` or the header's more menu to jump between AI workspace actions, review, save/export, and Source mode. The `Source` tab is read-only and reflects the current in-memory draft, including unsaved edits, as extracted plain text plus Tiptap JSON.
+
 Type `/` in the editor to open the slash command menu. The menu supports core Tiptap block commands such as text, headings, bullet/numbered/task lists, quote, divider, code block, and AI continue writing. Use the left-side block gutter controls for quick block insertion, duplication, deletion, and drag reordering.
 
 Use `DOCX 가져오기` on the document list to create a new document from a `.docx` file. Use `DOCX 내보내기` in the editor header to export the current in-memory draft, including unsaved edits. DOCX conversion is intentionally an MVP: it preserves core editing structure and text semantics, not exact Word layout, comments, tracked changes, headers, footers, or embedded media fidelity.
@@ -113,6 +117,8 @@ Use `DOCX 가져오기` on the document list to create a new document from a `.d
 Coredot Editor uses Tiptap as the document engine and keeps product behavior in focused layers:
 
 - `DocumentEditor` composes the editor surface, toolbar, AI command bar, proposal highlights, and block controls.
+- `DocumentShell` owns host-level workspace actions such as command palette commands, Source mode, saving/exporting, and AI workspace visibility.
+- `AiWorkspacePanel` renders review proposals, per-command AI conversation sessions, and accepted-change history.
 - `editor-block-ranges.ts` resolves the current paragraph, heading, or list item into a normalized block target and owns pointer hit-testing helpers used by the gutter.
 - `editor-block-drop-targets.ts` classifies drag destinations and suppresses invalid or no-op drops before a document mutation can happen.
 - `editor-block-drag-session.ts` guards drag operations against stale live editor state.

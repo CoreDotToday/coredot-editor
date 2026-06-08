@@ -756,6 +756,104 @@ describe("DocumentShell", () => {
     expect(within(chatPanel).getByText("revenue grew 8%")).toBeInTheDocument();
   });
 
+  it("opens a command palette and runs workspace commands", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "source body")}
+        templates={[createTemplate("tpl_1", "Rewrite template")]}
+      />,
+    );
+
+    await user.keyboard("{Meta>}k{/Meta}");
+
+    const palette = screen.getByRole("dialog", { name: "명령 팔레트" });
+    expect(within(palette).getByRole("textbox", { name: "명령 검색" })).toBeInTheDocument();
+    expect(within(palette).getByRole("option", { name: /문서 검토/ })).toBeInTheDocument();
+
+    await user.type(within(palette).getByRole("textbox", { name: "명령 검색" }), "source");
+    await user.click(within(palette).getByRole("option", { name: /Source 보기/ }));
+
+    expect(screen.queryByRole("dialog", { name: "명령 팔레트" })).not.toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Source" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("region", { name: "문서 Source" })).toHaveTextContent("source body");
+  });
+
+  it("keeps AI command conversations in separate sessions", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            run: createAiRun("run_clarity"),
+            proposal: createProposal("proposal_clarity", "pending", "selected text"),
+          }),
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            run: createAiRun("run_translate"),
+            proposal: {
+              ...createProposal("proposal_translate", "pending", "selected text"),
+              replacementText: "선택된 텍스트",
+            },
+          }),
+        ),
+      );
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "selected text in document")}
+        templates={[createTemplate("tpl_1", "Rewrite template")]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Mock selection command" }));
+    await screen.findByRole("region", { name: "선택 AI 결과" });
+    await user.click(screen.getByRole("button", { name: "Mock translation command" }));
+    await waitFor(() => expect(screen.getAllByText("선택된 텍스트").length).toBeGreaterThan(0));
+
+    await user.click(screen.getByRole("tab", { name: "대화" }));
+
+    expect(screen.getByRole("tab", { name: "명확하게 개선" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "한국어로 번역" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: "명확하게 개선" }));
+    expect(screen.getByRole("tabpanel", { name: "명확하게 개선" })).toHaveTextContent("revenue grew 8%");
+    expect(screen.getByRole("tabpanel", { name: "명확하게 개선" })).not.toHaveTextContent("선택된 텍스트");
+
+    await user.click(screen.getByRole("tab", { name: "한국어로 번역" }));
+    expect(screen.getByRole("tabpanel", { name: "한국어로 번역" })).toHaveTextContent("선택된 텍스트");
+  });
+
+  it("shows the current draft in source view and switches back to rich editing", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "saved body")}
+        templates={[]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Mock body edit" }));
+    await user.click(screen.getByRole("button", { name: "Source 보기" }));
+
+    const sourceRegion = screen.getByRole("region", { name: "문서 Source" });
+    expect(sourceRegion).toHaveTextContent("fresh edited body");
+    expect(sourceRegion).toHaveTextContent('"type": "doc"');
+
+    await user.click(screen.getByRole("button", { name: "편집 보기" }));
+
+    expect(screen.getByRole("textbox", { name: "문서 제목" })).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "문서 Source" })).not.toBeInTheDocument();
+  });
+
   it("shows a selection rewrite result preview with a translate default insert action", async () => {
     const user = userEvent.setup();
     const fetchMock = vi
