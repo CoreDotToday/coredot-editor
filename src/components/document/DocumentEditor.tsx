@@ -20,6 +20,13 @@ import {
 } from "lucide-react";
 import type { TiptapJson } from "@/db/schema";
 import {
+  findDocumentMatches,
+  nextDocumentFindIndex,
+  replaceAllDocumentMatches,
+  replaceDocumentMatch,
+  type DocumentFindOptions,
+} from "@/features/documents/document-find";
+import {
   convertListItemToTopLevelParagraphInTiptapJson,
   moveListItemInTiptapJson,
   moveListItemToTopLevelInTiptapJson,
@@ -77,6 +84,7 @@ import {
   isEditorBlockDragSessionStale,
   type EditorBlockDragSession,
 } from "./editor-block-drag-session";
+import { DocumentFindBar } from "./DocumentFindBar";
 import { NotionModASelection } from "./notion-mod-a-selection";
 import { SelectionAiMenu } from "./SelectionAiMenu";
 import { SelectionAiResultPopover, type SelectionAiResultPreview } from "./SelectionAiResultPopover";
@@ -85,16 +93,19 @@ import { SlashCommandMenu } from "./SlashCommandMenu";
 type DocumentEditorProps = {
   title: string;
   contentJson: TiptapJson;
+  isFindOpen?: boolean;
   isSelectionCommandRunning?: boolean;
   isSelectionCommandLimitReached?: boolean;
   inlineSuggestions?: AiSuggestionHighlightInput[];
   language?: EditorLanguage;
   messages?: EditorMessages["editor"];
   onChange: (draft: { title: string; contentJson: TiptapJson }) => void;
+  onFindOpenChange?: (isOpen: boolean) => void;
   onApplySelectionAiResult?: (proposalId: string, applyMode: "replace" | "insert_below") => void;
   onDismissSelectionAiResult?: () => void;
   onRetrySelectionAiResult?: () => void;
   onSelectionCommand?: (command: string, selectedText: string, context: SelectionAiCommandContext) => void;
+  outlineFocusRequest?: { requestId: string; topLevelIndex: number } | null;
   runningSelectionCommand?: string;
   runningSelectionCommandLimit?: number;
   runningSelectionCommands?: RunningSelectionAiCommand[];
@@ -147,15 +158,18 @@ const SELECTION_MENU_HEIGHT = 84;
 export function DocumentEditor({
   contentJson,
   inlineSuggestions = [],
+  isFindOpen = false,
   isSelectionCommandLimitReached = false,
   isSelectionCommandRunning = false,
   language = DEFAULT_EDITOR_LANGUAGE,
   messages = editorMessages[DEFAULT_EDITOR_LANGUAGE].editor,
   onChange,
+  onFindOpenChange,
   onApplySelectionAiResult,
   onDismissSelectionAiResult,
   onRetrySelectionAiResult,
   onSelectionCommand,
+  outlineFocusRequest = null,
   pluginContributions,
   runningSelectionCommand = "",
   runningSelectionCommandLimit = 5,
@@ -174,6 +188,10 @@ export function DocumentEditor({
   } | null>(null);
   const [editorFrameElement, setEditorFrameElement] = useState<HTMLDivElement | null>(null);
   const [preferredCommandScope, setPreferredCommandScope] = useState<AiCommandScope | null>(null);
+  const [findQuery, setFindQuery] = useState("");
+  const [findReplaceText, setFindReplaceText] = useState("");
+  const [findOptions, setFindOptions] = useState<DocumentFindOptions>({ caseSensitive: false, regex: false });
+  const [activeFindIndex, setActiveFindIndex] = useState(0);
   const editorFrameRef = useRef<HTMLDivElement | null>(null);
   const blockGutterTargetRef = useRef<BlockActionRange | null>(null);
   const blockDragSessionRef = useRef<EditorBlockDragSession | null>(null);
@@ -290,6 +308,31 @@ export function DocumentEditor({
 
     setAiSuggestionHighlights(editor, inlineSuggestions);
   }, [editor, inlineSuggestions]);
+
+  useEffect(() => {
+    if (!editor || !outlineFocusRequest) return;
+
+    const range = getTopLevelBlockActionRangeByIndex(editor, outlineFocusRequest.topLevelIndex);
+    if (!range) return;
+
+    focusBlockRange(editor, range);
+    requestAnimationFrame(() => {
+      const element = editor.view.nodeDOM(range.from) as HTMLElement | null;
+      element?.scrollIntoView?.({ block: "center", inline: "nearest", behavior: "smooth" });
+    });
+  }, [editor, outlineFocusRequest]);
+
+  useEffect(() => {
+    const handleFindShortcut = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "f") return;
+
+      event.preventDefault();
+      onFindOpenChange?.(true);
+    };
+
+    window.addEventListener("keydown", handleFindShortcut);
+    return () => window.removeEventListener("keydown", handleFindShortcut);
+  }, [onFindOpenChange]);
 
   useEffect(() => {
     const activeSuggestionId = inlineSuggestions.find((suggestion) => suggestion.active)?.id;
@@ -613,6 +656,43 @@ export function DocumentEditor({
 
   const characterCount = editor?.storage.characterCount.characters() ?? 0;
   const wordCount = editor?.storage.characterCount.words() ?? 0;
+  const findResult = useMemo(
+    () => {
+      void contentJsonSignature;
+      return editor && findQuery
+        ? findDocumentMatches(editor.state.doc, findQuery, findOptions)
+        : { error: null, matches: [] };
+    },
+    [contentJsonSignature, editor, findOptions, findQuery],
+  );
+  const normalizedFindIndex = findResult.matches.length > 0
+    ? Math.min(activeFindIndex, findResult.matches.length - 1)
+    : 0;
+  const focusFindMatch = useCallback(
+    (nextIndex: number) => {
+      const match = findResult.matches[nextIndex];
+      if (!editor || !match) return;
+
+      setActiveFindIndex(nextIndex);
+      editor.chain().focus().setTextSelection({ from: match.from, to: match.to }).run();
+      requestAnimationFrame(() => {
+        const element = editor.view.nodeDOM(match.from) as HTMLElement | null;
+        element?.scrollIntoView?.({ block: "center", inline: "nearest", behavior: "smooth" });
+      });
+    },
+    [editor, findResult.matches],
+  );
+  const replaceCurrentFindMatch = useCallback(() => {
+    const match = findResult.matches[normalizedFindIndex];
+    if (!editor || !match) return;
+
+    replaceDocumentMatch(editor, match, findReplaceText);
+  }, [editor, findReplaceText, findResult.matches, normalizedFindIndex]);
+  const replaceAllFindMatches = useCallback(() => {
+    if (!editor || findResult.matches.length === 0) return;
+
+    replaceAllDocumentMatches(editor, findResult.matches, findReplaceText);
+  }, [editor, findReplaceText, findResult.matches]);
   const commandTargets = editor ? getEditorAiCommandTargets(editor) : [];
   const commandTarget = getEditorAiCommandTargetFromTargets(commandTargets, preferredCommandScope);
   const shouldShowSelectionMenu = selectionMenu !== null && !isSelectionCommandLimitReached && !selectionAiResult;
@@ -627,6 +707,40 @@ export function DocumentEditor({
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-white">
       <EditorToolbar editor={editor} messages={messages.toolbar} />
+      {isFindOpen ? (
+        <DocumentFindBar
+          activeIndex={normalizedFindIndex}
+          caseSensitive={findOptions.caseSensitive}
+          error={findResult.error}
+          matchCount={findResult.matches.length}
+          messages={messages.find}
+          onCaseSensitiveChange={(caseSensitive) => {
+            setFindOptions((currentOptions) => ({ ...currentOptions, caseSensitive }));
+            setActiveFindIndex(0);
+          }}
+          onClose={() => onFindOpenChange?.(false)}
+          onNext={() =>
+            focusFindMatch(nextDocumentFindIndex(normalizedFindIndex, findResult.matches.length, 1))
+          }
+          onPrevious={() =>
+            focusFindMatch(nextDocumentFindIndex(normalizedFindIndex, findResult.matches.length, -1))
+          }
+          onQueryChange={(query) => {
+            setFindQuery(query);
+            setActiveFindIndex(0);
+          }}
+          onRegexChange={(regex) => {
+            setFindOptions((currentOptions) => ({ ...currentOptions, regex }));
+            setActiveFindIndex(0);
+          }}
+          onReplaceAll={replaceAllFindMatches}
+          onReplaceCurrent={replaceCurrentFindMatch}
+          onReplaceTextChange={setFindReplaceText}
+          query={findQuery}
+          regex={findOptions.regex}
+          replaceText={findReplaceText}
+        />
+      ) : null}
       <div className="px-4 pt-6 pb-2 sm:pt-8 sm:pr-8 sm:pl-16 lg:pl-20">
         <div className="mx-auto w-full max-w-[54rem]">
           <input

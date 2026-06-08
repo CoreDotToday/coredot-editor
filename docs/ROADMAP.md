@@ -6,6 +6,7 @@ Coredot Editor v1 is a working open-source AI document editor starter. The roadm
 
 - Maintain scope-aware quick actions in the bottom AI command bar so users can run common edits without inventing prompts.
 - Extend the typed command registry with app-specific host commands, command analytics hooks, and optional AI command mode.
+- Keep the live outline and `Cmd/Ctrl+F` find/replace flow stable across long Korean and mixed-language documents.
 - Persist non-generic rewrite explanations when a provider returns structured `{ replacementText, explanation }` output.
 - Keep plain text provider responses backward compatible.
 - Show command scope and source snippets consistently in the AI workspace.
@@ -14,8 +15,9 @@ Coredot Editor v1 is a working open-source AI document editor starter. The roadm
 
 - Show command scope, selected/source snippet, provider, model, status, elapsed time, and failure reason in the AI workspace.
 - Move document-scoped AI workspace sessions from the client adapter to database-backed conversation and message tables.
+- Persist prompt/context snapshots on `ai_runs` after defining storage limits and retention policy.
 - Group active and completed AI work so users can keep editing without losing track of long-running requests.
-- Add “show source” and “copy prompt context” affordances for debugging and trust, building on the Source inspection snapshot.
+- Extend the current AI context inspector with run-specific provider/model data and retrieved source snippets.
 
 ## v1.3: Inline Autocomplete
 
@@ -28,6 +30,7 @@ Coredot Editor v1 is a working open-source AI document editor starter. The roadm
 
 - Add document library ingestion for PDF, DOCX, and plain text.
 - Attach source snippets, page metadata, and citation IDs to AI context.
+- Feed retrieved chunks into the AI context snapshot so users can inspect exactly which external sources were sent.
 - Add citation verification before showing generated citations as trusted.
 - Let templates limit which source collections can be used.
 - Use the Docker RAG verification stack to validate pgvector, vector-store health, and future retrieval integration tests.
@@ -50,6 +53,7 @@ Coredot Editor v1 is a working open-source AI document editor starter. The roadm
 
 ## Later: Document Handoff Fidelity
 
+- Add editable Source/Markdown mode only after parser/serializer roundtrip tests cover headings, lists, tables, marks, and Korean text.
 - Export Tiptap tables as real DOCX tables.
 - Import DOCX tables into editable Tiptap table nodes.
 - Surface DOCX import warnings before redirecting to the imported document.

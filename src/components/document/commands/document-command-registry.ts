@@ -7,6 +7,7 @@ type DocumentCommandRegistryConfig = {
   exportDocxDraft: () => void;
   isExportingDocx: boolean;
   messages: EditorMessages["commandPalette"];
+  openFind: () => void;
   runDocumentReview: () => void;
   saveDraft: () => void;
   saveState: SaveState;
@@ -19,6 +20,7 @@ export function buildDocumentCommandRegistry({
   exportDocxDraft,
   isExportingDocx,
   messages,
+  openFind,
   runDocumentReview,
   saveDraft,
   saveState,
@@ -46,6 +48,15 @@ export function buildDocumentCommandRegistry({
       id: "review-document",
       keywords: ["ai", "review", "document", "검토", "리뷰"],
       label: messages.commands.reviewDocument,
+    },
+    {
+      enabled: true,
+      execute: openFind,
+      group: "view",
+      id: "find-document",
+      keywords: ["find", "search", "replace", "찾기", "검색", "교체"],
+      label: messages.commands.findDocument,
+      shortcut: "⌘F",
     },
     {
       enabled: editorSurface !== "source",

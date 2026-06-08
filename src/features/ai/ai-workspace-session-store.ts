@@ -84,6 +84,53 @@ export function archiveAiWorkspaceSession<TSession extends AiWorkspaceSessionLik
   return sessions.map((session) => (session.id === sessionId ? { ...session, archived: true } : session));
 }
 
+export function restoreAiWorkspaceSession<TSession extends AiWorkspaceSessionLike>(
+  sessions: TSession[],
+  sessionId: string,
+): TSession[] {
+  return sessions.map((session) => (session.id === sessionId ? { ...session, archived: false } : session));
+}
+
+export function renameAiWorkspaceSession<TSession extends AiWorkspaceSessionLike>(
+  sessions: TSession[],
+  sessionId: string,
+  title: string,
+): TSession[] {
+  const nextTitle = title.trim();
+  if (!nextTitle) return sessions;
+
+  return sessions.map((session) => (session.id === sessionId ? { ...session, title: nextTitle } : session));
+}
+
+export function forkAiWorkspaceSessionUntilMessage<TSession extends AiWorkspaceSessionLike>(
+  sessions: TSession[],
+  input: {
+    messageId: string;
+    newSessionId: string;
+    now: Date | string;
+    sourceSessionId: string;
+  },
+): TSession[] {
+  const sourceSession = sessions.find((session) => session.id === input.sourceSessionId);
+  if (!sourceSession) return sessions;
+
+  const messageIndex = sourceSession.messages.findIndex((message) => message.id === input.messageId);
+  if (messageIndex < 0) return sessions;
+
+  const forkedSession = {
+    ...sourceSession,
+    archived: false,
+    createdAt: input.now,
+    id: input.newSessionId,
+    messages: sourceSession.messages.slice(0, messageIndex + 1),
+    status: "idle" as const,
+    title: `${sourceSession.title} copy`,
+    updatedAt: input.now,
+  } satisfies AiWorkspaceSessionLike;
+
+  return [forkedSession as TSession, ...sessions];
+}
+
 export function toStoredAiWorkspaceSessions(sessions: AiWorkspaceSessionLike[]): StoredAiWorkspaceSession[] {
   return sessions.map((session) => {
     const updatedAt = toIsoDate(session.updatedAt);

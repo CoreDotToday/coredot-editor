@@ -78,10 +78,24 @@ export const editorMessages = {
       },
       submit: "Send AI request",
     },
+    aiContext: {
+      charCount: "{count} characters",
+      command: "Command",
+      copied: "Copied",
+      copy: "Copy context",
+      document: "Document",
+      empty: "No AI context to show.",
+      model: "Model",
+      selection: "Selection",
+      template: "Template",
+      title: "AI Context",
+      variables: "Variables",
+    },
     aiWorkspace: {
       appliedAt: "Applied {time}",
       archiveChat: "Hide chat",
       assistant: "AI",
+      cancelRename: "Cancel rename",
       changeEmpty: "Accepted AI changes will appear here.",
       changeTitle: "Change history",
       chatEmpty: "Use the command bar below the editor to ask for changes.",
@@ -92,6 +106,8 @@ export const editorMessages = {
       failed: "Failed",
       running: "AI is creating a proposal...",
       saved: "Saved in this document",
+      renameChat: "Rename chat",
+      renameInput: "Chat title",
       tabs: {
         changes: "Changes",
         chat: "Chat",
@@ -99,6 +115,7 @@ export const editorMessages = {
       },
       tabList: "AI workspace",
       runningStatusLabel: "AI work status",
+      saveRename: "Save name",
       undo: "Undo",
       undoChange: "Undo change for {targetText}",
       undoConflict: "This change cannot be undone after newer local edits.",
@@ -107,6 +124,7 @@ export const editorMessages = {
     commandPalette: {
       commands: {
         exportDocx: "Export DOCX",
+        findDocument: "Find in document",
         openWorkspace: "Open AI workspace",
         reviewDocument: "Review document",
         save: "Save document",
@@ -128,6 +146,22 @@ export const editorMessages = {
     editor: {
       bodyLabel: "Document body",
       characters: "characters",
+      find: {
+        caseSensitive: "Match case",
+        close: "Close find",
+        currentMatch: "{current}/{total}",
+        findLabel: "Find in document",
+        findPlaceholder: "Find text",
+        next: "Next match",
+        noMatches: "No matches",
+        previous: "Previous match",
+        regex: "Regular expression",
+        replace: "Replace",
+        replaceAll: "Replace all",
+        replaceCurrent: "Replace current",
+        replaceLabel: "Replacement text",
+        replacePlaceholder: "Replace with",
+      },
       placeholder: "Write the memo...",
       toolbar: {
         blockquote: "Block quote",
@@ -189,6 +223,7 @@ export const editorMessages = {
     },
     outline: {
       empty: "Headings will appear here as the document develops.",
+      itemLabel: "Go to {title}",
       title: "Outline",
     },
     saveState: {
@@ -384,10 +419,24 @@ export const editorMessages = {
       },
       submit: "AI 요청",
     },
+    aiContext: {
+      charCount: "{count} 글자",
+      command: "명령",
+      copied: "복사됨",
+      copy: "컨텍스트 복사",
+      document: "문서",
+      empty: "표시할 AI 컨텍스트가 없습니다.",
+      model: "모델",
+      selection: "선택 영역",
+      template: "템플릿",
+      title: "AI 컨텍스트",
+      variables: "변수",
+    },
     aiWorkspace: {
       appliedAt: "{time} 적용",
       archiveChat: "대화 숨기기",
       assistant: "AI",
+      cancelRename: "이름 변경 취소",
       changeEmpty: "수락한 AI 변경사항이 여기에 표시됩니다.",
       changeTitle: "변경내역",
       chatEmpty: "에디터 하단 입력창에서 변경 요청을 입력하세요.",
@@ -398,6 +447,8 @@ export const editorMessages = {
       failed: "실패",
       running: "AI가 제안을 생성하는 중입니다...",
       saved: "이 문서에 저장됨",
+      renameChat: "대화 이름 변경",
+      renameInput: "대화 제목",
       tabs: {
         changes: "변경내역",
         chat: "대화",
@@ -405,6 +456,7 @@ export const editorMessages = {
       },
       tabList: "AI 작업 영역",
       runningStatusLabel: "AI 작업 진행 상태",
+      saveRename: "이름 저장",
       undo: "되돌리기",
       undoChange: "{targetText} 변경 되돌리기",
       undoConflict: "이후 로컬 편집이 있어 이 변경은 자동으로 되돌릴 수 없습니다.",
@@ -413,6 +465,7 @@ export const editorMessages = {
     commandPalette: {
       commands: {
         exportDocx: "DOCX 내보내기",
+        findDocument: "문서에서 찾기",
         openWorkspace: "AI 작업 영역 열기",
         reviewDocument: "문서 검토",
         save: "문서 저장",
@@ -434,6 +487,22 @@ export const editorMessages = {
     editor: {
       bodyLabel: "문서 본문",
       characters: "글자",
+      find: {
+        caseSensitive: "대소문자 구분",
+        close: "찾기 닫기",
+        currentMatch: "{current}/{total}",
+        findLabel: "문서에서 찾기",
+        findPlaceholder: "찾을 텍스트",
+        next: "다음 일치 항목",
+        noMatches: "일치 없음",
+        previous: "이전 일치 항목",
+        regex: "정규식",
+        replace: "교체",
+        replaceAll: "모두 교체",
+        replaceCurrent: "현재 교체",
+        replaceLabel: "교체할 텍스트",
+        replacePlaceholder: "교체 텍스트",
+      },
       placeholder: "메모를 작성하세요...",
       toolbar: {
         blockquote: "인용문",
@@ -495,6 +564,7 @@ export const editorMessages = {
     },
     outline: {
       empty: "문서가 작성되면 제목이 여기에 표시됩니다.",
+      itemLabel: "{title} 위치로 이동",
       title: "개요",
     },
     saveState: {

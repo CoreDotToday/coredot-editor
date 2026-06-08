@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   archiveAiWorkspaceSession,
+  forkAiWorkspaceSessionUntilMessage,
   readAiWorkspaceSessionsFromStorage,
+  renameAiWorkspaceSession,
+  restoreAiWorkspaceSession,
   toStoredAiWorkspaceSessions,
   writeAiWorkspaceSessionsToStorage,
   type AiWorkspaceSessionLike,
@@ -104,5 +107,49 @@ describe("ai workspace session store", () => {
     expect(archived[0]?.archived).toBe(true);
     expect(archived[1]?.archived).toBeFalsy();
     expect(sessions[0]?.archived).toBeUndefined();
+  });
+
+  it("renames a session with a trimmed non-empty title", () => {
+    const renamed = renameAiWorkspaceSession([session], "session_1", "  새 제목  ");
+
+    expect(renamed[0]?.title).toBe("새 제목");
+    expect(renameAiWorkspaceSession([session], "session_1", "   ")[0]?.title).toBe("명확하게 개선");
+  });
+
+  it("restores an archived session", () => {
+    const restored = restoreAiWorkspaceSession([{ ...session, archived: true }], "session_1");
+
+    expect(restored[0]?.archived).toBe(false);
+  });
+
+  it("forks a session transcript up to a selected message", () => {
+    const forked = forkAiWorkspaceSessionUntilMessage(
+      [
+        {
+          ...session,
+          messages: [
+            ...session.messages,
+            { content: "제안", id: "message_2", role: "assistant" },
+            { content: "후속", id: "message_3", role: "user" },
+          ],
+        },
+      ],
+      {
+        messageId: "message_2",
+        now: new Date("2026-06-08T02:00:00.000Z"),
+        newSessionId: "session_fork",
+        sourceSessionId: "session_1",
+      },
+    );
+
+    expect(forked).toHaveLength(2);
+    expect(forked[0]).toMatchObject({
+      archived: false,
+      id: "session_fork",
+      status: "idle",
+      title: "명확하게 개선 copy",
+    });
+    expect(forked[0]?.messages.map((message) => message.id)).toEqual(["message_1", "message_2"]);
+    expect(forked[1]?.id).toBe("session_1");
   });
 });

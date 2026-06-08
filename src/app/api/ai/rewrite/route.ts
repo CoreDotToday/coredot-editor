@@ -67,7 +67,10 @@ export async function POST(request: Request) {
     provider: provider.name,
     model: provider.model,
     inputSummaryJson: {
+      afterContextLength: body.afterContext.length,
       command: body.command,
+      documentTextLength: reviewedText.length,
+      beforeContextLength: body.beforeContext.length,
       occurrenceIndex: body.occurrenceIndex,
       selectedTextLength: body.selectedText.length,
       selectionRange: body.selectionRange,

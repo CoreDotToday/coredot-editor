@@ -691,6 +691,33 @@ describe("DocumentShell", () => {
     expect(screen.getByText("선택됨: selected text")).toBeInTheDocument();
   });
 
+  it("keeps the AI context inspector pinned to the document snapshot captured when a selection command starts", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "original body")}
+        templates={[createTemplate("tpl_1", "Contract Review")]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Mock selection command" }));
+    await user.click(screen.getByRole("button", { name: "Mock body edit" }));
+    await user.click(screen.getByRole("button", { name: "컨텍스트 복사" }));
+
+    await waitFor(() => expect(writeText).toHaveBeenCalled());
+    const copiedSnapshot = JSON.parse(writeText.mock.calls.at(-1)?.[0] ?? "{}") as {
+      document?: { text?: string };
+    };
+    expect(copiedSnapshot.document?.text).toBe("original body");
+  });
+
   it("runs selection rewrite commands and adds the returned proposal", async () => {
     const user = userEvent.setup();
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(

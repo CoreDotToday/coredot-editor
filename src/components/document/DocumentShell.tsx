@@ -26,6 +26,7 @@ import {
   type MutableRefObject,
 } from "react";
 import type { AiProposalApplyMode, AiReviewProposal, AiReviewSummary } from "@/components/ai/AiReviewPanel";
+import { AiContextInspector } from "@/components/ai/AiContextInspector";
 import { AiRunHistory, type AiRunHistoryItem } from "@/components/ai/AiRunHistory";
 import {
   AiWorkspacePanel,
@@ -38,9 +39,12 @@ import { getTemplateVariableLabel, PromptTemplatePanel } from "@/components/temp
 import type { AiProposalRecord, AiRunRecord, DocumentRecord, PromptTemplateRecord, TiptapJson } from "@/db/schema";
 import {
   archiveAiWorkspaceSession,
+  renameAiWorkspaceSession,
   readAiWorkspaceSessionsForDocument,
   writeAiWorkspaceSessionsForDocument,
 } from "@/features/ai/ai-workspace-session-store";
+import { buildAiContextSnapshot } from "@/features/ai/ai-context-snapshot";
+import { buildDocumentOutline, type DocumentOutlineItem } from "@/features/documents/document-outline";
 import { extractPlainTextFromTiptap } from "@/features/documents/tiptap-text";
 import {
   EDITOR_LANGUAGE_STORAGE_KEY,
@@ -63,6 +67,7 @@ import {
 import { validateTemplateVariables } from "@/features/templates/template-validation";
 import { DocumentEditor, type RunningSelectionAiCommand, type SelectionAiCommandContext } from "./DocumentEditor";
 import { DocumentCommandPalette } from "./DocumentCommandPalette";
+import { DocumentOutlinePanel } from "./DocumentOutlinePanel";
 import { DocumentSourceView } from "./DocumentSourceView";
 import { buildDocumentCommandRegistry } from "./commands/document-command-registry";
 import type { SelectionAiResultPreview } from "./SelectionAiResultPopover";
@@ -106,6 +111,9 @@ type SelectionCommandPayload = {
   context?: SelectionAiCommandContext;
   selectedText: string;
   contentJson: TiptapJson;
+  template: Pick<ShellTemplate, "category" | "id" | "name"> | null;
+  title: string;
+  variables: Record<string, string>;
 };
 
 type SelectionProposalContext = ProposalTransactionContext;
@@ -238,6 +246,11 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
   const [isCreatingDocument, setIsCreatingDocument] = useState(false);
   const [editorSurface, setEditorSurface] = useState<EditorSurface>("editor");
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
+  const [isFindOpen, setIsFindOpen] = useState(false);
+  const [activeOutlineItemId, setActiveOutlineItemId] = useState<string | null>(null);
+  const [outlineFocusRequest, setOutlineFocusRequest] = useState<{ requestId: string; topLevelIndex: number } | null>(
+    null,
+  );
   const activeTemplateId = templates.some((template) => template.id === selectedTemplateId)
     ? selectedTemplateId
     : templates[0]?.id ?? "";
@@ -309,6 +322,9 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
       setUndoChangeError("");
       setEditorSurface("editor");
       setIsCommandPaletteOpen(false);
+      setIsFindOpen(false);
+      setActiveOutlineItemId(null);
+      setOutlineFocusRequest(null);
       setSelectedTemplateId(templates[0]?.id ?? "");
       setReviewProposals(proposals);
       setReviewRuns(aiRuns);
@@ -386,21 +402,38 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
     selectedText: string,
     context?: SelectionAiCommandContext,
   ) => {
-    setSelectionCommand({
-      command,
-      context,
-      selectedText,
-      contentJson: draft.contentJson,
-    });
     setSelectionAiResult(null);
     setSelectionApplicationNotice("");
 
     if (!selectedTemplate) {
+      setSelectionCommand({
+        command,
+        context,
+        selectedText,
+        contentJson: draft.contentJson,
+        template: null,
+        title: draft.title,
+        variables: {},
+      });
       setReviewError(messages.errors.selectTemplateForSelection);
       return;
     }
 
     const variablesWithDefaults = mergeMissingTemplateVariableDefaults(selectedTemplate, templateVariables);
+    const variablesForCommand = collectTemplateVariables(selectedTemplate, variablesWithDefaults);
+    setSelectionCommand({
+      command,
+      context,
+      selectedText,
+      contentJson: draft.contentJson,
+      template: {
+        category: selectedTemplate.category,
+        id: selectedTemplate.id,
+        name: selectedTemplate.name,
+      },
+      title: draft.title,
+      variables: variablesForCommand,
+    });
     setTemplateVariables(variablesWithDefaults);
 
     const variableValidation = validateTemplateVariables(selectedTemplate.variableSchemaJson, variablesWithDefaults);
@@ -461,7 +494,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
           documentId: document.id,
           templateId: selectedTemplate.id,
           command,
-          variables: collectTemplateVariables(selectedTemplate, variablesWithDefaults),
+          variables: variablesForCommand,
           selectedText,
           occurrenceIndex: context?.occurrenceIndex,
           selectionRange: context?.selectionRange,
@@ -545,7 +578,16 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
         currentCommands.filter((runningCommand) => runningCommand.id !== runningCommandId),
       );
     }
-  }, [document.id, draft.contentJson, language, messages, selectedTemplate, templateVariables, updateRunningSelectionCommands]);
+  }, [
+    document.id,
+    draft.contentJson,
+    draft.title,
+    language,
+    messages,
+    selectedTemplate,
+    templateVariables,
+    updateRunningSelectionCommands,
+  ]);
 
   const saveDraft = useCallback(async () => {
     const savingVersion = draftVersionRef.current;
@@ -1033,6 +1075,10 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
     setAiChatSessions((currentSessions) => archiveAiWorkspaceSession(currentSessions, sessionId));
   }, []);
 
+  const renameAiChatSession = useCallback((sessionId: string, title: string) => {
+    setAiChatSessions((currentSessions) => renameAiWorkspaceSession(currentSessions, sessionId, title));
+  }, []);
+
   const selectedTemplateName = selectedTemplate?.name ?? "";
   const inlineSuggestions = useMemo(
     () =>
@@ -1060,6 +1106,68 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
       })),
     [appliedChanges, draftContentSignature],
   );
+  const documentOutline = useMemo(
+    () => buildDocumentOutline(draft.title || messages.shell.untitledDocument, draft.contentJson),
+    [draft.contentJson, draft.title, messages.shell.untitledDocument],
+  );
+  const aiContextSnapshot = useMemo(() => {
+    const selectedTemplateForSnapshot = selectedTemplate ?? templates[0] ?? null;
+    const templateForSnapshot = selectionCommand?.template ?? selectedTemplateForSnapshot;
+    if (!templateForSnapshot) return null;
+    const contentJsonForSnapshot = selectionCommand?.contentJson ?? draft.contentJson;
+    const titleForSnapshot = selectionCommand?.title ?? draft.title;
+    const variablesForSnapshot = selectionCommand
+      ? selectionCommand.variables
+      : selectedTemplateForSnapshot
+        ? collectTemplateVariables(
+            selectedTemplateForSnapshot,
+            mergeMissingTemplateVariableDefaults(selectedTemplateForSnapshot, templateVariables),
+          )
+        : {};
+
+    return buildAiContextSnapshot({
+      command: selectionCommand?.command ?? "Review document",
+      document: {
+        id: document.id,
+        text: extractPlainTextFromTiptap(contentJsonForSnapshot),
+        title: titleForSnapshot || messages.shell.untitledDocument,
+      },
+      mode: selectionCommand ? "selection_rewrite" : "document_review",
+      selection: selectionCommand
+        ? {
+            occurrenceIndex: selectionCommand.context?.occurrenceIndex,
+            range: selectionCommand.context?.selectionRange,
+            text: selectionCommand.selectedText,
+          }
+        : undefined,
+      template: {
+        category: templateForSnapshot.category,
+        id: templateForSnapshot.id,
+        name: templateForSnapshot.name,
+      },
+      variables: variablesForSnapshot,
+    });
+  }, [
+    document.id,
+    draft.contentJson,
+    draft.title,
+    messages.shell.untitledDocument,
+    selectedTemplate,
+    selectionCommand,
+    templateVariables,
+    templates,
+  ]);
+  const selectOutlineItem = useCallback((item: DocumentOutlineItem) => {
+    setActiveOutlineItemId(item.id);
+    if (item.topLevelIndex === null) return;
+
+    setEditorSurface("editor");
+    setOutlineFocusRequest({
+      requestId: createWorkspaceClientId(aiWorkspaceIdRef, "outline_focus"),
+      topLevelIndex: item.topLevelIndex,
+    });
+    setIsSidebarOpen(false);
+  }, []);
   const commandPaletteActions = useMemo(
     () =>
       buildDocumentCommandRegistry({
@@ -1067,13 +1175,26 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
         exportDocxDraft,
         isExportingDocx,
         messages: messages.commandPalette,
+        openFind: () => {
+          setEditorSurface("editor");
+          setIsFindOpen(true);
+        },
         runDocumentReview,
         saveDraft,
         saveState,
         setEditorSurface,
         setWorkspaceOpen,
       }),
-    [editorSurface, exportDocxDraft, isExportingDocx, messages.commandPalette, runDocumentReview, saveDraft, saveState, setWorkspaceOpen],
+    [
+      editorSurface,
+      exportDocxDraft,
+      isExportingDocx,
+      messages.commandPalette,
+      runDocumentReview,
+      saveDraft,
+      saveState,
+      setWorkspaceOpen,
+    ],
   );
   const sidebarNavigationClassName = [
     "flex h-9 items-center gap-2 rounded-md px-2.5",
@@ -1141,10 +1262,12 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
         </button>
       </nav>
 
-      <section className="shrink-0 border-t border-zinc-200 px-4 py-4">
-        <h2 className="text-xs font-semibold uppercase tracking-normal text-zinc-500">{messages.outline.title}</h2>
-        <p className="mt-2 line-clamp-2 text-xs leading-5 text-zinc-500">{messages.outline.empty}</p>
-      </section>
+      <DocumentOutlinePanel
+        activeItemId={activeOutlineItemId}
+        messages={messages.outline}
+        onSelectItem={selectOutlineItem}
+        outline={documentOutline}
+      />
 
       <div className="min-h-0 flex-1 overflow-hidden border-t border-zinc-200">
         <PromptTemplatePanel
@@ -1180,6 +1303,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
       onClose={onClose}
       onFocusProposal={setActiveProposalId}
       onReviewDocument={runDocumentReview}
+      onRenameChatSession={renameAiChatSession}
       onUndoChange={undoAppliedChange}
       onUpdateProposalStatus={updateProposalStatusLocally}
       proposals={reviewProposals}
@@ -1188,6 +1312,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
       selectedTemplateName={selectedTemplateName}
       undoErrorMessage={undoChangeError}
     >
+      <AiContextInspector messages={messages.aiContext} snapshot={aiContextSnapshot} />
       <section className="px-5 py-5">
         <h3 className="text-xs font-medium uppercase tracking-normal text-zinc-500">
           {messages.selectionCommand.title}
@@ -1388,18 +1513,21 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
           <DocumentEditor
             key={document.id}
             contentJson={draft.contentJson}
+            isFindOpen={isFindOpen}
             isSelectionCommandLimitReached={isSelectionCommandLimitReached}
             isSelectionCommandRunning={isRewritingSelection}
             inlineSuggestions={inlineSuggestions}
             language={language}
             messages={messages.editor}
             onChange={handleDraftChange}
+            onFindOpenChange={setIsFindOpen}
             onApplySelectionAiResult={(proposalId, applyMode) =>
               updateProposalStatusLocally(proposalId, "accepted", applyMode)
             }
             onDismissSelectionAiResult={() => setSelectionAiResult(null)}
             onRetrySelectionAiResult={retrySelectionAiResult}
             onSelectionCommand={handleSelectionCommand}
+            outlineFocusRequest={outlineFocusRequest}
             runningSelectionCommand={selectionCommand?.command}
             runningSelectionCommandLimit={MAX_CONCURRENT_SELECTION_COMMANDS}
             runningSelectionCommands={runningSelectionCommands}

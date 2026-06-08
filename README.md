@@ -43,7 +43,9 @@ Before deploying a fork with real users, make the product-specific decisions tha
 - Review API that creates proposal records from structured AI findings
 - Rewrite API for exact-match selected text proposals, translations, and continue-writing insertions
 - SuperDoc-style bottom AI command bar for natural-language edits against the current selection, current block, or whole document
-- Right-side AI workspace with review, document-scoped AI conversation sessions, hideable chats, and change-history tabs
+- Live document outline in the left sidebar, generated from Tiptap heading nodes with click-to-jump navigation
+- In-document find/replace opened with `Cmd/Ctrl+F` or the command palette, with case-sensitive and guarded regex search
+- Right-side AI workspace with review, document-scoped AI conversation sessions, rename/hide controls, AI context inspector, and change-history tabs
 - Typed command registry and command palette for workspace actions, opened with `Cmd/Ctrl+K` or the editor header's more menu
 - Read-only Source mode for inspecting, copying, and downloading the current unsaved draft as plain text and Tiptap JSON
 - Inline pending proposal highlights inspired by Tiptap Content AI suggestions
@@ -106,7 +108,7 @@ With the example environment, the first saved LLM setting uses `stub`, so the AI
 
 In the editor, use the bottom `무엇을 변경할까요?` command bar for freeform AI requests. The command targets selected text first, then the current block, then the full document. AI output is saved as a proposal instead of immediately overwriting text; review it in the right workspace's `검토`, `대화`, and `변경내역` tabs.
 
-Open the command palette with `Cmd/Ctrl+K` or the header's more menu to jump between AI workspace actions, review, save/export, and Source mode. Commands are built from a typed registry with groups, enabled states, shortcuts, and fuzzy search. The `Source` tab is read-only and reflects the current in-memory draft, including unsaved edits, as extracted plain text plus Tiptap JSON; use its copy and download actions when debugging provider prompts or document conversion.
+Open the command palette with `Cmd/Ctrl+K` or the header's more menu to jump between AI workspace actions, document find, review, save/export, and Source mode. Commands are built from a typed registry with groups, enabled states, shortcuts, and fuzzy search. Use `Cmd/Ctrl+F` in the editor to open find/replace without falling back to browser find. The `Source` tab is read-only and reflects the current in-memory draft, including unsaved edits, as extracted plain text plus Tiptap JSON; use its copy and download actions when debugging provider prompts or document conversion.
 
 Type `/` in the editor to open the slash command menu. The menu supports core Tiptap block commands such as text, headings, bullet/numbered/task lists, quote, divider, code block, and AI continue writing. Use the left-side block gutter controls for quick block insertion, duplication, deletion, and drag reordering.
 
@@ -119,8 +121,10 @@ Coredot Editor uses Tiptap as the document engine and keeps product behavior in 
 - `DocumentEditor` composes the editor surface, toolbar, AI command bar, proposal highlights, and block controls.
 - `DocumentShell` owns host-level workspace state such as Source mode, saving/exporting, and AI workspace visibility.
 - `DocumentCommandPalette` renders the host command registry with grouped fuzzy search, shortcut labels, and keyboard navigation.
+- `DocumentOutlinePanel` renders a live heading outline from the current Tiptap draft and sends jump requests back into the editor.
+- `DocumentFindBar` renders compact find/replace controls while `document-find.ts` maps search matches to ProseMirror positions.
 - `DocumentSourceView` renders the current draft as plain text and Tiptap JSON with copy/download affordances.
-- `AiWorkspacePanel` renders review proposals, per-command AI conversation sessions, and accepted-change history. Chat sessions are persisted per document through a local adapter that can be replaced by database-backed conversation/message tables.
+- `AiWorkspacePanel` renders review proposals, per-command AI conversation sessions, the AI context inspector, and accepted-change history. Chat sessions are persisted per document through a local adapter that can be replaced by database-backed conversation/message tables.
 - `editor-block-ranges.ts` resolves the current paragraph, heading, or list item into a normalized block target and owns pointer hit-testing helpers used by the gutter.
 - `editor-block-drop-targets.ts` classifies drag destinations and suppresses invalid or no-op drops before a document mutation can happen.
 - `editor-block-drag-session.ts` guards drag operations against stale live editor state.
@@ -224,6 +228,8 @@ docs/                    Public maintainer and adopter documentation
 Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the data flow and extension points. Read [docs/PLUGINS.md](docs/PLUGINS.md) before adding editor plugins. Read [docs/PROMPTING.md](docs/PROMPTING.md) before replacing prompt templates.
 
 For RAG, citation, and Postgres migration experiments, use [docs/RAG_DOCKER.md](docs/RAG_DOCKER.md). It runs Postgres/pgvector and ChromaDB in Docker while the Next.js app remains local.
+
+The editor intentionally borrows Tolaria-style patterns selectively: command/search surfaces, source inspection, structured AI context snapshots, and conversation metadata are useful for this app. Native Tauri windows, git/vault file management, and BlockNote-specific schemas are intentionally not copied into the Next.js/Tiptap stack.
 
 Read [docs/ROADMAP.md](docs/ROADMAP.md) for the recommended post-v1 build order.
 

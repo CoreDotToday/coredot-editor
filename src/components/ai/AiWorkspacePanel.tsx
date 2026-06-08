@@ -1,6 +1,6 @@
 "use client";
 
-import { Clock3, Loader2, MessageSquareText, RotateCcw, ScrollText, X } from "lucide-react";
+import { Check, Clock3, Loader2, MessageSquareText, Pencil, RotateCcw, ScrollText, X } from "lucide-react";
 import type { ReactNode } from "react";
 import { useId, useState, type KeyboardEvent } from "react";
 import {
@@ -61,6 +61,7 @@ type AiWorkspacePanelProps = {
   onClose?: () => void;
   onFocusProposal?: (proposalId: string) => void;
   onReviewDocument: () => void;
+  onRenameChatSession?: (sessionId: string, title: string) => void;
   onUndoChange: (changeId: string) => void;
   onUpdateProposalStatus: (
     proposalId: string,
@@ -99,6 +100,7 @@ export function AiWorkspacePanel({
   onClose,
   onFocusProposal,
   onReviewDocument,
+  onRenameChatSession,
   onUndoChange,
   onUpdateProposalStatus,
   proposals,
@@ -109,11 +111,14 @@ export function AiWorkspacePanel({
 }: AiWorkspacePanelProps) {
   const [activeTab, setActiveTab] = useState<WorkspaceTab>("review");
   const [activeChatSessionId, setActiveChatSessionId] = useState<string>("");
+  const [renamingChatSessionId, setRenamingChatSessionId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
   const workspaceId = useId();
   const visibleChatSessions = chatSessions.filter((session) => !session.archived);
   const activeChatSession =
     visibleChatSessions.find((session) => session.id === activeChatSessionId) ?? visibleChatSessions[0] ?? null;
   const activeChatMessages = activeChatSession ? activeChatSession.messages : chatSessions.length > 0 ? [] : chatMessages;
+  const isRenamingActiveChat = activeChatSession?.id === renamingChatSessionId;
   const panelClassName =
     layout === "drawer"
       ? "flex h-full w-[min(100vw,24rem)] shrink-0 flex-col border-l border-zinc-200 bg-white shadow-2xl shadow-zinc-950/20"
@@ -243,18 +248,80 @@ export function AiWorkspacePanel({
               ))}
             </div>
           ) : null}
-          {activeChatSession && onArchiveChatSession ? (
-            <div className="mt-3 flex items-center justify-between gap-3">
-              <p className="truncate text-xs text-zinc-500">
-                {activeChatSession.status === "failed" ? messages.failed : messages.saved}
-              </p>
-              <button
-                className="inline-flex h-7 shrink-0 items-center rounded-md border border-zinc-200 px-2 text-xs font-medium text-zinc-600 hover:bg-zinc-50 hover:text-zinc-950"
-                onClick={() => onArchiveChatSession(activeChatSession.id)}
-                type="button"
-              >
-                {messages.archiveChat}
-              </button>
+          {activeChatSession && (onArchiveChatSession || onRenameChatSession) ? (
+            <div className="mt-3 space-y-2">
+              <div className="flex items-center justify-between gap-3">
+                <p className="truncate text-xs text-zinc-500">
+                  {activeChatSession.status === "failed" ? messages.failed : messages.saved}
+                </p>
+                <div className="flex shrink-0 items-center gap-1">
+                  {onRenameChatSession ? (
+                    <button
+                      aria-label={messages.renameChat}
+                      className="inline-flex h-7 items-center gap-1 rounded-md border border-zinc-200 px-2 text-xs font-medium text-zinc-600 hover:bg-zinc-50 hover:text-zinc-950"
+                      onClick={() => {
+                        setRenamingChatSessionId(activeChatSession.id);
+                        setRenameDraft(activeChatSession.title);
+                      }}
+                      type="button"
+                    >
+                      <Pencil aria-hidden="true" className="size-3.5" />
+                      {messages.renameChat}
+                    </button>
+                  ) : null}
+                  {onArchiveChatSession ? (
+                    <button
+                      className="inline-flex h-7 items-center rounded-md border border-zinc-200 px-2 text-xs font-medium text-zinc-600 hover:bg-zinc-50 hover:text-zinc-950"
+                      onClick={() => onArchiveChatSession(activeChatSession.id)}
+                      type="button"
+                    >
+                      {messages.archiveChat}
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+              {isRenamingActiveChat && onRenameChatSession ? (
+                <div className="flex items-center gap-1">
+                  <label className="sr-only" htmlFor={`${workspaceId}-rename-chat`}>
+                    {messages.renameInput}
+                  </label>
+                  <input
+                    aria-label={messages.renameInput}
+                    className="h-8 min-w-0 flex-1 rounded-md border border-zinc-200 px-2 text-sm outline-none focus:border-zinc-500"
+                    id={`${workspaceId}-rename-chat`}
+                    onChange={(event) => setRenameDraft(event.currentTarget.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        onRenameChatSession(activeChatSession.id, renameDraft);
+                        setRenamingChatSessionId(null);
+                      }
+                      if (event.key === "Escape") {
+                        setRenamingChatSessionId(null);
+                      }
+                    }}
+                    value={renameDraft}
+                  />
+                  <button
+                    aria-label={messages.saveRename}
+                    className="inline-flex size-8 items-center justify-center rounded-md bg-zinc-950 text-white hover:bg-zinc-800"
+                    onClick={() => {
+                      onRenameChatSession(activeChatSession.id, renameDraft);
+                      setRenamingChatSessionId(null);
+                    }}
+                    type="button"
+                  >
+                    <Check aria-hidden="true" className="size-4" />
+                  </button>
+                  <button
+                    aria-label={messages.cancelRename}
+                    className="inline-flex size-8 items-center justify-center rounded-md border border-zinc-200 text-zinc-600 hover:bg-zinc-50 hover:text-zinc-950"
+                    onClick={() => setRenamingChatSessionId(null)}
+                    type="button"
+                  >
+                    <X aria-hidden="true" className="size-4" />
+                  </button>
+                </div>
+              ) : null}
             </div>
           ) : null}
           {activeChatMessages.length === 0 ? (
