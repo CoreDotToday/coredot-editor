@@ -101,6 +101,16 @@ export const defaultEditorPlugins: EditorPlugin[] = [...builtinEditorPlugins, ..
 
 If a downstream project needs custom schema during DOCX conversion, create a separate server-safe schema plugin list for that route instead of importing the full app plugin list.
 
+## Internal Block Movement Boundaries
+
+Plugins can contribute commands and UI actions, but they should not directly mutate nested-list JSON. Use editor commands exposed by the host application, or add a typed host action first. This keeps block movement consistent with stale-session guards, normalized range resolution, drop-target validation, and the pure transforms in `src/features/documents/tiptap-blocks.ts`.
+
+If a plugin needs new block behavior, prefer this order:
+
+1. Add or reuse a Tiptap command when the behavior is local to the current selection.
+2. Add a host-level block action when the behavior belongs in the gutter or slash menu.
+3. Extend the pure document transform helpers and cover it with tests when nested-list structure changes.
+
 ## Test Checklist
 
 For a new plugin, add focused tests around the contribution type:

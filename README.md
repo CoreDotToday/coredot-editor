@@ -108,6 +108,19 @@ Type `/` in the editor to open the slash command menu. The menu supports core Ti
 
 Use `DOCX 가져오기` on the document list to create a new document from a `.docx` file. Use `DOCX 내보내기` in the editor header to export the current in-memory draft, including unsaved edits. DOCX conversion is intentionally an MVP: it preserves core editing structure and text semantics, not exact Word layout, comments, tracked changes, headers, footers, or embedded media fidelity.
 
+## Editor Architecture
+
+Coredot Editor uses Tiptap as the document engine and keeps product behavior in focused layers:
+
+- `DocumentEditor` composes the editor surface, toolbar, AI command bar, proposal highlights, and block controls.
+- `editor-block-ranges.ts` resolves the current paragraph, heading, or list item into a normalized block target and owns pointer hit-testing helpers used by the gutter.
+- `editor-block-drop-targets.ts` classifies drag destinations and suppresses invalid or no-op drops before a document mutation can happen.
+- `editor-block-drag-session.ts` guards drag operations against stale live editor state.
+- `tiptap-blocks.ts` applies pure JSON transforms for top-level blocks and nested list items.
+- The plugin registry contributes Tiptap extensions, slash commands, AI selection commands, and future editor actions.
+
+AI changes are proposal-based by default. Selection commands preserve a target snapshot so stale edits can be detected before applying a replacement or insert-below action.
+
 ## Core.Today LLM Proxy Setup
 
 Core.Today exposes LLM proxy routes for OpenAI, Anthropic, and Gemini. The OpenAI-compatible base URL is `https://api.core.today/llm/openai/v1`; Anthropic uses `https://api.core.today/llm/anthropic/v1`; Gemini uses `https://api.core.today/llm/gemini/v1beta`.

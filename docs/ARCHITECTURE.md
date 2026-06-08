@@ -53,6 +53,16 @@ The bottom command bar is intentionally an entry point, not a mutation surface. 
 
 Selection AI progress is tied to the captured command context, not the browser's live selection state. When a user runs a command, the editor stores the selected text, Tiptap range, occurrence index, and floating anchor from that moment. The inline progress badge and right workspace status continue to show the active job even if the user clicks elsewhere or selects another block. This matches legal drafting expectations: the source is fixed, the user can keep reviewing, and the result returns as an accept/reject proposal rather than an automatic mutation.
 
+### Block Interaction Layer
+
+Block controls are split into focused modules:
+
+- `editor-block-ranges.ts` maps the current caret, pointer, or selection to a normalized top-level block or list item. It also owns the DOM hit-testing helpers shared by gutter positioning and drop-target calculation.
+- `editor-block-drop-targets.ts` classifies visual drag destinations and rejects descendant or same-slot drops before any document mutation runs.
+- `editor-block-drag-session.ts` captures the source block, text preview, block type, and live editor JSON signature so stale drag operations are canceled instead of applying to the wrong content.
+
+Document mutations stay in pure Tiptap JSON helpers under `src/features/documents/tiptap-blocks.ts`. `DocumentEditor` coordinates the UI state and delegates range lookup, drop classification, and JSON transforms to those narrower modules.
+
 ### Editor Plugin Layer
 
 `src/plugins/` contains the static editor plugin layer. Built-in document behavior is declared as plugins, and downstream projects can register app-specific plugins in `src/plugins/app-plugins.ts`.
@@ -129,6 +139,8 @@ Undo is conservative. The client stores the draft snapshot immediately before a 
 `src/features/proposals/proposal-apply.ts` contains exact-match text replacement logic. Proposal targets must match the reviewed document text exactly once before they are persisted.
 
 Selection proposals also store `occurrenceIndex`, `targetFrom`, and `targetTo` metadata when the client can capture the active editor range. The editor uses this metadata to highlight pending suggestions in the document and to keep repeated-text selection edits scoped to the captured occurrence.
+
+Current-session selection proposals additionally keep a client-side operation snapshot: command, scope, selected text, selection range, occurrence index, and content signature from the document state at command start. Accept/insert actions preflight that snapshot before mutating the draft. Bulk acceptance checks every snapshot-backed pending proposal against the original draft before applying any proposal in descending document order, so one valid proposal application does not make the next proposal falsely stale.
 
 This is intentionally conservative. Downstream products that need full Microsoft Word-style tracked changes can evolve the proposal model from exact text plus range metadata into position-based or step-map-based proposal application, or into an Office.js add-in that writes native Word revisions.
 
