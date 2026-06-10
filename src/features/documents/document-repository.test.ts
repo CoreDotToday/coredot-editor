@@ -28,9 +28,12 @@ async function createIsolatedDocumentDb() {
       content_json text NOT NULL,
       plain_text text DEFAULT '' NOT NULL,
       status text DEFAULT 'draft' NOT NULL,
+      readiness text DEFAULT 'draft' NOT NULL,
+      metadata_json text DEFAULT '{}' NOT NULL,
       created_at integer NOT NULL,
       updated_at integer NOT NULL,
-      CONSTRAINT "documents_status_check" CHECK(status in ('draft', 'archived'))
+      CONSTRAINT "documents_status_check" CHECK(status in ('draft', 'archived')),
+      CONSTRAINT "documents_readiness_check" CHECK(readiness in ('draft', 'needs_review', 'ready', 'approved'))
     )
   `);
 
@@ -48,6 +51,8 @@ describe("document repository", () => {
     expect(document.title).toBe("Market Entry Memo");
     expect(document.contentJson).toEqual({ type: "doc", content: [{ type: "paragraph" }] });
     expect(document.plainText).toBe("");
+    expect(document.readiness).toBe("draft");
+    expect(document.metadataJson).toEqual({});
     expect(document.status).toBe("draft");
     expect(documents.some((item) => item.id === document.id)).toBe(true);
   });
@@ -113,5 +118,62 @@ describe("document repository", () => {
         contentJson: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "Updated" }] }] },
       }),
     ).resolves.toBeNull();
+  });
+
+  it("updates document content together with readiness and metadata", async () => {
+    const db = await createIsolatedDocumentDb();
+    const { createDocumentDraft, updateDocumentContent } = createDocumentRepository(db);
+    const document = await createDocumentDraft("Market Entry Memo");
+
+    const updated = await updateDocumentContent(document.id, {
+      title: "Updated Memo",
+      contentJson: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "Updated" }] }] },
+      metadataJson: { owner: "Legal", tags: ["risk"] },
+      readiness: "needs_review",
+    });
+
+    expect(updated).toMatchObject({
+      metadataJson: { owner: "Legal", tags: ["risk"] },
+      plainText: "Updated",
+      readiness: "needs_review",
+    });
+  });
+
+  it("lists reference candidates while excluding the current and archived documents", async () => {
+    const db = await createIsolatedDocumentDb();
+    const { archiveDocument, createDocumentFromContent, listDocumentReferenceCandidates } = createDocumentRepository(db);
+    const current = await createDocumentFromContent("Current Plan", {
+      type: "doc",
+      content: [{ type: "paragraph", content: [{ type: "text", text: "Current body" }] }],
+    });
+    const referenced = await createDocumentFromContent("Revenue Memo", {
+      type: "doc",
+      content: [{ type: "paragraph", content: [{ type: "text", text: "Reference body" }] }],
+    });
+    const archived = await createDocumentFromContent("Revenue Archive", {
+      type: "doc",
+      content: [{ type: "paragraph", content: [{ type: "text", text: "Archived body" }] }],
+    });
+    await archiveDocument(archived.id);
+
+    const candidates = await listDocumentReferenceCandidates({
+      excludeDocumentId: current.id,
+      limit: 5,
+      query: "revenue",
+    });
+
+    expect(candidates.map((candidate) => candidate.id)).toEqual([referenced.id]);
+    expect(candidates[0]).toMatchObject({ plainText: "Reference body", title: "Revenue Memo" });
+  });
+
+  it("returns referenced documents in stable input order", async () => {
+    const db = await createIsolatedDocumentDb();
+    const { createDocumentDraft, getDocumentsByIds } = createDocumentRepository(db);
+    const first = await createDocumentDraft("First");
+    const second = await createDocumentDraft("Second");
+
+    const documents = await getDocumentsByIds([second.id, "missing", first.id]);
+
+    expect(documents.map((document) => document.id)).toEqual([second.id, first.id]);
   });
 });

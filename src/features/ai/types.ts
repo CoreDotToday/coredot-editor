@@ -4,6 +4,18 @@ export const aiCommandPayloadSchema = z.object({
   documentId: z.string().min(1),
   templateId: z.string().min(1),
   command: z.string().min(1),
+  references: z
+    .object({
+      documents: z
+        .array(
+          z.object({
+            documentId: z.string().min(1),
+            titleSnapshot: z.string().optional(),
+          }),
+        )
+        .default([]),
+    })
+    .default({ documents: [] }),
   variables: z.record(z.string(), z.unknown()).default({}),
   selectedText: z.string().default(""),
   occurrenceIndex: z.number().int().nonnegative().optional(),

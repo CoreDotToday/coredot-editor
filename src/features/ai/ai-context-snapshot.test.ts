@@ -18,7 +18,7 @@ describe("buildAiContextSnapshot", () => {
       command: "Translate to English",
       document: { charCount: 6, id: "doc_1", title: "계약서" },
       mode: "selection_rewrite",
-      schemaVersion: 1,
+      schemaVersion: 2,
       selection: { occurrenceIndex: 0, range: { from: 1, to: 6 }, text: "반갑습니다." },
       template: { category: "contract_review", id: "tpl_1", name: "Contract Review" },
       variables: {
@@ -58,5 +58,42 @@ describe("buildAiContextSnapshot", () => {
 
     expect(snapshot.variables.values).toEqual({ apiKey: "[redacted]", audience: "executive" });
     expect(formatAiContextSnapshotForCopy(snapshot)).not.toContain("cdt_secret");
+  });
+
+  it("dedupes and truncates referenced documents", () => {
+    const snapshot = buildAiContextSnapshot(
+      {
+        command: "Compare references",
+        document: { id: "doc_1", text: "Main body", title: "Main" },
+        mode: "document_review",
+        references: {
+          documents: [
+            { id: "ref_1", text: "abcdefghijklmnopqrstuvwxyz", title: "Reference One" },
+            { id: "ref_1", text: "duplicate ignored", title: "Reference One" },
+            { id: "ref_2", text: "short", title: "Reference Two" },
+          ],
+        },
+        template: { id: "tpl_1", name: "Review" },
+        variables: {},
+      },
+      { maxReferenceChars: 10 },
+    );
+
+    expect(snapshot.references.documents).toEqual([
+      {
+        charCount: 26,
+        id: "ref_1",
+        text: "abcde\n...\nvwxyz",
+        title: "Reference One",
+        truncation: { shownChars: 10, strategy: "head-tail", totalChars: 26 },
+      },
+      {
+        charCount: 5,
+        id: "ref_2",
+        text: "short",
+        title: "Reference Two",
+        truncation: undefined,
+      },
+    ]);
   });
 });

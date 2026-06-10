@@ -36,7 +36,15 @@ import {
 } from "@/components/ai/AiWorkspacePanel";
 import { AiSettingsDialog } from "@/components/settings/AiSettingsDialog";
 import { getTemplateVariableLabel, PromptTemplatePanel } from "@/components/templates/PromptTemplatePanel";
-import type { AiProposalRecord, AiRunRecord, DocumentRecord, PromptTemplateRecord, TiptapJson } from "@/db/schema";
+import type {
+  AiProposalRecord,
+  AiRunRecord,
+  DocumentMetadata,
+  DocumentReadiness,
+  DocumentRecord,
+  PromptTemplateRecord,
+  TiptapJson,
+} from "@/db/schema";
 import {
   archiveAiWorkspaceSession,
   renameAiWorkspaceSession,
@@ -44,6 +52,7 @@ import {
   writeAiWorkspaceSessionsForDocument,
 } from "@/features/ai/ai-workspace-session-store";
 import { buildAiContextSnapshot } from "@/features/ai/ai-context-snapshot";
+import { resolveDocumentShortcut } from "@/features/commands/document-command-manifest";
 import { buildDocumentOutline, type DocumentOutlineItem } from "@/features/documents/document-outline";
 import { extractPlainTextFromTiptap } from "@/features/documents/tiptap-text";
 import {
@@ -64,15 +73,18 @@ import {
   isProposalSnapshotStale,
   type ProposalTransactionContext,
 } from "@/features/proposals/proposal-transaction";
+import type { AiDocumentReferenceCandidate, ResolvedAiDocumentReference } from "@/features/ai/ai-reference-parser";
 import { validateTemplateVariables } from "@/features/templates/template-validation";
 import { DocumentEditor, type RunningSelectionAiCommand, type SelectionAiCommandContext } from "./DocumentEditor";
 import { DocumentCommandPalette } from "./DocumentCommandPalette";
+import { DocumentMetadataPanel } from "./DocumentMetadataPanel";
 import { DocumentOutlinePanel } from "./DocumentOutlinePanel";
 import { DocumentSourceView } from "./DocumentSourceView";
 import { buildDocumentCommandRegistry } from "./commands/document-command-registry";
 import type { SelectionAiResultPreview } from "./SelectionAiResultPopover";
 
-type ShellDocument = Pick<DocumentRecord, "id" | "title" | "contentJson" | "plainText">;
+type ShellDocument = Pick<DocumentRecord, "id" | "title" | "contentJson" | "plainText"> &
+  Partial<Pick<DocumentRecord, "metadataJson" | "readiness">>;
 type ShellTemplate = Pick<PromptTemplateRecord, "id" | "name" | "category" | "variableSchemaJson">;
 type ShellTemplateField = ShellTemplate["variableSchemaJson"]["fields"][number];
 type ShellAiRun = Pick<AiRunRecord, "id" | "commandType" | "status" | "createdAt">;
@@ -96,6 +108,7 @@ export type EditorSurface = "editor" | "source";
 
 type DocumentShellProps = {
   document: ShellDocument;
+  referenceDocuments?: AiDocumentReferenceCandidate[];
   templates: ShellTemplate[];
   aiRuns: ShellAiRun[];
   proposals?: ShellProposal[];
@@ -104,6 +117,8 @@ type DocumentShellProps = {
 type DraftState = {
   title: string;
   contentJson: TiptapJson;
+  metadataJson: DocumentMetadata;
+  readiness: DocumentReadiness;
 };
 
 type SelectionCommandPayload = {
@@ -111,6 +126,7 @@ type SelectionCommandPayload = {
   context?: SelectionAiCommandContext;
   selectedText: string;
   contentJson: TiptapJson;
+  references: ResolvedAiDocumentReference[];
   template: Pick<ShellTemplate, "category" | "id" | "name"> | null;
   title: string;
   variables: Record<string, string>;
@@ -122,6 +138,8 @@ type DocumentSnapshot = {
   id: string;
   title: string;
   contentJson: TiptapJson;
+  metadataJson: DocumentMetadata;
+  readiness: DocumentReadiness;
 };
 
 type AiSnapshot = {
@@ -175,19 +193,20 @@ function getCompactWorkspaceLayoutServerSnapshot() {
   return false;
 }
 
-export function DocumentShell({ aiRuns, document, proposals = [], templates }: DocumentShellProps) {
+export function DocumentShell({ aiRuns, document, proposals = [], referenceDocuments = [], templates }: DocumentShellProps) {
   return (
     <DocumentShellContent
       key={document.id}
       aiRuns={aiRuns}
       document={document}
       proposals={proposals}
+      referenceDocuments={referenceDocuments}
       templates={templates}
     />
   );
 }
 
-function DocumentShellContent({ aiRuns, document, proposals = [], templates }: DocumentShellProps) {
+function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocuments = [], templates }: DocumentShellProps) {
   const initialTemplateVariables = useMemo(
     () => mergeMissingTemplateVariableDefaults(templates[0] ?? null, {}),
     [templates],
@@ -197,15 +216,19 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
       id: document.id,
       title: document.title,
       contentJson: document.contentJson,
+      metadataJson: document.metadataJson ?? {},
+      readiness: document.readiness ?? "draft",
     }),
-    [document.contentJson, document.id, document.title],
+    [document.contentJson, document.id, document.metadataJson, document.readiness, document.title],
   );
   const initialDraft = useMemo(
     () => ({
       title: incomingDocument.title,
       contentJson: incomingDocument.contentJson,
+      metadataJson: document.metadataJson ?? {},
+      readiness: document.readiness ?? "draft",
     }),
-    [incomingDocument],
+    [document.metadataJson, document.readiness, incomingDocument],
   );
   const [draft, setDraft] = useState<DraftState>(initialDraft);
   const draftVersionRef = useRef(0);
@@ -287,25 +310,40 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
     },
     [isCompactWorkspace],
   );
+  const openFind = useCallback(() => {
+    setEditorSurface("editor");
+    setIsFindOpen(true);
+  }, []);
 
   useEffect(() => {
-    const handleCommandPaletteShortcut = (event: KeyboardEvent) => {
-      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "k") {
+    const handleDocumentShortcut = (event: KeyboardEvent) => {
+      const commandId = resolveDocumentShortcut(event);
+      if (!commandId) {
         return;
       }
 
       event.preventDefault();
-      setIsCommandPaletteOpen(true);
+
+      if (commandId === "open-command-palette") {
+        setIsCommandPaletteOpen(true);
+        return;
+      }
+
+      if (commandId === "find-document") {
+        openFind();
+      }
     };
 
-    window.addEventListener("keydown", handleCommandPaletteShortcut);
-    return () => window.removeEventListener("keydown", handleCommandPaletteShortcut);
-  }, []);
+    window.addEventListener("keydown", handleDocumentShortcut);
+    return () => window.removeEventListener("keydown", handleDocumentShortcut);
+  }, [openFind]);
 
   if (
     observedDocument.id !== incomingDocument.id ||
     observedDocument.title !== incomingDocument.title ||
-    observedDocument.contentJson !== incomingDocument.contentJson
+    observedDocument.contentJson !== incomingDocument.contentJson ||
+    observedDocument.metadataJson !== incomingDocument.metadataJson ||
+    observedDocument.readiness !== incomingDocument.readiness
   ) {
     setObservedDocument(incomingDocument);
 
@@ -345,9 +383,14 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
     }
   }
 
-  const handleDraftChange = useCallback((nextDraft: DraftState) => {
+  const handleDraftChange = useCallback((nextDraft: Pick<DraftState, "contentJson" | "title">) => {
     draftVersionRef.current += 1;
-    setDraft(nextDraft);
+    setDraft((currentDraft) => ({ ...currentDraft, ...nextDraft }));
+    setSaveState("dirty");
+  }, []);
+  const handleMetadataChange = useCallback((change: { metadataJson?: DocumentMetadata; readiness?: DocumentReadiness }) => {
+    draftVersionRef.current += 1;
+    setDraft((currentDraft) => ({ ...currentDraft, ...change }));
     setSaveState("dirty");
   }, []);
 
@@ -401,6 +444,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
     command: string,
     selectedText: string,
     context?: SelectionAiCommandContext,
+    references: ResolvedAiDocumentReference[] = [],
   ) => {
     setSelectionAiResult(null);
     setSelectionApplicationNotice("");
@@ -411,6 +455,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
         context,
         selectedText,
         contentJson: draft.contentJson,
+        references,
         template: null,
         title: draft.title,
         variables: {},
@@ -426,6 +471,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
       context,
       selectedText,
       contentJson: draft.contentJson,
+      references,
       template: {
         category: selectedTemplate.category,
         id: selectedTemplate.id,
@@ -494,6 +540,12 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
           documentId: document.id,
           templateId: selectedTemplate.id,
           command,
+          references: {
+            documents: references.map((reference) => ({
+              documentId: reference.id,
+              titleSnapshot: reference.title,
+            })),
+          },
           variables: variablesForCommand,
           selectedText,
           occurrenceIndex: context?.occurrenceIndex,
@@ -796,6 +848,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
         undone: false,
       };
       setDraft({
+        ...draft,
         title: draft.title,
         contentJson: appliedDraft.contentJson,
       });
@@ -900,7 +953,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
       const proposalsToApply = getProposalApplicationOrder(pendingProposals, selectionProposalContexts);
       for (const proposal of proposalsToApply) {
         const applyMode = proposal.defaultApplyMode ?? "replace";
-        const beforeProposalDraft: DraftState = { title: draft.title, contentJson: nextContentJson };
+        const beforeProposalDraft: DraftState = { ...draft, title: draft.title, contentJson: nextContentJson };
         const appliedDraft = applyProposalToTiptapDraft(
           nextContentJson,
           proposal,
@@ -932,7 +985,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
 
       appliedDraftVersion = draftVersionRef.current + 1;
       draftVersionRef.current = appliedDraftVersion;
-      setDraft({ title: draft.title, contentJson: nextContentJson });
+      setDraft({ ...draft, contentJson: nextContentJson });
       setSaveState("dirty");
       if (nextAppliedChanges.length > 0) {
         setAppliedChanges((currentChanges) => [...[...nextAppliedChanges].reverse(), ...currentChanges]);
@@ -1011,7 +1064,12 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
       return;
     }
 
-    void handleSelectionCommand(selectionCommand.command, selectionCommand.selectedText, selectionCommand.context);
+    void handleSelectionCommand(
+      selectionCommand.command,
+      selectionCommand.selectedText,
+      selectionCommand.context,
+      selectionCommand.references,
+    );
   }, [handleSelectionCommand, selectionCommand]);
 
   const undoAppliedChange = useCallback(async (changeId: string) => {
@@ -1031,7 +1089,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
     const previousChanges = appliedChanges;
 
     draftVersionRef.current += 1;
-    setDraft({ title: draft.title, contentJson: change.beforeDraft.contentJson });
+    setDraft({ ...draft, contentJson: change.beforeDraft.contentJson });
     setSaveState("dirty");
     setUndoChangeError("");
     setReviewProposals((currentProposals) =>
@@ -1129,10 +1187,15 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
       command: selectionCommand?.command ?? "Review document",
       document: {
         id: document.id,
+        metadata: draft.metadataJson,
+        readiness: draft.readiness,
         text: extractPlainTextFromTiptap(contentJsonForSnapshot),
         title: titleForSnapshot || messages.shell.untitledDocument,
       },
       mode: selectionCommand ? "selection_rewrite" : "document_review",
+      references: {
+        documents: getReferencedDocumentsForSnapshot(selectionCommand?.references ?? [], referenceDocuments),
+      },
       selection: selectionCommand
         ? {
             occurrenceIndex: selectionCommand.context?.occurrenceIndex,
@@ -1150,8 +1213,11 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
   }, [
     document.id,
     draft.contentJson,
+    draft.metadataJson,
+    draft.readiness,
     draft.title,
     messages.shell.untitledDocument,
+    referenceDocuments,
     selectedTemplate,
     selectionCommand,
     templateVariables,
@@ -1175,10 +1241,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
         exportDocxDraft,
         isExportingDocx,
         messages: messages.commandPalette,
-        openFind: () => {
-          setEditorSurface("editor");
-          setIsFindOpen(true);
-        },
+        openFind,
         runDocumentReview,
         saveDraft,
         saveState,
@@ -1190,6 +1253,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
       exportDocxDraft,
       isExportingDocx,
       messages.commandPalette,
+      openFind,
       runDocumentReview,
       saveDraft,
       saveState,
@@ -1262,14 +1326,21 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
         </button>
       </nav>
 
-      <DocumentOutlinePanel
-        activeItemId={activeOutlineItemId}
-        messages={messages.outline}
-        onSelectItem={selectOutlineItem}
-        outline={documentOutline}
-      />
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <DocumentOutlinePanel
+          activeItemId={activeOutlineItemId}
+          messages={messages.outline}
+          onSelectItem={selectOutlineItem}
+          outline={documentOutline}
+        />
 
-      <div className="min-h-0 flex-1 overflow-hidden border-t border-zinc-200">
+        <DocumentMetadataPanel
+          metadata={draft.metadataJson}
+          messages={messages.metadataPanel}
+          onChange={handleMetadataChange}
+          readiness={draft.readiness}
+        />
+
         <PromptTemplatePanel
           messages={messages.templates}
           onSelectTemplate={selectTemplate}
@@ -1279,10 +1350,10 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
           variableErrors={templateVariableErrors}
           variableValues={templateVariables}
         />
-      </div>
 
-      <div className="max-h-52 shrink-0 overflow-y-auto border-t border-zinc-200">
-        <AiRunHistory language={language} messages={messages.history} runs={reviewRuns} />
+        <div className="border-t border-zinc-200">
+          <AiRunHistory language={language} messages={messages.history} runs={reviewRuns} />
+        </div>
       </div>
     </>
   );
@@ -1521,6 +1592,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], templates }: D
             messages={messages.editor}
             onChange={handleDraftChange}
             onFindOpenChange={setIsFindOpen}
+            referenceCandidates={referenceDocuments}
             onApplySelectionAiResult={(proposalId, applyMode) =>
               updateProposalStatusLocally(proposalId, "accepted", applyMode)
             }
@@ -1571,6 +1643,34 @@ function collectTemplateVariables(template: ShellTemplate, values: Record<string
     variables[field.name] = values[field.name] ?? "";
     return variables;
   }, {});
+}
+
+function getReferencedDocumentsForSnapshot(
+  references: readonly ResolvedAiDocumentReference[],
+  candidates: readonly AiDocumentReferenceCandidate[],
+) {
+  const byId = new Map(candidates.map((candidate) => [candidate.id, candidate]));
+  const seen = new Set<string>();
+
+  return references.flatMap((reference) => {
+    if (seen.has(reference.id)) {
+      return [];
+    }
+
+    seen.add(reference.id);
+    const candidate = byId.get(reference.id);
+    if (!candidate) {
+      return [];
+    }
+
+    return [
+      {
+        id: candidate.id,
+        text: candidate.plainText,
+        title: candidate.title,
+      },
+    ];
+  });
 }
 
 function localizeTemplateVariableErrors(

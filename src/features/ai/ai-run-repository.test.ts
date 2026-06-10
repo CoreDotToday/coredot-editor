@@ -28,6 +28,8 @@ async function createIsolatedAiRunDb() {
       content_json text NOT NULL,
       plain_text text DEFAULT '' NOT NULL,
       status text DEFAULT 'draft' NOT NULL,
+      readiness text DEFAULT 'draft' NOT NULL,
+      metadata_json text DEFAULT '{}' NOT NULL,
       created_at integer NOT NULL,
       updated_at integer NOT NULL
     )
@@ -91,6 +93,8 @@ async function createIsolatedAiRunDb() {
     title: "Memo",
     contentJson: { type: "doc" },
     plainText: "Text",
+    readiness: "draft",
+    metadataJson: {},
     status: "draft",
     createdAt: now,
     updatedAt: now,

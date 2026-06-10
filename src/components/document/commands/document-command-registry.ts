@@ -1,4 +1,5 @@
 import type { EditorMessages } from "@/features/i18n/editor-language";
+import { getDocumentCommandShortcutLabel } from "@/features/commands/document-command-manifest";
 import type { EditorSurface, SaveState } from "../DocumentShell";
 import type { DocumentCommandAction } from "./document-command-types";
 
@@ -56,7 +57,7 @@ export function buildDocumentCommandRegistry({
       id: "find-document",
       keywords: ["find", "search", "replace", "찾기", "검색", "교체"],
       label: messages.commands.findDocument,
-      shortcut: "⌘F",
+      shortcut: getDocumentCommandShortcutLabel("find-document"),
     },
     {
       enabled: editorSurface !== "source",

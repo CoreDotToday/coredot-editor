@@ -3,6 +3,7 @@ import { aiCommandPayloadSchema, type ReviewResult } from "@/features/ai/types";
 import { buildAiMessages } from "@/features/ai/payload-builder";
 import { completeAiRunWithProposals, createAiRun, failAiRun } from "@/features/ai/ai-run-repository";
 import { getAiSettings } from "@/features/ai/ai-settings-repository";
+import { hydrateAiReferenceDocuments } from "@/features/ai/reference-hydration";
 import { createAiProvider } from "@/features/ai/providers";
 import { getDocumentById } from "@/features/documents/document-repository";
 import { applyProposalToText } from "@/features/proposals/proposal-apply";
@@ -46,6 +47,7 @@ export async function POST(request: Request) {
   const hasSubmittedDocumentText =
     typeof payload === "object" && payload !== null && Object.hasOwn(payload, "documentText");
   const reviewedText = hasSubmittedDocumentText ? body.documentText : document.plainText;
+  const referencedDocuments = await hydrateAiReferenceDocuments(body.references);
 
   const run = await createAiRun({
     documentId: document.id,
@@ -56,6 +58,7 @@ export async function POST(request: Request) {
     inputSummaryJson: {
       command: body.command,
       documentTextLength: reviewedText.length,
+      referencedDocumentIds: referencedDocuments.map((reference) => reference.id),
       variableNames: Object.keys(body.variables),
     },
   });
@@ -64,6 +67,7 @@ export async function POST(request: Request) {
     const messages = buildAiMessages({
       ...body,
       documentText: reviewedText,
+      referencedDocuments,
       systemPrompt: template.systemPrompt,
     });
     const review = await provider.generateReview({ messages });

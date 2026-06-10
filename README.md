@@ -34,8 +34,10 @@ Before deploying a fork with real users, make the product-specific decisions tha
 - Next.js App Router workspace with document list, editor page, and template manager
 - Tiptap v3 editor with title editing, slash commands, selection commands, block gutter controls, placeholder text, link support, task lists, typography, drop/gap cursor behavior, and character counts
 - Static editor plugin layer for adding Tiptap extensions, selection AI commands, and slash menu items without editing the central editor components
+- Manifest-backed document command definitions for host shortcuts and command palette entries
 - Notion-style `Cmd/Ctrl+A` behavior inside the editor: first selects the current block, second selects the whole document
 - Drizzle ORM schema with SQLite/libSQL for local persistence
+- Document readiness and lightweight JSON metadata fields, with list filters that can later move to Postgres queries
 - Seeded, source-informed prompt templates for strategy review, executive rewrite, market research critique, and contract review
 - Contract review playbook template for risk-focused clause review and redline-ready replacement suggestions
 - Editable prompt template manager with JSON variable schema validation
@@ -43,6 +45,7 @@ Before deploying a fork with real users, make the product-specific decisions tha
 - Review API that creates proposal records from structured AI findings
 - Rewrite API for exact-match selected text proposals, translations, and continue-writing insertions
 - SuperDoc-style bottom AI command bar for natural-language edits against the current selection, current block, or whole document
+- AI command references with `@Document Title` mentions, hydrated server-side so prompts can include related documents without trusting browser-supplied reference text
 - Live document outline in the left sidebar, generated from Tiptap heading nodes with click-to-jump navigation
 - In-document find/replace opened with `Cmd/Ctrl+F` or the command palette, with case-sensitive and guarded regex search
 - Right-side AI workspace with review, document-scoped AI conversation sessions, rename/hide controls, AI context inspector, and change-history tabs
@@ -106,7 +109,7 @@ Open [http://localhost:3000](http://localhost:3000).
 
 With the example environment, the first saved LLM setting uses `stub`, so the AI flows work without an API key. If `AI_PROVIDER=coredot` or a Core.Today key is already configured, the first settings row is initialized for Core.Today instead. After that, the in-app `LLM 설정` dialog controls provider/model settings from the database.
 
-In the editor, use the bottom `무엇을 변경할까요?` command bar for freeform AI requests. The command targets selected text first, then the current block, then the full document. AI output is saved as a proposal instead of immediately overwriting text; review it in the right workspace's `검토`, `대화`, and `변경내역` tabs.
+In the editor, use the bottom `무엇을 변경할까요?` command bar for freeform AI requests. The command targets selected text first, then the current block, then the full document. Type `@` and choose another document to include it as referenced context; the server hydrates the referenced document body by ID before calling the model. AI output is saved as a proposal instead of immediately overwriting text; review it in the right workspace's `검토`, `대화`, and `변경내역` tabs.
 
 Open the command palette with `Cmd/Ctrl+K` or the header's more menu to jump between AI workspace actions, document find, review, save/export, and Source mode. Commands are built from a typed registry with groups, enabled states, shortcuts, and fuzzy search. Use `Cmd/Ctrl+F` in the editor to open find/replace without falling back to browser find. The `Source` tab is read-only and reflects the current in-memory draft, including unsaved edits, as extracted plain text plus Tiptap JSON; use its copy and download actions when debugging provider prompts or document conversion.
 
@@ -121,10 +124,12 @@ Coredot Editor uses Tiptap as the document engine and keeps product behavior in 
 - `DocumentEditor` composes the editor surface, toolbar, AI command bar, proposal highlights, and block controls.
 - `DocumentShell` owns host-level workspace state such as Source mode, saving/exporting, and AI workspace visibility.
 - `DocumentCommandPalette` renders the host command registry with grouped fuzzy search, shortcut labels, and keyboard navigation.
+- `document-command-manifest.ts` defines host-level command IDs and shortcuts so keyboard handling and palette display stay aligned.
 - `DocumentOutlinePanel` renders a live heading outline from the current Tiptap draft and sends jump requests back into the editor.
+- `DocumentMetadataPanel` edits document readiness and common metadata keys without mixing lifecycle `status` with review readiness.
 - `DocumentFindBar` renders compact find/replace controls while `document-find.ts` maps search matches to ProseMirror positions.
 - `DocumentSourceView` renders the current draft as plain text and Tiptap JSON with copy/download affordances.
-- `AiWorkspacePanel` renders review proposals, per-command AI conversation sessions, the AI context inspector, and accepted-change history. Chat sessions are persisted per document through a local adapter that can be replaced by database-backed conversation/message tables.
+- `AiWorkspacePanel` renders review proposals, per-command AI conversation sessions, the AI context inspector, and accepted-change history. Chat sessions are persisted per document through a local adapter that can be replaced by database-backed conversation/message tables. AI context snapshots include document readiness, metadata, selection context, and referenced documents.
 - `editor-block-ranges.ts` resolves the current paragraph, heading, or list item into a normalized block target and owns pointer hit-testing helpers used by the gutter.
 - `editor-block-drop-targets.ts` classifies drag destinations and suppresses invalid or no-op drops before a document mutation can happen.
 - `editor-block-drag-session.ts` guards drag operations against stale live editor state.
@@ -214,8 +219,8 @@ pnpm db:seed      # Seed default prompt templates
 src/app/                 Next.js routes and API route handlers
 src/components/          Editor, AI workspace, settings, template UI components
 src/db/                  Drizzle schema, client, migrations helper, seed data
-src/features/ai/         Provider adapter, payload builder, AI run repository, AI workspace session store
-src/features/documents/  Document persistence, source snapshots, Tiptap helpers, DOCX conversion
+src/features/ai/         Provider adapter, payload builder, AI references, AI run repository, AI workspace session store
+src/features/documents/  Document persistence, metadata/filter helpers, source snapshots, Tiptap helpers, DOCX conversion
 src/features/i18n/       Editor language pack and message formatting helpers
 src/features/proposals/  Proposal persistence, transactions, redline helpers
 src/features/templates/  Template persistence and variable validation

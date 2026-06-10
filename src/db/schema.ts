@@ -7,6 +7,10 @@ export type TiptapJson = {
   content?: unknown[];
 };
 
+export type DocumentReadiness = "draft" | "needs_review" | "ready" | "approved";
+export type DocumentMetadataValue = boolean | number | string | string[] | null;
+export type DocumentMetadata = Record<string, DocumentMetadataValue>;
+
 export const documents = sqliteTable(
   "documents",
   {
@@ -15,10 +19,22 @@ export const documents = sqliteTable(
     contentJson: text("content_json", { mode: "json" }).$type<TiptapJson>().notNull(),
     plainText: text("plain_text").notNull().default(""),
     status: text("status", { enum: ["draft", "archived"] }).notNull().default("draft"),
+    readiness: text("readiness", { enum: ["draft", "needs_review", "ready", "approved"] })
+      .notNull()
+      .default("draft"),
+    metadataJson: text("metadata_json", { mode: "json" })
+      .$type<DocumentMetadata>()
+      .notNull()
+      .default(sql`'{}'`)
+      .$defaultFn(() => ({})),
     createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
     updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
   },
-  (table) => [check("documents_status_check", sql`${table.status} in ('draft', 'archived')`)],
+  (table) => [
+    index("documents_readiness_idx").on(table.readiness),
+    check("documents_status_check", sql`${table.status} in ('draft', 'archived')`),
+    check("documents_readiness_check", sql`${table.readiness} in ('draft', 'needs_review', 'ready', 'approved')`),
+  ],
 );
 
 export const promptTemplates = sqliteTable("prompt_templates", {

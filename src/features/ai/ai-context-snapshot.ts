@@ -15,12 +15,23 @@ export type AiContextSnapshot = {
   document: {
     charCount: number;
     id: string;
+    metadata?: Record<string, unknown>;
+    readiness?: string;
     text: string;
     title: string;
     truncation?: AiContextTextTruncation;
   };
   mode: AiContextSnapshotMode;
-  schemaVersion: 1;
+  references: {
+    documents: Array<{
+      charCount: number;
+      id: string;
+      text: string;
+      title: string;
+      truncation?: AiContextTextTruncation;
+    }>;
+  };
+  schemaVersion: 2;
   selection?: {
     charCount: number;
     occurrenceIndex?: number;
@@ -47,10 +58,19 @@ export type BuildAiContextSnapshotInput = {
   command: string;
   document: {
     id: string;
+    metadata?: Record<string, unknown>;
+    readiness?: string;
     text: string;
     title: string;
   };
   mode: AiContextSnapshotMode;
+  references?: {
+    documents: Array<{
+      id: string;
+      text: string;
+      title: string;
+    }>;
+  };
   selection?: {
     occurrenceIndex?: number;
     range?: { from: number; to: number };
@@ -66,11 +86,13 @@ export type BuildAiContextSnapshotInput = {
 
 export type BuildAiContextSnapshotOptions = {
   maxDocumentChars?: number;
+  maxReferenceChars?: number;
   maxSelectionChars?: number;
   maxVariableChars?: number;
 };
 
 const DEFAULT_MAX_DOCUMENT_CHARS = 12_000;
+const DEFAULT_MAX_REFERENCE_CHARS = 8_000;
 const DEFAULT_MAX_SELECTION_CHARS = 4_000;
 const DEFAULT_MAX_VARIABLE_CHARS = 1_000;
 
@@ -109,6 +131,7 @@ export function buildAiContextSnapshot(
   options: BuildAiContextSnapshotOptions = {},
 ): AiContextSnapshot {
   const maxDocumentChars = options.maxDocumentChars ?? DEFAULT_MAX_DOCUMENT_CHARS;
+  const maxReferenceChars = options.maxReferenceChars ?? DEFAULT_MAX_REFERENCE_CHARS;
   const maxSelectionChars = options.maxSelectionChars ?? DEFAULT_MAX_SELECTION_CHARS;
   const maxVariableChars = options.maxVariableChars ?? DEFAULT_MAX_VARIABLE_CHARS;
   const documentText = compactText(input.document.text, maxDocumentChars);
@@ -118,6 +141,7 @@ export function buildAiContextSnapshot(
     return values;
   }, {});
   const selectionText = input.selection ? compactText(input.selection.text, maxSelectionChars) : null;
+  const referencedDocuments = buildReferencedDocuments(input.references?.documents ?? [], maxReferenceChars);
 
   return {
     ai: input.ai,
@@ -125,12 +149,17 @@ export function buildAiContextSnapshot(
     document: {
       charCount: input.document.text.length,
       id: input.document.id,
+      metadata: input.document.metadata,
+      readiness: input.document.readiness,
       text: documentText.text,
       title: input.document.title,
       truncation: documentText.truncation,
     },
     mode: input.mode,
-    schemaVersion: 1,
+    references: {
+      documents: referencedDocuments,
+    },
+    schemaVersion: 2,
     selection: input.selection
       ? {
           charCount: input.selection.text.length,
@@ -146,6 +175,30 @@ export function buildAiContextSnapshot(
       values: variableValues,
     },
   };
+}
+
+function buildReferencedDocuments(
+  documents: NonNullable<BuildAiContextSnapshotInput["references"]>["documents"],
+  maxReferenceChars: number,
+) {
+  const seen = new Set<string>();
+  return documents.flatMap((document) => {
+    if (seen.has(document.id)) {
+      return [];
+    }
+
+    seen.add(document.id);
+    const text = compactText(document.text, maxReferenceChars);
+    return [
+      {
+        charCount: document.text.length,
+        id: document.id,
+        text: text.text,
+        title: document.title,
+        truncation: text.truncation,
+      },
+    ];
+  });
 }
 
 export function formatAiContextSnapshotForCopy(snapshot: AiContextSnapshot) {

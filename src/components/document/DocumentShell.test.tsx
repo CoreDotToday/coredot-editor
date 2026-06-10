@@ -8,6 +8,7 @@ vi.mock("./DocumentEditor", () => ({
   DocumentEditor: ({
     contentJson,
     inlineSuggestions = [],
+    isFindOpen,
     isSelectionCommandLimitReached,
     isSelectionCommandRunning,
     onChange,
@@ -23,6 +24,7 @@ vi.mock("./DocumentEditor", () => ({
   }: {
     contentJson: { type: "doc"; content?: unknown[] };
     inlineSuggestions?: Array<{ active?: boolean; id: string; targetText: string }>;
+    isFindOpen?: boolean;
     isSelectionCommandLimitReached?: boolean;
     isSelectionCommandRunning?: boolean;
     language?: "en" | "ko";
@@ -38,6 +40,7 @@ vi.mock("./DocumentEditor", () => ({
         occurrenceIndex: number;
         selectionRange?: { from: number; to: number };
       },
+      references?: Array<{ id: string; title: string }>,
     ) => void;
     runningSelectionCommand?: string;
     runningSelectionCommands?: Array<{ command: string; id: string }>;
@@ -57,6 +60,7 @@ vi.mock("./DocumentEditor", () => ({
         value={title}
       />
       <div data-testid="mock-document-body">{readMockTiptapText(contentJson)}</div>
+      {isFindOpen ? <div role="search" aria-label="mock find bar">Find bar open</div> : null}
       <output data-testid="mock-inline-suggestions">{JSON.stringify(inlineSuggestions)}</output>
       {isSelectionCommandRunning ? (
         <div data-testid="mock-selection-command-running">
@@ -102,6 +106,23 @@ vi.mock("./DocumentEditor", () => ({
         type="button"
       >
         Mock second occurrence command
+      </button>
+      <button
+        onClick={() =>
+          onSelectionCommand?.(
+            "Compare @Revenue Memo",
+            "selected text",
+            {
+              anchor: { left: 80, side: "bottom", top: 140 },
+              occurrenceIndex: 0,
+              selectionRange: { from: 1, to: 14 },
+            },
+            [{ id: "doc_ref", title: "Revenue Memo" }],
+          )
+        }
+        type="button"
+      >
+        Mock referenced command
       </button>
       <button
         onClick={() =>
@@ -753,6 +774,38 @@ describe("DocumentShell", () => {
     expect(screen.getAllByText("revenue grew 8%").length).toBeGreaterThan(0);
   });
 
+  it("passes selected document references to selection rewrite requests", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          run: createAiRun("run_rewrite"),
+          proposal: createProposal("proposal_rewrite", "pending", "selected text"),
+        }),
+      ),
+    );
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "selected text in document")}
+        templates={[createTemplate("tpl_1", "Rewrite template")]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Mock referenced command" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith("/api/ai/rewrite", expect.anything());
+    });
+    const requestInit = fetchMock.mock.calls.find(([url]) => url === "/api/ai/rewrite")?.[1] as RequestInit;
+    const body = JSON.parse(String(requestInit.body));
+
+    expect(body.references).toEqual({
+      documents: [{ documentId: "doc_ref", titleSnapshot: "Revenue Memo" }],
+    });
+  });
+
   it("records AI command conversation in the right chat tab", async () => {
     const user = userEvent.setup();
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
@@ -806,6 +859,22 @@ describe("DocumentShell", () => {
     expect(screen.queryByRole("dialog", { name: "명령 팔레트" })).not.toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Source" })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByRole("region", { name: "문서 Source" })).toHaveTextContent("source body");
+  });
+
+  it("opens document find through the shell shortcut layer", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "source body")}
+        templates={[createTemplate("tpl_1", "Rewrite template")]}
+      />,
+    );
+
+    await user.keyboard("{Meta>}f{/Meta}");
+
+    expect(screen.getByRole("search", { name: "mock find bar" })).toBeInTheDocument();
   });
 
   it("keeps AI command conversations in separate sessions", async () => {

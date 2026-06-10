@@ -4,6 +4,7 @@ import { aiCommandPayloadSchema } from "@/features/ai/types";
 import { buildAiMessages } from "@/features/ai/payload-builder";
 import { completeAiRunWithProposals, createAiRun, failAiRun } from "@/features/ai/ai-run-repository";
 import { getAiSettings } from "@/features/ai/ai-settings-repository";
+import { hydrateAiReferenceDocuments } from "@/features/ai/reference-hydration";
 import { createAiProvider } from "@/features/ai/providers";
 import { getDocumentById } from "@/features/documents/document-repository";
 import { validateProposalTargetOccurrence } from "@/features/proposals/proposal-apply";
@@ -43,6 +44,7 @@ export async function POST(request: Request) {
   const hasSubmittedDocumentText =
     typeof payload === "object" && payload !== null && Object.hasOwn(payload, "documentText");
   const reviewedText = hasSubmittedDocumentText ? body.documentText : document.plainText;
+  const referencedDocuments = await hydrateAiReferenceDocuments(body.references);
   const targetValidation = validateProposalTargetOccurrence(reviewedText, body.selectedText, body.occurrenceIndex);
   if (!targetValidation.ok && body.occurrenceIndex !== undefined) {
     return NextResponse.json({ error: "Selected text occurrence was not found in the document" }, { status: 400 });
@@ -72,6 +74,7 @@ export async function POST(request: Request) {
       documentTextLength: reviewedText.length,
       beforeContextLength: body.beforeContext.length,
       occurrenceIndex: body.occurrenceIndex,
+      referencedDocumentIds: referencedDocuments.map((reference) => reference.id),
       selectedTextLength: body.selectedText.length,
       selectionRange: body.selectionRange,
       variableNames: Object.keys(body.variables),
@@ -82,6 +85,7 @@ export async function POST(request: Request) {
     const messages = buildAiMessages({
       ...body,
       documentText: reviewedText,
+      referencedDocuments,
       systemPrompt: buildSelectionRewriteSystemPrompt(template.systemPrompt, body.command),
     });
     const rewriteResult = normalizeSelectionRewriteResult(await provider.generateText({ messages }));

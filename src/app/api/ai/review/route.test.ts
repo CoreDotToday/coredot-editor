@@ -1,13 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { completeAiRunWithProposals, createAiRun } from "@/features/ai/ai-run-repository";
 import { createAiProvider } from "@/features/ai/providers";
-import { getDocumentById } from "@/features/documents/document-repository";
+import { getDocumentById, getDocumentsByIds } from "@/features/documents/document-repository";
 import { getPromptTemplateById } from "@/features/templates/template-repository";
 import type { DocumentRecord, PromptTemplateRecord } from "@/db/schema";
 import { POST } from "./route";
 
 vi.mock("@/features/documents/document-repository", () => ({
   getDocumentById: vi.fn(),
+  getDocumentsByIds: vi.fn(async () => []),
 }));
 
 vi.mock("@/features/templates/template-repository", () => ({
@@ -73,6 +74,8 @@ const documentRecord = {
   title: "Memo",
   plainText: "growth was good and someone should follow up",
   contentJson: { type: "doc" },
+  metadataJson: {},
+  readiness: "draft",
   status: "draft",
   createdAt: new Date("2026-01-01T00:00:00.000Z"),
   updatedAt: new Date("2026-01-01T00:00:00.000Z"),
@@ -158,6 +161,63 @@ describe("POST /api/ai/review", () => {
         expect.objectContaining({ occurrenceIndex: 0, targetText: "growth was good" }),
         expect.objectContaining({ occurrenceIndex: 0, targetText: "someone should follow up" }),
       ]),
+    );
+  });
+
+  it("hydrates referenced documents by id before building the review prompt", async () => {
+    const generateReview = vi.fn(async () => ({ summary: "No findings.", findings: [] }));
+    vi.mocked(getDocumentById).mockResolvedValueOnce(documentRecord);
+    vi.mocked(getDocumentsByIds).mockResolvedValueOnce([
+      {
+        ...documentRecord,
+        id: "doc_ref",
+        title: "Reference Memo",
+        plainText: "Reference memo body",
+      },
+    ]);
+    vi.mocked(getPromptTemplateById).mockResolvedValueOnce(templateRecord);
+    vi.mocked(createAiProvider).mockReturnValueOnce({
+      name: "stub",
+      model: "stub-editor",
+      generateText: vi.fn(),
+      streamText: vi.fn(),
+      generateReview,
+    });
+
+    const response = await POST(
+      createJsonRequest({
+        documentId: "doc_1",
+        templateId: "tpl_1",
+        command: "Review with references",
+        variables: {},
+        references: { documents: [{ documentId: "doc_ref", text: "client text must be ignored" }] },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(getDocumentsByIds).toHaveBeenCalledWith(["doc_ref"]);
+    expect(generateReview).toHaveBeenCalledWith({
+      messages: expect.arrayContaining([
+        expect.objectContaining({
+          role: "user",
+          content: expect.stringContaining("Reference memo body"),
+        }),
+      ]),
+    });
+    expect(generateReview).toHaveBeenCalledWith({
+      messages: expect.arrayContaining([
+        expect.objectContaining({
+          role: "user",
+          content: expect.not.stringContaining("client text must be ignored"),
+        }),
+      ]),
+    });
+    expect(createAiRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        inputSummaryJson: expect.objectContaining({
+          referencedDocumentIds: ["doc_ref"],
+        }),
+      }),
     );
   });
 

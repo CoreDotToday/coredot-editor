@@ -2,6 +2,9 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { DocumentImportButton } from "@/components/document/DocumentImportButton";
 import { createDocumentDraft, listDocuments } from "@/features/documents/document-repository";
+import { filterDocumentSummaries } from "@/features/documents/document-filters";
+import { documentReadinessValues, normalizeDocumentReadiness } from "@/features/documents/document-metadata";
+import type { DocumentReadiness } from "@/db/schema";
 
 export const dynamic = "force-dynamic";
 
@@ -20,8 +23,34 @@ const dateFormatter = new Intl.DateTimeFormat("ko-KR", {
   minute: "2-digit",
 });
 
-export default async function DocumentsPage() {
-  const documents = await listDocuments();
+type DocumentsPageProps = {
+  searchParams?: Promise<{
+    metadataKey?: string;
+    metadataValue?: string;
+    query?: string;
+    readiness?: string;
+  }>;
+};
+
+const readinessLabels: Record<DocumentReadiness, string> = {
+  approved: "승인됨",
+  draft: "초안",
+  needs_review: "검토 필요",
+  ready: "준비 완료",
+};
+
+function getListMetadataValue(value: unknown) {
+  return typeof value === "string" || typeof value === "number" ? String(value) : "";
+}
+
+export default async function DocumentsPage({ searchParams }: DocumentsPageProps) {
+  const params = (await searchParams) ?? {};
+  const documents = filterDocumentSummaries(await listDocuments(), {
+    metadataKey: params.metadataKey,
+    metadataValue: params.metadataValue,
+    query: params.query,
+    readiness: params.readiness && params.readiness !== "all" ? normalizeDocumentReadiness(params.readiness) : "all",
+  });
 
   return (
     <main className="min-h-screen bg-zinc-50 text-zinc-950">
@@ -46,6 +75,62 @@ export default async function DocumentsPage() {
           </div>
         </header>
 
+        <form
+          action="/documents"
+          className="grid gap-3 border-y border-zinc-200 bg-white p-4 sm:grid-cols-[minmax(0,1.5fr)_minmax(10rem,0.7fr)_minmax(8rem,0.6fr)_minmax(8rem,0.8fr)_auto]"
+        >
+          <label className="block">
+            <span className="text-xs font-medium text-zinc-500">검색</span>
+            <input
+              className="mt-1 h-9 w-full rounded-md border border-zinc-200 px-2 text-sm outline-none focus:border-zinc-500"
+              defaultValue={params.query ?? ""}
+              name="query"
+              placeholder="제목 또는 본문"
+            />
+          </label>
+          <label className="block">
+            <span className="text-xs font-medium text-zinc-500">준비 상태</span>
+            <select
+              className="mt-1 h-9 w-full rounded-md border border-zinc-200 bg-white px-2 text-sm outline-none focus:border-zinc-500"
+              defaultValue={params.readiness ?? "all"}
+              name="readiness"
+            >
+              <option value="all">전체</option>
+              {documentReadinessValues.map((readiness) => (
+                <option key={readiness} value={readiness}>
+                  {readinessLabels[readiness]}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="block">
+            <span className="text-xs font-medium text-zinc-500">속성 키</span>
+            <input
+              className="mt-1 h-9 w-full rounded-md border border-zinc-200 px-2 text-sm outline-none focus:border-zinc-500"
+              defaultValue={params.metadataKey ?? ""}
+              name="metadataKey"
+              placeholder="owner"
+            />
+          </label>
+          <label className="block">
+            <span className="text-xs font-medium text-zinc-500">속성 값</span>
+            <input
+              className="mt-1 h-9 w-full rounded-md border border-zinc-200 px-2 text-sm outline-none focus:border-zinc-500"
+              defaultValue={params.metadataValue ?? ""}
+              name="metadataValue"
+              placeholder="Legal"
+            />
+          </label>
+          <div className="flex items-end">
+            <button
+              className="h-9 w-full rounded-md bg-zinc-950 px-3 text-sm font-medium text-white hover:bg-zinc-800"
+              type="submit"
+            >
+              필터
+            </button>
+          </div>
+        </form>
+
         <section className="overflow-hidden border-y border-zinc-200 bg-white">
           {documents.length === 0 ? (
             <p className="px-4 py-12 text-center text-sm text-zinc-500">아직 문서가 없습니다.</p>
@@ -61,8 +146,21 @@ export default async function DocumentsPage() {
                       className="grid gap-3 px-4 py-5 transition-colors hover:bg-zinc-50 sm:grid-cols-[1fr_auto] sm:items-center sm:px-5"
                     >
                       <div className="min-w-0">
-                        <h2 className="truncate text-base font-medium text-zinc-950">{document.title}</h2>
+                        <div className="flex min-w-0 flex-wrap items-center gap-2">
+                          <h2 className="truncate text-base font-medium text-zinc-950">{document.title}</h2>
+                          <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-xs font-medium text-zinc-600">
+                            {readinessLabels[document.readiness]}
+                          </span>
+                        </div>
                         <p className="mt-1 line-clamp-2 text-sm leading-6 text-zinc-600">{preview}</p>
+                        <p className="mt-2 truncate text-xs text-zinc-500">
+                          {[
+                            getListMetadataValue(document.metadataJson.owner),
+                            getListMetadataValue(document.metadataJson.category),
+                          ]
+                            .filter(Boolean)
+                            .join(" · ")}
+                        </p>
                       </div>
                       <time
                         dateTime={document.updatedAt.toISOString()}

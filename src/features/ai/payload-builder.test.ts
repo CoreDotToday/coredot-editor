@@ -35,4 +35,29 @@ describe("buildAiMessages", () => {
     expect(messages[1]?.content).toContain('audiences: ["CEO","CFO"]');
     expect(messages[1]?.content).toContain('constraints: {"region":"Japan","budget":100}');
   });
+
+  it("renders referenced documents before the main document text", () => {
+    const messages = buildAiMessages({
+      systemPrompt: "You are a strategy editor.",
+      command: "Compare the referenced memo",
+      variables: {},
+      selectedText: "",
+      beforeContext: "",
+      afterContext: "",
+      documentText: "Main document",
+      referencedDocuments: [
+        {
+          id: "doc_ref",
+          text: "Reference document body",
+          title: "Reference Memo",
+        },
+      ],
+    });
+
+    const userContent = messages[1]?.content ?? "";
+
+    expect(userContent).toContain("Referenced documents:\n");
+    expect(userContent).toContain('"title": "Reference Memo"');
+    expect(userContent.indexOf("Referenced documents:")).toBeLessThan(userContent.indexOf("Document text:"));
+  });
 });

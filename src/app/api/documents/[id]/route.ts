@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { archiveDocument, getDocumentById, updateDocumentContent } from "@/features/documents/document-repository";
+import { documentReadinessValues } from "@/features/documents/document-metadata";
 
 const updateDocumentSchema = z.object({
   title: z.string().min(1),
@@ -8,6 +9,10 @@ const updateDocumentSchema = z.object({
     type: z.literal("doc"),
     content: z.array(z.unknown()).optional(),
   }),
+  metadataJson: z
+    .record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.array(z.string()), z.null()]))
+    .optional(),
+  readiness: z.enum(documentReadinessValues).optional(),
 });
 
 type Params = {

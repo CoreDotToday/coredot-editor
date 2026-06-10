@@ -14,6 +14,7 @@ export type AiContextInspectorMessages = {
   document: string;
   empty: string;
   model: string;
+  references: string;
   selection: string;
   template: string;
   title: string;
@@ -38,6 +39,7 @@ export function AiContextInspector({ messages, snapshot }: AiContextInspectorPro
   }
 
   const modelLabel = [snapshot.ai?.provider, snapshot.ai?.model].filter(Boolean).join(" / ") || "-";
+  const referencedDocuments = snapshot.references?.documents ?? [];
 
   const copySnapshot = async () => {
     try {
@@ -84,6 +86,19 @@ export function AiContextInspector({ messages, snapshot }: AiContextInspectorPro
           <SummaryRow
             label={messages.selection}
             value={formatEditorMessage(messages.charCount, { count: String(snapshot.selection.charCount) })}
+          />
+        ) : null}
+        {referencedDocuments.length > 0 ? (
+          <SummaryRow
+            label={messages.references}
+            value={referencedDocuments
+              .map(
+                (document) =>
+                  `${document.title} · ${formatEditorMessage(messages.charCount, {
+                    count: String(document.charCount),
+                  })}`,
+              )
+              .join(", ")}
           />
         ) : null}
         <SummaryRow label={messages.variables} value={snapshot.variables.names.join(", ") || "-"} />

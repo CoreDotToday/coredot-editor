@@ -108,7 +108,7 @@ describe("DocumentEditor", () => {
       />,
     );
 
-    await user.type(screen.getByRole("textbox", { name: "AI 명령" }), "더 계약서답게 정리해줘");
+    await user.type(screen.getByRole("combobox", { name: "AI 명령" }), "더 계약서답게 정리해줘");
     await user.click(screen.getByRole("button", { name: "AI 요청" }));
 
     expect(handleSelectionCommand).toHaveBeenCalledWith(
@@ -144,7 +144,7 @@ describe("DocumentEditor", () => {
     );
 
     await user.selectOptions(screen.getByRole("combobox", { name: "AI 적용 범위" }), "document");
-    await user.type(screen.getByRole("textbox", { name: "AI 명령" }), "전체 문서를 더 공식적으로 다듬어줘");
+    await user.type(screen.getByRole("combobox", { name: "AI 명령" }), "전체 문서를 더 공식적으로 다듬어줘");
     await user.click(screen.getByRole("button", { name: "AI 요청" }));
 
     expect(handleSelectionCommand).toHaveBeenCalledWith(

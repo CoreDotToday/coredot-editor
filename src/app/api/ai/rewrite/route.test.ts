@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { getDocumentById } from "@/features/documents/document-repository";
+import { getDocumentById, getDocumentsByIds } from "@/features/documents/document-repository";
 import { createAiProvider } from "@/features/ai/providers";
 import { completeAiRunWithProposals, createAiRun, failAiRun } from "@/features/ai/ai-run-repository";
 import { getPromptTemplateById } from "@/features/templates/template-repository";
@@ -8,6 +8,7 @@ import { POST } from "./route";
 
 vi.mock("@/features/documents/document-repository", () => ({
   getDocumentById: vi.fn(),
+  getDocumentsByIds: vi.fn(async () => []),
 }));
 
 vi.mock("@/features/templates/template-repository", () => ({
@@ -51,6 +52,8 @@ const documentRecord = {
   title: "Memo",
   plainText: "Old text in a document",
   contentJson: { type: "doc" },
+  metadataJson: {},
+  readiness: "draft",
   status: "draft",
   createdAt: new Date("2026-01-01T00:00:00.000Z"),
   updatedAt: new Date("2026-01-01T00:00:00.000Z"),
@@ -160,6 +163,60 @@ describe("POST /api/ai/rewrite", () => {
           replacementText: "Improved text",
         }),
       ],
+    );
+  });
+
+  it("hydrates referenced documents by id before building the rewrite prompt", async () => {
+    const generateText = vi.fn(async () => "Improved text");
+    vi.mocked(getDocumentById).mockResolvedValueOnce(documentRecord);
+    vi.mocked(getDocumentsByIds).mockResolvedValueOnce([
+      {
+        ...documentRecord,
+        id: "doc_ref",
+        title: "Reference Memo",
+        plainText: "Reference memo body",
+      },
+    ]);
+    vi.mocked(getPromptTemplateById).mockResolvedValueOnce(templateRecord);
+    vi.mocked(createAiProvider).mockReturnValueOnce({
+      name: "stub",
+      model: "stub-editor",
+      generateText,
+      streamText: vi.fn(),
+      generateReview: vi.fn(),
+    });
+
+    const response = await POST(
+      createJsonRequest({
+        ...validBody,
+        references: { documents: [{ documentId: "doc_ref", text: "client text must be ignored" }] },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(getDocumentsByIds).toHaveBeenCalledWith(["doc_ref"]);
+    expect(generateText).toHaveBeenCalledWith({
+      messages: expect.arrayContaining([
+        expect.objectContaining({
+          role: "user",
+          content: expect.stringContaining("Reference memo body"),
+        }),
+      ]),
+    });
+    expect(generateText).toHaveBeenCalledWith({
+      messages: expect.arrayContaining([
+        expect.objectContaining({
+          role: "user",
+          content: expect.not.stringContaining("client text must be ignored"),
+        }),
+      ]),
+    });
+    expect(createAiRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        inputSummaryJson: expect.objectContaining({
+          referencedDocumentIds: ["doc_ref"],
+        }),
+      }),
     );
   });
 

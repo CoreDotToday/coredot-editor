@@ -41,6 +41,7 @@ import {
   type EditorLanguage,
   type EditorMessages,
 } from "@/features/i18n/editor-language";
+import type { AiDocumentReferenceCandidate, ResolvedAiDocumentReference } from "@/features/ai/ai-reference-parser";
 import type { EditorPluginContributions } from "@/plugins/types";
 import type { EditorSelectionCommand } from "@/plugins/types";
 import { useEditorPlugins } from "@/plugins/use-editor-plugins";
@@ -99,12 +100,18 @@ type DocumentEditorProps = {
   inlineSuggestions?: AiSuggestionHighlightInput[];
   language?: EditorLanguage;
   messages?: EditorMessages["editor"];
+  referenceCandidates?: AiDocumentReferenceCandidate[];
   onChange: (draft: { title: string; contentJson: TiptapJson }) => void;
   onFindOpenChange?: (isOpen: boolean) => void;
   onApplySelectionAiResult?: (proposalId: string, applyMode: "replace" | "insert_below") => void;
   onDismissSelectionAiResult?: () => void;
   onRetrySelectionAiResult?: () => void;
-  onSelectionCommand?: (command: string, selectedText: string, context: SelectionAiCommandContext) => void;
+  onSelectionCommand?: (
+    command: string,
+    selectedText: string,
+    context: SelectionAiCommandContext,
+    references?: ResolvedAiDocumentReference[],
+  ) => void;
   outlineFocusRequest?: { requestId: string; topLevelIndex: number } | null;
   runningSelectionCommand?: string;
   runningSelectionCommandLimit?: number;
@@ -163,6 +170,7 @@ export function DocumentEditor({
   isSelectionCommandRunning = false,
   language = DEFAULT_EDITOR_LANGUAGE,
   messages = editorMessages[DEFAULT_EDITOR_LANGUAGE].editor,
+  referenceCandidates = [],
   onChange,
   onFindOpenChange,
   onApplySelectionAiResult,
@@ -323,18 +331,6 @@ export function DocumentEditor({
   }, [editor, outlineFocusRequest]);
 
   useEffect(() => {
-    const handleFindShortcut = (event: KeyboardEvent) => {
-      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "f") return;
-
-      event.preventDefault();
-      onFindOpenChange?.(true);
-    };
-
-    window.addEventListener("keydown", handleFindShortcut);
-    return () => window.removeEventListener("keydown", handleFindShortcut);
-  }, [onFindOpenChange]);
-
-  useEffect(() => {
     const activeSuggestionId = inlineSuggestions.find((suggestion) => suggestion.active)?.id;
     if (!activeSuggestionId || !editorFrameRef.current) return;
 
@@ -383,19 +379,26 @@ export function DocumentEditor({
   );
 
   const handleFreeformCommand = useCallback(
-    (command: string) => {
+    (command: string, references?: ResolvedAiDocumentReference[]) => {
       if (!editor) return;
 
       const target = getEditorAiCommandTarget(editor, preferredCommandScope);
       if (!target) return;
 
       const anchor = readCommandBarResultAnchor(editorFrameRef.current);
-      onSelectionCommandRef.current?.(command, target.selectedText, {
+      const context = {
         anchor,
         occurrenceIndex: target.occurrenceIndex,
         scope: target.scope,
         selectionRange: target.selectionRange,
-      });
+      };
+
+      if (references?.length) {
+        onSelectionCommandRef.current?.(command, target.selectedText, context, references);
+        return;
+      }
+
+      onSelectionCommandRef.current?.(command, target.selectedText, context);
     },
     [editor, preferredCommandScope],
   );
@@ -838,6 +841,7 @@ export function DocumentEditor({
             messages={editorMessages[language].aiCommandBar}
             onScopeChange={setPreferredCommandScope}
             onSubmit={handleFreeformCommand}
+            referenceCandidates={referenceCandidates}
             runningCount={runningSelectionCommands.length}
             runningLimit={runningSelectionCommandLimit}
             scope={commandTarget?.scope ?? "document"}

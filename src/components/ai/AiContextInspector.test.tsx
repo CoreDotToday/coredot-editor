@@ -11,6 +11,7 @@ const messages = {
   document: "문서",
   empty: "표시할 AI 컨텍스트가 없습니다.",
   model: "모델",
+  references: "참조",
   selection: "선택 영역",
   template: "템플릿",
   title: "AI 컨텍스트",
@@ -27,7 +28,10 @@ const snapshot: AiContextSnapshot = {
     title: "계약서",
   },
   mode: "selection_rewrite",
-  schemaVersion: 1,
+  references: {
+    documents: [],
+  },
+  schemaVersion: 2,
   selection: {
     charCount: 5,
     text: "선택문",
@@ -56,6 +60,29 @@ describe("AiContextInspector", () => {
     expect(screen.getByText("Contract Review")).toBeInTheDocument();
     expect(screen.getByText("contractType")).toBeInTheDocument();
     expect(screen.getByText("계약서 · 6 글자")).toBeInTheDocument();
+  });
+
+  it("renders referenced document summaries", () => {
+    render(
+      <AiContextInspector
+        messages={messages}
+        snapshot={{
+          ...snapshot,
+          references: {
+            documents: [
+              {
+                charCount: 16,
+                id: "doc_ref",
+                text: "reference body",
+                title: "Revenue Memo",
+              },
+            ],
+          },
+        }}
+      />,
+    );
+
+    expect(screen.getByText("Revenue Memo · 16 글자")).toBeInTheDocument();
   });
 
   it("copies the snapshot JSON", async () => {

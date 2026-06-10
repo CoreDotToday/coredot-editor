@@ -51,6 +51,7 @@ export const editorMessages = {
       noTarget: "Write or select document text first.",
       placeholder: "What can I change?",
       quickAction: "Run quick action: {command}",
+      referenceSuggestions: "Referenced documents",
       presets: {
         currentBlock: [
           { command: "Improve clarity", label: "Improve" },
@@ -86,10 +87,25 @@ export const editorMessages = {
       document: "Document",
       empty: "No AI context to show.",
       model: "Model",
+      references: "References",
       selection: "Selection",
       template: "Template",
       title: "AI Context",
       variables: "Variables",
+    },
+    metadataPanel: {
+      category: "Category",
+      dueDate: "Due date",
+      owner: "Owner",
+      readiness: "Readiness",
+      readinessLabels: {
+        approved: "Approved",
+        draft: "Draft",
+        needs_review: "Needs review",
+        ready: "Ready",
+      },
+      tags: "Tags",
+      title: "Properties",
     },
     aiWorkspace: {
       appliedAt: "Applied {time}",
@@ -392,6 +408,7 @@ export const editorMessages = {
       noTarget: "먼저 문서 내용을 작성하거나 텍스트를 선택하세요.",
       placeholder: "무엇을 변경할까요?",
       quickAction: "빠른 명령 실행: {command}",
+      referenceSuggestions: "참조 문서",
       presets: {
         currentBlock: [
           { command: "Improve clarity", label: "개선" },
@@ -427,10 +444,25 @@ export const editorMessages = {
       document: "문서",
       empty: "표시할 AI 컨텍스트가 없습니다.",
       model: "모델",
+      references: "참조",
       selection: "선택 영역",
       template: "템플릿",
       title: "AI 컨텍스트",
       variables: "변수",
+    },
+    metadataPanel: {
+      category: "분류",
+      dueDate: "기한",
+      owner: "소유자",
+      readiness: "준비 상태",
+      readinessLabels: {
+        approved: "승인됨",
+        draft: "초안",
+        needs_review: "검토 필요",
+        ready: "준비 완료",
+      },
+      tags: "태그",
+      title: "속성",
     },
     aiWorkspace: {
       appliedAt: "{time} 적용",
