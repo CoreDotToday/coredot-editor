@@ -1,18 +1,21 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { aiCommandPayloadSchema } from "@/features/ai/types";
+import { AI_CONTEXT_LIMITS } from "@/features/ai/context-limits";
 import { buildAiMessages } from "@/features/ai/payload-builder";
 import { completeAiRunWithProposals, createAiRun, failAiRun } from "@/features/ai/ai-run-repository";
-import { getAiSettings } from "@/features/ai/ai-settings-repository";
-import { hydrateAiReferenceDocuments } from "@/features/ai/reference-hydration";
-import { createAiProvider } from "@/features/ai/providers";
-import { getDocumentById } from "@/features/documents/document-repository";
+import {
+  createAiProviderForCommand,
+  prepareAiCommandRequest,
+  type AiCommandRequestFailure,
+} from "@/features/ai/ai-command-service";
 import { validateProposalTargetOccurrence } from "@/features/proposals/proposal-apply";
-import { getPromptTemplateById } from "@/features/templates/template-repository";
-import { validateTemplateVariables } from "@/features/templates/template-validation";
 
 const rewritePayloadSchema = aiCommandPayloadSchema.extend({
-  selectedText: z.string().refine((value) => value.trim().length > 0),
+  selectedText: z
+    .string()
+    .max(AI_CONTEXT_LIMITS.selectedTextMaxCharacters)
+    .refine((value) => value.trim().length > 0),
 });
 
 export async function POST(request: Request) {
@@ -23,28 +26,18 @@ export async function POST(request: Request) {
   }
 
   const body = result.data;
-  const document = await getDocumentById(body.documentId);
-  if (!document) {
-    return NextResponse.json({ error: "Document not found" }, { status: 404 });
-  }
-
-  const template = await getPromptTemplateById(body.templateId);
-  if (!template?.isActive) {
-    return NextResponse.json({ error: "Template not found" }, { status: 404 });
-  }
-
-  const variableValidation = validateTemplateVariables(template.variableSchemaJson, body.variables);
-  if (!variableValidation.ok) {
-    return NextResponse.json(
-      { error: "Invalid template variables", details: variableValidation.errors },
-      { status: 400 },
-    );
-  }
-
   const hasSubmittedDocumentText =
     typeof payload === "object" && payload !== null && Object.hasOwn(payload, "documentText");
-  const reviewedText = hasSubmittedDocumentText ? body.documentText : document.plainText;
-  const referencedDocuments = await hydrateAiReferenceDocuments(body.references);
+  const prepared = await prepareAiCommandRequest({
+    deferProviderCreation: true,
+    payload: body,
+    useSubmittedDocumentText: hasSubmittedDocumentText,
+  });
+  if (!prepared.ok) {
+    return aiCommandFailureResponse(prepared);
+  }
+
+  const { document, referencedDocuments, reviewedText, template } = prepared;
   const targetValidation = validateProposalTargetOccurrence(reviewedText, body.selectedText, body.occurrenceIndex);
   if (!targetValidation.ok && body.occurrenceIndex !== undefined) {
     return NextResponse.json({ error: "Selected text occurrence was not found in the document" }, { status: 400 });
@@ -54,13 +47,11 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Selected text must match exactly once in the document" }, { status: 400 });
   }
 
-  let provider;
-  try {
-    const aiSettings = await getAiSettings();
-    provider = createAiProvider(aiSettings);
-  } catch {
-    return NextResponse.json({ error: "AI generation failed" }, { status: 500 });
+  const providerResult = await createAiProviderForCommand();
+  if (!providerResult.ok) {
+    return aiCommandFailureResponse(providerResult);
   }
+  const { provider } = providerResult;
 
   const run = await createAiRun({
     documentId: document.id,
@@ -93,7 +84,7 @@ export async function POST(request: Request) {
     const finalizedRun = await completeAiRunWithProposals(run.id, replacementText, [
       {
         command: body.command,
-        defaultApplyMode: getDefaultApplyModeForCommand(body.command),
+        defaultApplyMode: body.defaultApplyMode ?? getDefaultApplyModeForCommand(body.command),
         documentId: document.id,
         occurrenceIndex: body.occurrenceIndex,
         source: "selection",
@@ -110,6 +101,16 @@ export async function POST(request: Request) {
     await failAiRun(run.id, error instanceof Error ? error.message : "Unknown AI generation failure");
     return NextResponse.json({ error: "AI generation failed" }, { status: 500 });
   }
+}
+
+function aiCommandFailureResponse(failure: AiCommandRequestFailure) {
+  return NextResponse.json(
+    {
+      ...(failure.details ? { details: failure.details } : {}),
+      error: failure.error,
+    },
+    { status: failure.status },
+  );
 }
 
 function getDefaultApplyModeForCommand(command: string) {

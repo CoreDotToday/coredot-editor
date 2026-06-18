@@ -42,6 +42,9 @@ Before deploying a fork with real users, make the product-specific decisions tha
 - Contract review playbook template for risk-focused clause review and redline-ready replacement suggestions
 - Editable prompt template manager with JSON variable schema validation
 - AI provider adapter with local `stub`, Core.Today `coredot`, Core.Today `anthropic`, Core.Today `gemini`, and direct `openai` modes
+- Side-effect-free provider capability registry for streaming, reasoning-effort, structured-review, and Core.Today proxy feature gating
+- Shared AI command preflight service for review/rewrite routes, so new AI routes can reuse document, template, provider, and reference preparation
+- Explicit AI payload limits with provider-message truncation for large document and reference bodies
 - Review API that creates proposal records from structured AI findings
 - Rewrite API for exact-match selected text proposals, translations, and continue-writing insertions
 - SuperDoc-style bottom AI command bar for natural-language edits against the current selection, current block, or whole document
@@ -49,7 +52,7 @@ Before deploying a fork with real users, make the product-specific decisions tha
 - Live document outline in the left sidebar, generated from Tiptap heading nodes with click-to-jump navigation
 - In-document find/replace opened with `Cmd/Ctrl+F` or the command palette, with case-sensitive and guarded regex search
 - Right-side AI workspace with review, document-scoped AI conversation sessions, rename/hide controls, AI context inspector, and change-history tabs
-- Typed command registry and command palette for workspace actions, opened with `Cmd/Ctrl+K` or the editor header's more menu
+- Typed command registry and command palette for workspace actions, opened with `Cmd/Ctrl+K` or the editor header's more menu, with manifest-backed IDs to keep shortcuts and palette actions aligned
 - Read-only Source mode for inspecting, copying, and downloading the current unsaved draft as plain text and Tiptap JSON
 - Inline pending proposal highlights inspired by Tiptap Content AI suggestions
 - Redline-style proposal previews with inserted/deleted text labels for contract review workflows
@@ -109,7 +112,7 @@ Open [http://localhost:3000](http://localhost:3000).
 
 With the example environment, the first saved LLM setting uses `stub`, so the AI flows work without an API key. If `AI_PROVIDER=coredot` or a Core.Today key is already configured, the first settings row is initialized for Core.Today instead. After that, the in-app `LLM 설정` dialog controls provider/model settings from the database.
 
-In the editor, use the bottom `무엇을 변경할까요?` command bar for freeform AI requests. The command targets selected text first, then the current block, then the full document. Type `@` and choose another document to include it as referenced context; the server hydrates the referenced document body by ID before calling the model. AI output is saved as a proposal instead of immediately overwriting text; review it in the right workspace's `검토`, `대화`, and `변경내역` tabs.
+In the editor, use the bottom `무엇을 변경할까요?` command bar for freeform AI requests. The command targets selected text first, then the current block, then the full document. Type `@` and choose another document to include it as referenced context; the server hydrates the referenced document body by ID, ignores browser-supplied reference text, and filters out the current document before calling the model. AI output is saved as a proposal instead of immediately overwriting text; review it in the right workspace's `검토`, `대화`, and `변경내역` tabs.
 
 Open the command palette with `Cmd/Ctrl+K` or the header's more menu to jump between AI workspace actions, document find, review, save/export, and Source mode. Commands are built from a typed registry with groups, enabled states, shortcuts, and fuzzy search. Use `Cmd/Ctrl+F` in the editor to open find/replace without falling back to browser find. The `Source` tab is read-only and reflects the current in-memory draft, including unsaved edits, as extracted plain text plus Tiptap JSON; use its copy and download actions when debugging provider prompts or document conversion.
 
@@ -172,7 +175,9 @@ OPENAI_API_KEY=sk-...
 OPENAI_MODEL=gpt-4.1-mini
 ```
 
-The provider integrations are isolated in `src/features/ai/providers.ts`. Add other providers there without changing the editor UI or route contracts.
+The provider integrations are isolated in `src/features/ai/providers.ts`. Add other providers there without changing the editor UI or route contracts. Provider capability metadata is available through `getAiProviderCapabilities()` without requiring API keys, so downstream UI can gate features before constructing a runtime provider.
+
+Review and rewrite routes share `src/features/ai/ai-command-service.ts` for document lookup, active template validation, variable validation, server-side reference hydration, AI settings loading, and provider creation. Prompt payload size policy lives in `src/features/ai/context-limits.ts` and is applied by `payload-builder.ts` before provider calls.
 
 ## Common Commands
 
@@ -257,10 +262,12 @@ Start with [docs/ADOPTION.md](docs/ADOPTION.md). The short version:
 ```bash
 AI_PROVIDER=stub
 DATABASE_URL=file:./data/e2e/coredot-e2e.db
-pnpm exec next dev -p 3100
+pnpm exec next dev -p ${E2E_PORT:-3100}
 ```
 
 This keeps E2E tests deterministic and prevents test documents from polluting the development database.
+
+If another local process already uses port `3100`, run with `E2E_PORT=3200 pnpm e2e`.
 
 Stop any manually running `pnpm dev` process before `pnpm e2e`; Next.js allows only one dev server for the same project directory.
 

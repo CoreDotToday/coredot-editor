@@ -263,6 +263,8 @@ describe("DocumentEditor", () => {
       "Mitigate legal risk",
       "Revenue risk needs review.",
       expect.objectContaining({ scope: "selection" }),
+      undefined,
+      expect.objectContaining({ defaultApplyMode: "replace", id: "plugin.legal_risk" }),
     );
   });
 

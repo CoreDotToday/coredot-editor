@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { buildAiMessages } from "./payload-builder";
-import { createAiProvider } from "./providers";
+import { createAiProvider, getAiProviderCapabilities } from "./providers";
 
 const { createOpenAIMock } = vi.hoisted(() => ({
   createOpenAIMock: vi.fn((options: { apiKey?: string; baseURL?: string }) => {
@@ -62,11 +62,81 @@ describe("AI providers", () => {
       });
       expect(provider.name).toBe("stub");
       expect(provider.model).toBe("stub-editor");
+      expect(provider.capabilities).toEqual({
+        coreTodayProxy: false,
+        reasoningEffort: false,
+        streaming: "buffered",
+        structuredReview: true,
+      });
     } finally {
       if (originalProvider === undefined) {
         delete process.env.AI_PROVIDER;
       } else {
         process.env.AI_PROVIDER = originalProvider;
+      }
+    }
+  });
+
+  it("exposes provider capability metadata for runtime feature gating", () => {
+    const originalApiKey = process.env.COREDOT_API_KEY;
+    process.env.COREDOT_API_KEY = "test_core_today_key";
+
+    try {
+      expect(createAiProvider({ aiProvider: "stub" }).capabilities).toMatchObject({
+        coreTodayProxy: false,
+        reasoningEffort: false,
+        streaming: "buffered",
+      });
+      expect(createAiProvider({ aiProvider: "openai" }).capabilities).toMatchObject({
+        coreTodayProxy: false,
+        reasoningEffort: true,
+        streaming: "native",
+      });
+      expect(createAiProvider({ aiProvider: "coredot" }).capabilities).toMatchObject({
+        coreTodayProxy: true,
+        reasoningEffort: true,
+        streaming: "native",
+      });
+      expect(createAiProvider({ aiProvider: "anthropic" }).capabilities).toMatchObject({
+        coreTodayProxy: true,
+        reasoningEffort: false,
+        streaming: "buffered",
+      });
+      expect(createAiProvider({ aiProvider: "gemini" }).capabilities).toMatchObject({
+        coreTodayProxy: true,
+        reasoningEffort: false,
+        streaming: "buffered",
+      });
+    } finally {
+      if (originalApiKey === undefined) {
+        delete process.env.COREDOT_API_KEY;
+      } else {
+        process.env.COREDOT_API_KEY = originalApiKey;
+      }
+    }
+  });
+
+  it("exposes side-effect-free capability lookup without provider credentials", () => {
+    const originalApiKey = process.env.COREDOT_API_KEY;
+    delete process.env.COREDOT_API_KEY;
+
+    try {
+      expect(getAiProviderCapabilities("coredot")).toEqual({
+        coreTodayProxy: true,
+        reasoningEffort: true,
+        streaming: "native",
+        structuredReview: true,
+      });
+      expect(getAiProviderCapabilities("anthropic")).toMatchObject({
+        coreTodayProxy: true,
+        streaming: "buffered",
+      });
+      expect(Object.isFrozen(getAiProviderCapabilities("coredot"))).toBe(true);
+    } finally {
+      if (originalApiKey === undefined) {
+        delete process.env.COREDOT_API_KEY;
+      } else {
+        process.env.COREDOT_API_KEY = originalApiKey;
       }
     }
   });

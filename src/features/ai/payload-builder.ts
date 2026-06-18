@@ -1,4 +1,5 @@
 import type { AiCommandPayload, AiMessage } from "./types";
+import { AI_CONTEXT_LIMITS, truncateAiContextText } from "./context-limits";
 
 type BuildMessagesInput = Omit<AiCommandPayload, "documentId" | "references" | "templateId"> & {
   documentId?: string;
@@ -27,13 +28,18 @@ export function buildAiMessages(input: BuildMessagesInput): AiMessage[] {
           input.referencedDocuments.map((document) => ({
             id: document.id,
             title: document.title,
-            text: document.text,
+            text: truncateAiContextText(document.text, AI_CONTEXT_LIMITS.providerReferenceTextMaxCharacters),
           })),
           null,
           2,
         )}`
       : "",
-    input.documentText ? `Document text:\n${input.documentText}` : "",
+    input.documentText
+      ? `Document text:\n${truncateAiContextText(
+          input.documentText,
+          AI_CONTEXT_LIMITS.providerDocumentTextMaxCharacters,
+        )}`
+      : "",
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -45,5 +51,6 @@ export function buildAiMessages(input: BuildMessagesInput): AiMessage[] {
 }
 
 function formatVariableValue(value: unknown): string {
-  return typeof value === "string" ? value : JSON.stringify(value);
+  const formatted = typeof value === "string" ? value : JSON.stringify(value);
+  return truncateAiContextText(formatted ?? "", AI_CONTEXT_LIMITS.variableValueMaxCharacters);
 }

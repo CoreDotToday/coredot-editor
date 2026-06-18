@@ -4,7 +4,8 @@ const e2eEnv = {
   AI_PROVIDER: "stub",
   DATABASE_URL: "file:./data/e2e/coredot-e2e.db",
 };
-const e2ePort = 3100;
+const requestedPort = Number.parseInt(process.env.E2E_PORT ?? "", 10);
+const e2ePort = Number.isFinite(requestedPort) && requestedPort > 0 ? requestedPort : 3100;
 const requestedWorkers = Number.parseInt(process.env.PLAYWRIGHT_WORKERS ?? "", 10);
 const e2eWorkers =
   Number.isFinite(requestedWorkers) && requestedWorkers > 0

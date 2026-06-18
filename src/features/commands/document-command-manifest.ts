@@ -1,20 +1,22 @@
-import type { DocumentCommandGroup } from "@/components/document/commands/document-command-types";
-
 type DocumentShortcutDefinition = {
   display: string;
   key: string;
   modifier: "mod";
 };
 
+export type DocumentCommandGroup = "ai" | "document" | "export" | "view";
+
 export type DocumentCommandManifestItem = {
   group: DocumentCommandGroup;
   id: string;
+  includeInRegistry?: boolean;
   shortcut?: DocumentShortcutDefinition;
 };
 
 export const documentCommandManifest = [
   {
     group: "view",
+    includeInRegistry: false,
     id: "open-command-palette",
     shortcut: {
       display: "⌘K",
@@ -66,6 +68,12 @@ const commandById = new Map<DocumentCommandId, (typeof documentCommandManifest)[
 export function getDocumentCommandShortcutLabel(commandId: DocumentCommandId): string | undefined {
   const command = commandById.get(commandId);
   return hasDocumentShortcut(command) ? command.shortcut.display : undefined;
+}
+
+export function getDocumentCommandRegistryIds(): DocumentCommandId[] {
+  return documentCommandManifest
+    .filter((command) => !("includeInRegistry" in command) || command.includeInRegistry !== false)
+    .map((command) => command.id);
 }
 
 export function resolveDocumentShortcut(

@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { updateProposalStatus } from "@/features/proposals/proposal-repository";
+import { getProposalById, updateProposalStatus } from "@/features/proposals/proposal-repository";
 import { PATCH } from "./route";
 
 vi.mock("@/features/proposals/proposal-repository", () => ({
+  getProposalById: vi.fn(),
   updateProposalStatus: vi.fn(),
 }));
 
@@ -48,7 +49,9 @@ describe("PATCH /api/proposals/[id]", () => {
 
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ proposal: { id: "proposal_1", status: "accepted" } });
-    expect(updateProposalStatus).toHaveBeenCalledWith("proposal_1", "accepted", undefined);
+    expect(updateProposalStatus).toHaveBeenCalledWith("proposal_1", "accepted", undefined, {
+      expectedStatus: undefined,
+    });
   });
 
   it("persists the applied mode when accepting a proposal", async () => {
@@ -63,7 +66,49 @@ describe("PATCH /api/proposals/[id]", () => {
     expect(await response.json()).toMatchObject({
       proposal: { id: "proposal_1", status: "accepted", appliedMode: "insert_below" },
     });
-    expect(updateProposalStatus).toHaveBeenCalledWith("proposal_1", "accepted", "insert_below");
+    expect(updateProposalStatus).toHaveBeenCalledWith("proposal_1", "accepted", "insert_below", {
+      expectedStatus: undefined,
+    });
+  });
+
+  it("returns 409 when the proposal status changed from the caller expectation", async () => {
+    vi.mocked(updateProposalStatus).mockResolvedValueOnce(
+      null as unknown as Awaited<ReturnType<typeof updateProposalStatus>>,
+    );
+    vi.mocked(getProposalById).mockResolvedValueOnce(createProposalRecord({ status: "accepted" }));
+
+    const response = await PATCH(
+      createJsonRequest({ status: "rejected", expectedStatus: "pending" }),
+      createContext("proposal_1"),
+    );
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      error: "Proposal status changed",
+      proposal: { id: "proposal_1", status: "accepted" },
+    });
+    expect(updateProposalStatus).toHaveBeenCalledWith("proposal_1", "rejected", undefined, {
+      expectedStatus: "pending",
+    });
+    expect(getProposalById).toHaveBeenCalledWith("proposal_1");
+  });
+
+  it("returns 409 instead of 404 when a conditional update misses an existing proposal", async () => {
+    vi.mocked(updateProposalStatus).mockResolvedValueOnce(
+      null as unknown as Awaited<ReturnType<typeof updateProposalStatus>>,
+    );
+    vi.mocked(getProposalById).mockResolvedValueOnce(createProposalRecord({ status: "pending" }));
+
+    const response = await PATCH(
+      createJsonRequest({ status: "accepted", expectedStatus: "pending" }),
+      createContext("proposal_1"),
+    );
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      error: "Proposal update conflict",
+      proposal: { id: "proposal_1", status: "pending" },
+    });
   });
 
   it("rejects invalid statuses", async () => {

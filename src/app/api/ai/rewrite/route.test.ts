@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getDocumentById, getDocumentsByIds } from "@/features/documents/document-repository";
+import { getAiSettings } from "@/features/ai/ai-settings-repository";
 import { createAiProvider } from "@/features/ai/providers";
 import { completeAiRunWithProposals, createAiRun, failAiRun } from "@/features/ai/ai-run-repository";
 import { getPromptTemplateById } from "@/features/templates/template-repository";
@@ -43,6 +44,12 @@ vi.mock("@/features/ai/providers", () => ({
   createAiProvider: vi.fn(() => ({
     name: "stub",
     model: "stub-editor",
+    capabilities: {
+      coreTodayProxy: false,
+      reasoningEffort: false,
+      streaming: "buffered",
+      structuredReview: true,
+    },
     generateText: vi.fn(async () => "Improved text"),
   })),
 }));
@@ -181,6 +188,12 @@ describe("POST /api/ai/rewrite", () => {
     vi.mocked(createAiProvider).mockReturnValueOnce({
       name: "stub",
       model: "stub-editor",
+    capabilities: {
+      coreTodayProxy: false,
+      reasoningEffort: false,
+      streaming: "buffered",
+      structuredReview: true,
+    },
       generateText,
       streamText: vi.fn(),
       generateReview: vi.fn(),
@@ -220,6 +233,71 @@ describe("POST /api/ai/rewrite", () => {
     );
   });
 
+  it("excludes the current document from referenced rewrite context", async () => {
+    const generateText = vi.fn(async () => "Improved text");
+    vi.mocked(getDocumentById).mockResolvedValueOnce(documentRecord);
+    vi.mocked(getDocumentsByIds).mockResolvedValueOnce([
+      {
+        ...documentRecord,
+        id: "doc_ref",
+        title: "Reference Memo",
+        plainText: "Reference memo body",
+      },
+    ]);
+    vi.mocked(getPromptTemplateById).mockResolvedValueOnce(templateRecord);
+    vi.mocked(createAiProvider).mockReturnValueOnce({
+      name: "stub",
+      model: "stub-editor",
+      capabilities: {
+        coreTodayProxy: false,
+        reasoningEffort: false,
+        streaming: "buffered",
+        structuredReview: true,
+      },
+      generateText,
+      streamText: vi.fn(),
+      generateReview: vi.fn(),
+    });
+
+    const response = await POST(
+      createJsonRequest({
+        ...validBody,
+        references: {
+          documents: [
+            { documentId: "doc_1", titleSnapshot: "Self reference" },
+            { documentId: "doc_ref", titleSnapshot: "Reference snapshot" },
+          ],
+        },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(getDocumentsByIds).toHaveBeenCalledWith(["doc_ref"]);
+    expect(generateText).toHaveBeenCalledWith({
+      messages: expect.arrayContaining([
+        expect.objectContaining({
+          role: "user",
+          content: expect.stringContaining("Reference memo body"),
+        }),
+      ]),
+    });
+    expect(generateText).toHaveBeenCalledWith({
+      messages: expect.arrayContaining([
+        expect.objectContaining({
+          role: "user",
+          content: expect.not.stringContaining("Self reference"),
+        }),
+      ]),
+    });
+    expect(createAiRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        inputSummaryJson: expect.objectContaining({
+          referencedDocumentIds: ["doc_ref"],
+        }),
+      }),
+    );
+  });
+
   it("uses a selection-rewrite system prompt even when the selected template is a review template", async () => {
     const generateText = vi.fn(async () => "Improved text");
     vi.mocked(getDocumentById).mockResolvedValueOnce(documentRecord);
@@ -232,6 +310,12 @@ describe("POST /api/ai/rewrite", () => {
     vi.mocked(createAiProvider).mockReturnValueOnce({
       name: "stub",
       model: "stub-editor",
+    capabilities: {
+      coreTodayProxy: false,
+      reasoningEffort: false,
+      streaming: "buffered",
+      structuredReview: true,
+    },
       generateText,
       streamText: vi.fn(),
       generateReview: vi.fn(),
@@ -269,6 +353,12 @@ describe("POST /api/ai/rewrite", () => {
     vi.mocked(createAiProvider).mockReturnValueOnce({
       name: "stub",
       model: "stub-editor",
+    capabilities: {
+      coreTodayProxy: false,
+      reasoningEffort: false,
+      streaming: "buffered",
+      structuredReview: true,
+    },
       generateText: vi.fn(async () =>
         JSON.stringify({
           findings: [
@@ -308,6 +398,12 @@ describe("POST /api/ai/rewrite", () => {
     vi.mocked(createAiProvider).mockReturnValueOnce({
       name: "stub",
       model: "stub-editor",
+    capabilities: {
+      coreTodayProxy: false,
+      reasoningEffort: false,
+      streaming: "buffered",
+      structuredReview: true,
+    },
       generateText: vi.fn(async () =>
         JSON.stringify({
           explanation: "Clarifies ownership and removes vague wording.",
@@ -340,6 +436,12 @@ describe("POST /api/ai/rewrite", () => {
     vi.mocked(createAiProvider).mockReturnValueOnce({
       name: "stub",
       model: "stub-editor",
+    capabilities: {
+      coreTodayProxy: false,
+      reasoningEffort: false,
+      streaming: "buffered",
+      structuredReview: true,
+    },
       generateText: vi.fn(async () =>
         [
           "```json",
@@ -396,6 +498,12 @@ describe("POST /api/ai/rewrite", () => {
     vi.mocked(createAiProvider).mockReturnValueOnce({
       name: "stub",
       model: "stub-editor",
+    capabilities: {
+      coreTodayProxy: false,
+      reasoningEffort: false,
+      streaming: "buffered",
+      structuredReview: true,
+    },
       generateText,
       streamText: vi.fn(),
       generateReview: vi.fn(),
@@ -611,6 +719,22 @@ describe("POST /api/ai/rewrite", () => {
     expect(failAiRun).not.toHaveBeenCalled();
   });
 
+  it("validates selected text before creating a provider", async () => {
+    vi.mocked(getDocumentById).mockResolvedValueOnce({
+      ...documentRecord,
+      plainText: "Different document text",
+    });
+    vi.mocked(getPromptTemplateById).mockResolvedValueOnce(templateRecord);
+
+    const response = await POST(createJsonRequest(validBody));
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "Selected text must match exactly once in the document" });
+    expect(getAiSettings).not.toHaveBeenCalled();
+    expect(createAiProvider).not.toHaveBeenCalled();
+    expect(createAiRun).not.toHaveBeenCalled();
+  });
+
   it("returns 500 and fails the run when finalizing proposals fails", async () => {
     vi.mocked(getDocumentById).mockResolvedValueOnce(documentRecord);
     vi.mocked(getPromptTemplateById).mockResolvedValueOnce(templateRecord);
@@ -639,6 +763,12 @@ describe("POST /api/ai/rewrite", () => {
     vi.mocked(createAiProvider).mockReturnValueOnce({
       name: "stub",
       model: "stub-editor",
+    capabilities: {
+      coreTodayProxy: false,
+      reasoningEffort: false,
+      streaming: "buffered",
+      structuredReview: true,
+    },
       generateText: vi.fn(async () => {
         throw new Error("provider unavailable");
       }),

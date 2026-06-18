@@ -1045,7 +1045,7 @@ describe("DocumentShell", () => {
       "/api/proposals/proposal_rewrite",
       expect.objectContaining({
         method: "PATCH",
-        body: JSON.stringify({ status: "accepted", appliedMode: "insert_below" }),
+        body: JSON.stringify({ status: "accepted", expectedStatus: "pending", appliedMode: "insert_below" }),
       }),
     );
     expect(screen.getByTestId("mock-document-body")).toHaveTextContent("selected text");
@@ -1501,6 +1501,46 @@ describe("DocumentShell", () => {
     );
   });
 
+  it("ignores variables from a previously selected template when validating and reviewing", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          run: createAiRun("run_1"),
+          proposals: [],
+          review: { findings: [], summary: "ok" },
+        }),
+      ),
+    );
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "body")}
+        templates={[createContractTemplate(), createStrategyTemplate()]}
+      />,
+    );
+
+    await user.click(screen.getByRole("radio", { name: "Executive Rewrite" }));
+    await user.clear(screen.getByRole("textbox", { name: "대상 독자" }));
+    await user.type(screen.getByRole("textbox", { name: "대상 독자" }), "Executive leadership");
+    await user.clear(screen.getByRole("textbox", { name: "문서 목표" }));
+    await user.type(screen.getByRole("textbox", { name: "문서 목표" }), "Improve decision readiness.");
+    await user.selectOptions(screen.getByRole("combobox", { name: "톤" }), "analytical");
+    await user.click(screen.getByRole("button", { name: "문서 검토" }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/ai/review", expect.anything()));
+    const requestInit = fetchMock.mock.calls.find(([url]) => url === "/api/ai/review")?.[1] as RequestInit;
+    const body = JSON.parse(String(requestInit.body)) as { variables: Record<string, string> };
+
+    expect(body.variables).toEqual({
+      audience: "Executive leadership",
+      objective: "Improve decision readiness.",
+      tone: "analytical",
+    });
+    expect(screen.queryByText("필수 템플릿 필드를 입력하세요.")).not.toBeInTheDocument();
+  });
+
   it("persists proposal status changes and rolls back failed updates", async () => {
     const user = userEvent.setup();
     const fetchMock = vi
@@ -1523,7 +1563,7 @@ describe("DocumentShell", () => {
       "/api/proposals/proposal_1",
       expect.objectContaining({
         method: "PATCH",
-        body: JSON.stringify({ status: "accepted", appliedMode: "replace" }),
+        body: JSON.stringify({ status: "accepted", expectedStatus: "pending", appliedMode: "replace" }),
       }),
     );
     expect(screen.getByText("수락됨")).toBeInTheDocument();
@@ -1531,6 +1571,104 @@ describe("DocumentShell", () => {
     await user.click(screen.getByRole("button", { name: "owner is unclear 제안 거절" }));
 
     expect(screen.getByText("대기 중")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("제안 상태를 업데이트하지 못했습니다.");
+  });
+
+  it("merges the server proposal when a proposal status update conflicts", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          error: "Proposal status changed",
+          proposal: { ...createProposal("proposal_1", "accepted"), appliedMode: "replace" },
+        }),
+        { status: 409 },
+      ),
+    );
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "growth was good")}
+        proposals={[createProposal("proposal_1")]}
+        templates={[createTemplate("tpl_1", "Board review")]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "growth was good 제안 거절" }));
+
+    expect(screen.getByText("수락됨")).toBeInTheDocument();
+    expect(screen.queryByText("대기 중")).not.toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("제안 상태를 업데이트하지 못했습니다.");
+  });
+
+  it("does not apply proposal text when an accept request conflicts after a newer edit", async () => {
+    const user = userEvent.setup();
+    const failedPatch = createDeferredResponse();
+    vi.spyOn(globalThis, "fetch").mockReturnValue(failedPatch.promise);
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "growth was good")}
+        proposals={[createProposal("proposal_1")]}
+        templates={[createTemplate("tpl_1", "Board review")]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "growth was good 제안으로 교체" }));
+    await user.clear(screen.getByRole("textbox", { name: "문서 제목" }));
+    await user.type(screen.getByRole("textbox", { name: "문서 제목" }), "Edited while pending");
+
+    await act(async () => {
+      failedPatch.resolve(
+        new Response(
+          JSON.stringify({
+            error: "Proposal status changed",
+            proposal: { ...createProposal("proposal_1", "rejected"), appliedMode: null },
+          }),
+          { status: 409 },
+        ),
+      );
+      await failedPatch.promise;
+    });
+
+    expect(screen.getByRole("textbox", { name: "문서 제목" })).toHaveValue("Edited while pending");
+    expect(screen.getByTestId("mock-document-body")).toHaveTextContent("growth was good");
+    expect(screen.getByText("거절됨")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("제안 상태를 업데이트하지 못했습니다.");
+  });
+
+  it("keeps accepted status when local accept application fails and compensation fails", async () => {
+    const user = userEvent.setup();
+    const acceptedPatch = createDeferredResponse();
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockReturnValueOnce(acceptedPatch.promise)
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "Failed" }), { status: 500 }));
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "growth was good")}
+        proposals={[createProposal("proposal_1")]}
+        templates={[createTemplate("tpl_1", "Board review")]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "growth was good 제안으로 교체" }));
+    await user.click(screen.getByRole("button", { name: "Mock body edit" }));
+
+    await act(async () => {
+      acceptedPatch.resolve(
+        new Response(JSON.stringify({ proposal: { ...createProposal("proposal_1"), status: "accepted" } })),
+      );
+      await acceptedPatch.promise;
+    });
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(screen.getByTestId("mock-document-body")).toHaveTextContent("fresh edited body");
+    expect(screen.getByText("수락됨")).toBeInTheDocument();
     expect(screen.getByRole("alert")).toHaveTextContent("제안 상태를 업데이트하지 못했습니다.");
   });
 
@@ -1555,7 +1693,7 @@ describe("DocumentShell", () => {
       "/api/proposals/proposal_1",
       expect.objectContaining({
         method: "PATCH",
-        body: JSON.stringify({ status: "accepted", appliedMode: "replace" }),
+        body: JSON.stringify({ status: "accepted", expectedStatus: "pending", appliedMode: "replace" }),
       }),
     );
     expect(screen.getByTestId("mock-document-body")).toHaveTextContent("revenue grew 8%");
@@ -1616,7 +1754,7 @@ describe("DocumentShell", () => {
       "/api/proposals/proposal_list",
       expect.objectContaining({
         method: "PATCH",
-        body: JSON.stringify({ status: "accepted", appliedMode: "replace" }),
+        body: JSON.stringify({ status: "accepted", expectedStatus: "pending", appliedMode: "replace" }),
       }),
     );
     expect(screen.getByTestId("mock-document-body")).toHaveTextContent("Combined replacement.");
@@ -1688,7 +1826,7 @@ describe("DocumentShell", () => {
       "/api/proposals/proposal_list",
       expect.objectContaining({
         method: "PATCH",
-        body: JSON.stringify({ status: "accepted", appliedMode: "insert_below" }),
+        body: JSON.stringify({ status: "accepted", expectedStatus: "pending", appliedMode: "insert_below" }),
       }),
     );
     expect(screen.getByTestId("mock-document-body")).toHaveTextContent("First item.");
@@ -1761,7 +1899,7 @@ describe("DocumentShell", () => {
       "/api/proposals/proposal_1",
       expect.objectContaining({
         method: "PATCH",
-        body: JSON.stringify({ status: "accepted", appliedMode: "insert_below" }),
+        body: JSON.stringify({ status: "accepted", expectedStatus: "pending", appliedMode: "insert_below" }),
       }),
     );
     expect(screen.getByTestId("mock-document-body")).toHaveTextContent("growth was good");
@@ -1799,7 +1937,7 @@ describe("DocumentShell", () => {
       "/api/proposals/proposal_1",
       expect.objectContaining({
         method: "PATCH",
-        body: JSON.stringify({ status: "pending" }),
+        body: JSON.stringify({ status: "pending", expectedStatus: "accepted" }),
       }),
     );
     expect(screen.getByTestId("mock-document-body")).toHaveTextContent("growth was good");
@@ -1835,6 +1973,125 @@ describe("DocumentShell", () => {
     expect(screen.getByTestId("mock-document-body")).toHaveTextContent("growth was good");
   });
 
+  it("does not roll back newer title edits when an undo status update fails", async () => {
+    const user = userEvent.setup();
+    const failedUndo = createDeferredResponse();
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ proposal: { ...createProposal("proposal_1"), status: "accepted" } })),
+      )
+      .mockReturnValueOnce(failedUndo.promise);
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "growth was good")}
+        proposals={[createProposal("proposal_1")]}
+        templates={[createTemplate("tpl_1", "Board review")]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "growth was good 제안으로 교체" }));
+    await user.click(screen.getByRole("tab", { name: "변경내역" }));
+    await user.click(screen.getByRole("button", { name: "growth was good 변경 되돌리기" }));
+    await user.clear(screen.getByRole("textbox", { name: "문서 제목" }));
+    await user.type(screen.getByRole("textbox", { name: "문서 제목" }), "Edited while undo pending");
+
+    await act(async () => {
+      failedUndo.resolve(new Response(JSON.stringify({ error: "Failed" }), { status: 500 }));
+      await failedUndo.promise;
+    });
+
+    expect(screen.getByRole("textbox", { name: "문서 제목" })).toHaveValue("Edited while undo pending");
+    expect(screen.getByTestId("mock-document-body")).toHaveTextContent("revenue grew 8%");
+    expect(screen.getByRole("alert")).toHaveTextContent("제안 상태를 업데이트하지 못했습니다.");
+  });
+
+  it("keeps undo proposal status aligned when content changes and compensation fails", async () => {
+    const user = userEvent.setup();
+    const pendingUndo = createDeferredResponse();
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ proposal: { ...createProposal("proposal_1"), status: "accepted" } })),
+      )
+      .mockReturnValueOnce(pendingUndo.promise)
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "Failed" }), { status: 500 }));
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "growth was good")}
+        proposals={[createProposal("proposal_1")]}
+        templates={[createTemplate("tpl_1", "Board review")]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "growth was good 제안으로 교체" }));
+    await user.click(screen.getByRole("tab", { name: "변경내역" }));
+    await user.click(screen.getByRole("button", { name: "growth was good 변경 되돌리기" }));
+    await user.click(screen.getByRole("button", { name: "Mock body edit" }));
+
+    await act(async () => {
+      pendingUndo.resolve(
+        new Response(JSON.stringify({ proposal: { ...createProposal("proposal_1"), status: "pending" } })),
+      );
+      await pendingUndo.promise;
+    });
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      "/api/proposals/proposal_1",
+      expect.objectContaining({
+        method: "PATCH",
+        body: JSON.stringify({ status: "accepted", expectedStatus: "pending", appliedMode: "replace" }),
+      }),
+    );
+    expect(screen.getByTestId("mock-document-body")).toHaveTextContent("fresh edited body");
+    expect(screen.getByRole("alert")).toHaveTextContent("이후 로컬 편집이 있어 이 변경은 자동으로 되돌릴 수 없습니다.");
+    await user.click(screen.getByRole("tab", { name: "검토" }));
+    expect(screen.getByText("대기 중")).toBeInTheDocument();
+  });
+
+  it("keeps undo proposal status reverted when compensation succeeds without a proposal body", async () => {
+    const user = userEvent.setup();
+    const pendingUndo = createDeferredResponse();
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ proposal: { ...createProposal("proposal_1"), status: "accepted" } })),
+      )
+      .mockReturnValueOnce(pendingUndo.promise)
+      .mockResolvedValueOnce(new Response(JSON.stringify({})));
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "growth was good")}
+        proposals={[createProposal("proposal_1")]}
+        templates={[createTemplate("tpl_1", "Board review")]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "growth was good 제안으로 교체" }));
+    await user.click(screen.getByRole("tab", { name: "변경내역" }));
+    await user.click(screen.getByRole("button", { name: "growth was good 변경 되돌리기" }));
+    await user.click(screen.getByRole("button", { name: "Mock body edit" }));
+
+    await act(async () => {
+      pendingUndo.resolve(
+        new Response(JSON.stringify({ proposal: { ...createProposal("proposal_1"), status: "pending" } })),
+      );
+      await pendingUndo.promise;
+    });
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+    expect(screen.getByTestId("mock-document-body")).toHaveTextContent("fresh edited body");
+    expect(screen.getByRole("alert")).toHaveTextContent("이후 로컬 편집이 있어 이 변경은 자동으로 되돌릴 수 없습니다.");
+    await user.click(screen.getByRole("tab", { name: "검토" }));
+    expect(screen.getByText("수락됨")).toBeInTheDocument();
+  });
+
   it("does not roll back newer edits when bulk accept persistence fails", async () => {
     const user = userEvent.setup();
     const failedPatch = createDeferredResponse();
@@ -1858,6 +2115,81 @@ describe("DocumentShell", () => {
     });
 
     expect(screen.getByTestId("mock-document-body")).toHaveTextContent("fresh edited body");
+  });
+
+  it("reverts bulk accept status when a successful patch cannot be applied to a newer draft", async () => {
+    const user = userEvent.setup();
+    const acceptedPatch = createDeferredResponse();
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockReturnValueOnce(acceptedPatch.promise)
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ proposal: { ...createProposal("proposal_1"), status: "pending" } })),
+      );
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "growth was good")}
+        proposals={[createProposal("proposal_1")]}
+        templates={[createTemplate("tpl_1", "Board review")]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "대기 중인 모든 제안 수락" }));
+    await user.click(screen.getByRole("button", { name: "Mock body edit" }));
+
+    await act(async () => {
+      acceptedPatch.resolve(
+        new Response(JSON.stringify({ proposal: { ...createProposal("proposal_1"), status: "accepted" } })),
+      );
+      await acceptedPatch.promise;
+    });
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      "/api/proposals/proposal_1",
+      expect.objectContaining({
+        method: "PATCH",
+        body: JSON.stringify({ status: "pending", expectedStatus: "accepted" }),
+      }),
+    );
+    expect(screen.getByTestId("mock-document-body")).toHaveTextContent("fresh edited body");
+    expect(screen.getByText("대기 중")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("제안 상태를 업데이트하지 못했습니다.");
+  });
+
+  it("keeps bulk accept server status when local application and compensation both fail", async () => {
+    const user = userEvent.setup();
+    const acceptedPatch = createDeferredResponse();
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockReturnValueOnce(acceptedPatch.promise)
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "Failed" }), { status: 500 }));
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "growth was good")}
+        proposals={[createProposal("proposal_1")]}
+        templates={[createTemplate("tpl_1", "Board review")]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "대기 중인 모든 제안 수락" }));
+    await user.click(screen.getByRole("button", { name: "Mock body edit" }));
+
+    await act(async () => {
+      acceptedPatch.resolve(
+        new Response(JSON.stringify({ proposal: { ...createProposal("proposal_1"), status: "accepted" } })),
+      );
+      await acceptedPatch.promise;
+    });
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(screen.getByTestId("mock-document-body")).toHaveTextContent("fresh edited body");
+    expect(screen.getByText("수락됨")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("제안 상태를 업데이트하지 못했습니다.");
   });
 
   it("bulk accepts range-backed proposals from the end of the document first", async () => {
@@ -1916,6 +2248,48 @@ describe("DocumentShell", () => {
     expect(screen.getByTestId("mock-document-body")).toHaveTextContent("Alpha replacement is much longer.");
     expect(screen.getByTestId("mock-document-body")).toHaveTextContent("Beta replacement.");
     expect(screen.queryByText("선택 위치가 변경되어 제안을 적용할 수 없습니다. 다시 실행해 주세요.")).not.toBeInTheDocument();
+  });
+
+  it("keeps bulk accept server successes when a later proposal update conflicts", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            proposal: { ...createProposal("proposal_1", "accepted", "growth was good"), appliedMode: "replace" },
+          }),
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            error: "Proposal status changed",
+            proposal: { ...createProposal("proposal_2", "rejected", "owner is unclear") },
+          }),
+          { status: 409 },
+        ),
+      );
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "growth was good owner is unclear")}
+        proposals={[
+          createProposal("proposal_1", "pending", "growth was good"),
+          createProposal("proposal_2", "pending", "owner is unclear"),
+        ]}
+        templates={[createTemplate("tpl_1", "Board review")]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "대기 중인 모든 제안 수락" }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(screen.getByTestId("mock-document-body")).toHaveTextContent("revenue grew 8% owner is unclear");
+    expect(screen.getByText("수락됨")).toBeInTheDocument();
+    expect(screen.getByText("거절됨")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("제안 상태를 업데이트하지 못했습니다.");
   });
 
   it("does not bulk accept a current-session proposal after the draft content changes", async () => {
@@ -2066,8 +2440,16 @@ describe("SelectionAiMenu", () => {
     await user.click(screen.getByRole("button", { name: "한국어로 번역" }));
     await user.click(screen.getByRole("button", { name: "영어로 번역" }));
 
-    expect(handleCommand).toHaveBeenNthCalledWith(1, "Translate to Korean");
-    expect(handleCommand).toHaveBeenNthCalledWith(2, "Translate to English");
+    expect(handleCommand).toHaveBeenNthCalledWith(
+      1,
+      "Translate to Korean",
+      expect.objectContaining({ defaultApplyMode: "insert_below", id: "ai.translate_ko" }),
+    );
+    expect(handleCommand).toHaveBeenNthCalledWith(
+      2,
+      "Translate to English",
+      expect.objectContaining({ defaultApplyMode: "insert_below", id: "ai.translate_en" }),
+    );
   });
 
   it("renders plugin-provided selection commands", async () => {
@@ -2093,7 +2475,10 @@ describe("SelectionAiMenu", () => {
 
     await user.click(screen.getByRole("button", { name: "법률 리스크 완화" }));
 
-    expect(handleCommand).toHaveBeenCalledWith("Mitigate legal risk");
+    expect(handleCommand).toHaveBeenCalledWith(
+      "Mitigate legal risk",
+      expect.objectContaining({ defaultApplyMode: "replace", id: "legal-risk" }),
+    );
     expect(screen.queryByRole("button", { name: "한국어로 번역" })).not.toBeInTheDocument();
   });
 
@@ -2105,7 +2490,10 @@ describe("SelectionAiMenu", () => {
 
     await user.click(screen.getByRole("button", { name: "이어서 쓰기" }));
 
-    expect(handleCommand).toHaveBeenCalledWith("Continue writing");
+    expect(handleCommand).toHaveBeenCalledWith(
+      "Continue writing",
+      expect.objectContaining({ defaultApplyMode: "insert_below", id: "ai.continue_writing" }),
+    );
   });
 
   it("renders selection commands with Korean labels", async () => {
@@ -2117,8 +2505,16 @@ describe("SelectionAiMenu", () => {
     await user.click(screen.getByRole("button", { name: "한국어로 번역" }));
     await user.click(screen.getByRole("button", { name: "영어로 번역" }));
 
-    expect(handleCommand).toHaveBeenNthCalledWith(1, "Translate to Korean");
-    expect(handleCommand).toHaveBeenNthCalledWith(2, "Translate to English");
+    expect(handleCommand).toHaveBeenNthCalledWith(
+      1,
+      "Translate to Korean",
+      expect.objectContaining({ defaultApplyMode: "insert_below", id: "ai.translate_ko" }),
+    );
+    expect(handleCommand).toHaveBeenNthCalledWith(
+      2,
+      "Translate to English",
+      expect.objectContaining({ defaultApplyMode: "insert_below", id: "ai.translate_en" }),
+    );
   });
 
   it("renders continue writing with a Korean label", async () => {
@@ -2129,7 +2525,10 @@ describe("SelectionAiMenu", () => {
 
     await user.click(screen.getByRole("button", { name: "이어서 쓰기" }));
 
-    expect(handleCommand).toHaveBeenCalledWith("Continue writing");
+    expect(handleCommand).toHaveBeenCalledWith(
+      "Continue writing",
+      expect.objectContaining({ defaultApplyMode: "insert_below", id: "ai.continue_writing" }),
+    );
   });
 
   it("shows an in-place running status for the active command", () => {

@@ -42,8 +42,11 @@ import {
   type EditorMessages,
 } from "@/features/i18n/editor-language";
 import type { AiDocumentReferenceCandidate, ResolvedAiDocumentReference } from "@/features/ai/ai-reference-parser";
-import type { EditorPluginContributions } from "@/plugins/types";
-import type { EditorSelectionCommand } from "@/plugins/types";
+import type {
+  EditorPluginContributions,
+  EditorSelectionCommand,
+  EditorSelectionCommandMetadata,
+} from "@/plugins/types";
 import { useEditorPlugins } from "@/plugins/use-editor-plugins";
 import { AiSuggestionHighlight, setAiSuggestionHighlights, type AiSuggestionHighlightInput } from "./ai-suggestion-highlight";
 import {
@@ -111,6 +114,7 @@ type DocumentEditorProps = {
     selectedText: string,
     context: SelectionAiCommandContext,
     references?: ResolvedAiDocumentReference[],
+    metadata?: EditorSelectionCommandMetadata,
   ) => void;
   outlineFocusRequest?: { requestId: string; topLevelIndex: number } | null;
   runningSelectionCommand?: string;
@@ -356,7 +360,7 @@ export function DocumentEditor({
   );
 
   const handleCommand = useCallback(
-    (command: string) => {
+    (command: string, metadata: EditorSelectionCommandMetadata) => {
       if (!editor) return;
 
       const { from, to } = editor.state.selection;
@@ -373,7 +377,7 @@ export function DocumentEditor({
         selectionRange: { from, to },
       };
 
-      onSelectionCommandRef.current?.(command, selectedText, context);
+      onSelectionCommandRef.current?.(command, selectedText, context, undefined, metadata);
     },
     [editor, selectionMenu],
   );

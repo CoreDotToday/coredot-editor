@@ -2,13 +2,8 @@ import { NextResponse } from "next/server";
 import { aiCommandPayloadSchema, type ReviewResult } from "@/features/ai/types";
 import { buildAiMessages } from "@/features/ai/payload-builder";
 import { completeAiRunWithProposals, createAiRun, failAiRun } from "@/features/ai/ai-run-repository";
-import { getAiSettings } from "@/features/ai/ai-settings-repository";
-import { hydrateAiReferenceDocuments } from "@/features/ai/reference-hydration";
-import { createAiProvider } from "@/features/ai/providers";
-import { getDocumentById } from "@/features/documents/document-repository";
+import { prepareAiCommandRequest, type AiCommandRequestFailure } from "@/features/ai/ai-command-service";
 import { applyProposalToText } from "@/features/proposals/proposal-apply";
-import { getPromptTemplateById } from "@/features/templates/template-repository";
-import { validateTemplateVariables } from "@/features/templates/template-validation";
 
 export async function POST(request: Request) {
   const payload = await request.json().catch(() => null);
@@ -18,36 +13,17 @@ export async function POST(request: Request) {
   }
 
   const body = result.data;
-  const document = await getDocumentById(body.documentId);
-  if (!document) {
-    return NextResponse.json({ error: "Document not found" }, { status: 404 });
-  }
-
-  const template = await getPromptTemplateById(body.templateId);
-  if (!template?.isActive) {
-    return NextResponse.json({ error: "Template not found" }, { status: 404 });
-  }
-
-  const variableValidation = validateTemplateVariables(template.variableSchemaJson, body.variables);
-  if (!variableValidation.ok) {
-    return NextResponse.json(
-      { error: "Invalid template variables", details: variableValidation.errors },
-      { status: 400 },
-    );
-  }
-
-  let provider;
-  try {
-    const aiSettings = await getAiSettings();
-    provider = createAiProvider(aiSettings);
-  } catch {
-    return NextResponse.json({ error: "AI generation failed" }, { status: 500 });
-  }
-
   const hasSubmittedDocumentText =
     typeof payload === "object" && payload !== null && Object.hasOwn(payload, "documentText");
-  const reviewedText = hasSubmittedDocumentText ? body.documentText : document.plainText;
-  const referencedDocuments = await hydrateAiReferenceDocuments(body.references);
+  const prepared = await prepareAiCommandRequest({
+    payload: body,
+    useSubmittedDocumentText: hasSubmittedDocumentText,
+  });
+  if (!prepared.ok) {
+    return aiCommandFailureResponse(prepared);
+  }
+
+  const { document, provider, referencedDocuments, reviewedText, template } = prepared;
 
   const run = await createAiRun({
     documentId: document.id,
@@ -104,6 +80,16 @@ export async function POST(request: Request) {
     await failAiRun(run.id, error instanceof Error ? error.message : "Unknown AI generation failure");
     return NextResponse.json({ error: "AI generation failed" }, { status: 500 });
   }
+}
+
+function aiCommandFailureResponse(failure: AiCommandRequestFailure) {
+  return NextResponse.json(
+    {
+      ...(failure.details ? { details: failure.details } : {}),
+      error: failure.error,
+    },
+    { status: failure.status },
+  );
 }
 
 function formatFindingExplanation(finding: ReviewResult["findings"][number]): string {

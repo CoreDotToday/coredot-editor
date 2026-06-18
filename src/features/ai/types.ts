@@ -1,9 +1,14 @@
 import { z } from "zod";
+import { AI_CONTEXT_LIMITS } from "./context-limits";
+
+export const aiProposalApplyModeSchema = z.enum(["replace", "insert_below"]);
+export type AiProposalApplyModeInput = z.infer<typeof aiProposalApplyModeSchema>;
 
 export const aiCommandPayloadSchema = z.object({
   documentId: z.string().min(1),
   templateId: z.string().min(1),
-  command: z.string().min(1),
+  command: z.string().min(1).max(AI_CONTEXT_LIMITS.commandMaxCharacters),
+  defaultApplyMode: aiProposalApplyModeSchema.optional(),
   references: z
     .object({
       documents: z
@@ -13,11 +18,12 @@ export const aiCommandPayloadSchema = z.object({
             titleSnapshot: z.string().optional(),
           }),
         )
+        .max(AI_CONTEXT_LIMITS.maxReferenceDocuments)
         .default([]),
     })
     .default({ documents: [] }),
   variables: z.record(z.string(), z.unknown()).default({}),
-  selectedText: z.string().default(""),
+  selectedText: z.string().max(AI_CONTEXT_LIMITS.selectedTextMaxCharacters).default(""),
   occurrenceIndex: z.number().int().nonnegative().optional(),
   selectionRange: z
     .object({
@@ -26,9 +32,9 @@ export const aiCommandPayloadSchema = z.object({
     })
     .refine((range) => range.to >= range.from)
     .optional(),
-  beforeContext: z.string().default(""),
-  afterContext: z.string().default(""),
-  documentText: z.string().default(""),
+  beforeContext: z.string().max(AI_CONTEXT_LIMITS.beforeContextMaxCharacters).default(""),
+  afterContext: z.string().max(AI_CONTEXT_LIMITS.afterContextMaxCharacters).default(""),
+  documentText: z.string().max(AI_CONTEXT_LIMITS.documentTextMaxCharacters).default(""),
 });
 
 export type AiCommandPayload = z.infer<typeof aiCommandPayloadSchema>;

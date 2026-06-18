@@ -1,4 +1,4 @@
-import { desc, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { db } from "@/db/client";
 import { aiProposals, type NewAiProposalRecord } from "@/db/schema";
 
@@ -40,11 +40,20 @@ export function createProposalRepository(database: ProposalDatabase = db) {
         .orderBy(desc(aiProposals.createdAt));
     },
 
+    async getProposalById(id: string) {
+      const [proposal] = await database.select().from(aiProposals).where(eq(aiProposals.id, id)).limit(1);
+      return proposal ?? null;
+    },
+
     async updateProposalStatus(
       id: string,
       status: "pending" | "accepted" | "rejected",
       appliedMode?: "replace" | "insert_below",
+      options: { expectedStatus?: "pending" | "accepted" | "rejected" } = {},
     ) {
+      const whereClause = options.expectedStatus
+        ? and(eq(aiProposals.id, id), eq(aiProposals.status, options.expectedStatus))
+        : eq(aiProposals.id, id);
       const [proposal] = await database
         .update(aiProposals)
         .set({
@@ -52,7 +61,7 @@ export function createProposalRepository(database: ProposalDatabase = db) {
           status,
           updatedAt: new Date(),
         })
-        .where(eq(aiProposals.id, id))
+        .where(whereClause)
         .returning();
 
       return proposal ?? null;
@@ -63,5 +72,6 @@ export function createProposalRepository(database: ProposalDatabase = db) {
 const defaultRepository = createProposalRepository();
 
 export const createProposal = defaultRepository.createProposal;
+export const getProposalById = defaultRepository.getProposalById;
 export const listProposalsForDocument = defaultRepository.listProposalsForDocument;
 export const updateProposalStatus = defaultRepository.updateProposalStatus;

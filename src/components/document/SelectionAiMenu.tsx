@@ -17,7 +17,11 @@ import {
   type EditorLanguage,
 } from "@/features/i18n/editor-language";
 import { createDefaultSelectionCommands } from "@/plugins/builtin/ai-writing-plugin";
-import type { EditorSelectionCommand, EditorSelectionCommandIcon } from "@/plugins/types";
+import type {
+  EditorSelectionCommand,
+  EditorSelectionCommandIcon,
+  EditorSelectionCommandMetadata,
+} from "@/plugins/types";
 
 type SelectionAiMenuSide = "top" | "bottom";
 
@@ -27,7 +31,7 @@ type SelectionAiMenuProps = {
   isRunning?: boolean;
   language?: EditorLanguage;
   left?: number;
-  onCommand: (command: string) => void;
+  onCommand: (command: string, metadata: EditorSelectionCommandMetadata) => void;
   runningCommand?: string;
   side?: SelectionAiMenuSide;
   selectedText?: string;
@@ -86,7 +90,7 @@ export function SelectionAiMenu({
           </div>
         ) : null}
         {!isRunning
-          ? commands.map(({ ariaLabel, command, icon, id, label }) => {
+          ? commands.map(({ ariaLabel, command, defaultApplyMode = "replace", icon, id, label }) => {
               const Icon = commandIconMap[icon];
 
               return (
@@ -94,7 +98,7 @@ export function SelectionAiMenu({
                   aria-label={ariaLabel}
                   className="inline-flex h-8 min-w-0 items-center gap-1.5 rounded px-2 text-left text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-100 hover:text-zinc-950 focus:outline-none focus:ring-2 focus:ring-zinc-950"
                   key={id}
-                  onClick={() => onCommand(command)}
+                  onClick={() => onCommand(command, { defaultApplyMode, id })}
                   title={ariaLabel}
                   type="button"
                 >

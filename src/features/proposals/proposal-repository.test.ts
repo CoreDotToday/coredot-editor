@@ -106,4 +106,24 @@ describe("proposal repository", () => {
     expect(proposals).toHaveLength(1);
     expect(proposals[0]).toMatchObject({ id: firstProposal.id, appliedMode: "insert_below", status: "accepted" });
   });
+
+  it("does not update a proposal when the expected status is stale", async () => {
+    const db = await createIsolatedProposalDb();
+    const repository = createProposalRepository(db);
+    const proposal = await repository.createProposal({
+      aiRunId: "run_1",
+      documentId: "doc_1",
+      targetText: "old",
+      replacementText: "new",
+      explanation: "Clearer.",
+    });
+
+    const updatedProposal = await repository.updateProposalStatus(proposal.id, "accepted", "replace", {
+      expectedStatus: "accepted",
+    });
+    const savedProposal = await repository.getProposalById(proposal.id);
+
+    expect(updatedProposal).toBeNull();
+    expect(savedProposal).toMatchObject({ id: proposal.id, appliedMode: null, status: "pending" });
+  });
 });

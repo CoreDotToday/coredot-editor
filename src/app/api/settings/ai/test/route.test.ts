@@ -16,6 +16,12 @@ vi.mock("@/features/ai/ai-settings-repository", () => ({
 
 vi.mock("@/features/ai/providers", () => ({
   createAiProvider: vi.fn(() => ({
+    capabilities: {
+      coreTodayProxy: true,
+      reasoningEffort: true,
+      streaming: "native",
+      structuredReview: true,
+    },
     generateText: vi.fn(async () => "OK"),
     model: "gpt-5-nano",
     name: "coredot",

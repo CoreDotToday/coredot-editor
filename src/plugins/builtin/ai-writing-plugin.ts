@@ -44,6 +44,7 @@ export function createDefaultSelectionCommands(messages: EditorMessages): Editor
     {
       ariaLabel: commandMessages.continueWriting.ariaLabel,
       command: "Continue writing",
+      defaultApplyMode: "insert_below",
       icon: "pen-line",
       id: "ai.continue_writing",
       label: commandMessages.continueWriting.label,
@@ -51,6 +52,7 @@ export function createDefaultSelectionCommands(messages: EditorMessages): Editor
     {
       ariaLabel: commandMessages.translateKorean.ariaLabel,
       command: "Translate to Korean",
+      defaultApplyMode: "insert_below",
       icon: "languages",
       id: "ai.translate_ko",
       label: commandMessages.translateKorean.label,
@@ -58,6 +60,7 @@ export function createDefaultSelectionCommands(messages: EditorMessages): Editor
     {
       ariaLabel: commandMessages.translateEnglish.ariaLabel,
       command: "Translate to English",
+      defaultApplyMode: "insert_below",
       icon: "languages",
       id: "ai.translate_en",
       label: commandMessages.translateEnglish.label,

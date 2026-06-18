@@ -1,10 +1,12 @@
-export type DocumentCommandGroup = "ai" | "document" | "export" | "view";
+import type { DocumentCommandGroup, DocumentCommandId } from "@/features/commands/document-command-manifest";
+
+export type { DocumentCommandGroup };
 
 export type DocumentCommandAction = {
   enabled?: boolean;
   execute: () => void;
   group: DocumentCommandGroup;
-  id: string;
+  id: DocumentCommandId;
   keywords: string[];
   label: string;
   shortcut?: string;

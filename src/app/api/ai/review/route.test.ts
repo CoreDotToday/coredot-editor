@@ -43,6 +43,12 @@ vi.mock("@/features/ai/providers", () => ({
   createAiProvider: vi.fn(() => ({
     name: "stub",
     model: "stub-editor",
+    capabilities: {
+      coreTodayProxy: false,
+      reasoningEffort: false,
+      streaming: "buffered",
+      structuredReview: true,
+    },
     generateReview: vi.fn(async () => ({
       summary: "Two findings.",
       findings: [
@@ -179,6 +185,12 @@ describe("POST /api/ai/review", () => {
     vi.mocked(createAiProvider).mockReturnValueOnce({
       name: "stub",
       model: "stub-editor",
+    capabilities: {
+      coreTodayProxy: false,
+      reasoningEffort: false,
+      streaming: "buffered",
+      structuredReview: true,
+    },
       generateText: vi.fn(),
       streamText: vi.fn(),
       generateReview,
@@ -221,6 +233,74 @@ describe("POST /api/ai/review", () => {
     );
   });
 
+  it("excludes the current document from referenced review context", async () => {
+    const generateReview = vi.fn(async () => ({ summary: "No findings.", findings: [] }));
+    vi.mocked(getDocumentById).mockResolvedValueOnce(documentRecord);
+    vi.mocked(getDocumentsByIds).mockResolvedValueOnce([
+      {
+        ...documentRecord,
+        id: "doc_ref",
+        title: "Reference Memo",
+        plainText: "Reference memo body",
+      },
+    ]);
+    vi.mocked(getPromptTemplateById).mockResolvedValueOnce(templateRecord);
+    vi.mocked(createAiProvider).mockReturnValueOnce({
+      name: "stub",
+      model: "stub-editor",
+      capabilities: {
+        coreTodayProxy: false,
+        reasoningEffort: false,
+        streaming: "buffered",
+        structuredReview: true,
+      },
+      generateText: vi.fn(),
+      streamText: vi.fn(),
+      generateReview,
+    });
+
+    const response = await POST(
+      createJsonRequest({
+        documentId: "doc_1",
+        templateId: "tpl_1",
+        command: "Review with references",
+        variables: {},
+        references: {
+          documents: [
+            { documentId: "doc_1", titleSnapshot: "Self reference" },
+            { documentId: "doc_ref", titleSnapshot: "Reference snapshot" },
+          ],
+        },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(getDocumentsByIds).toHaveBeenCalledWith(["doc_ref"]);
+    expect(generateReview).toHaveBeenCalledWith({
+      messages: expect.arrayContaining([
+        expect.objectContaining({
+          role: "user",
+          content: expect.stringContaining("Reference memo body"),
+        }),
+      ]),
+    });
+    expect(generateReview).toHaveBeenCalledWith({
+      messages: expect.arrayContaining([
+        expect.objectContaining({
+          role: "user",
+          content: expect.not.stringContaining("Self reference"),
+        }),
+      ]),
+    });
+    expect(createAiRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        inputSummaryJson: expect.objectContaining({
+          referencedDocumentIds: ["doc_ref"],
+        }),
+      }),
+    );
+  });
+
   it("validates generated findings against submitted document text", async () => {
     vi.mocked(getDocumentById).mockResolvedValueOnce({
       ...documentRecord,
@@ -230,6 +310,12 @@ describe("POST /api/ai/review", () => {
     vi.mocked(createAiProvider).mockReturnValueOnce({
       name: "stub",
       model: "stub-editor",
+    capabilities: {
+      coreTodayProxy: false,
+      reasoningEffort: false,
+      streaming: "buffered",
+      structuredReview: true,
+    },
       generateText: vi.fn(),
       streamText: vi.fn(),
       generateReview: vi.fn(async () => ({
@@ -295,6 +381,12 @@ describe("POST /api/ai/review", () => {
     vi.mocked(createAiProvider).mockReturnValueOnce({
       name: "stub",
       model: "stub-editor",
+    capabilities: {
+      coreTodayProxy: false,
+      reasoningEffort: false,
+      streaming: "buffered",
+      structuredReview: true,
+    },
       generateText: vi.fn(),
       streamText: vi.fn(),
       generateReview: vi.fn(async () => ({

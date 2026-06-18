@@ -14,7 +14,15 @@ export type AiProviderSettings = {
   aiReasoningEffort?: AiReasoningEffort | null;
 };
 
+export type AiProviderCapabilities = {
+  coreTodayProxy: boolean;
+  reasoningEffort: boolean;
+  streaming: "buffered" | "native";
+  structuredReview: boolean;
+};
+
 export type AiProvider = {
+  capabilities: AiProviderCapabilities;
   name: AiProviderName;
   model: string;
   generateText(input: { messages: AiMessage[] }): Promise<string>;
@@ -22,30 +30,67 @@ export type AiProvider = {
   generateReview(input: { messages: AiMessage[] }): Promise<ReviewResult>;
 };
 
+export const AI_PROVIDER_CAPABILITIES: Readonly<Record<AiProviderName, AiProviderCapabilities>> = Object.freeze({
+  anthropic: defineAiProviderCapabilities({
+    coreTodayProxy: true,
+    reasoningEffort: false,
+    streaming: "buffered",
+    structuredReview: true,
+  }),
+  coredot: defineAiProviderCapabilities({
+    coreTodayProxy: true,
+    reasoningEffort: true,
+    streaming: "native",
+    structuredReview: true,
+  }),
+  gemini: defineAiProviderCapabilities({
+    coreTodayProxy: true,
+    reasoningEffort: false,
+    streaming: "buffered",
+    structuredReview: true,
+  }),
+  openai: defineAiProviderCapabilities({
+    coreTodayProxy: false,
+    reasoningEffort: true,
+    streaming: "native",
+    structuredReview: true,
+  }),
+  stub: defineAiProviderCapabilities({
+    coreTodayProxy: false,
+    reasoningEffort: false,
+    streaming: "buffered",
+    structuredReview: true,
+  }),
+});
+
+type AiProviderFactory = (settings?: AiProviderSettings) => AiProvider;
+
+const AI_PROVIDER_FACTORIES: Record<AiProviderName, AiProviderFactory> = {
+  anthropic: createCoreDotAnthropicProvider,
+  coredot: createCoreDotProvider,
+  gemini: createCoreDotGeminiProvider,
+  openai: createOpenAiProvider,
+  stub: createStubAiProvider,
+};
+
 export function createAiProvider(settings?: AiProviderSettings): AiProvider {
   const provider = settings?.aiProvider ?? process.env.AI_PROVIDER ?? "stub";
-
-  if (provider === "stub") {
-    return createStubAiProvider();
+  if (isAiProviderName(provider)) {
+    return AI_PROVIDER_FACTORIES[provider](settings);
   }
-
-  if (provider === "openai") {
-    return createOpenAiProvider(settings);
-  }
-
-  if (provider === "coredot") {
-    return createCoreDotProvider(settings);
-  }
-
-  if (provider === "anthropic") {
-    return createCoreDotAnthropicProvider(settings);
-  }
-
-  if (provider === "gemini") {
-    return createCoreDotGeminiProvider(settings);
-  }
-
   throw new Error(`Unsupported AI_PROVIDER: ${provider}`);
+}
+
+export function getAiProviderCapabilities(provider: AiProviderName) {
+  return AI_PROVIDER_CAPABILITIES[provider];
+}
+
+function isAiProviderName(provider: string): provider is AiProviderName {
+  return Object.hasOwn(AI_PROVIDER_FACTORIES, provider);
+}
+
+function defineAiProviderCapabilities(capabilities: AiProviderCapabilities) {
+  return Object.freeze(capabilities);
 }
 
 function createOpenAiProvider(settings?: AiProviderSettings): AiProvider {
@@ -53,6 +98,7 @@ function createOpenAiProvider(settings?: AiProviderSettings): AiProvider {
   const generationSettings = createGenerationSettings(undefined, settings?.aiReasoningEffort);
 
   return {
+    capabilities: AI_PROVIDER_CAPABILITIES.openai,
     name: "openai",
     model,
     async generateText(input) {
@@ -97,6 +143,7 @@ function createCoreDotProvider(settings?: AiProviderSettings): AiProvider {
   });
 
   return {
+    capabilities: AI_PROVIDER_CAPABILITIES.coredot,
     name: "coredot",
     model,
     async generateText(input) {
@@ -138,6 +185,7 @@ function createCoreDotAnthropicProvider(settings?: AiProviderSettings): AiProvid
     settings?.aiMaxCompletionTokens ?? readOptionalPositiveInteger(process.env.COREDOT_MAX_COMPLETION_TOKENS) ?? 32768;
 
   return {
+    capabilities: AI_PROVIDER_CAPABILITIES.anthropic,
     name: "anthropic",
     model,
     async generateText(input) {
@@ -162,6 +210,7 @@ function createCoreDotGeminiProvider(settings?: AiProviderSettings): AiProvider 
     settings?.aiMaxCompletionTokens ?? readOptionalPositiveInteger(process.env.COREDOT_MAX_COMPLETION_TOKENS) ?? 32768;
 
   return {
+    capabilities: AI_PROVIDER_CAPABILITIES.gemini,
     name: "gemini",
     model,
     async generateText(input) {
@@ -197,6 +246,7 @@ function createStubAiProvider(): AiProvider {
   };
 
   return {
+    capabilities: AI_PROVIDER_CAPABILITIES.stub,
     name: "stub",
     model: "stub-editor",
     async generateText(input) {

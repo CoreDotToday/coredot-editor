@@ -10,10 +10,16 @@ export type EditorPluginContext = {
 };
 
 export type EditorSelectionCommandIcon = "bar-chart" | "languages" | "minimize" | "pen-line" | "sparkles" | "wand";
+export type EditorSelectionApplyMode = "insert_below" | "replace";
+export type EditorSelectionCommandMetadata = {
+  defaultApplyMode: EditorSelectionApplyMode;
+  id?: string;
+};
 
 export type EditorSelectionCommand = {
   ariaLabel: string;
   command: string;
+  defaultApplyMode?: EditorSelectionApplyMode;
   icon: EditorSelectionCommandIcon;
   id: string;
   label: string;

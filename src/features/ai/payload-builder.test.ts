@@ -60,4 +60,33 @@ describe("buildAiMessages", () => {
     expect(userContent).toContain('"title": "Reference Memo"');
     expect(userContent.indexOf("Referenced documents:")).toBeLessThan(userContent.indexOf("Document text:"));
   });
+
+  it("truncates large document and reference bodies before building provider messages", () => {
+    const longDocumentText = `${"Main body ".repeat(30_000)}END_OF_MAIN_DOCUMENT`;
+    const longReferenceText = `${"Reference body ".repeat(12_000)}END_OF_REFERENCE_DOCUMENT`;
+
+    const messages = buildAiMessages({
+      systemPrompt: "You are a strategy editor.",
+      command: "Compare the referenced memo",
+      variables: {},
+      selectedText: "",
+      beforeContext: "",
+      afterContext: "",
+      documentText: longDocumentText,
+      referencedDocuments: [
+        {
+          id: "doc_ref",
+          text: longReferenceText,
+          title: "Reference Memo",
+        },
+      ],
+    });
+
+    const userContent = messages[1]?.content ?? "";
+
+    expect(userContent).toContain("[truncated");
+    expect(userContent).not.toContain("END_OF_MAIN_DOCUMENT");
+    expect(userContent).not.toContain("END_OF_REFERENCE_DOCUMENT");
+    expect(userContent.length).toBeLessThan(longDocumentText.length + longReferenceText.length);
+  });
 });

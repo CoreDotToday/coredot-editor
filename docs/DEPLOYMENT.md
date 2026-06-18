@@ -135,10 +135,12 @@ Do not use stub mode for production workflows that users expect to be model-back
 ```bash
 AI_PROVIDER=stub
 DATABASE_URL=file:./data/e2e/coredot-e2e.db
-pnpm exec next dev -p 3100
+pnpm exec next dev -p ${E2E_PORT:-3100}
 ```
 
 Playwright is configured with `reuseExistingServer: false` so tests do not accidentally attach to a server using production-like credentials.
+
+If port `3100` is already used by another local process, run `E2E_PORT=3200 pnpm e2e`.
 
 Stop any manually running `pnpm dev` process before running `pnpm e2e`. Next.js allows only one dev server for the same project directory, even when the E2E server uses a different port.
 

@@ -1,9 +1,10 @@
 import { z } from "zod";
 import type { PromptVariableSchema } from "@/db/schema";
+import { AI_CONTEXT_LIMITS } from "@/features/ai/context-limits";
 
 const variableFieldSchema = z
   .object({
-    name: z.string().min(1),
+    name: z.string().min(1).max(AI_CONTEXT_LIMITS.variableNameMaxCharacters),
     label: z.string().min(1),
     type: z.enum(["text", "textarea", "select"]),
     required: z.boolean(),
@@ -22,7 +23,7 @@ const variableFieldSchema = z
 export const promptVariableSchema = z
   .object({
     fields: z.array(variableFieldSchema),
-    required: z.array(z.string().min(1)),
+    required: z.array(z.string().min(1).max(AI_CONTEXT_LIMITS.variableNameMaxCharacters)),
   })
   .superRefine((schema, context) => {
     const fieldNames = new Set<string>();
@@ -72,14 +73,59 @@ export function validateTemplateVariables(
 ): TemplateVariableValidation {
   const errors: Record<string, string> = {};
   const requiredFields = new Set(schema.required);
+  const fieldByName = new Map(schema.fields.map((field) => [field.name, field]));
+  let serializedTotalLength = 0;
+
+  for (const [name, value] of Object.entries(values)) {
+    const field = fieldByName.get(name);
+    if (!field) {
+      errors[name] = "선언되지 않은 변수입니다.";
+      continue;
+    }
+
+    if (name.length > AI_CONTEXT_LIMITS.variableNameMaxCharacters) {
+      errors[name] = `${field.label} 변수명이 너무 깁니다.`;
+      continue;
+    }
+
+    const serializedValue = serializeTemplateVariableValue(value);
+    serializedTotalLength += serializedValue.length;
+    if (serializedValue.length > AI_CONTEXT_LIMITS.variableValueMaxCharacters) {
+      errors[name] = `${field.label} 값이 너무 깁니다.`;
+      continue;
+    }
+
+    if (field.type === "select" && !isMissingVariableValue(value) && !field.options?.includes(String(value))) {
+      errors[name] = `${field.label} 값은 허용된 옵션 중 하나여야 합니다.`;
+    }
+  }
+
+  if (serializedTotalLength > AI_CONTEXT_LIMITS.variableTotalMaxCharacters) {
+    errors._variables = "템플릿 변수 값이 너무 깁니다.";
+  }
 
   for (const field of schema.fields) {
     const value = values[field.name];
-    const isMissing = value === undefined || value === null || String(value).trim() === "";
-    if ((field.required || requiredFields.has(field.name)) && isMissing) {
+    if ((field.required || requiredFields.has(field.name)) && isMissingVariableValue(value)) {
       errors[field.name] = `${field.label} 필드는 필수입니다.`;
     }
   }
 
   return Object.keys(errors).length === 0 ? { ok: true, errors: {} } : { ok: false, errors };
+}
+
+function isMissingVariableValue(value: unknown) {
+  return value === undefined || value === null || String(value).trim() === "";
+}
+
+function serializeTemplateVariableValue(value: unknown) {
+  if (typeof value === "string") {
+    return value;
+  }
+
+  try {
+    return JSON.stringify(value) ?? "";
+  } catch {
+    return String(value);
+  }
 }
