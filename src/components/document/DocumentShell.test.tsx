@@ -347,6 +347,48 @@ function createDeferredResponse() {
   return { promise, reject, resolve };
 }
 
+function expectProposalApplyFetch(
+  fetchMock: { mock: { calls: Array<[unknown, RequestInit?]> } },
+  proposalId: string,
+  appliedMode: "replace" | "insert_below",
+) {
+  const expectedUrl = `/api/proposals/${proposalId}/apply`;
+  const call = fetchMock.mock.calls.find(([input]) => input === expectedUrl);
+
+  expect(call).toBeDefined();
+  const [, init] = call!;
+  expect(init).toEqual(expect.objectContaining({ method: "POST" }));
+  expect(JSON.parse(String(init?.body))).toMatchObject({
+    appliedMode,
+    document: {
+      id: "doc_1",
+    },
+    expectedDocumentContentSignature: expect.any(String),
+    expectedStatus: "pending",
+  });
+}
+
+function expectLastProposalApplyFetch(
+  fetchMock: { mock: { calls: Array<[unknown, RequestInit?]> } },
+  proposalId: string,
+  appliedMode: "replace" | "insert_below",
+) {
+  const call = fetchMock.mock.calls.at(-1);
+
+  expect(call).toBeDefined();
+  const [input, init] = call!;
+  expect(input).toBe(`/api/proposals/${proposalId}/apply`);
+  expect(init).toEqual(expect.objectContaining({ method: "POST" }));
+  expect(JSON.parse(String(init?.body))).toMatchObject({
+    appliedMode,
+    document: {
+      id: "doc_1",
+    },
+    expectedDocumentContentSignature: expect.any(String),
+    expectedStatus: "pending",
+  });
+}
+
 describe("DocumentShell", () => {
   it("renders three workspace regions", () => {
     render(
@@ -1041,13 +1083,7 @@ describe("DocumentShell", () => {
 
     await user.click(within(preview).getByRole("button", { name: "아래에 추가" }));
 
-    expect(fetchMock).toHaveBeenLastCalledWith(
-      "/api/proposals/proposal_rewrite",
-      expect.objectContaining({
-        method: "PATCH",
-        body: JSON.stringify({ status: "accepted", expectedStatus: "pending", appliedMode: "insert_below" }),
-      }),
-    );
+    expectLastProposalApplyFetch(fetchMock, "proposal_rewrite", "insert_below");
     expect(screen.getByTestId("mock-document-body")).toHaveTextContent("selected text");
     expect(screen.getByTestId("mock-document-body")).toHaveTextContent("revenue grew 8%");
     expect(screen.getByText("초안에 반영되었습니다. 변경 사항을 유지하려면 저장하세요.")).toBeInTheDocument();
@@ -1368,6 +1404,52 @@ describe("DocumentShell", () => {
     expect(screen.getByText("세 가지 이슈 중 하나만 안전하게 제안으로 만들었습니다.")).toBeInTheDocument();
   });
 
+  it("refreshes persisted proposal statuses without clearing the current review summary", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          run: createAiRun("run_1"),
+          review: {
+            summary: "검토 결과를 유지합니다.",
+            findings: [
+              {
+                problem: "Unclear evidence",
+                reason: "The source is missing.",
+                targetText: "growth was good",
+                replacementText: "revenue grew 8%",
+              },
+            ],
+          },
+          proposals: [createProposal("proposal_1")],
+          skippedProposalCount: 0,
+        }),
+      ),
+    );
+    const document = createDocumentWithContent("doc_1", "Market Entry Memo", "growth was good");
+    const templates = [createTemplate("tpl_1", "Board review")];
+
+    const { rerender } = render(<DocumentShell aiRuns={[]} document={document} templates={templates} />);
+
+    await user.click(screen.getByRole("button", { name: "문서 검토" }));
+
+    expect(await screen.findByText("검토 결과를 유지합니다.")).toBeInTheDocument();
+    expect(screen.getByText("대기 중")).toBeInTheDocument();
+
+    rerender(
+      <DocumentShell
+        aiRuns={[createAiRun("run_1")]}
+        document={document}
+        proposals={[{ ...createProposal("proposal_1", "accepted"), appliedMode: "replace" }]}
+        templates={templates}
+      />,
+    );
+
+    expect(screen.getByText("검토 결과를 유지합니다.")).toBeInTheDocument();
+    expect(screen.getByText("수락됨")).toBeInTheDocument();
+    expect(screen.queryByText("대기 중")).not.toBeInTheDocument();
+  });
+
   it("preserves an all-skipped review snapshot across same-document proposal refreshes", async () => {
     const user = userEvent.setup();
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
@@ -1559,13 +1641,7 @@ describe("DocumentShell", () => {
 
     await user.click(screen.getByRole("button", { name: "growth was good 제안으로 교체" }));
 
-    expect(fetchMock).toHaveBeenCalledWith(
-      "/api/proposals/proposal_1",
-      expect.objectContaining({
-        method: "PATCH",
-        body: JSON.stringify({ status: "accepted", expectedStatus: "pending", appliedMode: "replace" }),
-      }),
-    );
+    expectProposalApplyFetch(fetchMock, "proposal_1", "replace");
     expect(screen.getByText("수락됨")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "owner is unclear 제안 거절" }));
@@ -1639,13 +1715,10 @@ describe("DocumentShell", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("제안 상태를 업데이트하지 못했습니다.");
   });
 
-  it("keeps accepted status when local accept application fails and compensation fails", async () => {
+  it("uses the server-applied document when local accept application becomes stale", async () => {
     const user = userEvent.setup();
     const acceptedPatch = createDeferredResponse();
-    const fetchMock = vi
-      .spyOn(globalThis, "fetch")
-      .mockReturnValueOnce(acceptedPatch.promise)
-      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "Failed" }), { status: 500 }));
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockReturnValueOnce(acceptedPatch.promise);
 
     render(
       <DocumentShell
@@ -1661,21 +1734,50 @@ describe("DocumentShell", () => {
 
     await act(async () => {
       acceptedPatch.resolve(
-        new Response(JSON.stringify({ proposal: { ...createProposal("proposal_1"), status: "accepted" } })),
+        new Response(
+          JSON.stringify({
+            document: {
+              id: "doc_1",
+              title: "Market Entry Memo",
+              contentJson: {
+                type: "doc",
+                content: [{ type: "paragraph", content: [{ type: "text", text: "revenue grew 8%" }] }],
+              },
+              metadataJson: {},
+              readiness: "draft",
+            },
+            proposal: { ...createProposal("proposal_1"), status: "accepted" },
+          }),
+        ),
       );
       await acceptedPatch.promise;
     });
 
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
-    expect(screen.getByTestId("mock-document-body")).toHaveTextContent("fresh edited body");
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    expect(screen.getByTestId("mock-document-body")).toHaveTextContent("revenue grew 8%");
+    expect(screen.getByRole("status", { name: "문서 저장 상태" })).toHaveTextContent("저장됨");
     expect(screen.getByText("수락됨")).toBeInTheDocument();
-    expect(screen.getByRole("alert")).toHaveTextContent("제안 상태를 업데이트하지 못했습니다.");
+    expect(screen.queryByText("제안 상태를 업데이트하지 못했습니다.")).not.toBeInTheDocument();
   });
 
   it("replaces accepted proposal text in the local draft", async () => {
     const user = userEvent.setup();
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify({ proposal: { ...createProposal("proposal_1"), status: "accepted" } })),
+      new Response(
+        JSON.stringify({
+          document: {
+            id: "doc_1",
+            title: "Market Entry Memo",
+            contentJson: {
+              type: "doc",
+              content: [{ type: "paragraph", content: [{ type: "text", text: "revenue grew 8%" }] }],
+            },
+            metadataJson: {},
+            readiness: "draft",
+          },
+          proposal: { ...createProposal("proposal_1"), status: "accepted" },
+        }),
+      ),
     );
 
     render(
@@ -1689,15 +1791,9 @@ describe("DocumentShell", () => {
 
     await user.click(screen.getByRole("button", { name: "growth was good 제안으로 교체" }));
 
-    expect(fetchMock).toHaveBeenCalledWith(
-      "/api/proposals/proposal_1",
-      expect.objectContaining({
-        method: "PATCH",
-        body: JSON.stringify({ status: "accepted", expectedStatus: "pending", appliedMode: "replace" }),
-      }),
-    );
+    expectProposalApplyFetch(fetchMock, "proposal_1", "replace");
     expect(screen.getByTestId("mock-document-body")).toHaveTextContent("revenue grew 8%");
-    expect(screen.getByText("저장되지 않음")).toBeInTheDocument();
+    expect(screen.getByText("저장됨")).toBeInTheDocument();
   });
 
   it("replaces accepted proposal text across selected list items in the local draft", async () => {
@@ -1750,13 +1846,7 @@ describe("DocumentShell", () => {
 
     await user.click(screen.getByRole("button", { name: /제안으로 교체/ }));
 
-    expect(fetchMock).toHaveBeenCalledWith(
-      "/api/proposals/proposal_list",
-      expect.objectContaining({
-        method: "PATCH",
-        body: JSON.stringify({ status: "accepted", expectedStatus: "pending", appliedMode: "replace" }),
-      }),
-    );
+    expectProposalApplyFetch(fetchMock, "proposal_list", "replace");
     expect(screen.getByTestId("mock-document-body")).toHaveTextContent("Combined replacement.");
     expect(screen.getByTestId("mock-document-body")).toHaveTextContent("Third item.");
     expect(screen.getByTestId("mock-document-body")).not.toHaveTextContent("First item.");
@@ -1822,13 +1912,7 @@ describe("DocumentShell", () => {
 
     await user.click(screen.getByRole("button", { name: /제안을 아래에 추가/ }));
 
-    expect(fetchMock).toHaveBeenCalledWith(
-      "/api/proposals/proposal_list",
-      expect.objectContaining({
-        method: "PATCH",
-        body: JSON.stringify({ status: "accepted", expectedStatus: "pending", appliedMode: "insert_below" }),
-      }),
-    );
+    expectProposalApplyFetch(fetchMock, "proposal_list", "insert_below");
     expect(screen.getByTestId("mock-document-body")).toHaveTextContent("First item.");
     expect(screen.getByTestId("mock-document-body")).toHaveTextContent("Second item.");
     expect(screen.getByTestId("mock-document-body")).toHaveTextContent("Inserted suggestion.");
@@ -1895,13 +1979,7 @@ describe("DocumentShell", () => {
 
     await user.click(screen.getByRole("button", { name: "growth was good 제안을 아래에 추가" }));
 
-    expect(fetchMock).toHaveBeenCalledWith(
-      "/api/proposals/proposal_1",
-      expect.objectContaining({
-        method: "PATCH",
-        body: JSON.stringify({ status: "accepted", expectedStatus: "pending", appliedMode: "insert_below" }),
-      }),
-    );
+    expectProposalApplyFetch(fetchMock, "proposal_1", "insert_below");
     expect(screen.getByTestId("mock-document-body")).toHaveTextContent("growth was good");
     expect(screen.getByTestId("mock-document-body")).toHaveTextContent("revenue grew 8%");
     expect(screen.getByText("저장되지 않음")).toBeInTheDocument();
@@ -2015,8 +2093,7 @@ describe("DocumentShell", () => {
       .mockResolvedValueOnce(
         new Response(JSON.stringify({ proposal: { ...createProposal("proposal_1"), status: "accepted" } })),
       )
-      .mockReturnValueOnce(pendingUndo.promise)
-      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "Failed" }), { status: 500 }));
+      .mockReturnValueOnce(pendingUndo.promise);
 
     render(
       <DocumentShell
@@ -2039,12 +2116,12 @@ describe("DocumentShell", () => {
       await pendingUndo.promise;
     });
 
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
     expect(fetchMock).toHaveBeenLastCalledWith(
       "/api/proposals/proposal_1",
       expect.objectContaining({
         method: "PATCH",
-        body: JSON.stringify({ status: "accepted", expectedStatus: "pending", appliedMode: "replace" }),
+        body: JSON.stringify({ status: "pending", expectedStatus: "accepted" }),
       }),
     );
     expect(screen.getByTestId("mock-document-body")).toHaveTextContent("fresh edited body");
@@ -2053,7 +2130,7 @@ describe("DocumentShell", () => {
     expect(screen.getByText("대기 중")).toBeInTheDocument();
   });
 
-  it("keeps undo proposal status reverted when compensation succeeds without a proposal body", async () => {
+  it("keeps undo proposal pending when local undo becomes stale", async () => {
     const user = userEvent.setup();
     const pendingUndo = createDeferredResponse();
     const fetchMock = vi
@@ -2061,8 +2138,7 @@ describe("DocumentShell", () => {
       .mockResolvedValueOnce(
         new Response(JSON.stringify({ proposal: { ...createProposal("proposal_1"), status: "accepted" } })),
       )
-      .mockReturnValueOnce(pendingUndo.promise)
-      .mockResolvedValueOnce(new Response(JSON.stringify({})));
+      .mockReturnValueOnce(pendingUndo.promise);
 
     render(
       <DocumentShell
@@ -2085,11 +2161,11 @@ describe("DocumentShell", () => {
       await pendingUndo.promise;
     });
 
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
     expect(screen.getByTestId("mock-document-body")).toHaveTextContent("fresh edited body");
     expect(screen.getByRole("alert")).toHaveTextContent("이후 로컬 편집이 있어 이 변경은 자동으로 되돌릴 수 없습니다.");
     await user.click(screen.getByRole("tab", { name: "검토" }));
-    expect(screen.getByText("수락됨")).toBeInTheDocument();
+    expect(screen.getByText("대기 중")).toBeInTheDocument();
   });
 
   it("does not roll back newer edits when bulk accept persistence fails", async () => {
@@ -2117,90 +2193,30 @@ describe("DocumentShell", () => {
     expect(screen.getByTestId("mock-document-body")).toHaveTextContent("fresh edited body");
   });
 
-  it("reverts bulk accept status when a successful patch cannot be applied to a newer draft", async () => {
-    const user = userEvent.setup();
-    const acceptedPatch = createDeferredResponse();
-    const fetchMock = vi
-      .spyOn(globalThis, "fetch")
-      .mockReturnValueOnce(acceptedPatch.promise)
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ proposal: { ...createProposal("proposal_1"), status: "pending" } })),
-      );
-
-    render(
-      <DocumentShell
-        aiRuns={[]}
-        document={createDocumentWithContent("doc_1", "Market Entry Memo", "growth was good")}
-        proposals={[createProposal("proposal_1")]}
-        templates={[createTemplate("tpl_1", "Board review")]}
-      />,
-    );
-
-    await user.click(screen.getByRole("button", { name: "대기 중인 모든 제안 수락" }));
-    await user.click(screen.getByRole("button", { name: "Mock body edit" }));
-
-    await act(async () => {
-      acceptedPatch.resolve(
-        new Response(JSON.stringify({ proposal: { ...createProposal("proposal_1"), status: "accepted" } })),
-      );
-      await acceptedPatch.promise;
-    });
-
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
-    expect(fetchMock).toHaveBeenLastCalledWith(
-      "/api/proposals/proposal_1",
-      expect.objectContaining({
-        method: "PATCH",
-        body: JSON.stringify({ status: "pending", expectedStatus: "accepted" }),
-      }),
-    );
-    expect(screen.getByTestId("mock-document-body")).toHaveTextContent("fresh edited body");
-    expect(screen.getByText("대기 중")).toBeInTheDocument();
-    expect(screen.getByRole("alert")).toHaveTextContent("제안 상태를 업데이트하지 못했습니다.");
-  });
-
-  it("keeps bulk accept server status when local application and compensation both fail", async () => {
-    const user = userEvent.setup();
-    const acceptedPatch = createDeferredResponse();
-    const fetchMock = vi
-      .spyOn(globalThis, "fetch")
-      .mockReturnValueOnce(acceptedPatch.promise)
-      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "Failed" }), { status: 500 }));
-
-    render(
-      <DocumentShell
-        aiRuns={[]}
-        document={createDocumentWithContent("doc_1", "Market Entry Memo", "growth was good")}
-        proposals={[createProposal("proposal_1")]}
-        templates={[createTemplate("tpl_1", "Board review")]}
-      />,
-    );
-
-    await user.click(screen.getByRole("button", { name: "대기 중인 모든 제안 수락" }));
-    await user.click(screen.getByRole("button", { name: "Mock body edit" }));
-
-    await act(async () => {
-      acceptedPatch.resolve(
-        new Response(JSON.stringify({ proposal: { ...createProposal("proposal_1"), status: "accepted" } })),
-      );
-      await acceptedPatch.promise;
-    });
-
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
-    expect(screen.getByTestId("mock-document-body")).toHaveTextContent("fresh edited body");
-    expect(screen.getByText("수락됨")).toBeInTheDocument();
-    expect(screen.getByRole("alert")).toHaveTextContent("제안 상태를 업데이트하지 못했습니다.");
-  });
-
   it("bulk accepts range-backed proposals from the end of the document first", async () => {
     const user = userEvent.setup();
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = String(input);
       const proposalId = url.includes("proposal_alpha") ? "proposal_alpha" : "proposal_beta";
+      const text =
+        proposalId === "proposal_beta"
+          ? "Alpha.Beta replacement."
+          : "Alpha replacement is much longer.Beta replacement.";
       return new Response(
         JSON.stringify({
+          document: {
+            id: "doc_1",
+            title: "Range bulk accept",
+            contentJson: {
+              type: "doc",
+              content: [{ type: "paragraph", content: [{ type: "text", text }] }],
+            },
+            metadataJson: {},
+            readiness: "draft",
+          },
           proposal: {
             ...createProposal(proposalId),
+            appliedMode: "replace",
             status: "accepted",
           },
         }),
@@ -2257,6 +2273,18 @@ describe("DocumentShell", () => {
       .mockResolvedValueOnce(
         new Response(
           JSON.stringify({
+            document: {
+              id: "doc_1",
+              title: "Market Entry Memo",
+              contentJson: {
+                type: "doc",
+                content: [
+                  { type: "paragraph", content: [{ type: "text", text: "revenue grew 8% owner is unclear" }] },
+                ],
+              },
+              metadataJson: {},
+              readiness: "draft",
+            },
             proposal: { ...createProposal("proposal_1", "accepted", "growth was good"), appliedMode: "replace" },
           }),
         ),

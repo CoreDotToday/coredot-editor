@@ -182,6 +182,13 @@ type ProposalStatusPatchPayload = {
   status: ShellProposal["status"];
 };
 
+type ProposalApplyPayload = {
+  appliedMode: AiProposalApplyMode;
+  document: { id: string };
+  expectedDocumentContentSignature: string;
+  expectedStatus?: "pending";
+};
+
 class ProposalStatusConflictError extends Error {
   proposal: AiReviewProposal;
 
@@ -194,6 +201,15 @@ class ProposalStatusConflictError extends Error {
 
 function isProposalStatusConflictError(error: unknown): error is ProposalStatusConflictError {
   return error instanceof ProposalStatusConflictError;
+}
+
+function createDraftFromDocumentSnapshot(document: DocumentSnapshot): DraftState {
+  return {
+    contentJson: document.contentJson,
+    metadataJson: document.metadataJson ?? {},
+    readiness: document.readiness ?? "draft",
+    title: document.title,
+  };
 }
 
 async function patchProposalStatus(proposalId: string, payload: ProposalStatusPatchPayload) {
@@ -215,6 +231,32 @@ async function patchProposalStatus(proposalId: string, payload: ProposalStatusPa
   }
 
   throw new Error("Failed to update proposal status");
+}
+
+type ProposalApplyResponse = {
+  document?: DocumentSnapshot;
+  proposal?: AiReviewProposal;
+};
+
+async function applyProposalOnServer(proposalId: string, payload: ProposalApplyPayload): Promise<ProposalApplyResponse> {
+  const response = await fetch(`/api/proposals/${encodeURIComponent(proposalId)}/apply`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+  const body = (await response.json().catch(() => ({}))) as ProposalApplyResponse;
+
+  if (response.ok) {
+    return body;
+  }
+
+  if (response.status === 409 && body.proposal) {
+    throw new ProposalStatusConflictError(body.proposal);
+  }
+
+  throw new Error("Failed to apply proposal");
 }
 
 function subscribeCompactWorkspaceLayout(onStoreChange: () => void) {
@@ -277,6 +319,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
   const [draft, setDraft] = useState<DraftState>(initialDraft);
   const draftRef = useRef<DraftState>(initialDraft);
   const draftVersionRef = useRef(0);
+  const serverContentSignatureRef = useRef(createProposalContentSignature(incomingDocument.contentJson));
   const [saveState, setSaveState] = useState<SaveState>("saved");
   const [language, setLanguage] = useState<EditorLanguage>(() => readStoredEditorLanguage());
   const [selectionCommand, setSelectionCommand] = useState<SelectionCommandPayload | null>(null);
@@ -391,6 +434,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
     observedDocument.readiness !== incomingDocument.readiness
   ) {
     setObservedDocument(incomingDocument);
+    serverContentSignatureRef.current = createProposalContentSignature(incomingDocument.contentJson);
 
     if (saveState === "saved") {
       setDraft(initialDraft);
@@ -423,7 +467,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
   if (observedAiSnapshot.aiRuns !== aiRuns || observedAiSnapshot.proposals !== proposals) {
     setObservedAiSnapshot({ aiRuns, proposals });
     setReviewRuns(aiRuns);
-    if (!reviewSummary) {
+    if (!reviewSummary || reviewProposals.length > 0) {
       setReviewProposals(proposals);
     }
   }
@@ -724,6 +768,12 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
         throw new Error("Failed to save document");
       }
 
+      const body = (await response.json().catch(() => ({}))) as { document?: DocumentSnapshot };
+      if (draftVersionRef.current === savingVersion) {
+        serverContentSignatureRef.current = createProposalContentSignature(
+          body.document?.contentJson ?? savingDraft.contentJson,
+        );
+      }
       setSaveState((currentState) => (draftVersionRef.current === savingVersion ? "saved" : currentState));
     } catch {
       setSaveState((currentState) => (draftVersionRef.current === savingVersion ? "failed" : currentState));
@@ -902,17 +952,65 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
     setReviewError("");
 
     try {
-      const updatedProposal = await patchProposalStatus(proposalId, {
-        status,
-        expectedStatus: previousProposal.status,
-        appliedMode: status === "accepted" ? applyMode : undefined,
-      });
+      const appliedServerResponse = status === "accepted"
+        ? await applyProposalOnServer(proposalId, {
+            appliedMode: applyMode,
+            document: { id: document.id },
+            expectedDocumentContentSignature: serverContentSignatureRef.current,
+            expectedStatus: previousProposal.status === "pending" ? "pending" : undefined,
+          })
+        : null;
+      const updatedProposal = status === "accepted"
+        ? appliedServerResponse?.proposal ?? null
+        : await patchProposalStatus(proposalId, {
+          status,
+          expectedStatus: previousProposal.status,
+        });
       const proposalForState: AiReviewProposal =
         updatedProposal ?? { ...previousProposal, appliedMode: status === "accepted" ? applyMode : null, status };
+      if (status === "accepted" && appliedServerResponse?.document) {
+        serverContentSignatureRef.current = createProposalContentSignature(appliedServerResponse.document.contentJson);
+      }
 
       if (status === "accepted") {
         const baseDraft = draftVersionRef.current === startingDraftVersion ? draft : draftRef.current;
         const appliedMode = proposalForState.appliedMode ?? applyMode;
+        if (appliedServerResponse?.document) {
+          const serverDraft = createDraftFromDocumentSnapshot(appliedServerResponse.document);
+          draftVersionRef.current += 1;
+          draftRef.current = serverDraft;
+          setDraft(serverDraft);
+          setSaveState("saved");
+          setAppliedChanges((currentChanges) => [
+            {
+              appliedAt: new Date(),
+              appliedMode,
+              afterContentSignature: createProposalContentSignature(appliedServerResponse.document!.contentJson),
+              beforeDraft: baseDraft,
+              id: createWorkspaceClientId(aiWorkspaceIdRef, "change"),
+              proposalId,
+              replacementText: previousProposal.replacementText,
+              targetText: previousProposal.targetText,
+              undone: false,
+            },
+            ...currentChanges,
+          ]);
+          setReviewProposals((currentProposals) =>
+            currentProposals.map((proposal) => (proposal.id === proposalId ? proposalForState : proposal)),
+          );
+          if (isSelectionProposal) {
+            setSelectionApplicationNotice(messages.selectionResult.appliedNotice);
+          }
+          setUndoChangeError("");
+          if (selectionAiResult?.proposalId === proposalId) {
+            setSelectionAiResult(null);
+          }
+          if (activeProposalId === proposalId) {
+            setActiveProposalId(null);
+          }
+          return;
+        }
+
         const proposalForApply: AiReviewProposal = {
           ...previousProposal,
           appliedMode,
@@ -926,26 +1024,9 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
         );
 
         if (!appliedDraft.ok) {
-          let revertedProposal: AiReviewProposal | null = null;
-          let compensationFailed = false;
-          try {
-            revertedProposal =
-              (await patchProposalStatus(proposalId, {
-                status: previousProposal.status,
-                expectedStatus: proposalForState.status,
-              })) ?? previousProposal;
-          } catch (error) {
-            if (isProposalStatusConflictError(error)) {
-              revertedProposal = error.proposal;
-            } else {
-              compensationFailed = true;
-            }
-          }
           setReviewProposals((currentProposals) =>
             currentProposals.map((proposal) =>
-              proposal.id === proposalId
-                ? revertedProposal ?? (compensationFailed ? proposalForState : previousProposal)
-                : proposal,
+              proposal.id === proposalId ? proposalForState : proposal,
             ),
           );
           setSelectionApplicationNotice("");
@@ -1005,6 +1086,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
       setReviewError(messages.errors.updateProposalFailed);
     }
   }, [
+    document.id,
     draft,
     messages.errors,
     messages.selectionResult.appliedNotice,
@@ -1094,18 +1176,89 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
     }
 
     setReviewError("");
+
+    if (status === "accepted") {
+      const updatedProposalById = new Map<string, AiReviewProposal>();
+      const nextAppliedChanges: AppliedAiChangeRecord[] = [];
+      const proposalsToApply = getProposalApplicationOrder(pendingProposals, selectionProposalContexts);
+      let nextDraft = draftVersionRef.current === startingDraftVersion ? draft : draftRef.current;
+      let nextServerContentSignature = serverContentSignatureRef.current;
+      let updateFailed = false;
+
+      for (const proposal of proposalsToApply) {
+        const appliedMode = proposal.appliedMode ?? proposal.defaultApplyMode ?? "replace";
+        const beforeProposalDraft = nextDraft;
+
+        try {
+          const applyResponse = await applyProposalOnServer(proposal.id, {
+            appliedMode,
+            document: { id: document.id },
+            expectedDocumentContentSignature: nextServerContentSignature,
+            expectedStatus: "pending",
+          });
+
+          if (!applyResponse.document || !applyResponse.proposal) {
+            updateFailed = true;
+            break;
+          }
+
+          const serverDraft = createDraftFromDocumentSnapshot(applyResponse.document);
+          nextServerContentSignature = createProposalContentSignature(applyResponse.document.contentJson);
+          nextDraft = serverDraft;
+          updatedProposalById.set(proposal.id, applyResponse.proposal);
+          nextAppliedChanges.push({
+            appliedAt: new Date(),
+            appliedMode,
+            afterContentSignature: nextServerContentSignature,
+            beforeDraft: beforeProposalDraft,
+            id: createWorkspaceClientId(aiWorkspaceIdRef, "change"),
+            proposalId: proposal.id,
+            replacementText: proposal.replacementText,
+            targetText: proposal.targetText,
+            undone: false,
+          });
+        } catch (error) {
+          updateFailed = true;
+          if (isProposalStatusConflictError(error)) {
+            updatedProposalById.set(error.proposal.id, error.proposal);
+          }
+          break;
+        }
+      }
+
+      if (updatedProposalById.size > 0) {
+        serverContentSignatureRef.current = nextServerContentSignature;
+        draftVersionRef.current += 1;
+        draftRef.current = nextDraft;
+        setDraft(nextDraft);
+        setSaveState("saved");
+        setAppliedChanges((currentChanges) => [
+          ...[...nextAppliedChanges].reverse(),
+          ...currentChanges,
+        ]);
+      }
+
+      setReviewProposals((currentProposals) =>
+        currentProposals.map((proposal) => updatedProposalById.get(proposal.id) ?? proposal),
+      );
+      setUndoChangeError("");
+      if (updateFailed) {
+        setReviewError(messages.errors.updateProposalFailed);
+      } else {
+        setActiveProposalId(null);
+      }
+      return;
+    }
+
     const updatedProposals: AiReviewProposal[] = [];
     let conflictProposal: AiReviewProposal | null = null;
     let updateFailed = false;
 
     for (const proposal of pendingProposals) {
-      const appliedMode = status === "accepted" ? proposal.defaultApplyMode ?? "replace" : undefined;
-
       try {
         const updatedProposal = await patchProposalStatus(proposal.id, {
           status,
           expectedStatus: proposal.status,
-          appliedMode,
         });
         if (updatedProposal) {
           updatedProposals.push(updatedProposal);
@@ -1124,62 +1277,6 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
       updatedProposalById.set(conflictProposal.id, conflictProposal);
     }
 
-    if (status === "accepted") {
-      const originalProposalById = new Map(pendingProposals.map((proposal) => [proposal.id, proposal]));
-      const acceptedProposals = updatedProposals
-        .filter((proposal) => proposal.status === "accepted")
-        .flatMap((proposal) => {
-          const originalProposal = originalProposalById.get(proposal.id);
-          return originalProposal
-            ? [
-                {
-                  ...originalProposal,
-                  appliedMode: proposal.appliedMode ?? originalProposal.appliedMode,
-                  status: proposal.status,
-                },
-              ]
-            : [];
-        });
-      if (acceptedProposals.length > 0) {
-        const baseDraft = draftVersionRef.current === startingDraftVersion ? draft : draftRef.current;
-        const acceptedDraftState = buildAcceptedDraftState(baseDraft, acceptedProposals);
-        if (acceptedDraftState.ok) {
-          draftVersionRef.current += 1;
-          const updatedDraft = { ...baseDraft, contentJson: acceptedDraftState.nextContentJson };
-          draftRef.current = updatedDraft;
-          setDraft(updatedDraft);
-          setSaveState("dirty");
-          if (acceptedDraftState.nextAppliedChanges.length > 0) {
-            setAppliedChanges((currentChanges) => [
-              ...[...acceptedDraftState.nextAppliedChanges].reverse(),
-              ...currentChanges,
-            ]);
-          }
-        } else {
-          updateFailed = true;
-          for (const proposal of acceptedProposals) {
-            const originalProposal = originalProposalById.get(proposal.id);
-            if (!originalProposal) {
-              continue;
-            }
-
-            try {
-              const revertedProposal = await patchProposalStatus(proposal.id, {
-                status: originalProposal.status,
-                expectedStatus: proposal.status,
-              });
-              updatedProposalById.set(proposal.id, revertedProposal ?? originalProposal);
-            } catch (error) {
-              updatedProposalById.set(
-                proposal.id,
-                isProposalStatusConflictError(error) ? error.proposal : proposal,
-              );
-            }
-          }
-        }
-      }
-    }
-
     setReviewProposals((currentProposals) =>
       currentProposals.map((proposal) => updatedProposalById.get(proposal.id) ?? proposal),
     );
@@ -1190,6 +1287,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
       setActiveProposalId(null);
     }
   }, [
+    document.id,
     draft,
     messages.errors.staleSelection,
     messages.errors.updateProposalFailed,
@@ -1237,26 +1335,10 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
       const baseDraft = draftVersionRef.current === startingDraftVersion ? draft : draftRef.current;
 
       if (JSON.stringify(baseDraft.contentJson) !== change.afterContentSignature) {
-        let revertedProposal: AiReviewProposal | null = null;
-        try {
-          revertedProposal =
-            (await patchProposalStatus(change.proposalId, {
-              status: previousProposalStatus,
-              expectedStatus: updatedProposal?.status ?? "pending",
-              appliedMode: change.appliedMode,
-            })) ??
-            (proposalBeforeUndo
-              ? { ...proposalBeforeUndo, appliedMode: change.appliedMode, status: previousProposalStatus }
-              : null);
-        } catch (error) {
-          if (isProposalStatusConflictError(error)) {
-            revertedProposal = error.proposal;
-          }
-        }
         setReviewProposals((currentProposals) =>
           currentProposals.map((proposal) =>
             proposal.id === change.proposalId
-              ? revertedProposal ?? updatedProposal ?? { ...proposal, appliedMode: null, status: "pending" }
+              ? updatedProposal ?? { ...proposal, appliedMode: null, status: "pending" }
               : proposal,
           ),
         );

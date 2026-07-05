@@ -42,33 +42,35 @@ describe("PATCH /api/proposals/[id]", () => {
     vi.clearAllMocks();
   });
 
-  it("updates proposal status", async () => {
-    vi.mocked(updateProposalStatus).mockResolvedValueOnce(createProposalRecord());
+  it("updates non-accepted proposal status", async () => {
+    vi.mocked(updateProposalStatus).mockResolvedValueOnce(createProposalRecord({ appliedMode: null, status: "rejected" }));
 
-    const response = await PATCH(createJsonRequest({ status: "accepted" }), createContext());
+    const response = await PATCH(createJsonRequest({ status: "rejected" }), createContext());
 
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ proposal: { id: "proposal_1", status: "accepted" } });
-    expect(updateProposalStatus).toHaveBeenCalledWith("proposal_1", "accepted", undefined, {
+    expect(await response.json()).toMatchObject({ proposal: { id: "proposal_1", status: "rejected" } });
+    expect(updateProposalStatus).toHaveBeenCalledWith("proposal_1", "rejected", undefined, {
       expectedStatus: undefined,
     });
   });
 
-  it("persists the applied mode when accepting a proposal", async () => {
-    vi.mocked(updateProposalStatus).mockResolvedValueOnce(createProposalRecord({ appliedMode: "insert_below" }));
+  it("rejects accepted status updates", async () => {
+    const response = await PATCH(createJsonRequest({ status: "accepted" }), createContext());
 
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "Use proposal apply endpoint for accepted proposals" });
+    expect(updateProposalStatus).not.toHaveBeenCalled();
+  });
+
+  it("rejects accepted status updates even when an applied mode is provided", async () => {
     const response = await PATCH(
-      createJsonRequest({ status: "accepted", appliedMode: "insert_below" }),
+      createJsonRequest({ status: "accepted", appliedMode: "replace" }),
       createContext(),
     );
 
-    expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({
-      proposal: { id: "proposal_1", status: "accepted", appliedMode: "insert_below" },
-    });
-    expect(updateProposalStatus).toHaveBeenCalledWith("proposal_1", "accepted", "insert_below", {
-      expectedStatus: undefined,
-    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "Use proposal apply endpoint for accepted proposals" });
+    expect(updateProposalStatus).not.toHaveBeenCalled();
   });
 
   it("returns 409 when the proposal status changed from the caller expectation", async () => {
@@ -100,7 +102,7 @@ describe("PATCH /api/proposals/[id]", () => {
     vi.mocked(getProposalById).mockResolvedValueOnce(createProposalRecord({ status: "pending" }));
 
     const response = await PATCH(
-      createJsonRequest({ status: "accepted", expectedStatus: "pending" }),
+      createJsonRequest({ status: "rejected", expectedStatus: "pending" }),
       createContext("proposal_1"),
     );
 

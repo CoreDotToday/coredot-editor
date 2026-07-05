@@ -177,7 +177,9 @@ Proposal status updates are conditional. The client sends the proposal status it
 
 This is intentionally conservative. Downstream products that need full Microsoft Word-style tracked changes can evolve the proposal model from exact text plus range metadata into position-based or step-map-based proposal application, or into an Office.js add-in that writes native Word revisions.
 
-The next server-side hardening step is an atomic proposal-apply endpoint. That endpoint should receive the document id, proposal id, apply mode, and expected draft/source signature, then update the document content and proposal status in one database transaction. Until that exists, the current client-side apply path keeps local draft snapshots and server-side status preconditions to reduce stale updates without broad schema changes.
+Single-proposal acceptance now has a server-side apply endpoint at `/api/proposals/[id]/apply`. The route receives the document id, apply mode, expected proposal status, and the last known server content signature, then applies the proposal to the saved server document, updates the document content/plain text, and marks the proposal accepted in one database transaction. The client still keeps local draft snapshots for in-session undo, but accepted proposals no longer rely on a separate status PATCH followed by a later autosave to make the server state coherent.
+
+The remaining larger hardening step is server undo parity. Bulk accept reuses the same `/apply` endpoint sequentially, so each accepted proposal still persists document content and proposal status together. Local undo remains conservative client-side orchestration with proposal status preconditions, and accepted-status PATCH is blocked so document/proposal persistence cannot split again. Downstream products that need collaborative proposal application should extend the same `/apply` style interface to explicit server-side undo records.
 
 ## Database Model
 

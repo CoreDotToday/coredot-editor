@@ -32,5 +32,5 @@ test("creates a document and accepts a stub AI review proposal", async ({ page }
   await replaceProposal.click();
   await expect(page.getByText("수락됨")).toBeVisible();
   await expect(page.getByRole("textbox", { name: "문서 본문" })).toContainText(`${body} [reviewed]`);
-  await expect(page.getByRole("status", { name: "문서 저장 상태" })).toHaveText("저장되지 않음");
+  await expect(page.getByRole("status", { name: "문서 저장 상태" })).toHaveText("저장됨");
 });

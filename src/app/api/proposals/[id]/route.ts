@@ -20,6 +20,10 @@ export async function PATCH(request: Request, context: ProposalRouteContext) {
 
   const { id } = await context.params;
   const { appliedMode, expectedStatus, status } = result.data;
+  if (status === "accepted") {
+    return NextResponse.json({ error: "Use proposal apply endpoint for accepted proposals" }, { status: 400 });
+  }
+
   const proposal = await updateProposalStatus(id, status, appliedMode, { expectedStatus });
   if (!proposal) {
     const existingProposal = await getProposalById(id);
