@@ -9,6 +9,7 @@ Describe what changed and why.
 - [ ] `pnpm test`
 - [ ] `pnpm e2e` when user flows changed
 - [ ] `pnpm build`
+- [ ] `pnpm docs:build` when public docs changed
 
 ## Checklist
 

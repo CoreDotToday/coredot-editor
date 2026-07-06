@@ -1,0 +1,71 @@
+site_name: Coredot Editor
+site_description: Open-source AI document editor starter built with Next.js, Tiptap, Drizzle, SQLite, and the Vercel AI SDK.
+site_url: https://coredottoday.github.io/coredot-editor/
+repo_name: CoreDotToday/coredot-editor
+repo_url: https://github.com/CoreDotToday/coredot-editor
+edit_uri: edit/main/docs/
+
+docs_dir: docs
+site_dir: site
+
+theme:
+  name: material
+  language: en
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.tracking
+    - search.highlight
+    - search.share
+    - search.suggest
+    - content.action.edit
+    - content.code.copy
+  palette:
+    - scheme: default
+      primary: black
+      accent: indigo
+  font:
+    text: Inter
+    code: JetBrains Mono
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.tasklist:
+      custom_checkbox: true
+
+nav:
+  - Overview: index.md
+  - Start:
+      - Getting Started: getting-started.md
+      - Product Tour: product-tour.md
+      - Configuration: configuration.md
+      - Production Readiness: production-readiness.md
+  - Build:
+      - Development: development.md
+      - API Reference: api-reference.md
+      - Adopting The Starter: ADOPTION.md
+      - Deployment: DEPLOYMENT.md
+  - Architecture:
+      - System Architecture: ARCHITECTURE.md
+      - Extension Points: PLUGINS.md
+      - Prompting: PROMPTING.md
+      - RAG Docker Stack: RAG_DOCKER.md
+  - Project:
+      - Roadmap: ROADMAP.md
+      - Maintainers: MAINTAINERS.md
+      - Community: community.md

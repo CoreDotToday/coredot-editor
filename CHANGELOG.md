@@ -10,6 +10,8 @@ This project uses a simple human-written changelog. Keep entries concise and gro
 
 - Added scope-aware quick action presets to the bottom AI command bar.
 - Added a public roadmap for post-v1 AI editor improvements.
+- Added a MkDocs Material documentation site, GitHub Pages workflow, and public documentation entry pages.
+- Removed agent-only planning notes from the public documentation tree.
 
 ### Changed
 

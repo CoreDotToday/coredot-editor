@@ -98,7 +98,7 @@ Before shipping a new prompt set, test at least these cases with the real provid
 
 ## Source-Informed Basis
 
-These practices follow current official guidance:
+The external guidance below can change. Re-check vendor documentation before changing prompt contracts or model-specific provider behavior:
 
 - [OpenAI prompt engineering](https://platform.openai.com/docs/guides/prompt-engineering): use clear message roles, Markdown/XML-style structure, and explicit instructions.
 - [OpenAI reasoning best practices](https://platform.openai.com/docs/guides/reasoning-best-practices): keep prompts simple and direct, use delimiters, and avoid unnecessary chain-of-thought requests.

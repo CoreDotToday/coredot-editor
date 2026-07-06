@@ -30,6 +30,9 @@
 
 # production
 /build
+/site
+docs/superpowers/
+/.venv-docs
 
 # misc
 .DS_Store

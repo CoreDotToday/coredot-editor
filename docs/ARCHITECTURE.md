@@ -240,7 +240,7 @@ Common downstream changes:
 - Replace seeded prompt templates.
 - Extend contract review playbooks with clause libraries, organization precedents, and benchmark rules.
 - Add richer proposal application with editor ranges.
-- Promote proposal acceptance into a server-side document/proposal transaction with source signatures.
+- Extend the server-side proposal apply route with explicit server-side undo records.
 - Add app-specific editor plugins through `src/plugins/app-plugins.ts`.
 - Add collaboration with Yjs or another sync layer.
 - Extend the DOCX MVP toward comments, tracked changes, embedded media, and stricter Word layout fidelity.

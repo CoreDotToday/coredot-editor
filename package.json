@@ -32,6 +32,8 @@
     "db:migrate": "drizzle-kit migrate",
     "db:seed": "tsx src/db/seed.ts",
     "db:setup": "pnpm db:migrate && pnpm db:seed",
+    "docs:serve": "python3 -m mkdocs serve",
+    "docs:build": "python3 -m mkdocs build --strict",
     "docker:rag:up": "bash scripts/rag/verify-docker-env.sh up",
     "docker:rag:down": "bash scripts/rag/verify-docker-env.sh down",
     "docker:rag:verify": "bash scripts/rag/verify-docker-env.sh verify",

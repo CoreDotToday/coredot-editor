@@ -37,6 +37,17 @@ pnpm build
 
 `pnpm e2e` uses an isolated SQLite database under `data/e2e/` and should not mutate your local development database.
 
+When changing public documentation, install the docs toolchain and build the site in strict mode:
+
+```bash
+python3 -m venv .venv-docs
+. .venv-docs/bin/activate
+python -m pip install -r requirements-docs.txt
+pnpm docs:build
+```
+
+Keep `docs/` publishable. Do not commit agent-only plans, private implementation notes, customer material, or unreleased security details under the public docs tree.
+
 ## Code Style
 
 - Use TypeScript and Zod at API boundaries.
@@ -76,6 +87,7 @@ New provider behavior should be covered by tests and should not require live cre
 - [ ] Tests cover new or changed behavior.
 - [ ] `pnpm lint`, `pnpm typecheck`, `pnpm test`, and `pnpm build` pass.
 - [ ] `pnpm e2e` passes when the change touches user flows.
+- [ ] `pnpm docs:build` passes when the change touches `docs/`, `mkdocs.yml`, or documentation navigation.
 - [ ] No database files, `.env` files, traces, or generated build artifacts are committed.
 
 ## Reporting Bugs
