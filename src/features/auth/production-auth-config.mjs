@@ -3,13 +3,9 @@ export const CLERK_NOT_CONFIGURED_ERROR =
 export const TEST_AUTH_IN_PRODUCTION_ERROR =
   "Test authentication is disabled in production";
 
-function hasValue(value: string | undefined): boolean {
-  return Boolean(value?.trim());
-}
+const hasValue = (value) => Boolean(value?.trim());
 
-export function assertProductionAuthConfigured(
-  env: NodeJS.ProcessEnv,
-): void {
+export function assertProductionAuthConfigured(env) {
   if (env.NODE_ENV !== "production") {
     return;
   }

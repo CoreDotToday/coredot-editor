@@ -25,52 +25,56 @@ function runPreflight(
   });
 }
 
-describe("production auth preflight", () => {
-  it("accepts configured Clerk production startup", () => {
-    const result = runPreflight();
+describe(
+  "production auth preflight",
+  { sequential: true, timeout: 20_000 },
+  () => {
+    it("accepts configured Clerk production startup", () => {
+      const result = runPreflight();
 
-    expect(result.status).toBe(0);
-    expect(result.stderr).toBe("");
-  });
-
-  it("rejects missing production Clerk credentials", () => {
-    const result = runPreflight({ CLERK_SECRET_KEY: "  " });
-
-    expect(result.status).not.toBe(0);
-    expect(result.stderr).toContain("Clerk authentication is not configured");
-  });
-
-  it("rejects production test authentication", () => {
-    const result = runPreflight({ AUTH_MODE: "test" });
-
-    expect(result.status).not.toBe(0);
-    expect(result.stderr).toContain(
-      "Test authentication is disabled in production",
-    );
-  });
-
-  it("preserves development test authentication", () => {
-    const result = runPreflight({
-      AUTH_MODE: "test",
-      CLERK_SECRET_KEY: "",
-      NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: "",
-      NODE_ENV: "development",
+      expect(result.status).toBe(0);
+      expect(result.stderr).toBe("");
     });
 
-    expect(result.status).toBe(0);
-  });
+    it("rejects missing production Clerk credentials", () => {
+      const result = runPreflight({ CLERK_SECRET_KEY: "  " });
 
-  it("forces production validation for the supported start command", () => {
-    const result = runPreflight(
-      {
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain("Clerk authentication is not configured");
+    });
+
+    it("rejects production test authentication", () => {
+      const result = runPreflight({ AUTH_MODE: "test" });
+
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain(
+        "Test authentication is disabled in production",
+      );
+    });
+
+    it("preserves development test authentication", () => {
+      const result = runPreflight({
+        AUTH_MODE: "test",
         CLERK_SECRET_KEY: "",
         NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: "",
         NODE_ENV: "development",
-      },
-      ["--production"],
-    );
+      });
 
-    expect(result.status).not.toBe(0);
-    expect(result.stderr).toContain("Clerk authentication is not configured");
-  });
-});
+      expect(result.status).toBe(0);
+    });
+
+    it("forces production validation for the supported start command", () => {
+      const result = runPreflight(
+        {
+          CLERK_SECRET_KEY: "",
+          NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: "",
+          NODE_ENV: "development",
+        },
+        ["--production"],
+      );
+
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain("Clerk authentication is not configured");
+    });
+  },
+);

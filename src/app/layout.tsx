@@ -1,7 +1,7 @@
 import { ClerkProvider } from "@clerk/nextjs";
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
-import { assertProductionAuthConfigured } from "@/features/auth/production-auth-config";
+import { assertProductionAuthConfigured } from "@/features/auth/production-auth-config.mjs";
 import "./globals.css";
 
 const geistSans = Geist({

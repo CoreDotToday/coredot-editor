@@ -1,7 +1,7 @@
 import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
 import type { NextMiddleware } from "next/server";
 import { NextResponse } from "next/server";
-import { assertProductionAuthConfigured } from "@/features/auth/production-auth-config";
+import { assertProductionAuthConfigured } from "@/features/auth/production-auth-config.mjs";
 
 const isPublicRoute = createRouteMatcher([
   "/",

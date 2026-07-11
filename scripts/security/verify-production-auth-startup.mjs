@@ -5,6 +5,23 @@ const pnpmCommand = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
 const clerkConfigurationError = "Clerk authentication is not configured";
 const startupTimeoutMilliseconds = 20_000;
 
+function terminateProcess(child) {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return;
+  }
+
+  if (process.platform !== "win32" && child.pid) {
+    try {
+      process.kill(-child.pid, "SIGTERM");
+      return;
+    } catch {
+      // Fall back to terminating the direct child below.
+    }
+  }
+
+  child.kill("SIGTERM");
+}
+
 function run(command, args, options) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, options);
@@ -74,6 +91,7 @@ async function verifyInvalidProductionStartupFails() {
 
   await new Promise((resolve, reject) => {
     const child = spawn(pnpmCommand, ["start"], {
+      detached: process.platform !== "win32",
       env: invalidEnvironment,
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -88,7 +106,7 @@ async function verifyInvalidProductionStartupFails() {
 
       if (/\bReady in\b/i.test(output)) {
         reportedReady = true;
-        child.kill("SIGTERM");
+        terminateProcess(child);
       }
     };
 
@@ -97,7 +115,7 @@ async function verifyInvalidProductionStartupFails() {
 
     const timeout = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGTERM");
+      terminateProcess(child);
     }, startupTimeoutMilliseconds);
 
     child.once("error", (error) => {
@@ -137,9 +155,79 @@ async function verifyInvalidProductionStartupFails() {
   });
 }
 
+async function verifyValidProductionStartupReachesReadiness() {
+  const port = await reserveAvailablePort();
+  const validEnvironment = {
+    ...process.env,
+    AUTH_MODE: "clerk",
+    CLERK_SECRET_KEY: "sk_test_startup_verification",
+    NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY:
+      "pk_test_Y2xlcmsuZXhhbXBsZS5jb20k",
+    NODE_ENV: "production",
+    HOSTNAME: "127.0.0.1",
+    PORT: String(port),
+  };
+
+  await new Promise((resolve, reject) => {
+    const child = spawn(pnpmCommand, ["start"], {
+      detached: process.platform !== "win32",
+      env: validEnvironment,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let output = "";
+    let reportedReady = false;
+    let timedOut = false;
+
+    const collectOutput = (chunk) => {
+      const text = chunk.toString();
+      output += text;
+      process.stdout.write(text);
+
+      if (!reportedReady && /\bReady in\b/i.test(output)) {
+        reportedReady = true;
+        terminateProcess(child);
+      }
+    };
+
+    child.stdout.on("data", collectOutput);
+    child.stderr.on("data", collectOutput);
+
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      terminateProcess(child);
+    }, startupTimeoutMilliseconds);
+
+    child.once("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+
+    child.once("exit", (code, signal) => {
+      clearTimeout(timeout);
+
+      if (timedOut) {
+        reject(new Error("Valid production server did not become ready in time"));
+        return;
+      }
+
+      if (!reportedReady) {
+        reject(
+          new Error(
+            `Valid production server exited before readiness (code ${String(code)}, signal ${String(signal)})`,
+          ),
+        );
+        return;
+      }
+
+      resolve();
+    });
+  });
+}
+
 await buildProductionApplication();
 await verifyInvalidProductionStartupFails();
+await verifyValidProductionStartupReachesReadiness();
 
 console.log(
-  "Verified invalid production auth exits nonzero before server readiness.",
+  "Verified invalid production auth exits before readiness and valid auth reaches readiness.",
 );

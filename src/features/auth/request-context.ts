@@ -1,5 +1,5 @@
 import { createTestRequestContext } from "./test-request-context";
-import { assertProductionAuthConfigured } from "./production-auth-config";
+import { assertProductionAuthConfigured } from "./production-auth-config.mjs";
 
 export type WorkspaceRole = "admin" | "member" | "owner";
 

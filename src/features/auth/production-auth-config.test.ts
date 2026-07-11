@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertProductionAuthConfigured } from "./production-auth-config";
+import { assertProductionAuthConfigured } from "./production-auth-config.mjs";
 
 function productionEnv(
   overrides: Partial<NodeJS.ProcessEnv> = {},
