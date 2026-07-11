@@ -1,5 +1,6 @@
 import { readFile, readdir } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
+import { pathToFileURL } from "node:url";
 import ts from "typescript";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AuthenticationRequiredError } from "./request-context";
@@ -101,6 +102,29 @@ function analyzeRouteMethodExports(source: string, fileName = "route.ts") {
   return { methods, violations };
 }
 
+async function assertRouteMethodsReturnUnauthorized(
+  routeLabel: string,
+  methods: readonly string[],
+  routeModule: Record<string, unknown>,
+) {
+  for (const method of methods) {
+    const handler = routeModule[method];
+    if (typeof handler !== "function") {
+      throw new Error(`${routeLabel}#${method} is not an exported function`);
+    }
+    const response = await handler() as Response;
+    const body = await response.json().catch(() => null) as Record<string, unknown> | null;
+    if (
+      response.status !== 401 ||
+      !body ||
+      body.error !== "Authentication required" ||
+      Object.keys(body).length !== 1
+    ) {
+      throw new Error(`${routeLabel}#${method} did not return the standard JSON 401 response`);
+    }
+  }
+}
+
 describe("protected server entrypoints", () => {
   it("requires every API route to use the centralized protected route seam", async () => {
     const routeFiles = await findFiles(join(appDirectory, "api"), "route.ts");
@@ -138,6 +162,21 @@ describe("protected server entrypoints", () => {
     ]);
   });
 
+  it("detects an unprotected method even when another method in the route is protected", async () => {
+    const analysis = analyzeRouteMethodExports(`
+      export async function GET() {}
+      export async function POST() {}
+    `, "fixture/route.ts");
+    const fixtureModule = {
+      GET: async () => Response.json({ error: "Authentication required" }, { status: 401 }),
+      POST: async () => Response.json({ ok: true }),
+    };
+
+    await expect(
+      assertRouteMethodsReturnUnauthorized("fixture/route.ts", analysis.methods, fixtureModule),
+    ).rejects.toThrow("fixture/route.ts#POST did not return the standard JSON 401 response");
+  });
+
   it("requires every non-public page and server action to use the page context seam", async () => {
     const pageFiles = await findFiles(appDirectory, "page.tsx");
     const protectedPageFiles = pageFiles.filter((pageFile) => !publicPageRoutes.has(getPageRoute(pageFile)));
@@ -163,31 +202,21 @@ describe("protected server entrypoints", () => {
         throw new AuthenticationRequiredError();
       },
     });
-    const routeModules = await Promise.all([
-      import("@/app/api/ai/review/route"),
-      import("@/app/api/ai/rewrite/route"),
-      import("@/app/api/documents/route"),
-      import("@/app/api/documents/[id]/route"),
-      import("@/app/api/documents/[id]/export/route"),
-      import("@/app/api/documents/import/route"),
-      import("@/app/api/proposals/[id]/route"),
-      import("@/app/api/proposals/[id]/apply/route"),
-      import("@/app/api/settings/ai/route"),
-      import("@/app/api/settings/ai/test/route"),
-      import("@/app/api/templates/route"),
-      import("@/app/api/templates/[id]/route"),
-    ]);
-    const handlers = routeModules.flatMap((routeModule) =>
-      Object.entries(routeModule)
-        .filter(([name, value]) => /^[A-Z]+$/.test(name) && typeof value === "function")
-        .map(([, value]) => value as () => Promise<Response>),
+    const routeFiles = await findFiles(join(appDirectory, "api"), "route.ts");
+    const inventory = await Promise.all(routeFiles.map(async (routeFile) => ({
+      analysis: analyzeRouteMethodExports(await readFile(routeFile, "utf8"), routeFile),
+      routeFile,
+      routeLabel: relative(process.cwd(), routeFile),
+    })));
+    const discoveredMethods = inventory.flatMap(({ analysis, routeLabel }) =>
+      analysis.methods.map((method) => `${routeLabel}#${method}`),
     );
 
-    expect(handlers).toHaveLength(18);
-    for (const handler of handlers) {
-      const response = await handler();
-      expect(response.status).toBe(401);
-      await expect(response.json()).resolves.toEqual({ error: "Authentication required" });
+    expect(discoveredMethods.length).toBeGreaterThan(0);
+    expect(new Set(discoveredMethods).size).toBe(discoveredMethods.length);
+    for (const { analysis, routeFile, routeLabel } of inventory) {
+      const routeModule = await import(pathToFileURL(routeFile).href) as Record<string, unknown>;
+      await assertRouteMethodsReturnUnauthorized(routeLabel, analysis.methods, routeModule);
     }
     expect(ensureWorkspaceBootstrap).not.toHaveBeenCalled();
   });
