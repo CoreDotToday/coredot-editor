@@ -1,12 +1,12 @@
 import { NextResponse } from "next/server";
 import { getAiSettings } from "@/features/ai/ai-settings-repository";
-
-const localWorkspace = { workspaceId: "local" };
 import { createAiProvider } from "@/features/ai/providers";
+import { createProtectedRouteHandler, requireWorkspaceAdministrator } from "@/features/auth/route-context";
 
-export async function POST() {
+const postHandler = createProtectedRouteHandler(async (context) => {
+  requireWorkspaceAdministrator(context);
   try {
-    const settings = await getAiSettings(localWorkspace);
+    const settings = await getAiSettings(context);
     const provider = createAiProvider(settings);
     await provider.generateText({
       messages: [
@@ -19,4 +19,8 @@ export async function POST() {
   } catch {
     return NextResponse.json({ ok: false, error: "LLM 설정을 확인해 주세요." }, { status: 400 });
   }
+});
+
+export async function POST() {
+  return postHandler();
 }

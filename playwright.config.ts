@@ -2,7 +2,10 @@ import { defineConfig, devices } from "@playwright/test";
 
 const e2eEnv = {
   AI_PROVIDER: "stub",
+  AUTH_MODE: "test",
   DATABASE_URL: "file:./data/e2e/coredot-e2e.db",
+  TEST_PRINCIPAL_ID: "e2e-user",
+  TEST_WORKSPACE_ID: "e2e-workspace",
 };
 const requestedPort = Number.parseInt(process.env.E2E_PORT ?? "", 10);
 const e2ePort = Number.isFinite(requestedPort) && requestedPort > 0 ? requestedPort : 3100;
@@ -19,7 +22,8 @@ export default defineConfig({
   fullyParallel: true,
   workers: e2eWorkers,
   webServer: {
-    command: `AI_PROVIDER=${e2eEnv.AI_PROVIDER} DATABASE_URL=${e2eEnv.DATABASE_URL} pnpm exec next dev -p ${e2ePort}`,
+    command: `pnpm exec next dev -p ${e2ePort}`,
+    env: e2eEnv,
     url: `http://127.0.0.1:${e2ePort}`,
     reuseExistingServer: false,
   },

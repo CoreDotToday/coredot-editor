@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createDocumentFromContent } from "@/features/documents/document-repository";
 import { docxBufferToTiptapJson } from "@/features/documents/docx-conversion";
+import { TEST_REQUEST_CONTEXT } from "@/test/auth-context";
 import { POST } from "./route";
 
 vi.mock("@/features/documents/document-repository", () => ({
@@ -46,7 +47,7 @@ describe("POST /api/documents/import", () => {
     });
     vi.mocked(createDocumentFromContent).mockResolvedValueOnce({
       id: "doc_imported",
-      workspaceId: "local",
+      workspaceId: "vitest-workspace",
       title: "Contract Draft",
       contentJson: {
         type: "doc",
@@ -69,7 +70,7 @@ describe("POST /api/documents/import", () => {
     );
 
     expect(response.status).toBe(201);
-    expect(createDocumentFromContent).toHaveBeenCalledWith({ workspaceId: "local" }, "Contract Draft", {
+    expect(createDocumentFromContent).toHaveBeenCalledWith(TEST_REQUEST_CONTEXT, "Contract Draft", {
       type: "doc",
       content: [{ type: "paragraph", content: [{ type: "text", text: "Imported body" }] }],
     });

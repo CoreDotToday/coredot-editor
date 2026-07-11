@@ -5,6 +5,8 @@ import { createAiProvider } from "@/features/ai/providers";
 import { completeAiRunWithProposals, createAiRun, failAiRun } from "@/features/ai/ai-run-repository";
 import { getPromptTemplateById } from "@/features/templates/template-repository";
 import type { DocumentRecord, PromptTemplateRecord } from "@/db/schema";
+import { setProtectedRequestContextDependenciesForTests } from "@/features/auth/route-context";
+import { TEST_REQUEST_CONTEXT } from "@/test/auth-context";
 import { POST } from "./route";
 
 vi.mock("@/features/documents/document-repository", () => ({
@@ -29,7 +31,7 @@ vi.mock("@/features/ai/ai-run-repository", () => ({
   failAiRun: vi.fn(async (_scope, id, errorMessage) => ({ id, errorMessage, status: "failed" })),
 }));
 
-const localWorkspace = { workspaceId: "local" };
+const localWorkspace = TEST_REQUEST_CONTEXT;
 
 vi.mock("@/features/ai/ai-settings-repository", () => ({
   getAiSettings: vi.fn(async () => ({
@@ -39,7 +41,7 @@ vi.mock("@/features/ai/ai-settings-repository", () => ({
     aiProvider: "stub",
     aiReasoningEffort: null,
     id: "default",
-    workspaceId: "local",
+    workspaceId: "vitest-workspace",
   })),
 }));
 
@@ -59,7 +61,7 @@ vi.mock("@/features/ai/providers", () => ({
 
 const documentRecord = {
   id: "doc_1",
-  workspaceId: "local",
+  workspaceId: "vitest-workspace",
   title: "Memo",
   plainText: "Old text in a document",
   contentJson: { type: "doc" },
@@ -72,7 +74,7 @@ const documentRecord = {
 
 const templateRecord = {
   id: "tpl_1",
-  workspaceId: "local",
+  workspaceId: "vitest-workspace",
   builtinKey: null,
   name: "Rewrite",
   description: "Rewrite",
@@ -108,6 +110,10 @@ const validBody = {
 describe("POST /api/ai/rewrite", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    setProtectedRequestContextDependenciesForTests({
+      ensureWorkspaceBootstrap: async () => undefined,
+      getRequestContext: async () => TEST_REQUEST_CONTEXT,
+    });
   });
 
   it("returns 400 for bad JSON without touching repositories", async () => {
@@ -125,6 +131,27 @@ describe("POST /api/ai/rewrite", () => {
 
     expect(response.status).toBe(404);
     expect(await response.json()).toEqual({ error: "Document not found" });
+  });
+
+  it("returns 404 when a second principal requests AI work for another workspace's document", async () => {
+    const workspaceBContext = {
+      ...TEST_REQUEST_CONTEXT,
+      principalId: "principal-b",
+      requestId: "request-b",
+      workspaceId: "workspace-b",
+    };
+    setProtectedRequestContextDependenciesForTests({
+      ensureWorkspaceBootstrap: async () => undefined,
+      getRequestContext: async () => workspaceBContext,
+    });
+    vi.mocked(getDocumentById).mockResolvedValueOnce(null as never);
+
+    const response = await POST(createJsonRequest({ ...validBody, documentId: "workspace-a-document" }));
+
+    expect(response.status).toBe(404);
+    expect(getDocumentById).toHaveBeenCalledWith(workspaceBContext, "workspace-a-document");
+    expect(getAiSettings).not.toHaveBeenCalled();
+    expect(createAiRun).not.toHaveBeenCalled();
   });
 
   it("returns 404 when the template is missing before selected text validation", async () => {

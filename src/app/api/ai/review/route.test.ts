@@ -4,6 +4,7 @@ import { createAiProvider } from "@/features/ai/providers";
 import { getDocumentById, getDocumentsByIds } from "@/features/documents/document-repository";
 import { getPromptTemplateById } from "@/features/templates/template-repository";
 import type { DocumentRecord, PromptTemplateRecord } from "@/db/schema";
+import { TEST_REQUEST_CONTEXT } from "@/test/auth-context";
 import { POST } from "./route";
 
 vi.mock("@/features/documents/document-repository", () => ({
@@ -28,7 +29,7 @@ vi.mock("@/features/ai/ai-run-repository", () => ({
   failAiRun: vi.fn(),
 }));
 
-const localWorkspace = { workspaceId: "local" };
+const localWorkspace = TEST_REQUEST_CONTEXT;
 
 vi.mock("@/features/ai/ai-settings-repository", () => ({
   getAiSettings: vi.fn(async () => ({
@@ -38,7 +39,7 @@ vi.mock("@/features/ai/ai-settings-repository", () => ({
     aiProvider: "stub",
     aiReasoningEffort: null,
     id: "default",
-    workspaceId: "local",
+    workspaceId: "vitest-workspace",
   })),
 }));
 
@@ -80,7 +81,7 @@ vi.mock("@/features/ai/providers", () => ({
 
 const documentRecord = {
   id: "doc_1",
-  workspaceId: "local",
+  workspaceId: "vitest-workspace",
   title: "Memo",
   plainText: "growth was good and someone should follow up",
   contentJson: { type: "doc" },
@@ -93,7 +94,7 @@ const documentRecord = {
 
 const templateRecord = {
   id: "tpl_1",
-  workspaceId: "local",
+  workspaceId: "vitest-workspace",
   builtinKey: null,
   name: "Review",
   description: "Review",

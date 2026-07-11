@@ -1,11 +1,11 @@
 import { PromptTemplateManager } from "@/components/templates/PromptTemplateManager";
 import { listPromptTemplates } from "@/features/templates/template-repository";
-
-const localWorkspace = { workspaceId: "local" };
+import { getProtectedPageContext } from "@/features/auth/route-context";
 
 export const dynamic = "force-dynamic";
 
 export default async function TemplatesPage() {
-  const templates = await listPromptTemplates(localWorkspace);
+  const context = await getProtectedPageContext("/templates");
+  const templates = await listPromptTemplates(context);
   return <PromptTemplateManager templates={templates} />;
 }

@@ -1,25 +1,33 @@
 import { NextResponse } from "next/server";
 import { aiSettingsPayloadSchema, getAiSettings, updateAiSettings } from "@/features/ai/ai-settings-repository";
+import { createProtectedRouteHandler, requireWorkspaceAdministrator } from "@/features/auth/route-context";
 
-const localWorkspace = { workspaceId: "local" };
-
-export async function GET() {
-  const settings = await getAiSettings(localWorkspace);
+const getHandler = createProtectedRouteHandler(async (context) => {
+  const settings = await getAiSettings(context);
   return NextResponse.json({ settings, secrets: getSecretStatus() });
-}
+});
 
-export async function PUT(request: Request) {
+const putHandler = createProtectedRouteHandler(async (context, request: Request) => {
+  requireWorkspaceAdministrator(context);
   const result = aiSettingsPayloadSchema.safeParse(await request.json().catch(() => null));
   if (!result.success) {
     return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
   }
 
   try {
-    const settings = await updateAiSettings(localWorkspace, result.data);
+    const settings = await updateAiSettings(context, result.data);
     return NextResponse.json({ settings, secrets: getSecretStatus() });
   } catch {
     return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
   }
+});
+
+export async function GET() {
+  return getHandler();
+}
+
+export async function PUT(request: Request) {
+  return putHandler(request);
 }
 
 function getSecretStatus() {

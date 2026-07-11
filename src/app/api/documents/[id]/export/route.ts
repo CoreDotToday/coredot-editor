@@ -1,9 +1,8 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { getDocumentById } from "@/features/documents/document-repository";
-
-const localWorkspace = { workspaceId: "local" };
 import { tiptapJsonToDocxBuffer } from "@/features/documents/docx-conversion";
+import { createProtectedRouteHandler } from "@/features/auth/route-context";
 
 export const runtime = "nodejs";
 
@@ -21,9 +20,9 @@ type Params = {
   params: Promise<{ id: string }>;
 };
 
-export async function POST(request: Request, { params }: Params) {
+const postHandler = createProtectedRouteHandler(async (context, request: Request, { params }: Params) => {
   const { id } = await params;
-  const document = await getDocumentById(localWorkspace, id);
+  const document = await getDocumentById(context, id);
   if (!document) {
     return NextResponse.json({ error: "Document not found" }, { status: 404 });
   }
@@ -40,6 +39,10 @@ export async function POST(request: Request, { params }: Params) {
       "Content-Type": DOCX_MIME_TYPE,
     },
   });
+});
+
+export async function POST(request: Request, params: Params) {
+  return postHandler(request, params);
 }
 
 function sanitizeFileName(value: string) {

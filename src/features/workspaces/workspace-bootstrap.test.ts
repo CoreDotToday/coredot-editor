@@ -8,6 +8,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import * as schema from "@/db/schema";
 import { defaultPromptTemplates } from "@/db/seed";
 import { createWorkspaceBootstrap } from "./workspace-bootstrap";
+import { createProtectedRouteHandler } from "@/features/auth/route-context";
+import type { RequestContext } from "@/features/auth/request-context";
 
 const tempDirs: string[] = [];
 const workspaceA = { workspaceId: "workspace_a" };
@@ -59,6 +61,42 @@ async function createIsolatedWorkspaceDb() {
 }
 
 describe("workspace bootstrap", () => {
+  it("bootstraps a new workspace once through concurrent first protected requests", async () => {
+    const db = await createIsolatedWorkspaceDb();
+    const ensureWorkspaceBootstrap = createWorkspaceBootstrap(db);
+    const context: RequestContext = {
+      authMode: "test",
+      principalId: "new-principal",
+      requestId: "new-request",
+      role: "owner",
+      workspaceId: "new-workspace",
+    };
+    const handler = createProtectedRouteHandler(
+      async (requestContext, request: Request) => {
+        void request;
+        return Response.json({ workspaceId: requestContext.workspaceId });
+      },
+      {
+        ensureWorkspaceBootstrap,
+        getRequestContext: async () => context,
+      },
+    );
+
+    const responses = await Promise.all([
+      handler(new Request("http://localhost/api/documents")),
+      handler(new Request("http://localhost/api/templates")),
+      handler(new Request("http://localhost/api/settings/ai")),
+    ]);
+
+    expect(responses.map((response) => response.status)).toEqual([200, 200, 200]);
+    const templates = await db.select().from(schema.promptTemplates);
+    const settings = await db.select().from(schema.appSettings);
+    expect(templates).toHaveLength(defaultPromptTemplates.length);
+    expect(templates.every((template) => template.workspaceId === context.workspaceId)).toBe(true);
+    expect(settings).toHaveLength(1);
+    expect(settings[0]?.workspaceId).toBe(context.workspaceId);
+  });
+
   it("creates defaults idempotently for each workspace without copying another workspace's values", async () => {
     const db = await createIsolatedWorkspaceDb();
     const ensureWorkspaceBootstrap = createWorkspaceBootstrap(db);

@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getAiSettings, updateAiSettings } from "@/features/ai/ai-settings-repository";
+import { setProtectedRequestContextDependenciesForTests } from "@/features/auth/route-context";
+import { TEST_REQUEST_CONTEXT } from "@/test/auth-context";
 import { GET, PUT } from "./route";
 
 vi.mock("@/features/ai/ai-settings-repository", async (importOriginal) => {
@@ -13,7 +15,7 @@ vi.mock("@/features/ai/ai-settings-repository", async (importOriginal) => {
       aiProvider: "coredot",
       aiReasoningEffort: null,
       id: "default",
-      workspaceId: "local",
+      workspaceId: "vitest-workspace",
     })),
     updateAiSettings: vi.fn(async (scope, input) => ({
       ...input,
@@ -33,6 +35,7 @@ function createJsonRequest(body: unknown) {
 describe("/api/settings/ai", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    useRequestContext();
   });
 
   it("returns settings with secret configuration booleans only", async () => {
@@ -53,7 +56,7 @@ describe("/api/settings/ai", () => {
           aiProvider: "coredot",
           aiReasoningEffort: null,
           id: "default",
-          workspaceId: "local",
+          workspaceId: "vitest-workspace",
         },
         secrets: {
           coredotConfigured: true,
@@ -88,7 +91,7 @@ describe("/api/settings/ai", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(updateAiSettings).toHaveBeenCalledWith({ workspaceId: "local" }, {
+    expect(updateAiSettings).toHaveBeenCalledWith(TEST_REQUEST_CONTEXT, {
       aiBaseUrl: "https://api.core.today/llm/openai/v1",
       aiMaxCompletionTokens: 64000,
       aiModel: "gpt-5-mini",
@@ -111,4 +114,25 @@ describe("/api/settings/ai", () => {
     expect(await response.json()).toEqual({ error: "Invalid request body" });
     expect(getAiSettings).not.toHaveBeenCalled();
   });
+
+  it("allows member reads but forbids settings updates before parsing", async () => {
+    const memberContext = { ...TEST_REQUEST_CONTEXT, principalId: "member-a", role: "member" as const };
+    useRequestContext(memberContext);
+
+    const readResponse = await GET();
+    const updateResponse = await PUT(new Request("http://localhost/api/settings/ai", { body: "{", method: "PUT" }));
+
+    expect(readResponse.status).toBe(200);
+    expect(getAiSettings).toHaveBeenCalledWith(memberContext);
+    expect(updateResponse.status).toBe(403);
+    expect(await updateResponse.json()).toEqual({ error: "Forbidden" });
+    expect(updateAiSettings).not.toHaveBeenCalled();
+  });
 });
+
+function useRequestContext(context = TEST_REQUEST_CONTEXT) {
+  setProtectedRequestContextDependenciesForTests({
+    ensureWorkspaceBootstrap: async () => undefined,
+    getRequestContext: async () => context,
+  });
+}

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AiProposalRecord, DocumentRecord } from "@/db/schema";
 import { applyProposalToDocumentDraft } from "@/features/proposals/proposal-application-service";
+import { TEST_REQUEST_CONTEXT } from "@/test/auth-context";
 import { POST } from "./route";
 
 vi.mock("@/features/proposals/proposal-application-service", () => ({
@@ -10,7 +11,7 @@ vi.mock("@/features/proposals/proposal-application-service", () => ({
 function createProposalRecord(overrides: Partial<AiProposalRecord> = {}): AiProposalRecord {
   return {
     id: "proposal_1",
-    workspaceId: "local",
+    workspaceId: "vitest-workspace",
     aiRunId: "run_1",
     documentId: "doc_1",
     targetText: "old",
@@ -33,7 +34,7 @@ function createProposalRecord(overrides: Partial<AiProposalRecord> = {}): AiProp
 function createDocumentRecord(overrides: Partial<DocumentRecord> = {}): DocumentRecord {
   return {
     id: "doc_1",
-    workspaceId: "local",
+    workspaceId: "vitest-workspace",
     title: "Market Entry Memo",
     contentJson: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "new" }] }] },
     plainText: "new",
@@ -93,7 +94,7 @@ describe("POST /api/proposals/[id]/apply", () => {
       proposal: { id: "proposal_1", appliedMode: "replace", status: "accepted" },
     });
     expect(applyProposalToDocumentDraft).toHaveBeenCalledWith(
-      { workspaceId: "local" },
+      TEST_REQUEST_CONTEXT,
       {
         appliedMode: "replace",
         draft: {

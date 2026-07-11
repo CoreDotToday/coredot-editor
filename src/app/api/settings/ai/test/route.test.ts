@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getAiSettings } from "@/features/ai/ai-settings-repository";
 import { createAiProvider } from "@/features/ai/providers";
+import { setProtectedRequestContextDependenciesForTests } from "@/features/auth/route-context";
+import { TEST_REQUEST_CONTEXT } from "@/test/auth-context";
 import { POST } from "./route";
 
 vi.mock("@/features/ai/ai-settings-repository", () => ({
@@ -31,6 +33,10 @@ vi.mock("@/features/ai/providers", () => ({
 describe("POST /api/settings/ai/test", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    setProtectedRequestContextDependenciesForTests({
+      ensureWorkspaceBootstrap: async () => undefined,
+      getRequestContext: async () => TEST_REQUEST_CONTEXT,
+    });
   });
 
   it("tests the saved provider settings without requiring browser-side secrets", async () => {
@@ -60,5 +66,18 @@ describe("POST /api/settings/ai/test", () => {
 
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({ error: "LLM 설정을 확인해 주세요.", ok: false });
+  });
+
+  it("forbids members from exercising saved provider credentials", async () => {
+    setProtectedRequestContextDependenciesForTests({
+      ensureWorkspaceBootstrap: async () => undefined,
+      getRequestContext: async () => ({ ...TEST_REQUEST_CONTEXT, role: "member" }),
+    });
+
+    const response = await POST();
+
+    expect(response.status).toBe(403);
+    expect(getAiSettings).not.toHaveBeenCalled();
+    expect(createAiProvider).not.toHaveBeenCalled();
   });
 });

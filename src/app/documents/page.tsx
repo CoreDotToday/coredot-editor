@@ -2,18 +2,18 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { DocumentImportButton } from "@/components/document/DocumentImportButton";
 import { createDocumentDraft, listDocuments } from "@/features/documents/document-repository";
-
-const localWorkspace = { workspaceId: "local" };
 import { filterDocumentSummaries } from "@/features/documents/document-filters";
 import { documentReadinessValues, normalizeDocumentReadiness } from "@/features/documents/document-metadata";
 import type { DocumentReadiness } from "@/db/schema";
+import { getProtectedPageContext } from "@/features/auth/route-context";
 
 export const dynamic = "force-dynamic";
 
 async function createDocument() {
   "use server";
 
-  const document = await createDocumentDraft(localWorkspace, "제목 없는 문서");
+  const context = await getProtectedPageContext("/documents");
+  const document = await createDocumentDraft(context, "제목 없는 문서");
   redirect(`/documents/${document.id}`);
 }
 
@@ -46,8 +46,9 @@ function getListMetadataValue(value: unknown) {
 }
 
 export default async function DocumentsPage({ searchParams }: DocumentsPageProps) {
+  const context = await getProtectedPageContext("/documents");
   const params = (await searchParams) ?? {};
-  const documents = filterDocumentSummaries(await listDocuments(localWorkspace), {
+  const documents = filterDocumentSummaries(await listDocuments(context), {
     metadataKey: params.metadataKey,
     metadataValue: params.metadataValue,
     query: params.query,

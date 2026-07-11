@@ -4,10 +4,9 @@ import { buildAiMessages } from "@/features/ai/payload-builder";
 import { completeAiRunWithProposals, createAiRun, failAiRun } from "@/features/ai/ai-run-repository";
 import { prepareAiCommandRequest, type AiCommandRequestFailure } from "@/features/ai/ai-command-service";
 import { applyProposalToText } from "@/features/proposals/proposal-apply";
+import { createProtectedRouteHandler } from "@/features/auth/route-context";
 
-const localWorkspace = { workspaceId: "local" };
-
-export async function POST(request: Request) {
+const postHandler = createProtectedRouteHandler(async (context, request: Request) => {
   const payload = await request.json().catch(() => null);
   const result = aiCommandPayloadSchema.safeParse(payload);
   if (!result.success) {
@@ -18,7 +17,7 @@ export async function POST(request: Request) {
   const hasSubmittedDocumentText =
     typeof payload === "object" && payload !== null && Object.hasOwn(payload, "documentText");
   const prepared = await prepareAiCommandRequest(
-    localWorkspace,
+    context,
     {
       payload: body,
       useSubmittedDocumentText: hasSubmittedDocumentText,
@@ -30,7 +29,7 @@ export async function POST(request: Request) {
 
   const { document, provider, referencedDocuments, reviewedText, template } = prepared;
 
-  const run = await createAiRun(localWorkspace, {
+  const run = await createAiRun(context, {
     documentId: document.id,
     promptTemplateId: template.id,
     commandType: "document_review",
@@ -64,7 +63,7 @@ export async function POST(request: Request) {
 
     const outputText = JSON.stringify(review);
     const finalizedRun = await completeAiRunWithProposals(
-      localWorkspace,
+      context,
       run.id,
       outputText,
       validFindings.map(({ finding, occurrenceIndex }) => ({
@@ -83,9 +82,13 @@ export async function POST(request: Request) {
       skippedProposalCount,
     });
   } catch (error) {
-    await failAiRun(localWorkspace, run.id, error instanceof Error ? error.message : "Unknown AI generation failure");
+    await failAiRun(context, run.id, error instanceof Error ? error.message : "Unknown AI generation failure");
     return NextResponse.json({ error: "AI generation failed" }, { status: 500 });
   }
+});
+
+export async function POST(request: Request) {
+  return postHandler(request);
 }
 
 function aiCommandFailureResponse(failure: AiCommandRequestFailure) {

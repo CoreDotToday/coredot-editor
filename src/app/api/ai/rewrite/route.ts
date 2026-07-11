@@ -10,6 +10,7 @@ import {
   type AiCommandRequestFailure,
 } from "@/features/ai/ai-command-service";
 import { validateProposalTargetOccurrence } from "@/features/proposals/proposal-apply";
+import { createProtectedRouteHandler } from "@/features/auth/route-context";
 
 const rewritePayloadSchema = aiCommandPayloadSchema.extend({
   selectedText: z
@@ -17,9 +18,7 @@ const rewritePayloadSchema = aiCommandPayloadSchema.extend({
     .max(AI_CONTEXT_LIMITS.selectedTextMaxCharacters)
     .refine((value) => value.trim().length > 0),
 });
-const localWorkspace = { workspaceId: "local" };
-
-export async function POST(request: Request) {
+const postHandler = createProtectedRouteHandler(async (context, request: Request) => {
   const payload = await request.json().catch(() => null);
   const result = rewritePayloadSchema.safeParse(payload);
   if (!result.success) {
@@ -30,7 +29,7 @@ export async function POST(request: Request) {
   const hasSubmittedDocumentText =
     typeof payload === "object" && payload !== null && Object.hasOwn(payload, "documentText");
   const prepared = await prepareAiCommandRequest(
-    localWorkspace,
+    context,
     {
       deferProviderCreation: true,
       payload: body,
@@ -51,13 +50,13 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Selected text must match exactly once in the document" }, { status: 400 });
   }
 
-  const providerResult = await createAiProviderForCommand(localWorkspace);
+  const providerResult = await createAiProviderForCommand(context);
   if (!providerResult.ok) {
     return aiCommandFailureResponse(providerResult);
   }
   const { provider } = providerResult;
 
-  const run = await createAiRun(localWorkspace, {
+  const run = await createAiRun(context, {
     documentId: document.id,
     promptTemplateId: template.id,
     commandType: "selection_rewrite",
@@ -85,7 +84,7 @@ export async function POST(request: Request) {
     });
     const rewriteResult = normalizeSelectionRewriteResult(await provider.generateText({ messages }));
     const { explanation, replacementText } = rewriteResult;
-    const finalizedRun = await completeAiRunWithProposals(localWorkspace, run.id, replacementText, [
+    const finalizedRun = await completeAiRunWithProposals(context, run.id, replacementText, [
       {
         command: body.command,
         defaultApplyMode: body.defaultApplyMode ?? getDefaultApplyModeForCommand(body.command),
@@ -102,9 +101,13 @@ export async function POST(request: Request) {
 
     return NextResponse.json({ run: finalizedRun?.run ?? run, proposal: finalizedRun?.proposals[0] ?? null });
   } catch (error) {
-    await failAiRun(localWorkspace, run.id, error instanceof Error ? error.message : "Unknown AI generation failure");
+    await failAiRun(context, run.id, error instanceof Error ? error.message : "Unknown AI generation failure");
     return NextResponse.json({ error: "AI generation failed" }, { status: 500 });
   }
+});
+
+export async function POST(request: Request) {
+  return postHandler(request);
 }
 
 function aiCommandFailureResponse(failure: AiCommandRequestFailure) {

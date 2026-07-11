@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { archivePromptTemplate, updatePromptTemplate } from "@/features/templates/template-repository";
+import { TEST_REQUEST_CONTEXT } from "@/test/auth-context";
+import { setProtectedRequestContextDependenciesForTests } from "@/features/auth/route-context";
 import { DELETE, PUT } from "./route";
 
 vi.mock("@/features/templates/template-repository", () => ({
@@ -21,6 +23,10 @@ vi.mock("@/features/templates/template-repository", () => ({
 
 afterEach(() => {
   vi.clearAllMocks();
+  setProtectedRequestContextDependenciesForTests({
+    ensureWorkspaceBootstrap: async () => undefined,
+    getRequestContext: async () => TEST_REQUEST_CONTEXT,
+  });
 });
 
 const validUpdateBody = {
@@ -73,6 +79,25 @@ describe("PUT /api/templates/[id]", () => {
     expect(response.status).toBe(404);
     expect(await response.json()).toEqual({ error: "Template not found" });
   });
+
+  it("returns 404 when updating another workspace's template id", async () => {
+    const workspaceBContext = {
+      ...TEST_REQUEST_CONTEXT,
+      principalId: "principal-b",
+      requestId: "request-b",
+      workspaceId: "workspace-b",
+    };
+    setProtectedRequestContextDependenciesForTests({
+      ensureWorkspaceBootstrap: async () => undefined,
+      getRequestContext: async () => workspaceBContext,
+    });
+    vi.mocked(updatePromptTemplate).mockResolvedValueOnce(null as never);
+
+    const response = await PUT(createJsonRequest(validUpdateBody), params);
+
+    expect(response.status).toBe(404);
+    expect(updatePromptTemplate).toHaveBeenCalledWith(workspaceBContext, "tpl_1", validUpdateBody);
+  });
 });
 
 describe("DELETE /api/templates/[id]", () => {
@@ -90,6 +115,24 @@ describe("DELETE /api/templates/[id]", () => {
 
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ template: { id: "tpl_1", isActive: false } });
-    expect(archivePromptTemplate).toHaveBeenCalledWith({ workspaceId: "local" }, "tpl_1");
+    expect(archivePromptTemplate).toHaveBeenCalledWith(TEST_REQUEST_CONTEXT, "tpl_1");
+  });
+
+  it("forbids members from updating or archiving templates", async () => {
+    setProtectedRequestContextDependenciesForTests({
+      ensureWorkspaceBootstrap: async () => undefined,
+      getRequestContext: async () => ({ ...TEST_REQUEST_CONTEXT, role: "member" }),
+    });
+
+    const updateResponse = await PUT(createJsonRequest(validUpdateBody), params);
+    const archiveResponse = await DELETE(
+      new Request("http://localhost/api/templates/tpl_1", { method: "DELETE" }),
+      params,
+    );
+
+    expect(updateResponse.status).toBe(403);
+    expect(archiveResponse.status).toBe(403);
+    expect(updatePromptTemplate).not.toHaveBeenCalled();
+    expect(archivePromptTemplate).not.toHaveBeenCalled();
   });
 });

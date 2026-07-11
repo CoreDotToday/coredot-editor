@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getProposalById, updateProposalStatus } from "@/features/proposals/proposal-repository";
+import { setProtectedRequestContextDependenciesForTests } from "@/features/auth/route-context";
+import { TEST_REQUEST_CONTEXT } from "@/test/auth-context";
 import { PATCH } from "./route";
 
 vi.mock("@/features/proposals/proposal-repository", () => ({
@@ -40,6 +42,10 @@ function createContext(id = "proposal_1") {
 describe("PATCH /api/proposals/[id]", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    setProtectedRequestContextDependenciesForTests({
+      ensureWorkspaceBootstrap: async () => undefined,
+      getRequestContext: async () => TEST_REQUEST_CONTEXT,
+    });
   });
 
   it("updates non-accepted proposal status", async () => {
@@ -49,7 +55,7 @@ describe("PATCH /api/proposals/[id]", () => {
 
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ proposal: { id: "proposal_1", status: "rejected" } });
-    expect(updateProposalStatus).toHaveBeenCalledWith({ workspaceId: "local" }, "proposal_1", "rejected", undefined, {
+    expect(updateProposalStatus).toHaveBeenCalledWith(TEST_REQUEST_CONTEXT, "proposal_1", "rejected", undefined, {
       expectedStatus: undefined,
     });
   });
@@ -89,10 +95,10 @@ describe("PATCH /api/proposals/[id]", () => {
       error: "Proposal status changed",
       proposal: { id: "proposal_1", status: "accepted" },
     });
-    expect(updateProposalStatus).toHaveBeenCalledWith({ workspaceId: "local" }, "proposal_1", "rejected", undefined, {
+    expect(updateProposalStatus).toHaveBeenCalledWith(TEST_REQUEST_CONTEXT, "proposal_1", "rejected", undefined, {
       expectedStatus: "pending",
     });
-    expect(getProposalById).toHaveBeenCalledWith({ workspaceId: "local" }, "proposal_1");
+    expect(getProposalById).toHaveBeenCalledWith(TEST_REQUEST_CONTEXT, "proposal_1");
   });
 
   it("returns 409 instead of 404 when a conditional update misses an existing proposal", async () => {
@@ -138,5 +144,32 @@ describe("PATCH /api/proposals/[id]", () => {
 
     expect(response.status).toBe(404);
     expect(await response.json()).toEqual({ error: "Proposal not found" });
+  });
+
+  it("returns 404 without leaking or mutating another workspace's proposal", async () => {
+    const workspaceBContext = {
+      ...TEST_REQUEST_CONTEXT,
+      principalId: "principal-b",
+      requestId: "request-b",
+      workspaceId: "workspace-b",
+    };
+    setProtectedRequestContextDependenciesForTests({
+      ensureWorkspaceBootstrap: async () => undefined,
+      getRequestContext: async () => workspaceBContext,
+    });
+    vi.mocked(updateProposalStatus).mockResolvedValueOnce(null as never);
+    vi.mocked(getProposalById).mockResolvedValueOnce(null as never);
+
+    const response = await PATCH(createJsonRequest({ status: "rejected" }), createContext());
+
+    expect(response.status).toBe(404);
+    expect(updateProposalStatus).toHaveBeenCalledWith(
+      workspaceBContext,
+      "proposal_1",
+      "rejected",
+      undefined,
+      { expectedStatus: undefined },
+    );
+    expect(getProposalById).toHaveBeenCalledWith(workspaceBContext, "proposal_1");
   });
 });

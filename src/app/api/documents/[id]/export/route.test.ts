@@ -43,7 +43,7 @@ describe("POST /api/documents/[id]/export", () => {
   it("returns 400 for an invalid export payload", async () => {
     vi.mocked(getDocumentById).mockResolvedValueOnce({
       id: "doc_1",
-      workspaceId: "local",
+      workspaceId: "vitest-workspace",
       title: "Draft",
       contentJson: { type: "doc", content: [{ type: "paragraph" }] },
       metadataJson: {},
@@ -68,7 +68,7 @@ describe("POST /api/documents/[id]/export", () => {
     };
     vi.mocked(getDocumentById).mockResolvedValueOnce({
       id: "doc_1",
-      workspaceId: "local",
+      workspaceId: "vitest-workspace",
       title: "Saved title",
       contentJson: { type: "doc", content: [{ type: "paragraph" }] },
       metadataJson: {},

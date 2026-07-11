@@ -1,8 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { getProposalById, updateProposalStatus } from "@/features/proposals/proposal-repository";
-
-const localWorkspace = { workspaceId: "local" };
+import { createProtectedRouteHandler } from "@/features/auth/route-context";
 
 const proposalStatusPayloadSchema = z.object({
   status: z.enum(["pending", "accepted", "rejected"]),
@@ -14,7 +13,11 @@ type ProposalRouteContext = {
   params: Promise<{ id: string }>;
 };
 
-export async function PATCH(request: Request, context: ProposalRouteContext) {
+const patchHandler = createProtectedRouteHandler(async (
+  requestContext,
+  request: Request,
+  context: ProposalRouteContext,
+) => {
   const result = proposalStatusPayloadSchema.safeParse(await request.json().catch(() => null));
   if (!result.success) {
     return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
@@ -26,9 +29,9 @@ export async function PATCH(request: Request, context: ProposalRouteContext) {
     return NextResponse.json({ error: "Use proposal apply endpoint for accepted proposals" }, { status: 400 });
   }
 
-  const proposal = await updateProposalStatus(localWorkspace, id, status, appliedMode, { expectedStatus });
+  const proposal = await updateProposalStatus(requestContext, id, status, appliedMode, { expectedStatus });
   if (!proposal) {
-    const existingProposal = await getProposalById(localWorkspace, id);
+    const existingProposal = await getProposalById(requestContext, id);
     if (existingProposal) {
       return NextResponse.json(
         {
@@ -45,4 +48,8 @@ export async function PATCH(request: Request, context: ProposalRouteContext) {
   }
 
   return NextResponse.json({ proposal });
+});
+
+export async function PATCH(request: Request, context: ProposalRouteContext) {
+  return patchHandler(request, context);
 }

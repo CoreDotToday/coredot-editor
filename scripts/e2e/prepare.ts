@@ -3,13 +3,15 @@ import { mkdir, rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { APP_ROOT } from "../../src/db/url";
-import { seedDefaultPromptTemplates } from "../../src/db/seed";
 
 export const E2E_DATABASE_URL = "file:./data/e2e/coredot-e2e.db";
 export const E2E_DATABASE_PATH = resolve(APP_ROOT, "data/e2e/coredot-e2e.db");
 export const E2E_ENV = {
   AI_PROVIDER: "stub",
+  AUTH_MODE: "test",
   DATABASE_URL: E2E_DATABASE_URL,
+  TEST_PRINCIPAL_ID: "e2e-user",
+  TEST_WORKSPACE_ID: "e2e-workspace",
 } as const;
 
 const sqliteSidecarSuffixes = ["", "-shm", "-wal", "-journal"];
@@ -52,9 +54,9 @@ export async function prepareE2eDatabase() {
   await removeE2eDatabaseFiles();
   await runCommand("pnpm", ["db:migrate"], env);
 
-  process.env.AI_PROVIDER = E2E_ENV.AI_PROVIDER;
-  process.env.DATABASE_URL = E2E_ENV.DATABASE_URL;
-  await seedDefaultPromptTemplates();
+  Object.assign(process.env, E2E_ENV);
+  const { ensureWorkspaceBootstrap } = await import("../../src/features/workspaces/workspace-bootstrap");
+  await ensureWorkspaceBootstrap({ workspaceId: E2E_ENV.TEST_WORKSPACE_ID });
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {

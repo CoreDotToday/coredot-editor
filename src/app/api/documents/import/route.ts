@@ -1,14 +1,13 @@
 import { NextResponse } from "next/server";
 import { createDocumentFromContent } from "@/features/documents/document-repository";
-
-const localWorkspace = { workspaceId: "local" };
 import { docxBufferToTiptapJson } from "@/features/documents/docx-conversion";
+import { createProtectedRouteHandler } from "@/features/auth/route-context";
 
 export const runtime = "nodejs";
 
 const DOCX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
-export async function POST(request: Request) {
+const postHandler = createProtectedRouteHandler(async (context, request: Request) => {
   const formData = await request.formData().catch(() => null);
   const file = formData?.get("file");
 
@@ -19,12 +18,16 @@ export async function POST(request: Request) {
   const buffer = Buffer.from(await file.arrayBuffer());
   const conversion = await docxBufferToTiptapJson(buffer);
   const document = await createDocumentFromContent(
-    localWorkspace,
+    context,
     getDocumentTitleFromFileName(file.name),
     conversion.contentJson,
   );
 
   return NextResponse.json({ document, warnings: conversion.warnings }, { status: 201 });
+});
+
+export async function POST(request: Request) {
+  return postHandler(request);
 }
 
 function isDocxFile(file: File) {

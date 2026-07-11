@@ -4,8 +4,7 @@ import {
   applyProposalToDocumentDraft,
   type ProposalApplicationResult,
 } from "@/features/proposals/proposal-application-service";
-
-const localWorkspace = { workspaceId: "local" };
+import { createProtectedRouteHandler } from "@/features/auth/route-context";
 
 const proposalApplyPayloadSchema = z.object({
   appliedMode: z.enum(["replace", "insert_below"]),
@@ -20,7 +19,11 @@ type ProposalApplyRouteContext = {
   params: Promise<{ id: string }>;
 };
 
-export async function POST(request: Request, context: ProposalApplyRouteContext) {
+const postHandler = createProtectedRouteHandler(async (
+  requestContext,
+  request: Request,
+  context: ProposalApplyRouteContext,
+) => {
   const result = proposalApplyPayloadSchema.safeParse(await request.json().catch(() => null));
   if (!result.success) {
     return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
@@ -28,7 +31,7 @@ export async function POST(request: Request, context: ProposalApplyRouteContext)
 
   const { id } = await context.params;
   const application = await applyProposalToDocumentDraft(
-    localWorkspace,
+    requestContext,
     {
       appliedMode: result.data.appliedMode,
       draft: result.data.document,
@@ -39,6 +42,10 @@ export async function POST(request: Request, context: ProposalApplyRouteContext)
   );
 
   return proposalApplicationResponse(application);
+});
+
+export async function POST(request: Request, context: ProposalApplyRouteContext) {
+  return postHandler(request, context);
 }
 
 function proposalApplicationResponse(result: ProposalApplicationResult) {

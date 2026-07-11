@@ -1,25 +1,32 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { createDocumentDraft, listDocuments } from "@/features/documents/document-repository";
-
-const localWorkspace = { workspaceId: "local" };
+import { createProtectedRouteHandler } from "@/features/auth/route-context";
 
 const createDocumentSchema = z.object({
   title: z.string().min(1).default("Untitled document"),
 });
 
-export async function GET() {
-  const documents = await listDocuments(localWorkspace);
+const getHandler = createProtectedRouteHandler(async (context) => {
+  const documents = await listDocuments(context);
   return NextResponse.json({ documents });
-}
+});
 
-export async function POST(request: Request) {
+const postHandler = createProtectedRouteHandler(async (context, request: Request) => {
   const result = createDocumentSchema.safeParse(await request.json().catch(() => null));
   if (!result.success) {
     return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
   }
 
   const body = result.data;
-  const document = await createDocumentDraft(localWorkspace, body.title);
+  const document = await createDocumentDraft(context, body.title);
   return NextResponse.json({ document }, { status: 201 });
+});
+
+export async function GET() {
+  return getHandler();
+}
+
+export async function POST(request: Request) {
+  return postHandler(request);
 }
