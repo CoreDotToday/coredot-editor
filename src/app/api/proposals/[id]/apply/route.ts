@@ -5,6 +5,8 @@ import {
   type ProposalApplicationResult,
 } from "@/features/proposals/proposal-application-service";
 
+const localWorkspace = { workspaceId: "local" };
+
 const proposalApplyPayloadSchema = z.object({
   appliedMode: z.enum(["replace", "insert_below"]),
   document: z.object({
@@ -25,13 +27,16 @@ export async function POST(request: Request, context: ProposalApplyRouteContext)
   }
 
   const { id } = await context.params;
-  const application = await applyProposalToDocumentDraft({
-    appliedMode: result.data.appliedMode,
-    draft: result.data.document,
-    expectedDocumentContentSignature: result.data.expectedDocumentContentSignature,
-    expectedStatus: result.data.expectedStatus,
-    proposalId: id,
-  });
+  const application = await applyProposalToDocumentDraft(
+    localWorkspace,
+    {
+      appliedMode: result.data.appliedMode,
+      draft: result.data.document,
+      expectedDocumentContentSignature: result.data.expectedDocumentContentSignature,
+      expectedStatus: result.data.expectedStatus,
+      proposalId: id,
+    },
+  );
 
   return proposalApplicationResponse(application);
 }

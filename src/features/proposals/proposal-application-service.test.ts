@@ -1,5 +1,5 @@
 import { createClient } from "@libsql/client";
-import { sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/libsql";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -11,6 +11,9 @@ import { createProposalApplicationService } from "./proposal-application-service
 import { createProposalContentSignature } from "./proposal-transaction";
 
 const tempDirs: string[] = [];
+const localScope = { workspaceId: "local" };
+const workspaceA = { workspaceId: "workspace_a" };
+const workspaceB = { workspaceId: "workspace_b" };
 
 afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
@@ -80,12 +83,14 @@ async function seedDocumentAndProposal(
     targetFrom?: number | null;
     targetTo?: number | null;
     targetText?: string;
+    workspaceId?: string;
   } = {},
 ) {
   const documentContent = input.documentContent ?? createDocumentContent("growth was good");
+  const workspaceId = input.workspaceId ?? localScope.workspaceId;
   await db.insert(documents).values({
     id: "doc_1",
-    workspaceId: "local",
+    workspaceId,
     title: "Market Entry Memo",
     contentJson: documentContent,
     metadataJson: { owner: "Strategy" },
@@ -97,7 +102,7 @@ async function seedDocumentAndProposal(
   });
   await db.insert(aiProposals).values({
     id: "proposal_1",
-    workspaceId: "local",
+    workspaceId,
     aiRunId: "run_1",
     documentId: "doc_1",
     targetText: input.targetText ?? "growth was good",
@@ -118,7 +123,7 @@ describe("proposal application service", () => {
     await seedDocumentAndProposal(db);
     const service = createProposalApplicationService(db);
 
-    const result = await service.applyProposalToDocumentDraft({
+    const result = await service.applyProposalToDocumentDraft(localScope, {
       appliedMode: "replace",
       draft: {
         id: "doc_1",
@@ -141,6 +146,10 @@ describe("proposal application service", () => {
       title: "Market Entry Memo",
     });
     expect(result.document.contentJson).toEqual(createDocumentContent("revenue grew 8%"));
+    const [savedProposal] = await db.select().from(aiProposals).where(eq(aiProposals.id, "proposal_1"));
+    const [savedDocument] = await db.select().from(documents).where(eq(documents.id, "doc_1"));
+    expect(savedProposal).toMatchObject({ appliedMode: "replace", status: "accepted" });
+    expect(savedDocument).toMatchObject({ plainText: "revenue grew 8%" });
   });
 
   it("returns a proposal conflict without changing the document when the expected status is stale", async () => {
@@ -148,7 +157,7 @@ describe("proposal application service", () => {
     await seedDocumentAndProposal(db, { proposalStatus: "rejected" });
     const service = createProposalApplicationService(db);
 
-    const result = await service.applyProposalToDocumentDraft({
+    const result = await service.applyProposalToDocumentDraft(localScope, {
       appliedMode: "replace",
       draft: {
         id: "doc_1",
@@ -180,7 +189,7 @@ describe("proposal application service", () => {
     });
     const service = createProposalApplicationService(db);
 
-    const result = await service.applyProposalToDocumentDraft({
+    const result = await service.applyProposalToDocumentDraft(localScope, {
       appliedMode: "replace",
       draft: {
         id: "doc_1",
@@ -207,7 +216,7 @@ describe("proposal application service", () => {
     await seedDocumentAndProposal(db, { documentStatus: "archived" });
     const service = createProposalApplicationService(db);
 
-    const result = await service.applyProposalToDocumentDraft({
+    const result = await service.applyProposalToDocumentDraft(localScope, {
       appliedMode: "replace",
       draft: {
         id: "doc_1",
@@ -231,7 +240,7 @@ describe("proposal application service", () => {
     await seedDocumentAndProposal(db, { documentContent: createDocumentContent("newer saved text") });
     const service = createProposalApplicationService(db);
 
-    const result = await service.applyProposalToDocumentDraft({
+    const result = await service.applyProposalToDocumentDraft(localScope, {
       appliedMode: "replace",
       draft: {
         id: "doc_1",
@@ -251,5 +260,25 @@ describe("proposal application service", () => {
     });
     expect(proposal).toMatchObject({ appliedMode: null, status: "pending" });
     expect(document).toMatchObject({ plainText: "growth was good", title: "Market Entry Memo" });
+  });
+
+  it("does not reveal or mutate another workspace's proposal and document", async () => {
+    const db = await createIsolatedProposalApplicationDb();
+    await seedDocumentAndProposal(db, { workspaceId: workspaceA.workspaceId });
+    const service = createProposalApplicationService(db);
+
+    const result = await service.applyProposalToDocumentDraft(workspaceB, {
+      appliedMode: "replace",
+      draft: { id: "doc_1" },
+      expectedDocumentContentSignature: createProposalContentSignature(createDocumentContent("growth was good")),
+      expectedStatus: "pending",
+      proposalId: "proposal_1",
+    });
+    const [proposal] = await db.select().from(aiProposals).where(eq(aiProposals.id, "proposal_1"));
+    const [document] = await db.select().from(documents).where(eq(documents.id, "doc_1"));
+
+    expect(result).toEqual({ error: "proposal_not_found", ok: false });
+    expect(proposal).toMatchObject({ appliedMode: null, status: "pending", workspaceId: workspaceA.workspaceId });
+    expect(document).toMatchObject({ plainText: "growth was good", workspaceId: workspaceA.workspaceId });
   });
 });

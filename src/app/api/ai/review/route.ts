@@ -17,10 +17,13 @@ export async function POST(request: Request) {
   const body = result.data;
   const hasSubmittedDocumentText =
     typeof payload === "object" && payload !== null && Object.hasOwn(payload, "documentText");
-  const prepared = await prepareAiCommandRequest({
-    payload: body,
-    useSubmittedDocumentText: hasSubmittedDocumentText,
-  });
+  const prepared = await prepareAiCommandRequest(
+    localWorkspace,
+    {
+      payload: body,
+      useSubmittedDocumentText: hasSubmittedDocumentText,
+    },
+  );
   if (!prepared.ok) {
     return aiCommandFailureResponse(prepared);
   }

@@ -1,13 +1,12 @@
 import type { DocumentRecord, PromptTemplateRecord } from "@/db/schema";
 import { getDocumentById } from "@/features/documents/document-repository";
+import type { WorkspaceScope } from "@/features/auth/request-context";
 import { getPromptTemplateById } from "@/features/templates/template-repository";
 import { validateTemplateVariables } from "@/features/templates/template-validation";
 import { getAiSettings, type AiSettings } from "./ai-settings-repository";
 import { hydrateAiReferenceDocuments, type HydratedAiReferenceDocument } from "./reference-hydration";
 import { createAiProvider, type AiProvider } from "./providers";
 import type { AiCommandPayload } from "./types";
-
-const localWorkspace = { workspaceId: "local" };
 
 export type PreparedAiCommandRequest = {
   aiSettings: AiSettings;
@@ -55,20 +54,23 @@ const defaultDependencies: AiCommandServiceDependencies = {
   hydrateAiReferenceDocuments,
 };
 
-export async function createAiProviderForCommand({
-  dependencies = defaultDependencies,
-}: {
-  dependencies?: Pick<AiCommandServiceDependencies, "createAiProvider" | "getAiSettings">;
-} = {}): Promise<AiProviderCreationResult> {
+export async function createAiProviderForCommand(
+  scope: WorkspaceScope,
+  {
+    dependencies = defaultDependencies,
+  }: {
+    dependencies?: Pick<AiCommandServiceDependencies, "createAiProvider" | "getAiSettings">;
+  } = {},
+): Promise<AiProviderCreationResult> {
   try {
-    const aiSettings = await dependencies.getAiSettings(localWorkspace);
+    const aiSettings = await dependencies.getAiSettings(scope);
     return { aiSettings, ok: true, provider: dependencies.createAiProvider(aiSettings) };
   } catch {
     return { error: "AI generation failed", ok: false, status: 500 };
   }
 }
 
-export async function prepareAiCommandRequest({
+export async function prepareAiCommandRequest(scope: WorkspaceScope, {
   dependencies,
   deferProviderCreation,
   payload,
@@ -80,7 +82,7 @@ export async function prepareAiCommandRequest({
   useSubmittedDocumentText?: boolean;
 }): Promise<AiCommandContextResult>;
 
-export async function prepareAiCommandRequest({
+export async function prepareAiCommandRequest(scope: WorkspaceScope, {
   dependencies,
   deferProviderCreation,
   payload,
@@ -92,7 +94,7 @@ export async function prepareAiCommandRequest({
   useSubmittedDocumentText?: boolean;
 }): Promise<AiCommandRequestResult>;
 
-export async function prepareAiCommandRequest({
+export async function prepareAiCommandRequest(scope: WorkspaceScope, {
   dependencies = defaultDependencies,
   deferProviderCreation = false,
   payload,
@@ -103,12 +105,12 @@ export async function prepareAiCommandRequest({
   payload: AiCommandPayload;
   useSubmittedDocumentText?: boolean;
 }): Promise<AiCommandRequestResult | AiCommandContextResult> {
-  const document = await dependencies.getDocumentById(localWorkspace, payload.documentId);
+  const document = await dependencies.getDocumentById(scope, payload.documentId);
   if (!document) {
     return { error: "Document not found", ok: false, status: 404 };
   }
 
-  const template = await dependencies.getPromptTemplateById(localWorkspace, payload.templateId);
+  const template = await dependencies.getPromptTemplateById(scope, payload.templateId);
   if (!template?.isActive) {
     return { error: "Template not found", ok: false, status: 404 };
   }
@@ -123,9 +125,11 @@ export async function prepareAiCommandRequest({
     };
   }
 
-  const referencedDocuments = await dependencies.hydrateAiReferenceDocuments(payload.references, {
-    currentDocumentId: document.id,
-  });
+  const referencedDocuments = await dependencies.hydrateAiReferenceDocuments(
+    scope,
+    payload.references,
+    { currentDocumentId: document.id },
+  );
 
   const preparedContext = {
     document,
@@ -139,7 +143,7 @@ export async function prepareAiCommandRequest({
     return preparedContext;
   }
 
-  const providerResult = await createAiProviderForCommand({ dependencies });
+  const providerResult = await createAiProviderForCommand(scope, { dependencies });
   if (!providerResult.ok) {
     return providerResult;
   }

@@ -92,15 +92,18 @@ describe("POST /api/proposals/[id]/apply", () => {
       document: { id: "doc_1", title: "Updated Memo" },
       proposal: { id: "proposal_1", appliedMode: "replace", status: "accepted" },
     });
-    expect(applyProposalToDocumentDraft).toHaveBeenCalledWith({
-      appliedMode: "replace",
-      draft: {
-        id: "doc_1",
+    expect(applyProposalToDocumentDraft).toHaveBeenCalledWith(
+      { workspaceId: "local" },
+      {
+        appliedMode: "replace",
+        draft: {
+          id: "doc_1",
+        },
+        expectedDocumentContentSignature: "{\"type\":\"doc\",\"content\":[]}",
+        expectedStatus: "pending",
+        proposalId: "proposal_1",
       },
-      expectedDocumentContentSignature: "{\"type\":\"doc\",\"content\":[]}",
-      expectedStatus: "pending",
-      proposalId: "proposal_1",
-    });
+    );
   });
 
   it("returns 409 when the proposal status changed", async () => {

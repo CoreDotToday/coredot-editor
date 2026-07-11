@@ -1,7 +1,6 @@
 import type { AiCommandPayload } from "./types";
 import { getDocumentsByIds } from "@/features/documents/document-repository";
-
-const localWorkspace = { workspaceId: "local" };
+import type { WorkspaceScope } from "@/features/auth/request-context";
 
 export type HydratedAiReferenceDocument = {
   id: string;
@@ -14,6 +13,7 @@ export type HydrateAiReferenceDocumentsOptions = {
 };
 
 export async function hydrateAiReferenceDocuments(
+  scope: WorkspaceScope,
   references: AiCommandPayload["references"],
   options: HydrateAiReferenceDocumentsOptions = {},
 ): Promise<HydratedAiReferenceDocument[]> {
@@ -24,7 +24,7 @@ export async function hydrateAiReferenceDocuments(
     return [];
   }
 
-  const documents = await getDocumentsByIds(localWorkspace, ids);
+  const documents = await getDocumentsByIds(scope, ids);
 
   return documents.map((document) => ({
     id: document.id,

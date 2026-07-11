@@ -3,6 +3,9 @@ import { prepareAiCommandRequest } from "./ai-command-service";
 import type { AiCommandServiceDependencies } from "./ai-command-service";
 import type { AiCommandPayload } from "./types";
 
+const workspaceA = { workspaceId: "workspace_a" };
+const workspaceB = { workspaceId: "workspace_b" };
+
 const basePayload: AiCommandPayload = {
   afterContext: "",
   beforeContext: "",
@@ -32,20 +35,20 @@ function createDependencies(overrides: Partial<AiCommandServiceDependencies> = {
       name: "stub" as const,
       streamText: vi.fn(),
     })),
-    getAiSettings: vi.fn(async () => ({
+    getAiSettings: vi.fn(async (scope) => ({
       aiBaseUrl: null,
       aiMaxCompletionTokens: null,
       aiModel: "stub-editor",
       aiProvider: "stub" as const,
       aiReasoningEffort: null,
       id: "default",
-      workspaceId: "local",
+      workspaceId: scope.workspaceId,
     })),
-    getDocumentById: vi.fn(async () => ({
+    getDocumentById: vi.fn(async (scope) => ({
       contentJson: { type: "doc" as const },
       createdAt: new Date("2026-01-01T00:00:00Z"),
       id: "doc_1",
-      workspaceId: "local",
+      workspaceId: scope.workspaceId,
       metadataJson: {},
       plainText: "Persisted document text",
       readiness: "draft" as const,
@@ -53,12 +56,12 @@ function createDependencies(overrides: Partial<AiCommandServiceDependencies> = {
       title: "Draft",
       updatedAt: new Date("2026-01-01T00:00:00Z"),
     })),
-    getPromptTemplateById: vi.fn(async () => ({
+    getPromptTemplateById: vi.fn(async (scope) => ({
       category: "contract",
       createdAt: new Date("2026-01-01T00:00:00Z"),
       description: "Template",
       id: "template_1",
-      workspaceId: "local",
+      workspaceId: scope.workspaceId,
       isActive: true,
       isDefault: true,
       name: "Template",
@@ -88,7 +91,7 @@ describe("prepareAiCommandRequest", () => {
   it("prepares validated document, template, provider, reviewed text, and server-hydrated references", async () => {
     const dependencies = createDependencies();
 
-    const result = await prepareAiCommandRequest({ dependencies, payload: basePayload });
+    const result = await prepareAiCommandRequest(workspaceA, { dependencies, payload: basePayload });
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -104,13 +107,18 @@ describe("prepareAiCommandRequest", () => {
         title: "Server title",
       },
     ]);
-    expect(dependencies.hydrateAiReferenceDocuments).toHaveBeenCalledWith(basePayload.references, {
-      currentDocumentId: "doc_1",
-    });
+    expect(dependencies.getDocumentById).toHaveBeenCalledWith(workspaceA, "doc_1");
+    expect(dependencies.getPromptTemplateById).toHaveBeenCalledWith(workspaceA, "template_1");
+    expect(dependencies.getAiSettings).toHaveBeenCalledWith(workspaceA);
+    expect(dependencies.hydrateAiReferenceDocuments).toHaveBeenCalledWith(
+      workspaceA,
+      basePayload.references,
+      { currentDocumentId: "doc_1" },
+    );
   });
 
   it("uses submitted document text for unsaved draft review payloads", async () => {
-    const result = await prepareAiCommandRequest({
+    const result = await prepareAiCommandRequest(workspaceA, {
       dependencies: createDependencies(),
       payload: {
         ...basePayload,
@@ -127,7 +135,7 @@ describe("prepareAiCommandRequest", () => {
   it("returns a typed validation failure before creating a provider", async () => {
     const dependencies = createDependencies();
 
-    const result = await prepareAiCommandRequest({
+    const result = await prepareAiCommandRequest(workspaceA, {
       dependencies,
       payload: {
         ...basePayload,
@@ -150,12 +158,31 @@ describe("prepareAiCommandRequest", () => {
       }),
     });
 
-    const result = await prepareAiCommandRequest({ dependencies, payload: basePayload });
+    const result = await prepareAiCommandRequest(workspaceA, { dependencies, payload: basePayload });
 
     expect(result).toEqual({
       error: "AI generation failed",
       ok: false,
       status: 500,
     });
+  });
+
+  it("uses only the explicitly passed workspace for document, template, settings, and references", async () => {
+    const dependencies = createDependencies();
+
+    const result = await prepareAiCommandRequest(workspaceB, { dependencies, payload: basePayload });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.document.workspaceId).toBe(workspaceB.workspaceId);
+    expect(result.template.workspaceId).toBe(workspaceB.workspaceId);
+    expect(result.aiSettings.workspaceId).toBe(workspaceB.workspaceId);
+    expect(dependencies.getDocumentById).not.toHaveBeenCalledWith({ workspaceId: "local" }, expect.anything());
+    expect(dependencies.getAiSettings).not.toHaveBeenCalledWith({ workspaceId: "local" });
+    expect(dependencies.hydrateAiReferenceDocuments).toHaveBeenCalledWith(
+      workspaceB,
+      basePayload.references,
+      expect.anything(),
+    );
   });
 });

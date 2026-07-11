@@ -1,6 +1,7 @@
 import { and, eq } from "drizzle-orm";
 import { db } from "@/db/client";
 import { aiProposals, documents, type AiProposalRecord, type DocumentRecord } from "@/db/schema";
+import type { WorkspaceScope } from "@/features/auth/request-context";
 import { extractPlainTextFromTiptap } from "@/features/documents/tiptap-text";
 import {
   applyProposalToTiptapDraft,
@@ -54,13 +55,21 @@ class ProposalApplicationRollback extends Error {
 
 export function createProposalApplicationService(database: ProposalApplicationDatabase = db) {
   return {
-    async applyProposalToDocumentDraft(input: ProposalApplicationInput): Promise<ProposalApplicationResult> {
+    async applyProposalToDocumentDraft(
+      scope: WorkspaceScope,
+      input: ProposalApplicationInput,
+    ): Promise<ProposalApplicationResult> {
       try {
         return await database.transaction(async (transaction) => {
           const [proposal] = await transaction
             .select()
             .from(aiProposals)
-            .where(eq(aiProposals.id, input.proposalId))
+            .where(
+              and(
+                eq(aiProposals.workspaceId, scope.workspaceId),
+                eq(aiProposals.id, input.proposalId),
+              ),
+            )
             .limit(1);
 
           if (!proposal) {
@@ -79,7 +88,13 @@ export function createProposalApplicationService(database: ProposalApplicationDa
           const [document] = await transaction
             .select()
             .from(documents)
-            .where(and(eq(documents.id, proposal.documentId), eq(documents.status, "draft")))
+            .where(
+              and(
+                eq(documents.workspaceId, scope.workspaceId),
+                eq(documents.id, proposal.documentId),
+                eq(documents.status, "draft"),
+              ),
+            )
             .limit(1);
 
           if (!document) {
@@ -113,14 +128,25 @@ export function createProposalApplicationService(database: ProposalApplicationDa
               status: "accepted",
               updatedAt: now,
             })
-            .where(and(eq(aiProposals.id, input.proposalId), eq(aiProposals.status, expectedStatus)))
+            .where(
+              and(
+                eq(aiProposals.workspaceId, scope.workspaceId),
+                eq(aiProposals.id, input.proposalId),
+                eq(aiProposals.status, expectedStatus),
+              ),
+            )
             .returning();
 
           if (!updatedProposal) {
             const [currentProposal] = await transaction
               .select()
               .from(aiProposals)
-              .where(eq(aiProposals.id, input.proposalId))
+              .where(
+                and(
+                  eq(aiProposals.workspaceId, scope.workspaceId),
+                  eq(aiProposals.id, input.proposalId),
+                ),
+              )
               .limit(1);
 
             return {
@@ -137,7 +163,13 @@ export function createProposalApplicationService(database: ProposalApplicationDa
               plainText: extractPlainTextFromTiptap(appliedDraft.contentJson),
               updatedAt: now,
             })
-            .where(and(eq(documents.id, proposal.documentId), eq(documents.status, "draft")))
+            .where(
+              and(
+                eq(documents.workspaceId, scope.workspaceId),
+                eq(documents.id, proposal.documentId),
+                eq(documents.status, "draft"),
+              ),
+            )
             .returning();
 
           if (!updatedDocument) {

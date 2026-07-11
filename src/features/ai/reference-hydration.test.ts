@@ -10,6 +10,9 @@ vi.mock("@/features/documents/document-repository", () => ({
 
 import { hydrateAiReferenceDocuments } from "./reference-hydration";
 
+const workspaceA = { workspaceId: "workspace_a" };
+const workspaceB = { workspaceId: "workspace_b" };
+
 describe("hydrateAiReferenceDocuments", () => {
   beforeEach(() => {
     getDocumentsByIdsMock.mockReset();
@@ -25,6 +28,7 @@ describe("hydrateAiReferenceDocuments", () => {
     ]);
 
     const result = await hydrateAiReferenceDocuments(
+      workspaceA,
       {
         documents: [
           { documentId: "doc_current", titleSnapshot: "Client current title" },
@@ -35,7 +39,7 @@ describe("hydrateAiReferenceDocuments", () => {
       { currentDocumentId: "doc_current" },
     );
 
-    expect(getDocumentsByIdsMock).toHaveBeenCalledWith({ workspaceId: "local" }, ["doc_ref"]);
+    expect(getDocumentsByIdsMock).toHaveBeenCalledWith(workspaceA, ["doc_ref"]);
     expect(result).toEqual([
       {
         id: "doc_ref",
@@ -47,6 +51,7 @@ describe("hydrateAiReferenceDocuments", () => {
 
   it("does not hit the repository when only self references remain", async () => {
     const result = await hydrateAiReferenceDocuments(
+      workspaceB,
       {
         documents: [{ documentId: "doc_current", titleSnapshot: "Client current title" }],
       },

@@ -29,11 +29,14 @@ export async function POST(request: Request) {
   const body = result.data;
   const hasSubmittedDocumentText =
     typeof payload === "object" && payload !== null && Object.hasOwn(payload, "documentText");
-  const prepared = await prepareAiCommandRequest({
-    deferProviderCreation: true,
-    payload: body,
-    useSubmittedDocumentText: hasSubmittedDocumentText,
-  });
+  const prepared = await prepareAiCommandRequest(
+    localWorkspace,
+    {
+      deferProviderCreation: true,
+      payload: body,
+      useSubmittedDocumentText: hasSubmittedDocumentText,
+    },
+  );
   if (!prepared.ok) {
     return aiCommandFailureResponse(prepared);
   }
@@ -48,7 +51,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Selected text must match exactly once in the document" }, { status: 400 });
   }
 
-  const providerResult = await createAiProviderForCommand();
+  const providerResult = await createAiProviderForCommand(localWorkspace);
   if (!providerResult.ok) {
     return aiCommandFailureResponse(providerResult);
   }
