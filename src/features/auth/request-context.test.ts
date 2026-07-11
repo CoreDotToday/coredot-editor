@@ -117,7 +117,7 @@ describe("request context", () => {
     );
   });
 
-  it("allows an injected Clerk reader without live Clerk credentials", async () => {
+  it("rejects an injected Clerk reader without production credentials", async () => {
     const readClerkIdentity = vi.fn(async () => ({
       orgId: null,
       orgRole: null,
@@ -129,9 +129,51 @@ describe("request context", () => {
       readClerkIdentity,
     });
 
+    await expect(resolve()).rejects.toThrow(
+      "Clerk authentication is not configured",
+    );
+    expect(readClerkIdentity).not.toHaveBeenCalled();
+  });
+
+  it("allows production injection only with explicit Clerk credentials", async () => {
+    const readClerkIdentity = vi.fn(async () => ({
+      orgId: null,
+      orgRole: null,
+      userId: "user_1",
+    }));
+    const resolve = createRequestContextResolver({
+      clerkPublishableKey: "pk_test_unit",
+      clerkSecretKey: "sk_test_unit",
+      env: { NODE_ENV: "production" },
+      environment: "production",
+      readClerkIdentity,
+    });
+
     await expect(resolve()).resolves.toMatchObject({
       principalId: "clerk:user_1",
     });
     expect(readClerkIdentity).toHaveBeenCalledOnce();
+  });
+
+  it("does not authorize production injection from ambient Clerk credentials", async () => {
+    const readClerkIdentity = vi.fn(async () => ({
+      orgId: null,
+      orgRole: null,
+      userId: "user_1",
+    }));
+    const resolve = createRequestContextResolver({
+      env: {
+        CLERK_SECRET_KEY: "sk_test_ambient",
+        NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: "pk_test_ambient",
+        NODE_ENV: "production",
+      },
+      environment: "production",
+      readClerkIdentity,
+    });
+
+    await expect(resolve()).rejects.toThrow(
+      "Clerk authentication is not configured",
+    );
+    expect(readClerkIdentity).not.toHaveBeenCalled();
   });
 });

@@ -28,6 +28,8 @@ type RuntimeEnvironment = "development" | "production" | "test";
 type ReadClerkIdentity = () => Promise<ClerkIdentity>;
 
 type RequestContextResolverOptions = {
+  clerkPublishableKey?: string;
+  clerkSecretKey?: string;
   env?: NodeJS.ProcessEnv;
   environment?: RuntimeEnvironment;
   mode?: AuthMode;
@@ -64,10 +66,11 @@ function mapClerkIdentity(identity: ClerkIdentity): RequestContext {
   };
 }
 
-function hasClerkCredentials(env: NodeJS.ProcessEnv): boolean {
-  return Boolean(
-    env.CLERK_SECRET_KEY && env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY,
-  );
+function hasClerkCredentials(
+  publishableKey: string | undefined,
+  secretKey: string | undefined,
+): boolean {
+  return Boolean(publishableKey?.trim() && secretKey?.trim());
 }
 
 export function createRequestContextResolver(
@@ -86,12 +89,20 @@ export function createRequestContextResolver(
       return createTestRequestContext(env);
     }
 
-    if (
-      environment === "production" &&
-      !options.readClerkIdentity &&
-      !hasClerkCredentials(env)
-    ) {
-      throw new Error("Clerk authentication is not configured");
+    if (environment === "production") {
+      const credentialsAreConfigured = options.readClerkIdentity
+        ? hasClerkCredentials(
+            options.clerkPublishableKey,
+            options.clerkSecretKey,
+          )
+        : hasClerkCredentials(
+            env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY,
+            env.CLERK_SECRET_KEY,
+          );
+
+      if (!credentialsAreConfigured) {
+        throw new Error("Clerk authentication is not configured");
+      }
     }
 
     const readIdentity =
