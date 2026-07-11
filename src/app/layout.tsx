@@ -1,3 +1,4 @@
+import { ClerkProvider } from "@clerk/nextjs";
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
@@ -22,7 +23,11 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
-  return (
+  if (process.env.AUTH_MODE === "test" && process.env.NODE_ENV === "production") {
+    throw new Error("Test authentication is disabled in production");
+  }
+
+  const document = (
     <html
       lang="ko"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
@@ -30,4 +35,10 @@ export default function RootLayout({
       <body className="min-h-full flex flex-col">{children}</body>
     </html>
   );
+
+  if (process.env.AUTH_MODE === "test") {
+    return document;
+  }
+
+  return <ClerkProvider>{document}</ClerkProvider>;
 }
