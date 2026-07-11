@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { check, index, integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { check, index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 import { nanoid } from "nanoid";
 
 export type TiptapJson = {
@@ -15,6 +15,7 @@ export const documents = sqliteTable(
   "documents",
   {
     id: text("id").primaryKey().$defaultFn(() => nanoid()),
+    workspaceId: text("workspace_id").notNull(),
     title: text("title").notNull(),
     contentJson: text("content_json", { mode: "json" }).$type<TiptapJson>().notNull(),
     plainText: text("plain_text").notNull().default(""),
@@ -32,28 +33,35 @@ export const documents = sqliteTable(
   },
   (table) => [
     index("documents_readiness_idx").on(table.readiness),
+    index("documents_workspace_status_updated_idx").on(table.workspaceId, table.status, table.updatedAt),
     check("documents_status_check", sql`${table.status} in ('draft', 'archived')`),
     check("documents_readiness_check", sql`${table.readiness} in ('draft', 'needs_review', 'ready', 'approved')`),
   ],
 );
 
-export const promptTemplates = sqliteTable("prompt_templates", {
-  id: text("id").primaryKey().$defaultFn(() => nanoid()),
-  name: text("name").notNull(),
-  description: text("description").notNull(),
-  category: text("category").notNull(),
-  systemPrompt: text("system_prompt").notNull(),
-  variableSchemaJson: text("variable_schema_json", { mode: "json" }).$type<PromptVariableSchema>().notNull(),
-  isDefault: integer("is_default", { mode: "boolean" }).notNull().default(false),
-  isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
-  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
-  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
-});
+export const promptTemplates = sqliteTable(
+  "prompt_templates",
+  {
+    id: text("id").primaryKey().$defaultFn(() => nanoid()),
+    workspaceId: text("workspace_id").notNull(),
+    name: text("name").notNull(),
+    description: text("description").notNull(),
+    category: text("category").notNull(),
+    systemPrompt: text("system_prompt").notNull(),
+    variableSchemaJson: text("variable_schema_json", { mode: "json" }).$type<PromptVariableSchema>().notNull(),
+    isDefault: integer("is_default", { mode: "boolean" }).notNull().default(false),
+    isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+    updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+  },
+  (table) => [index("prompt_templates_workspace_active_name_idx").on(table.workspaceId, table.isActive, table.name)],
+);
 
 export const aiRuns = sqliteTable(
   "ai_runs",
   {
     id: text("id").primaryKey().$defaultFn(() => nanoid()),
+    workspaceId: text("workspace_id").notNull(),
     documentId: text("document_id").notNull().references(() => documents.id, { onDelete: "cascade" }),
     promptTemplateId: text("prompt_template_id").references(() => promptTemplates.id, { onDelete: "set null" }),
     commandType: text("command_type", { enum: ["selection_rewrite", "document_review"] }).notNull(),
@@ -70,6 +78,7 @@ export const aiRuns = sqliteTable(
   (table) => [
     index("ai_runs_document_id_idx").on(table.documentId),
     index("ai_runs_prompt_template_id_idx").on(table.promptTemplateId),
+    index("ai_runs_workspace_document_created_idx").on(table.workspaceId, table.documentId, table.createdAt),
     check("ai_runs_command_type_check", sql`${table.commandType} in ('selection_rewrite', 'document_review')`),
     check("ai_runs_status_check", sql`${table.status} in ('pending', 'streaming', 'completed', 'failed')`),
   ],
@@ -79,6 +88,7 @@ export const aiProposals = sqliteTable(
   "ai_proposals",
   {
     id: text("id").primaryKey().$defaultFn(() => nanoid()),
+    workspaceId: text("workspace_id").notNull(),
     aiRunId: text("ai_run_id").notNull().references(() => aiRuns.id, { onDelete: "cascade" }),
     documentId: text("document_id").notNull().references(() => documents.id, { onDelete: "cascade" }),
     targetText: text("target_text").notNull(),
@@ -98,6 +108,7 @@ export const aiProposals = sqliteTable(
   (table) => [
     index("ai_proposals_ai_run_id_idx").on(table.aiRunId),
     index("ai_proposals_document_id_idx").on(table.documentId),
+    index("ai_proposals_workspace_document_created_idx").on(table.workspaceId, table.documentId, table.createdAt),
     check("ai_proposals_source_check", sql`${table.source} in ('selection', 'review')`),
     check("ai_proposals_default_apply_mode_check", sql`${table.defaultApplyMode} in ('replace', 'insert_below')`),
     check(
@@ -111,7 +122,8 @@ export const aiProposals = sqliteTable(
 export const appSettings = sqliteTable(
   "app_settings",
   {
-    id: text("id").primaryKey(),
+    id: text("id").primaryKey().$defaultFn(() => nanoid()),
+    workspaceId: text("workspace_id").notNull(),
     aiProvider: text("ai_provider", { enum: ["stub", "openai", "coredot", "anthropic", "gemini"] })
       .notNull()
       .default("stub"),
@@ -125,6 +137,7 @@ export const appSettings = sqliteTable(
     updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
   },
   (table) => [
+    uniqueIndex("app_settings_workspace_id_unique").on(table.workspaceId),
     check(
       "app_settings_ai_provider_check",
       sql`${table.aiProvider} in ('stub', 'openai', 'coredot', 'anthropic', 'gemini')`,

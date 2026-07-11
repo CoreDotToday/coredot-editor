@@ -7,6 +7,8 @@ import { hydrateAiReferenceDocuments, type HydratedAiReferenceDocument } from ".
 import { createAiProvider, type AiProvider } from "./providers";
 import type { AiCommandPayload } from "./types";
 
+const localWorkspace = { workspaceId: "local" };
+
 export type PreparedAiCommandRequest = {
   aiSettings: AiSettings;
   document: DocumentRecord;
@@ -59,7 +61,7 @@ export async function createAiProviderForCommand({
   dependencies?: Pick<AiCommandServiceDependencies, "createAiProvider" | "getAiSettings">;
 } = {}): Promise<AiProviderCreationResult> {
   try {
-    const aiSettings = await dependencies.getAiSettings();
+    const aiSettings = await dependencies.getAiSettings(localWorkspace);
     return { aiSettings, ok: true, provider: dependencies.createAiProvider(aiSettings) };
   } catch {
     return { error: "AI generation failed", ok: false, status: 500 };
@@ -101,12 +103,12 @@ export async function prepareAiCommandRequest({
   payload: AiCommandPayload;
   useSubmittedDocumentText?: boolean;
 }): Promise<AiCommandRequestResult | AiCommandContextResult> {
-  const document = await dependencies.getDocumentById(payload.documentId);
+  const document = await dependencies.getDocumentById(localWorkspace, payload.documentId);
   if (!document) {
     return { error: "Document not found", ok: false, status: 404 };
   }
 
-  const template = await dependencies.getPromptTemplateById(payload.templateId);
+  const template = await dependencies.getPromptTemplateById(localWorkspace, payload.templateId);
   if (!template?.isActive) {
     return { error: "Template not found", ok: false, status: 404 };
   }

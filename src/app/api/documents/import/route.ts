@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { createDocumentFromContent } from "@/features/documents/document-repository";
+
+const localWorkspace = { workspaceId: "local" };
 import { docxBufferToTiptapJson } from "@/features/documents/docx-conversion";
 
 export const runtime = "nodejs";
@@ -16,7 +18,11 @@ export async function POST(request: Request) {
 
   const buffer = Buffer.from(await file.arrayBuffer());
   const conversion = await docxBufferToTiptapJson(buffer);
-  const document = await createDocumentFromContent(getDocumentTitleFromFileName(file.name), conversion.contentJson);
+  const document = await createDocumentFromContent(
+    localWorkspace,
+    getDocumentTitleFromFileName(file.name),
+    conversion.contentJson,
+  );
 
   return NextResponse.json({ document, warnings: conversion.warnings }, { status: 201 });
 }

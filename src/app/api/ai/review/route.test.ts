@@ -16,7 +16,7 @@ vi.mock("@/features/templates/template-repository", () => ({
 }));
 
 vi.mock("@/features/ai/ai-run-repository", () => ({
-  completeAiRunWithProposals: vi.fn(async (id, outputText, proposals) => ({
+  completeAiRunWithProposals: vi.fn(async (_scope, id, outputText, proposals) => ({
     run: { id, outputText, status: "completed" },
     proposals: proposals.map((proposal: Record<string, unknown>, index: number) => ({
       id: `proposal_${index + 1}`,
@@ -24,9 +24,11 @@ vi.mock("@/features/ai/ai-run-repository", () => ({
       ...proposal,
     })),
   })),
-  createAiRun: vi.fn(async (input) => ({ id: "run_1", ...input, status: "pending" })),
+  createAiRun: vi.fn(async (_scope, input) => ({ id: "run_1", ...input, status: "pending" })),
   failAiRun: vi.fn(),
 }));
+
+const localWorkspace = { workspaceId: "local" };
 
 vi.mock("@/features/ai/ai-settings-repository", () => ({
   getAiSettings: vi.fn(async () => ({
@@ -36,6 +38,7 @@ vi.mock("@/features/ai/ai-settings-repository", () => ({
     aiProvider: "stub",
     aiReasoningEffort: null,
     id: "default",
+    workspaceId: "local",
   })),
 }));
 
@@ -77,6 +80,7 @@ vi.mock("@/features/ai/providers", () => ({
 
 const documentRecord = {
   id: "doc_1",
+  workspaceId: "local",
   title: "Memo",
   plainText: "growth was good and someone should follow up",
   contentJson: { type: "doc" },
@@ -89,6 +93,7 @@ const documentRecord = {
 
 const templateRecord = {
   id: "tpl_1",
+  workspaceId: "local",
   name: "Review",
   description: "Review",
   category: "review",
@@ -159,8 +164,12 @@ describe("POST /api/ai/review", () => {
       proposals: [{ targetText: "growth was good" }, { targetText: "someone should follow up" }],
       skippedProposalCount: 1,
     });
-    expect(createAiRun).toHaveBeenCalledWith(expect.objectContaining({ commandType: "document_review" }));
+    expect(createAiRun).toHaveBeenCalledWith(
+      localWorkspace,
+      expect.objectContaining({ commandType: "document_review" }),
+    );
     expect(completeAiRunWithProposals).toHaveBeenCalledWith(
+      localWorkspace,
       "run_1",
       expect.stringContaining("Two findings."),
       expect.arrayContaining([
@@ -207,7 +216,7 @@ describe("POST /api/ai/review", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(getDocumentsByIds).toHaveBeenCalledWith(["doc_ref"]);
+    expect(getDocumentsByIds).toHaveBeenCalledWith(localWorkspace, ["doc_ref"]);
     expect(generateReview).toHaveBeenCalledWith({
       messages: expect.arrayContaining([
         expect.objectContaining({
@@ -225,6 +234,7 @@ describe("POST /api/ai/review", () => {
       ]),
     });
     expect(createAiRun).toHaveBeenCalledWith(
+      localWorkspace,
       expect.objectContaining({
         inputSummaryJson: expect.objectContaining({
           referencedDocumentIds: ["doc_ref"],
@@ -275,7 +285,7 @@ describe("POST /api/ai/review", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(getDocumentsByIds).toHaveBeenCalledWith(["doc_ref"]);
+    expect(getDocumentsByIds).toHaveBeenCalledWith(localWorkspace, ["doc_ref"]);
     expect(generateReview).toHaveBeenCalledWith({
       messages: expect.arrayContaining([
         expect.objectContaining({
@@ -293,6 +303,7 @@ describe("POST /api/ai/review", () => {
       ]),
     });
     expect(createAiRun).toHaveBeenCalledWith(
+      localWorkspace,
       expect.objectContaining({
         inputSummaryJson: expect.objectContaining({
           referencedDocumentIds: ["doc_ref"],
@@ -347,6 +358,7 @@ describe("POST /api/ai/review", () => {
       skippedProposalCount: 0,
     });
     expect(completeAiRunWithProposals).toHaveBeenCalledWith(
+      localWorkspace,
       "run_1",
       expect.stringContaining("Draft finding."),
       [expect.objectContaining({ targetText: "fresh edited body" })],
@@ -372,7 +384,10 @@ describe("POST /api/ai/review", () => {
       proposals: [],
       skippedProposalCount: 3,
     });
-    expect(createAiRun).toHaveBeenCalledWith(expect.objectContaining({ inputSummaryJson: expect.objectContaining({ documentTextLength: 0 }) }));
+    expect(createAiRun).toHaveBeenCalledWith(
+      localWorkspace,
+      expect.objectContaining({ inputSummaryJson: expect.objectContaining({ documentTextLength: 0 }) }),
+    );
   });
 
   it("completes reviews with skipped findings when none are safely applicable", async () => {
@@ -417,7 +432,12 @@ describe("POST /api/ai/review", () => {
       proposals: [],
       skippedProposalCount: 1,
     });
-    expect(completeAiRunWithProposals).toHaveBeenCalledWith("run_1", expect.stringContaining("Findings were ambiguous."), []);
+    expect(completeAiRunWithProposals).toHaveBeenCalledWith(
+      localWorkspace,
+      "run_1",
+      expect.stringContaining("Findings were ambiguous."),
+      [],
+    );
   });
 
   it("returns 500 when provider configuration is invalid before a run exists", async () => {

@@ -2,6 +2,7 @@ import { eq } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "@/db/client";
 import { appSettings, type AppSettingsRecord } from "@/db/schema";
+import type { WorkspaceScope } from "@/features/auth/request-context";
 import {
   DEFAULT_COREDOT_ANTHROPIC_BASE_URL,
   DEFAULT_COREDOT_BASE_URL,
@@ -9,7 +10,6 @@ import {
   normalizeCoreTodayBaseUrl,
 } from "./core-today-base-url";
 
-export const DEFAULT_AI_SETTINGS_ID = "default";
 export { DEFAULT_COREDOT_ANTHROPIC_BASE_URL, DEFAULT_COREDOT_BASE_URL, DEFAULT_COREDOT_GEMINI_BASE_URL };
 export const DEFAULT_COREDOT_MODEL = "gpt-5-nano";
 export const DEFAULT_COREDOT_ANTHROPIC_MODEL = "claude-sonnet-4.5";
@@ -31,28 +31,28 @@ export const aiSettingsPayloadSchema = z.object({
 export type AiSettingsPayload = z.input<typeof aiSettingsPayloadSchema>;
 export type AiSettings = Pick<
   AppSettingsRecord,
-  "id" | "aiProvider" | "aiModel" | "aiBaseUrl" | "aiMaxCompletionTokens" | "aiReasoningEffort"
+  "id" | "workspaceId" | "aiProvider" | "aiModel" | "aiBaseUrl" | "aiMaxCompletionTokens" | "aiReasoningEffort"
 >;
 
 type AiSettingsDatabase = typeof db;
 
 export function createAiSettingsRepository(database: AiSettingsDatabase = db) {
   return {
-    async getAiSettings() {
+    async getAiSettings(scope: WorkspaceScope) {
       const [settings] = await database
         .select()
         .from(appSettings)
-        .where(eq(appSettings.id, DEFAULT_AI_SETTINGS_ID))
+        .where(eq(appSettings.workspaceId, scope.workspaceId))
         .limit(1);
 
       if (settings) {
         return toAiSettings(settings);
       }
 
-      return createDefaultSettings(database);
+      return createDefaultSettings(database, scope);
     },
 
-    async updateAiSettings(input: AiSettingsPayload) {
+    async updateAiSettings(scope: WorkspaceScope, input: AiSettingsPayload) {
       const result = aiSettingsPayloadSchema.safeParse(input);
       if (!result.success) {
         throw new Error("Invalid AI settings");
@@ -63,13 +63,13 @@ export function createAiSettingsRepository(database: AiSettingsDatabase = db) {
       const [settings] = await database
         .insert(appSettings)
         .values({
-          id: DEFAULT_AI_SETTINGS_ID,
+          workspaceId: scope.workspaceId,
           ...normalized,
           createdAt: now,
           updatedAt: now,
         })
         .onConflictDoUpdate({
-          target: appSettings.id,
+          target: appSettings.workspaceId,
           set: {
             ...normalized,
             updatedAt: now,
@@ -82,17 +82,17 @@ export function createAiSettingsRepository(database: AiSettingsDatabase = db) {
   };
 }
 
-async function createDefaultSettings(database: AiSettingsDatabase) {
+async function createDefaultSettings(database: AiSettingsDatabase, scope: WorkspaceScope) {
   const now = new Date();
   const [settings] = await database
     .insert(appSettings)
     .values({
-      id: DEFAULT_AI_SETTINGS_ID,
+      workspaceId: scope.workspaceId,
       ...getDefaultAiSettingsPayload(),
       createdAt: now,
       updatedAt: now,
     })
-    .onConflictDoNothing()
+    .onConflictDoNothing({ target: appSettings.workspaceId })
     .returning();
 
   if (settings) {
@@ -102,7 +102,7 @@ async function createDefaultSettings(database: AiSettingsDatabase) {
   const [existingSettings] = await database
     .select()
     .from(appSettings)
-    .where(eq(appSettings.id, DEFAULT_AI_SETTINGS_ID))
+    .where(eq(appSettings.workspaceId, scope.workspaceId))
     .limit(1);
   return toAiSettings(existingSettings!);
 }
@@ -245,6 +245,7 @@ function toAiSettings(settings: AppSettingsRecord): AiSettings {
     aiProvider: settings.aiProvider,
     aiReasoningEffort: settings.aiReasoningEffort,
     id: settings.id,
+    workspaceId: settings.workspaceId,
   };
 }
 

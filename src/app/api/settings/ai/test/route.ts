@@ -1,10 +1,12 @@
 import { NextResponse } from "next/server";
 import { getAiSettings } from "@/features/ai/ai-settings-repository";
+
+const localWorkspace = { workspaceId: "local" };
 import { createAiProvider } from "@/features/ai/providers";
 
 export async function POST() {
   try {
-    const settings = await getAiSettings();
+    const settings = await getAiSettings(localWorkspace);
     const provider = createAiProvider(settings);
     await provider.generateText({
       messages: [

@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { getProposalById, updateProposalStatus } from "@/features/proposals/proposal-repository";
 
+const localWorkspace = { workspaceId: "local" };
+
 const proposalStatusPayloadSchema = z.object({
   status: z.enum(["pending", "accepted", "rejected"]),
   appliedMode: z.enum(["replace", "insert_below"]).optional(),
@@ -24,9 +26,9 @@ export async function PATCH(request: Request, context: ProposalRouteContext) {
     return NextResponse.json({ error: "Use proposal apply endpoint for accepted proposals" }, { status: 400 });
   }
 
-  const proposal = await updateProposalStatus(id, status, appliedMode, { expectedStatus });
+  const proposal = await updateProposalStatus(localWorkspace, id, status, appliedMode, { expectedStatus });
   if (!proposal) {
-    const existingProposal = await getProposalById(id);
+    const existingProposal = await getProposalById(localWorkspace, id);
     if (existingProposal) {
       return NextResponse.json(
         {

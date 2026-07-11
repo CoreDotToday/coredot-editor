@@ -1,6 +1,7 @@
-import { desc, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { db } from "@/db/client";
 import { aiProposals, aiRuns, type NewAiProposalRecord, type NewAiRunRecord } from "@/db/schema";
+import type { WorkspaceScope } from "@/features/auth/request-context";
 
 type AiRunDatabase = typeof db;
 
@@ -22,12 +23,13 @@ type FinalizeAiRunProposalInput = Pick<
 
 export function createAiRunRepository(database: AiRunDatabase = db) {
   return {
-    async createAiRun(input: CreateAiRunInput) {
+    async createAiRun(scope: WorkspaceScope, input: CreateAiRunInput) {
       const now = new Date();
       const [run] = await database
         .insert(aiRuns)
         .values({
           ...input,
+          workspaceId: scope.workspaceId,
           outputText: "",
           status: "pending",
           wasApplied: false,
@@ -40,7 +42,7 @@ export function createAiRunRepository(database: AiRunDatabase = db) {
       return run!;
     },
 
-    async completeAiRun(id: string, outputText: string) {
+    async completeAiRun(scope: WorkspaceScope, id: string, outputText: string) {
       const [run] = await database
         .update(aiRuns)
         .set({
@@ -49,13 +51,18 @@ export function createAiRunRepository(database: AiRunDatabase = db) {
           errorMessage: null,
           updatedAt: new Date(),
         })
-        .where(eq(aiRuns.id, id))
+        .where(and(eq(aiRuns.workspaceId, scope.workspaceId), eq(aiRuns.id, id)))
         .returning();
 
       return run ?? null;
     },
 
-    async completeAiRunWithProposals(id: string, outputText: string, proposals: FinalizeAiRunProposalInput[]) {
+    async completeAiRunWithProposals(
+      scope: WorkspaceScope,
+      id: string,
+      outputText: string,
+      proposals: FinalizeAiRunProposalInput[],
+    ) {
       return database.transaction(async (transaction) => {
         const now = new Date();
         const [run] = await transaction
@@ -66,7 +73,7 @@ export function createAiRunRepository(database: AiRunDatabase = db) {
             errorMessage: null,
             updatedAt: now,
           })
-          .where(eq(aiRuns.id, id))
+          .where(and(eq(aiRuns.workspaceId, scope.workspaceId), eq(aiRuns.id, id)))
           .returning();
 
         if (!run) {
@@ -83,6 +90,7 @@ export function createAiRunRepository(database: AiRunDatabase = db) {
             proposals.map((proposal) => ({
               ...proposal,
               aiRunId: id,
+              workspaceId: scope.workspaceId,
               status: "pending" as const,
               createdAt: now,
               updatedAt: now,
@@ -94,7 +102,7 @@ export function createAiRunRepository(database: AiRunDatabase = db) {
       });
     },
 
-    async failAiRun(id: string, errorMessage: string) {
+    async failAiRun(scope: WorkspaceScope, id: string, errorMessage: string) {
       const [run] = await database
         .update(aiRuns)
         .set({
@@ -102,14 +110,18 @@ export function createAiRunRepository(database: AiRunDatabase = db) {
           errorMessage,
           updatedAt: new Date(),
         })
-        .where(eq(aiRuns.id, id))
+        .where(and(eq(aiRuns.workspaceId, scope.workspaceId), eq(aiRuns.id, id)))
         .returning();
 
       return run ?? null;
     },
 
-    async listAiRunsForDocument(documentId: string) {
-      return database.select().from(aiRuns).where(eq(aiRuns.documentId, documentId)).orderBy(desc(aiRuns.createdAt));
+    async listAiRunsForDocument(scope: WorkspaceScope, documentId: string) {
+      return database
+        .select()
+        .from(aiRuns)
+        .where(and(eq(aiRuns.workspaceId, scope.workspaceId), eq(aiRuns.documentId, documentId)))
+        .orderBy(desc(aiRuns.createdAt));
     },
   };
 }

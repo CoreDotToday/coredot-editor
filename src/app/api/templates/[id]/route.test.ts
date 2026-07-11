@@ -3,8 +3,9 @@ import { archivePromptTemplate, updatePromptTemplate } from "@/features/template
 import { DELETE, PUT } from "./route";
 
 vi.mock("@/features/templates/template-repository", () => ({
-  archivePromptTemplate: vi.fn(async (id) => ({
+  archivePromptTemplate: vi.fn(async (scope, id) => ({
     id,
+    workspaceId: scope.workspaceId,
     name: "Strategy Review",
     description: "Review strategy",
     category: "strategy_review",
@@ -89,6 +90,6 @@ describe("DELETE /api/templates/[id]", () => {
 
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ template: { id: "tpl_1", isActive: false } });
-    expect(archivePromptTemplate).toHaveBeenCalledWith("tpl_1");
+    expect(archivePromptTemplate).toHaveBeenCalledWith({ workspaceId: "local" }, "tpl_1");
   });
 });

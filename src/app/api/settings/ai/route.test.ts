@@ -13,10 +13,12 @@ vi.mock("@/features/ai/ai-settings-repository", async (importOriginal) => {
       aiProvider: "coredot",
       aiReasoningEffort: null,
       id: "default",
+      workspaceId: "local",
     })),
-    updateAiSettings: vi.fn(async (input) => ({
+    updateAiSettings: vi.fn(async (scope, input) => ({
       ...input,
       id: "default",
+      workspaceId: scope.workspaceId,
     })),
   };
 });
@@ -51,6 +53,7 @@ describe("/api/settings/ai", () => {
           aiProvider: "coredot",
           aiReasoningEffort: null,
           id: "default",
+          workspaceId: "local",
         },
         secrets: {
           coredotConfigured: true,
@@ -85,7 +88,7 @@ describe("/api/settings/ai", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(updateAiSettings).toHaveBeenCalledWith({
+    expect(updateAiSettings).toHaveBeenCalledWith({ workspaceId: "local" }, {
       aiBaseUrl: "https://api.core.today/llm/openai/v1",
       aiMaxCompletionTokens: 64000,
       aiModel: "gpt-5-mini",

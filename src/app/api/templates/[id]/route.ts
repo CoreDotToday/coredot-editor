@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { archivePromptTemplate, updatePromptTemplate } from "@/features/templates/template-repository";
+
+const localWorkspace = { workspaceId: "local" };
 import { promptTemplateUpdatePayloadSchema } from "@/features/templates/template-validation";
 
 type Params = {
@@ -13,7 +15,7 @@ export async function PUT(request: Request, { params }: Params) {
     return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
   }
 
-  const template = await updatePromptTemplate(id, result.data);
+  const template = await updatePromptTemplate(localWorkspace, id, result.data);
   if (!template) {
     return NextResponse.json({ error: "Template not found" }, { status: 404 });
   }
@@ -23,7 +25,7 @@ export async function PUT(request: Request, { params }: Params) {
 
 export async function DELETE(_request: Request, { params }: Params) {
   const { id } = await params;
-  const template = await archivePromptTemplate(id);
+  const template = await archivePromptTemplate(localWorkspace, id);
   if (!template) {
     return NextResponse.json({ error: "Template not found" }, { status: 404 });
   }

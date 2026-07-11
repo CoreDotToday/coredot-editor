@@ -11,6 +11,8 @@ export type RequestContext = {
   workspaceId: string;
 };
 
+export type WorkspaceScope = Pick<RequestContext, "workspaceId">;
+
 export type ClerkIdentity = {
   orgId: string | null | undefined;
   orgRole: string | null | undefined;

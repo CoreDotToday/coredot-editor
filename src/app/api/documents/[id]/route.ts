@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { archiveDocument, getDocumentById, updateDocumentContent } from "@/features/documents/document-repository";
+
+const localWorkspace = { workspaceId: "local" };
 import { documentReadinessValues } from "@/features/documents/document-metadata";
 
 const updateDocumentSchema = z.object({
@@ -21,7 +23,7 @@ type Params = {
 
 export async function GET(_request: Request, { params }: Params) {
   const { id } = await params;
-  const document = await getDocumentById(id);
+  const document = await getDocumentById(localWorkspace, id);
   if (!document) {
     return NextResponse.json({ error: "Document not found" }, { status: 404 });
   }
@@ -36,7 +38,7 @@ export async function PUT(request: Request, { params }: Params) {
   }
 
   const body = result.data;
-  const document = await updateDocumentContent(id, body);
+  const document = await updateDocumentContent(localWorkspace, id, body);
   if (!document) {
     return NextResponse.json({ error: "Document not found" }, { status: 404 });
   }
@@ -45,7 +47,7 @@ export async function PUT(request: Request, { params }: Params) {
 
 export async function DELETE(_request: Request, { params }: Params) {
   const { id } = await params;
-  const document = await archiveDocument(id);
+  const document = await archiveDocument(localWorkspace, id);
   if (!document) {
     return NextResponse.json({ error: "Document not found" }, { status: 404 });
   }

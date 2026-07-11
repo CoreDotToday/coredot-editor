@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { getDocumentById } from "@/features/documents/document-repository";
+
+const localWorkspace = { workspaceId: "local" };
 import { tiptapJsonToDocxBuffer } from "@/features/documents/docx-conversion";
 
 export const runtime = "nodejs";
@@ -21,7 +23,7 @@ type Params = {
 
 export async function POST(request: Request, { params }: Params) {
   const { id } = await params;
-  const document = await getDocumentById(id);
+  const document = await getDocumentById(localWorkspace, id);
   if (!document) {
     return NextResponse.json({ error: "Document not found" }, { status: 404 });
   }

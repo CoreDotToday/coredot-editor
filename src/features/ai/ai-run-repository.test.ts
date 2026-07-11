@@ -9,6 +9,8 @@ import * as schema from "@/db/schema";
 import { createAiRunRepository } from "./ai-run-repository";
 
 const tempDirs: string[] = [];
+const workspaceA = { workspaceId: "workspace_a" };
+const workspaceB = { workspaceId: "workspace_b" };
 
 afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
@@ -24,6 +26,7 @@ async function createIsolatedAiRunDb() {
   await db.run(sql`
     CREATE TABLE documents (
       id text PRIMARY KEY NOT NULL,
+      workspace_id text NOT NULL,
       title text NOT NULL,
       content_json text NOT NULL,
       plain_text text DEFAULT '' NOT NULL,
@@ -37,6 +40,7 @@ async function createIsolatedAiRunDb() {
   await db.run(sql`
     CREATE TABLE prompt_templates (
       id text PRIMARY KEY NOT NULL,
+      workspace_id text NOT NULL,
       name text NOT NULL,
       description text NOT NULL,
       category text NOT NULL,
@@ -51,6 +55,7 @@ async function createIsolatedAiRunDb() {
   await db.run(sql`
     CREATE TABLE ai_runs (
       id text PRIMARY KEY NOT NULL,
+      workspace_id text NOT NULL,
       document_id text NOT NULL,
       prompt_template_id text,
       command_type text NOT NULL,
@@ -68,6 +73,7 @@ async function createIsolatedAiRunDb() {
   await db.run(sql`
     CREATE TABLE ai_proposals (
       id text PRIMARY KEY NOT NULL,
+      workspace_id text NOT NULL,
       ai_run_id text NOT NULL,
       document_id text NOT NULL,
       target_text text NOT NULL,
@@ -90,6 +96,7 @@ async function createIsolatedAiRunDb() {
   const now = new Date("2026-01-01T00:00:00.000Z");
   await db.insert(schema.documents).values({
     id: "doc_1",
+    workspaceId: workspaceA.workspaceId,
     title: "Memo",
     contentJson: { type: "doc" },
     plainText: "Text",
@@ -101,6 +108,7 @@ async function createIsolatedAiRunDb() {
   });
   await db.insert(schema.promptTemplates).values({
     id: "tpl_1",
+    workspaceId: workspaceA.workspaceId,
     name: "Review",
     description: "Review",
     category: "strategy",
@@ -120,7 +128,7 @@ describe("AI run repository", () => {
     const db = await createIsolatedAiRunDb();
     const repository = createAiRunRepository(db);
 
-    const run = await repository.createAiRun({
+    const run = await repository.createAiRun(workspaceA, {
       documentId: "doc_1",
       promptTemplateId: "tpl_1",
       commandType: "selection_rewrite",
@@ -128,9 +136,9 @@ describe("AI run repository", () => {
       model: "stub-editor",
       inputSummaryJson: { selectedTextLength: 4 },
     });
-    const completedRun = await repository.completeAiRun(run.id, "New text");
-    const failedRun = await repository.failAiRun(run.id, "late failure");
-    const runs = await repository.listAiRunsForDocument("doc_1");
+    const completedRun = await repository.completeAiRun(workspaceA, run.id, "New text");
+    const failedRun = await repository.failAiRun(workspaceA, run.id, "late failure");
+    const runs = await repository.listAiRunsForDocument(workspaceA, "doc_1");
 
     expect(run.status).toBe("pending");
     expect(completedRun?.status).toBe("completed");
@@ -143,7 +151,7 @@ describe("AI run repository", () => {
   it("rolls back proposal inserts when finalizing an AI run fails", async () => {
     const db = await createIsolatedAiRunDb();
     const repository = createAiRunRepository(db);
-    const run = await repository.createAiRun({
+    const run = await repository.createAiRun(workspaceA, {
       documentId: "doc_1",
       promptTemplateId: "tpl_1",
       commandType: "document_review",
@@ -153,7 +161,7 @@ describe("AI run repository", () => {
     });
 
     await expect(
-      repository.completeAiRunWithProposals(run.id, "review output", [
+      repository.completeAiRunWithProposals(workspaceA, run.id, "review output", [
         {
           documentId: "doc_1",
           targetText: "good",
@@ -174,5 +182,29 @@ describe("AI run repository", () => {
 
     expect(savedRun?.status).toBe("pending");
     expect(proposals).toHaveLength(0);
+  });
+
+  it("does not list or finalize AI runs across workspaces", async () => {
+    const db = await createIsolatedAiRunDb();
+    const repository = createAiRunRepository(db);
+    const run = await repository.createAiRun(workspaceA, {
+      documentId: "doc_1",
+      promptTemplateId: "tpl_1",
+      commandType: "document_review",
+      provider: "stub",
+      model: "stub-editor",
+      inputSummaryJson: { documentTextLength: 4 },
+    });
+
+    await expect(repository.listAiRunsForDocument(workspaceB, "doc_1")).resolves.toEqual([]);
+    await expect(repository.completeAiRun(workspaceB, run.id, "Hijacked")).resolves.toBeNull();
+    await expect(repository.failAiRun(workspaceB, run.id, "Hijacked")).resolves.toBeNull();
+    await expect(
+      repository.completeAiRunWithProposals(workspaceB, run.id, "Hijacked", []),
+    ).resolves.toBeNull();
+
+    await expect(repository.listAiRunsForDocument(workspaceA, "doc_1")).resolves.toEqual([
+      expect.objectContaining({ id: run.id, outputText: "", status: "pending", workspaceId: workspaceA.workspaceId }),
+    ]);
   });
 });

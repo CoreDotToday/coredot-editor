@@ -31,6 +31,7 @@ async function createIsolatedPromptTemplateDb() {
   await db.run(sql`
     CREATE TABLE prompt_templates (
       id text PRIMARY KEY NOT NULL,
+      workspace_id text NOT NULL,
       name text NOT NULL,
       description text NOT NULL,
       category text NOT NULL,
@@ -108,6 +109,7 @@ describe("seedDefaultPromptTemplates", () => {
         id: promptTemplates.id,
         name: promptTemplates.name,
         isDefault: promptTemplates.isDefault,
+        workspaceId: promptTemplates.workspaceId,
       })
       .from(promptTemplates)
       .orderBy(promptTemplates.id);
@@ -120,5 +122,6 @@ describe("seedDefaultPromptTemplates", () => {
       "tpl_strategy_review",
     ]);
     expect(rows.every((row) => row.isDefault)).toBe(true);
+    expect(rows.every((row) => row.workspaceId === "local")).toBe(true);
   });
 });

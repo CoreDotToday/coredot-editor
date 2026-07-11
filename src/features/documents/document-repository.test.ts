@@ -9,6 +9,8 @@ import * as schema from "@/db/schema";
 import { createDocumentRepository } from "./document-repository";
 
 const tempDirs: string[] = [];
+const workspaceA = { workspaceId: "workspace_a" };
+const workspaceB = { workspaceId: "workspace_b" };
 
 afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
@@ -24,6 +26,7 @@ async function createIsolatedDocumentDb() {
   await db.run(sql`
     CREATE TABLE documents (
       id text PRIMARY KEY NOT NULL,
+      workspace_id text NOT NULL,
       title text NOT NULL,
       content_json text NOT NULL,
       plain_text text DEFAULT '' NOT NULL,
@@ -45,8 +48,8 @@ describe("document repository", () => {
     const db = await createIsolatedDocumentDb();
     const { createDocumentDraft, listDocuments } = createDocumentRepository(db);
 
-    const document = await createDocumentDraft("Market Entry Memo");
-    const documents = await listDocuments();
+    const document = await createDocumentDraft(workspaceA, "Market Entry Memo");
+    const documents = await listDocuments(workspaceA);
 
     expect(document.title).toBe("Market Entry Memo");
     expect(document.contentJson).toEqual({ type: "doc", content: [{ type: "paragraph" }] });
@@ -61,7 +64,7 @@ describe("document repository", () => {
     const db = await createIsolatedDocumentDb();
     const { createDocumentFromContent } = createDocumentRepository(db);
 
-    const document = await createDocumentFromContent("Imported Contract", {
+    const document = await createDocumentFromContent(workspaceA, "Imported Contract", {
       type: "doc",
       content: [
         { type: "heading", attrs: { level: 1 }, content: [{ type: "text", text: "Contract" }] },
@@ -84,11 +87,11 @@ describe("document repository", () => {
   it("archives an existing document and removes it from draft listings", async () => {
     const db = await createIsolatedDocumentDb();
     const { archiveDocument, createDocumentDraft, getDocumentById, listDocuments } = createDocumentRepository(db);
-    const document = await createDocumentDraft("Market Entry Memo");
+    const document = await createDocumentDraft(workspaceA, "Market Entry Memo");
 
-    const archivedDocument = await archiveDocument(document.id);
-    const savedDocument = await getDocumentById(document.id);
-    const documents = await listDocuments();
+    const archivedDocument = await archiveDocument(workspaceA, document.id);
+    const savedDocument = await getDocumentById(workspaceA, document.id);
+    const documents = await listDocuments(workspaceA);
 
     expect(archivedDocument?.id).toBe(document.id);
     expect(archivedDocument?.status).toBe("archived");
@@ -99,21 +102,21 @@ describe("document repository", () => {
   it("returns null when archiving a missing or already archived document", async () => {
     const db = await createIsolatedDocumentDb();
     const { archiveDocument, createDocumentDraft } = createDocumentRepository(db);
-    const document = await createDocumentDraft("Market Entry Memo");
-    await archiveDocument(document.id);
+    const document = await createDocumentDraft(workspaceA, "Market Entry Memo");
+    await archiveDocument(workspaceA, document.id);
 
-    await expect(archiveDocument("missing-document")).resolves.toBeNull();
-    await expect(archiveDocument(document.id)).resolves.toBeNull();
+    await expect(archiveDocument(workspaceA, "missing-document")).resolves.toBeNull();
+    await expect(archiveDocument(workspaceA, document.id)).resolves.toBeNull();
   });
 
   it("returns null when updating an archived document", async () => {
     const db = await createIsolatedDocumentDb();
     const { archiveDocument, createDocumentDraft, updateDocumentContent } = createDocumentRepository(db);
-    const document = await createDocumentDraft("Market Entry Memo");
-    await archiveDocument(document.id);
+    const document = await createDocumentDraft(workspaceA, "Market Entry Memo");
+    await archiveDocument(workspaceA, document.id);
 
     await expect(
-      updateDocumentContent(document.id, {
+      updateDocumentContent(workspaceA, document.id, {
         title: "Updated Memo",
         contentJson: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "Updated" }] }] },
       }),
@@ -123,9 +126,9 @@ describe("document repository", () => {
   it("updates document content together with readiness and metadata", async () => {
     const db = await createIsolatedDocumentDb();
     const { createDocumentDraft, updateDocumentContent } = createDocumentRepository(db);
-    const document = await createDocumentDraft("Market Entry Memo");
+    const document = await createDocumentDraft(workspaceA, "Market Entry Memo");
 
-    const updated = await updateDocumentContent(document.id, {
+    const updated = await updateDocumentContent(workspaceA, document.id, {
       title: "Updated Memo",
       contentJson: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "Updated" }] }] },
       metadataJson: { owner: "Legal", tags: ["risk"] },
@@ -142,21 +145,21 @@ describe("document repository", () => {
   it("lists reference candidates while excluding the current and archived documents", async () => {
     const db = await createIsolatedDocumentDb();
     const { archiveDocument, createDocumentFromContent, listDocumentReferenceCandidates } = createDocumentRepository(db);
-    const current = await createDocumentFromContent("Current Plan", {
+    const current = await createDocumentFromContent(workspaceA, "Current Plan", {
       type: "doc",
       content: [{ type: "paragraph", content: [{ type: "text", text: "Current body" }] }],
     });
-    const referenced = await createDocumentFromContent("Revenue Memo", {
+    const referenced = await createDocumentFromContent(workspaceA, "Revenue Memo", {
       type: "doc",
       content: [{ type: "paragraph", content: [{ type: "text", text: "Reference body" }] }],
     });
-    const archived = await createDocumentFromContent("Revenue Archive", {
+    const archived = await createDocumentFromContent(workspaceA, "Revenue Archive", {
       type: "doc",
       content: [{ type: "paragraph", content: [{ type: "text", text: "Archived body" }] }],
     });
-    await archiveDocument(archived.id);
+    await archiveDocument(workspaceA, archived.id);
 
-    const candidates = await listDocumentReferenceCandidates({
+    const candidates = await listDocumentReferenceCandidates(workspaceA, {
       excludeDocumentId: current.id,
       limit: 5,
       query: "revenue",
@@ -169,11 +172,34 @@ describe("document repository", () => {
   it("returns referenced documents in stable input order", async () => {
     const db = await createIsolatedDocumentDb();
     const { createDocumentDraft, getDocumentsByIds } = createDocumentRepository(db);
-    const first = await createDocumentDraft("First");
-    const second = await createDocumentDraft("Second");
+    const first = await createDocumentDraft(workspaceA, "First");
+    const second = await createDocumentDraft(workspaceA, "Second");
 
-    const documents = await getDocumentsByIds([second.id, "missing", first.id]);
+    const documents = await getDocumentsByIds(workspaceA, [second.id, "missing", first.id]);
 
     expect(documents.map((document) => document.id)).toEqual([second.id, first.id]);
+  });
+
+  it("does not reveal or mutate documents across workspaces", async () => {
+    const db = await createIsolatedDocumentDb();
+    const repository = createDocumentRepository(db);
+    const document = await repository.createDocumentDraft(workspaceA, "Workspace A memo");
+
+    await expect(repository.getDocumentById(workspaceB, document.id)).resolves.toBeNull();
+    await expect(repository.getDocumentsByIds(workspaceB, [document.id])).resolves.toEqual([]);
+    await expect(repository.listDocuments(workspaceB)).resolves.toEqual([]);
+    await expect(
+      repository.updateDocumentContent(workspaceB, document.id, {
+        title: "Hijacked",
+        contentJson: { type: "doc", content: [{ type: "paragraph" }] },
+      }),
+    ).resolves.toBeNull();
+    await expect(repository.archiveDocument(workspaceB, document.id)).resolves.toBeNull();
+
+    await expect(repository.getDocumentById(workspaceA, document.id)).resolves.toMatchObject({
+      status: "draft",
+      title: "Workspace A memo",
+      workspaceId: workspaceA.workspaceId,
+    });
   });
 });

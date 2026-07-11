@@ -1,6 +1,7 @@
 import { and, desc, eq } from "drizzle-orm";
 import { db } from "@/db/client";
 import { aiProposals, type NewAiProposalRecord } from "@/db/schema";
+import type { WorkspaceScope } from "@/features/auth/request-context";
 
 type ProposalDatabase = typeof db;
 
@@ -17,12 +18,13 @@ type CreateProposalInput = Pick<
 
 export function createProposalRepository(database: ProposalDatabase = db) {
   return {
-    async createProposal(input: CreateProposalInput) {
+    async createProposal(scope: WorkspaceScope, input: CreateProposalInput) {
       const now = new Date();
       const [proposal] = await database
         .insert(aiProposals)
         .values({
           ...input,
+          workspaceId: scope.workspaceId,
           status: "pending",
           createdAt: now,
           updatedAt: now,
@@ -32,28 +34,37 @@ export function createProposalRepository(database: ProposalDatabase = db) {
       return proposal!;
     },
 
-    async listProposalsForDocument(documentId: string) {
+    async listProposalsForDocument(scope: WorkspaceScope, documentId: string) {
       return database
         .select()
         .from(aiProposals)
-        .where(eq(aiProposals.documentId, documentId))
+        .where(and(eq(aiProposals.workspaceId, scope.workspaceId), eq(aiProposals.documentId, documentId)))
         .orderBy(desc(aiProposals.createdAt));
     },
 
-    async getProposalById(id: string) {
-      const [proposal] = await database.select().from(aiProposals).where(eq(aiProposals.id, id)).limit(1);
+    async getProposalById(scope: WorkspaceScope, id: string) {
+      const [proposal] = await database
+        .select()
+        .from(aiProposals)
+        .where(and(eq(aiProposals.workspaceId, scope.workspaceId), eq(aiProposals.id, id)))
+        .limit(1);
       return proposal ?? null;
     },
 
     async updateProposalStatus(
+      scope: WorkspaceScope,
       id: string,
       status: "pending" | "accepted" | "rejected",
       appliedMode?: "replace" | "insert_below",
       options: { expectedStatus?: "pending" | "accepted" | "rejected" } = {},
     ) {
       const whereClause = options.expectedStatus
-        ? and(eq(aiProposals.id, id), eq(aiProposals.status, options.expectedStatus))
-        : eq(aiProposals.id, id);
+        ? and(
+            eq(aiProposals.workspaceId, scope.workspaceId),
+            eq(aiProposals.id, id),
+            eq(aiProposals.status, options.expectedStatus),
+          )
+        : and(eq(aiProposals.workspaceId, scope.workspaceId), eq(aiProposals.id, id));
       const [proposal] = await database
         .update(aiProposals)
         .set({

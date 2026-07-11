@@ -1,6 +1,7 @@
 import { and, desc, eq, inArray } from "drizzle-orm";
 import { db } from "@/db/client";
 import { documents, type DocumentMetadata, type DocumentReadiness, type TiptapJson } from "@/db/schema";
+import type { WorkspaceScope } from "@/features/auth/request-context";
 import { normalizeDocumentMetadata, normalizeDocumentReadiness } from "./document-metadata";
 import { extractPlainTextFromTiptap } from "./tiptap-text";
 
@@ -13,11 +14,12 @@ export const emptyDocument: TiptapJson = {
 
 export function createDocumentRepository(database: DocumentDatabase = db) {
   return {
-    async createDocumentDraft(title: string) {
+    async createDocumentDraft(scope: WorkspaceScope, title: string) {
       const now = new Date();
       const rows = await database
         .insert(documents)
         .values({
+          workspaceId: scope.workspaceId,
           title,
           contentJson: emptyDocument,
           metadataJson: {},
@@ -32,11 +34,12 @@ export function createDocumentRepository(database: DocumentDatabase = db) {
       return rows[0]!;
     },
 
-    async createDocumentFromContent(title: string, contentJson: TiptapJson) {
+    async createDocumentFromContent(scope: WorkspaceScope, title: string, contentJson: TiptapJson) {
       const now = new Date();
       const rows = await database
         .insert(documents)
         .values({
+          workspaceId: scope.workspaceId,
           title,
           contentJson,
           metadataJson: {},
@@ -51,20 +54,30 @@ export function createDocumentRepository(database: DocumentDatabase = db) {
       return rows[0]!;
     },
 
-    async listDocuments() {
-      return database.select().from(documents).where(eq(documents.status, "draft")).orderBy(desc(documents.updatedAt));
+    async listDocuments(scope: WorkspaceScope) {
+      return database
+        .select()
+        .from(documents)
+        .where(and(eq(documents.workspaceId, scope.workspaceId), eq(documents.status, "draft")))
+        .orderBy(desc(documents.updatedAt));
     },
 
-    async getDocumentById(id: string) {
+    async getDocumentById(scope: WorkspaceScope, id: string) {
       const rows = await database
         .select()
         .from(documents)
-        .where(and(eq(documents.id, id), eq(documents.status, "draft")))
+        .where(
+          and(
+            eq(documents.workspaceId, scope.workspaceId),
+            eq(documents.id, id),
+            eq(documents.status, "draft"),
+          ),
+        )
         .limit(1);
       return rows[0] ?? null;
     },
 
-    async getDocumentsByIds(ids: string[]) {
+    async getDocumentsByIds(scope: WorkspaceScope, ids: string[]) {
       if (ids.length === 0) {
         return [];
       }
@@ -73,7 +86,13 @@ export function createDocumentRepository(database: DocumentDatabase = db) {
       const rows = await database
         .select()
         .from(documents)
-        .where(and(inArray(documents.id, uniqueIds), eq(documents.status, "draft")));
+        .where(
+          and(
+            eq(documents.workspaceId, scope.workspaceId),
+            inArray(documents.id, uniqueIds),
+            eq(documents.status, "draft"),
+          ),
+        );
       const byId = new Map(rows.map((document) => [document.id, document]));
 
       return uniqueIds.flatMap((id) => {
@@ -82,13 +101,16 @@ export function createDocumentRepository(database: DocumentDatabase = db) {
       });
     },
 
-    async listDocumentReferenceCandidates(input: { excludeDocumentId?: string; limit?: number; query?: string } = {}) {
+    async listDocumentReferenceCandidates(
+      scope: WorkspaceScope,
+      input: { excludeDocumentId?: string; limit?: number; query?: string } = {},
+    ) {
       const limit = Math.max(1, Math.min(input.limit ?? 12, 50));
       const normalizedQuery = input.query?.trim().toLocaleLowerCase() ?? "";
       const rows = await database
         .select()
         .from(documents)
-        .where(eq(documents.status, "draft"))
+        .where(and(eq(documents.workspaceId, scope.workspaceId), eq(documents.status, "draft")))
         .orderBy(desc(documents.updatedAt));
 
       return rows
@@ -107,6 +129,7 @@ export function createDocumentRepository(database: DocumentDatabase = db) {
     },
 
     async updateDocumentContent(
+      scope: WorkspaceScope,
       id: string,
       input: {
         title: string;
@@ -126,18 +149,30 @@ export function createDocumentRepository(database: DocumentDatabase = db) {
           readiness: input.readiness === undefined ? undefined : normalizeDocumentReadiness(input.readiness),
           updatedAt: now,
         })
-        .where(and(eq(documents.id, id), eq(documents.status, "draft")))
+        .where(
+          and(
+            eq(documents.workspaceId, scope.workspaceId),
+            eq(documents.id, id),
+            eq(documents.status, "draft"),
+          ),
+        )
         .returning();
 
       return rows[0] ?? null;
     },
 
-    async archiveDocument(id: string) {
+    async archiveDocument(scope: WorkspaceScope, id: string) {
       const now = new Date();
       const rows = await database
         .update(documents)
         .set({ status: "archived", updatedAt: now })
-        .where(and(eq(documents.id, id), eq(documents.status, "draft")))
+        .where(
+          and(
+            eq(documents.workspaceId, scope.workspaceId),
+            eq(documents.id, id),
+            eq(documents.status, "draft"),
+          ),
+        )
         .returning();
 
       return rows[0] ?? null;

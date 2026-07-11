@@ -5,6 +5,8 @@ import { completeAiRunWithProposals, createAiRun, failAiRun } from "@/features/a
 import { prepareAiCommandRequest, type AiCommandRequestFailure } from "@/features/ai/ai-command-service";
 import { applyProposalToText } from "@/features/proposals/proposal-apply";
 
+const localWorkspace = { workspaceId: "local" };
+
 export async function POST(request: Request) {
   const payload = await request.json().catch(() => null);
   const result = aiCommandPayloadSchema.safeParse(payload);
@@ -25,7 +27,7 @@ export async function POST(request: Request) {
 
   const { document, provider, referencedDocuments, reviewedText, template } = prepared;
 
-  const run = await createAiRun({
+  const run = await createAiRun(localWorkspace, {
     documentId: document.id,
     promptTemplateId: template.id,
     commandType: "document_review",
@@ -59,6 +61,7 @@ export async function POST(request: Request) {
 
     const outputText = JSON.stringify(review);
     const finalizedRun = await completeAiRunWithProposals(
+      localWorkspace,
       run.id,
       outputText,
       validFindings.map(({ finding, occurrenceIndex }) => ({
@@ -77,7 +80,7 @@ export async function POST(request: Request) {
       skippedProposalCount,
     });
   } catch (error) {
-    await failAiRun(run.id, error instanceof Error ? error.message : "Unknown AI generation failure");
+    await failAiRun(localWorkspace, run.id, error instanceof Error ? error.message : "Unknown AI generation failure");
     return NextResponse.json({ error: "AI generation failed" }, { status: 500 });
   }
 }

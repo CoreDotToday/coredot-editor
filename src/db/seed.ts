@@ -186,6 +186,7 @@ export async function seedDefaultPromptTemplates(now = new Date()) {
       .insert(promptTemplates)
       .values({
         id: template.id,
+        workspaceId: "local",
         name: template.name,
         description: template.description,
         category: template.category,
@@ -199,6 +200,7 @@ export async function seedDefaultPromptTemplates(now = new Date()) {
       .onConflictDoUpdate({
         target: promptTemplates.id,
         set: {
+          workspaceId: "local",
           name: template.name,
           description: template.description,
           category: template.category,

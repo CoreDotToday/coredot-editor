@@ -5,7 +5,7 @@ import { PUT } from "./route";
 vi.mock("@/features/documents/document-repository", () => ({
   archiveDocument: vi.fn(),
   getDocumentById: vi.fn(),
-  updateDocumentContent: vi.fn(async (id, input) => ({
+  updateDocumentContent: vi.fn(async (_scope, id, input) => ({
     id,
     ...input,
     plainText: "Updated body",
@@ -37,7 +37,7 @@ describe("PUT /api/documents/[id]", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(updateDocumentContent).toHaveBeenCalledWith("doc_1", {
+    expect(updateDocumentContent).toHaveBeenCalledWith({ workspaceId: "local" }, "doc_1", {
       title: "Updated Memo",
       contentJson: { type: "doc", content: [] },
       readiness: "ready",

@@ -49,7 +49,7 @@ describe("PATCH /api/proposals/[id]", () => {
 
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ proposal: { id: "proposal_1", status: "rejected" } });
-    expect(updateProposalStatus).toHaveBeenCalledWith("proposal_1", "rejected", undefined, {
+    expect(updateProposalStatus).toHaveBeenCalledWith({ workspaceId: "local" }, "proposal_1", "rejected", undefined, {
       expectedStatus: undefined,
     });
   });
@@ -89,10 +89,10 @@ describe("PATCH /api/proposals/[id]", () => {
       error: "Proposal status changed",
       proposal: { id: "proposal_1", status: "accepted" },
     });
-    expect(updateProposalStatus).toHaveBeenCalledWith("proposal_1", "rejected", undefined, {
+    expect(updateProposalStatus).toHaveBeenCalledWith({ workspaceId: "local" }, "proposal_1", "rejected", undefined, {
       expectedStatus: "pending",
     });
-    expect(getProposalById).toHaveBeenCalledWith("proposal_1");
+    expect(getProposalById).toHaveBeenCalledWith({ workspaceId: "local" }, "proposal_1");
   });
 
   it("returns 409 instead of 404 when a conditional update misses an existing proposal", async () => {

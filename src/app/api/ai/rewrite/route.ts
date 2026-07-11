@@ -17,6 +17,7 @@ const rewritePayloadSchema = aiCommandPayloadSchema.extend({
     .max(AI_CONTEXT_LIMITS.selectedTextMaxCharacters)
     .refine((value) => value.trim().length > 0),
 });
+const localWorkspace = { workspaceId: "local" };
 
 export async function POST(request: Request) {
   const payload = await request.json().catch(() => null);
@@ -53,7 +54,7 @@ export async function POST(request: Request) {
   }
   const { provider } = providerResult;
 
-  const run = await createAiRun({
+  const run = await createAiRun(localWorkspace, {
     documentId: document.id,
     promptTemplateId: template.id,
     commandType: "selection_rewrite",
@@ -81,7 +82,7 @@ export async function POST(request: Request) {
     });
     const rewriteResult = normalizeSelectionRewriteResult(await provider.generateText({ messages }));
     const { explanation, replacementText } = rewriteResult;
-    const finalizedRun = await completeAiRunWithProposals(run.id, replacementText, [
+    const finalizedRun = await completeAiRunWithProposals(localWorkspace, run.id, replacementText, [
       {
         command: body.command,
         defaultApplyMode: body.defaultApplyMode ?? getDefaultApplyModeForCommand(body.command),
@@ -98,7 +99,7 @@ export async function POST(request: Request) {
 
     return NextResponse.json({ run: finalizedRun?.run ?? run, proposal: finalizedRun?.proposals[0] ?? null });
   } catch (error) {
-    await failAiRun(run.id, error instanceof Error ? error.message : "Unknown AI generation failure");
+    await failAiRun(localWorkspace, run.id, error instanceof Error ? error.message : "Unknown AI generation failure");
     return NextResponse.json({ error: "AI generation failed" }, { status: 500 });
   }
 }

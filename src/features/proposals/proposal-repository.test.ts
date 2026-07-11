@@ -9,6 +9,8 @@ import * as schema from "@/db/schema";
 import { createProposalRepository } from "./proposal-repository";
 
 const tempDirs: string[] = [];
+const workspaceA = { workspaceId: "workspace_a" };
+const workspaceB = { workspaceId: "workspace_b" };
 
 afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
@@ -24,6 +26,7 @@ async function createIsolatedProposalDb() {
   await db.run(sql`
     CREATE TABLE ai_proposals (
       id text PRIMARY KEY NOT NULL,
+      workspace_id text NOT NULL,
       ai_run_id text NOT NULL,
       document_id text NOT NULL,
       target_text text NOT NULL,
@@ -50,7 +53,7 @@ describe("proposal repository", () => {
     const db = await createIsolatedProposalDb();
     const repository = createProposalRepository(db);
 
-    const proposal = await repository.createProposal({
+    const proposal = await repository.createProposal(workspaceA, {
       aiRunId: "run_1",
       documentId: "doc_1",
       targetText: "old",
@@ -77,20 +80,21 @@ describe("proposal repository", () => {
       targetTo: 16,
       defaultApplyMode: "replace",
       status: "pending",
+      workspaceId: workspaceA.workspaceId,
     });
   });
 
   it("lists proposals for a document and updates proposal status", async () => {
     const db = await createIsolatedProposalDb();
     const repository = createProposalRepository(db);
-    const firstProposal = await repository.createProposal({
+    const firstProposal = await repository.createProposal(workspaceA, {
       aiRunId: "run_1",
       documentId: "doc_1",
       targetText: "first",
       replacementText: "updated first",
       explanation: "First.",
     });
-    await repository.createProposal({
+    await repository.createProposal(workspaceA, {
       aiRunId: "run_1",
       documentId: "doc_2",
       targetText: "other",
@@ -98,8 +102,13 @@ describe("proposal repository", () => {
       explanation: "Other.",
     });
 
-    const updatedProposal = await repository.updateProposalStatus(firstProposal.id, "accepted", "insert_below");
-    const proposals = await repository.listProposalsForDocument("doc_1");
+    const updatedProposal = await repository.updateProposalStatus(
+      workspaceA,
+      firstProposal.id,
+      "accepted",
+      "insert_below",
+    );
+    const proposals = await repository.listProposalsForDocument(workspaceA, "doc_1");
 
     expect(updatedProposal?.status).toBe("accepted");
     expect(updatedProposal?.appliedMode).toBe("insert_below");
@@ -110,7 +119,7 @@ describe("proposal repository", () => {
   it("does not update a proposal when the expected status is stale", async () => {
     const db = await createIsolatedProposalDb();
     const repository = createProposalRepository(db);
-    const proposal = await repository.createProposal({
+    const proposal = await repository.createProposal(workspaceA, {
       aiRunId: "run_1",
       documentId: "doc_1",
       targetText: "old",
@@ -118,12 +127,35 @@ describe("proposal repository", () => {
       explanation: "Clearer.",
     });
 
-    const updatedProposal = await repository.updateProposalStatus(proposal.id, "accepted", "replace", {
+    const updatedProposal = await repository.updateProposalStatus(workspaceA, proposal.id, "accepted", "replace", {
       expectedStatus: "accepted",
     });
-    const savedProposal = await repository.getProposalById(proposal.id);
+    const savedProposal = await repository.getProposalById(workspaceA, proposal.id);
 
     expect(updatedProposal).toBeNull();
     expect(savedProposal).toMatchObject({ id: proposal.id, appliedMode: null, status: "pending" });
+  });
+
+  it("does not reveal or update proposals across workspaces", async () => {
+    const db = await createIsolatedProposalDb();
+    const repository = createProposalRepository(db);
+    const proposal = await repository.createProposal(workspaceA, {
+      aiRunId: "run_1",
+      documentId: "doc_1",
+      targetText: "old",
+      replacementText: "new",
+      explanation: "Private proposal.",
+    });
+
+    await expect(repository.getProposalById(workspaceB, proposal.id)).resolves.toBeNull();
+    await expect(repository.listProposalsForDocument(workspaceB, "doc_1")).resolves.toEqual([]);
+    await expect(
+      repository.updateProposalStatus(workspaceB, proposal.id, "accepted", "replace"),
+    ).resolves.toBeNull();
+
+    await expect(repository.getProposalById(workspaceA, proposal.id)).resolves.toMatchObject({
+      status: "pending",
+      workspaceId: workspaceA.workspaceId,
+    });
   });
 });

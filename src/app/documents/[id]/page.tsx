@@ -5,23 +5,25 @@ import { getDocumentById, listDocumentReferenceCandidates } from "@/features/doc
 import { listProposalsForDocument } from "@/features/proposals/proposal-repository";
 import { listActivePromptTemplates } from "@/features/templates/template-repository";
 
+const localWorkspace = { workspaceId: "local" };
+
 type DocumentPageProps = {
   params: Promise<{ id: string }>;
 };
 
 export default async function DocumentPage({ params }: DocumentPageProps) {
   const { id } = await params;
-  const document = await getDocumentById(id);
+  const document = await getDocumentById(localWorkspace, id);
 
   if (!document) {
     notFound();
   }
 
   const [templates, aiRuns, proposals, referenceDocuments] = await Promise.all([
-    listActivePromptTemplates(),
-    listAiRunsForDocument(document.id),
-    listProposalsForDocument(document.id),
-    listDocumentReferenceCandidates({ excludeDocumentId: document.id, limit: 24 }),
+    listActivePromptTemplates(localWorkspace),
+    listAiRunsForDocument(localWorkspace, document.id),
+    listProposalsForDocument(localWorkspace, document.id),
+    listDocumentReferenceCandidates(localWorkspace, { excludeDocumentId: document.id, limit: 24 }),
   ]);
 
   return (

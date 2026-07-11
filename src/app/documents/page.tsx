@@ -2,6 +2,8 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { DocumentImportButton } from "@/components/document/DocumentImportButton";
 import { createDocumentDraft, listDocuments } from "@/features/documents/document-repository";
+
+const localWorkspace = { workspaceId: "local" };
 import { filterDocumentSummaries } from "@/features/documents/document-filters";
 import { documentReadinessValues, normalizeDocumentReadiness } from "@/features/documents/document-metadata";
 import type { DocumentReadiness } from "@/db/schema";
@@ -11,7 +13,7 @@ export const dynamic = "force-dynamic";
 async function createDocument() {
   "use server";
 
-  const document = await createDocumentDraft("제목 없는 문서");
+  const document = await createDocumentDraft(localWorkspace, "제목 없는 문서");
   redirect(`/documents/${document.id}`);
 }
 
@@ -45,7 +47,7 @@ function getListMetadataValue(value: unknown) {
 
 export default async function DocumentsPage({ searchParams }: DocumentsPageProps) {
   const params = (await searchParams) ?? {};
-  const documents = filterDocumentSummaries(await listDocuments(), {
+  const documents = filterDocumentSummaries(await listDocuments(localWorkspace), {
     metadataKey: params.metadataKey,
     metadataValue: params.metadataValue,
     query: params.query,

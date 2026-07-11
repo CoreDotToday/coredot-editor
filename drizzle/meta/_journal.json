@@ -43,6 +43,13 @@
       "when": 1781047645223,
       "tag": "0005_tiny_slyde",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1783793238000,
+      "tag": "0006_workspace_ownership",
+      "breakpoints": true
     }
   ]
 }

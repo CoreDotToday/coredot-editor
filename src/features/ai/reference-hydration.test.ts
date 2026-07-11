@@ -35,7 +35,7 @@ describe("hydrateAiReferenceDocuments", () => {
       { currentDocumentId: "doc_current" },
     );
 
-    expect(getDocumentsByIdsMock).toHaveBeenCalledWith(["doc_ref"]);
+    expect(getDocumentsByIdsMock).toHaveBeenCalledWith({ workspaceId: "local" }, ["doc_ref"]);
     expect(result).toEqual([
       {
         id: "doc_ref",

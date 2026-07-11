@@ -26,6 +26,7 @@ async function createIsolatedProposalApplicationDb() {
   await db.run(sql`
     CREATE TABLE documents (
       id text PRIMARY KEY NOT NULL,
+      workspace_id text NOT NULL,
       title text NOT NULL,
       content_json text NOT NULL,
       plain_text text DEFAULT '' NOT NULL,
@@ -39,6 +40,7 @@ async function createIsolatedProposalApplicationDb() {
   await db.run(sql`
     CREATE TABLE ai_proposals (
       id text PRIMARY KEY NOT NULL,
+      workspace_id text NOT NULL,
       ai_run_id text NOT NULL,
       document_id text NOT NULL,
       target_text text NOT NULL,
@@ -83,6 +85,7 @@ async function seedDocumentAndProposal(
   const documentContent = input.documentContent ?? createDocumentContent("growth was good");
   await db.insert(documents).values({
     id: "doc_1",
+    workspaceId: "local",
     title: "Market Entry Memo",
     contentJson: documentContent,
     metadataJson: { owner: "Strategy" },
@@ -94,6 +97,7 @@ async function seedDocumentAndProposal(
   });
   await db.insert(aiProposals).values({
     id: "proposal_1",
+    workspaceId: "local",
     aiRunId: "run_1",
     documentId: "doc_1",
     targetText: input.targetText ?? "growth was good",

@@ -11,6 +11,7 @@ afterEach(() => {
 function createTemplate(overrides: Partial<PromptTemplateRecord> = {}): PromptTemplateRecord {
   return {
     id: "tpl_1",
+    workspaceId: "local",
     name: "Strategy Review",
     description: "Review strategy",
     category: "strategy_review",

@@ -9,6 +9,8 @@ import * as schema from "@/db/schema";
 import { createAiSettingsRepository } from "./ai-settings-repository";
 
 const tempDirs: string[] = [];
+const workspaceA = { workspaceId: "workspace_a" };
+const workspaceB = { workspaceId: "workspace_b" };
 
 afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
@@ -24,6 +26,7 @@ async function createIsolatedSettingsDb() {
   await db.run(sql`
     CREATE TABLE app_settings (
       id text PRIMARY KEY NOT NULL,
+      workspace_id text NOT NULL UNIQUE,
       ai_provider text DEFAULT 'coredot' NOT NULL,
       ai_model text DEFAULT 'gpt-5-nano' NOT NULL,
       ai_base_url text,
@@ -49,7 +52,7 @@ describe("AI settings repository", () => {
     const repository = createAiSettingsRepository(db);
 
     try {
-      const settings = await repository.getAiSettings();
+      const settings = await repository.getAiSettings(workspaceA);
 
       expect(settings).toMatchObject({
         aiBaseUrl: null,
@@ -57,7 +60,7 @@ describe("AI settings repository", () => {
         aiModel: "stub-editor",
         aiProvider: "stub",
         aiReasoningEffort: null,
-        id: "default",
+        workspaceId: workspaceA.workspaceId,
       });
     } finally {
       if (originalProvider === undefined) {
@@ -87,7 +90,7 @@ describe("AI settings repository", () => {
     const repository = createAiSettingsRepository(db);
 
     try {
-      const settings = await repository.getAiSettings();
+      const settings = await repository.getAiSettings(workspaceA);
 
       expect(settings).toMatchObject({
         aiBaseUrl: "https://api.core.today/llm/openai/v1",
@@ -95,7 +98,7 @@ describe("AI settings repository", () => {
         aiModel: "gpt-5-nano",
         aiProvider: "coredot",
         aiReasoningEffort: null,
-        id: "default",
+        workspaceId: workspaceA.workspaceId,
       });
     } finally {
       if (originalProvider === undefined) {
@@ -110,7 +113,7 @@ describe("AI settings repository", () => {
     const db = await createIsolatedSettingsDb();
     const repository = createAiSettingsRepository(db);
 
-    const settings = await repository.updateAiSettings({
+    const settings = await repository.updateAiSettings(workspaceA, {
       aiBaseUrl: "https://should-not-stick.example.test/v1",
       aiMaxCompletionTokens: 999,
       aiModel: "ignored-model",
@@ -131,14 +134,14 @@ describe("AI settings repository", () => {
     const db = await createIsolatedSettingsDb();
     const repository = createAiSettingsRepository(db);
 
-    const anthropicSettings = await repository.updateAiSettings({
+    const anthropicSettings = await repository.updateAiSettings(workspaceA, {
       aiBaseUrl: null,
       aiMaxCompletionTokens: 8192,
       aiModel: "claude-sonnet-4.5",
       aiProvider: "anthropic",
       aiReasoningEffort: "high",
     });
-    const geminiSettings = await repository.updateAiSettings({
+    const geminiSettings = await repository.updateAiSettings(workspaceA, {
       aiBaseUrl: null,
       aiMaxCompletionTokens: 4096,
       aiModel: "gemini-2.5-flash",
@@ -167,7 +170,7 @@ describe("AI settings repository", () => {
     const repository = createAiSettingsRepository(db);
 
     await expect(
-      repository.updateAiSettings({
+      repository.updateAiSettings(workspaceA, {
         aiBaseUrl: "not-a-url",
         aiMaxCompletionTokens: 32768,
         aiModel: "gpt-5-nano",
@@ -182,7 +185,7 @@ describe("AI settings repository", () => {
     const repository = createAiSettingsRepository(db);
 
     await expect(
-      repository.updateAiSettings({
+      repository.updateAiSettings(workspaceA, {
         aiBaseUrl: "https://attacker.example.test/llm/openai/v1",
         aiMaxCompletionTokens: 32768,
         aiModel: "gpt-5-nano",
@@ -192,7 +195,7 @@ describe("AI settings repository", () => {
     ).rejects.toThrow("Invalid Core.Today base URL");
 
     await expect(
-      repository.updateAiSettings({
+      repository.updateAiSettings(workspaceA, {
         aiBaseUrl: "https://api.core.today/llm/gemini/v1beta",
         aiMaxCompletionTokens: 32768,
         aiModel: "claude-sonnet-4.5",
@@ -202,7 +205,7 @@ describe("AI settings repository", () => {
     ).rejects.toThrow("Invalid Core.Today base URL");
 
     await expect(
-      repository.updateAiSettings({
+      repository.updateAiSettings(workspaceA, {
         aiBaseUrl: "https://api.core.today/llm/anthropic/v1",
         aiMaxCompletionTokens: 32768,
         aiModel: "gpt-5-nano",
@@ -212,7 +215,7 @@ describe("AI settings repository", () => {
     ).rejects.toThrow("Invalid Core.Today base URL");
 
     await expect(
-      repository.updateAiSettings({
+      repository.updateAiSettings(workspaceA, {
         aiBaseUrl: "https://api.core.today:444/llm/gemini/v1beta",
         aiMaxCompletionTokens: 32768,
         aiModel: "gemini-2.5-flash",
@@ -232,12 +235,47 @@ describe("AI settings repository", () => {
       aiReasoningEffort: null,
       createdAt: new Date(),
       id: "default",
+      workspaceId: workspaceA.workspaceId,
       updatedAt: new Date(),
     });
     const repository = createAiSettingsRepository(db);
 
-    const settings = await repository.getAiSettings();
+    const settings = await repository.getAiSettings(workspaceA);
 
     expect(settings.aiBaseUrl).toBe("https://api.core.today/llm/openai/v1");
+  });
+
+  it("keeps each workspace's AI settings isolated", async () => {
+    const db = await createIsolatedSettingsDb();
+    const repository = createAiSettingsRepository(db);
+
+    await repository.updateAiSettings(workspaceA, {
+      aiBaseUrl: null,
+      aiMaxCompletionTokens: null,
+      aiModel: "gpt-4.1-mini",
+      aiProvider: "openai",
+      aiReasoningEffort: "medium",
+    });
+
+    const workspaceBSettings = await repository.getAiSettings(workspaceB);
+    expect(workspaceBSettings).toMatchObject({
+      aiModel: "stub-editor",
+      aiProvider: "stub",
+      workspaceId: workspaceB.workspaceId,
+    });
+
+    await repository.updateAiSettings(workspaceB, {
+      aiBaseUrl: null,
+      aiMaxCompletionTokens: null,
+      aiModel: "ignored",
+      aiProvider: "stub",
+      aiReasoningEffort: null,
+    });
+
+    await expect(repository.getAiSettings(workspaceA)).resolves.toMatchObject({
+      aiModel: "gpt-4.1-mini",
+      aiProvider: "openai",
+      workspaceId: workspaceA.workspaceId,
+    });
   });
 });

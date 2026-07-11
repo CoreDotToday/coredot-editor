@@ -46,6 +46,7 @@ describe("POST /api/documents/import", () => {
     });
     vi.mocked(createDocumentFromContent).mockResolvedValueOnce({
       id: "doc_imported",
+      workspaceId: "local",
       title: "Contract Draft",
       contentJson: {
         type: "doc",
@@ -68,7 +69,7 @@ describe("POST /api/documents/import", () => {
     );
 
     expect(response.status).toBe(201);
-    expect(createDocumentFromContent).toHaveBeenCalledWith("Contract Draft", {
+    expect(createDocumentFromContent).toHaveBeenCalledWith({ workspaceId: "local" }, "Contract Draft", {
       type: "doc",
       content: [{ type: "paragraph", content: [{ type: "text", text: "Imported body" }] }],
     });

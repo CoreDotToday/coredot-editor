@@ -17,7 +17,7 @@ vi.mock("@/features/templates/template-repository", () => ({
 }));
 
 vi.mock("@/features/ai/ai-run-repository", () => ({
-  completeAiRunWithProposals: vi.fn(async (id, outputText, proposals) => ({
+  completeAiRunWithProposals: vi.fn(async (_scope, id, outputText, proposals) => ({
     run: { id, outputText, status: "completed" },
     proposals: proposals.map((proposal: Record<string, unknown>, index: number) => ({
       id: `proposal_${index + 1}`,
@@ -25,9 +25,11 @@ vi.mock("@/features/ai/ai-run-repository", () => ({
       ...proposal,
     })),
   })),
-  createAiRun: vi.fn(async (input) => ({ id: "run_1", ...input, status: "pending" })),
-  failAiRun: vi.fn(async (id, errorMessage) => ({ id, errorMessage, status: "failed" })),
+  createAiRun: vi.fn(async (_scope, input) => ({ id: "run_1", ...input, status: "pending" })),
+  failAiRun: vi.fn(async (_scope, id, errorMessage) => ({ id, errorMessage, status: "failed" })),
 }));
+
+const localWorkspace = { workspaceId: "local" };
 
 vi.mock("@/features/ai/ai-settings-repository", () => ({
   getAiSettings: vi.fn(async () => ({
@@ -37,6 +39,7 @@ vi.mock("@/features/ai/ai-settings-repository", () => ({
     aiProvider: "stub",
     aiReasoningEffort: null,
     id: "default",
+    workspaceId: "local",
   })),
 }));
 
@@ -56,6 +59,7 @@ vi.mock("@/features/ai/providers", () => ({
 
 const documentRecord = {
   id: "doc_1",
+  workspaceId: "local",
   title: "Memo",
   plainText: "Old text in a document",
   contentJson: { type: "doc" },
@@ -68,6 +72,7 @@ const documentRecord = {
 
 const templateRecord = {
   id: "tpl_1",
+  workspaceId: "local",
   name: "Rewrite",
   description: "Rewrite",
   category: "rewrite",
@@ -153,6 +158,7 @@ describe("POST /api/ai/rewrite", () => {
       },
     });
     expect(createAiRun).toHaveBeenCalledWith(
+      localWorkspace,
       expect.objectContaining({
         commandType: "selection_rewrite",
         documentId: "doc_1",
@@ -162,6 +168,7 @@ describe("POST /api/ai/rewrite", () => {
       }),
     );
     expect(completeAiRunWithProposals).toHaveBeenCalledWith(
+      localWorkspace,
       "run_1",
       "Improved text",
       [
@@ -207,7 +214,7 @@ describe("POST /api/ai/rewrite", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(getDocumentsByIds).toHaveBeenCalledWith(["doc_ref"]);
+    expect(getDocumentsByIds).toHaveBeenCalledWith(localWorkspace, ["doc_ref"]);
     expect(generateText).toHaveBeenCalledWith({
       messages: expect.arrayContaining([
         expect.objectContaining({
@@ -225,6 +232,7 @@ describe("POST /api/ai/rewrite", () => {
       ]),
     });
     expect(createAiRun).toHaveBeenCalledWith(
+      localWorkspace,
       expect.objectContaining({
         inputSummaryJson: expect.objectContaining({
           referencedDocumentIds: ["doc_ref"],
@@ -272,7 +280,7 @@ describe("POST /api/ai/rewrite", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(getDocumentsByIds).toHaveBeenCalledWith(["doc_ref"]);
+    expect(getDocumentsByIds).toHaveBeenCalledWith(localWorkspace, ["doc_ref"]);
     expect(generateText).toHaveBeenCalledWith({
       messages: expect.arrayContaining([
         expect.objectContaining({
@@ -290,6 +298,7 @@ describe("POST /api/ai/rewrite", () => {
       ]),
     });
     expect(createAiRun).toHaveBeenCalledWith(
+      localWorkspace,
       expect.objectContaining({
         inputSummaryJson: expect.objectContaining({
           referencedDocumentIds: ["doc_ref"],
@@ -380,6 +389,7 @@ describe("POST /api/ai/rewrite", () => {
 
     expect(response.status).toBe(200);
     expect(completeAiRunWithProposals).toHaveBeenCalledWith(
+      localWorkspace,
       "run_1",
       "Old text with objective written evidence requirements.",
       [
@@ -418,6 +428,7 @@ describe("POST /api/ai/rewrite", () => {
 
     expect(response.status).toBe(200);
     expect(completeAiRunWithProposals).toHaveBeenCalledWith(
+      localWorkspace,
       "run_1",
       "Old text with clearer ownership.",
       [
@@ -460,6 +471,7 @@ describe("POST /api/ai/rewrite", () => {
 
     expect(response.status).toBe(200);
     expect(completeAiRunWithProposals).toHaveBeenCalledWith(
+      localWorkspace,
       "run_1",
       "Old text stated directly.",
       [
@@ -479,6 +491,7 @@ describe("POST /api/ai/rewrite", () => {
 
     expect(response.status).toBe(200);
     expect(completeAiRunWithProposals).toHaveBeenCalledWith(
+      localWorkspace,
       "run_1",
       "Improved text",
       [
@@ -529,6 +542,7 @@ describe("POST /api/ai/rewrite", () => {
       ]),
     });
     expect(completeAiRunWithProposals).toHaveBeenCalledWith(
+      localWorkspace,
       "run_1",
       "Next paragraph that continues the selected context.",
       [
@@ -550,6 +564,7 @@ describe("POST /api/ai/rewrite", () => {
 
     expect(response.status).toBe(200);
     expect(completeAiRunWithProposals).toHaveBeenCalledWith(
+      localWorkspace,
       "run_1",
       "Improved text",
       [
@@ -579,6 +594,7 @@ describe("POST /api/ai/rewrite", () => {
 
     expect(response.status).toBe(200);
     expect(completeAiRunWithProposals).toHaveBeenCalledWith(
+      localWorkspace,
       "run_1",
       "Improved text",
       [
@@ -615,6 +631,7 @@ describe("POST /api/ai/rewrite", () => {
 
     expect(response.status).toBe(200);
     expect(completeAiRunWithProposals).toHaveBeenCalledWith(
+      localWorkspace,
       "run_1",
       "Improved text",
       [
@@ -656,6 +673,7 @@ describe("POST /api/ai/rewrite", () => {
 
     expect(response.status).toBe(200);
     expect(createAiRun).toHaveBeenCalledWith(
+      localWorkspace,
       expect.objectContaining({
         inputSummaryJson: expect.objectContaining({
           selectionRange: { from: 1, to: 9 },
@@ -663,6 +681,7 @@ describe("POST /api/ai/rewrite", () => {
       }),
     );
     expect(completeAiRunWithProposals).toHaveBeenCalledWith(
+      localWorkspace,
       "run_1",
       "Improved text",
       [
@@ -744,8 +763,9 @@ describe("POST /api/ai/rewrite", () => {
 
     expect(response.status).toBe(500);
     expect(await response.json()).toEqual({ error: "AI generation failed" });
-    expect(failAiRun).toHaveBeenCalledWith("run_1", "finalize failed");
+    expect(failAiRun).toHaveBeenCalledWith(localWorkspace, "run_1", "finalize failed");
     expect(completeAiRunWithProposals).toHaveBeenCalledWith(
+      localWorkspace,
       "run_1",
       "Improved text",
       [
@@ -780,6 +800,6 @@ describe("POST /api/ai/rewrite", () => {
 
     expect(response.status).toBe(500);
     expect(await response.json()).toEqual({ error: "AI generation failed" });
-    expect(failAiRun).toHaveBeenCalledWith("run_1", "provider unavailable");
+    expect(failAiRun).toHaveBeenCalledWith(localWorkspace, "run_1", "provider unavailable");
   });
 });
