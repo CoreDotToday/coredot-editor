@@ -108,7 +108,31 @@ async function applyWorkspaceOwnershipMigration(client: Awaited<ReturnType<typeo
   }
 }
 
+async function applyRequestBudgetMigration(client: Awaited<ReturnType<typeof createLegacyDatabase>>) {
+  const migration = await readFile(resolve(process.cwd(), "drizzle/0007_request_budgets.sql"), "utf8");
+  for (const statement of migration.split("--> statement-breakpoint")) {
+    const sql = statement.trim();
+    if (sql) await client.execute(sql);
+  }
+}
+
 describe("workspace ownership migration", () => {
+  it("applies request budgets on a populated 0006 database without disturbing data or foreign keys", async () => {
+    const client = await createLegacyDatabase();
+    await applyWorkspaceOwnershipMigration(client);
+    await applyRequestBudgetMigration(client);
+
+    expect((await client.execute("SELECT title FROM documents WHERE id = 'legacy_doc'")).rows[0]?.title).toBe("Legacy memo");
+    expect((await client.execute("PRAGMA foreign_key_check")).rows).toEqual([]);
+    await expect(
+      client.execute(`
+        INSERT INTO request_budget_buckets
+          (workspace_id, principal_id, policy_id, window_start, request_count, expires_at)
+        VALUES ('local', 'principal', 'test', 0, 1, 60000)
+      `),
+    ).resolves.toBeDefined();
+  });
+
   it("backfills stable built-in identity for migrated defaults", async () => {
     const client = await createLegacyDatabase();
     await applyWorkspaceOwnershipMigration(client);

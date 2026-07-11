@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getDocumentById } from "@/features/documents/document-repository";
 import { tiptapJsonToDocxBuffer } from "@/features/documents/docx-conversion";
+import { RESOURCE_LIMITS } from "@/features/security/resource-policy";
+import { setRequestBudgetForTests } from "@/features/security/request-budget";
 import { POST } from "./route";
 
 vi.mock("@/features/documents/document-repository", () => ({
@@ -25,6 +27,52 @@ function createContext(id = "doc_1") {
 describe("POST /api/documents/[id]/export", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it("returns 429 before lookup or body parsing when the budget is exhausted", async () => {
+    setRequestBudgetForTests({
+      consume: vi.fn(async () => ({
+        allowed: false,
+        limit: 20,
+        remaining: 0,
+        retryAt: new Date(Date.now() + 5_000),
+      })),
+    });
+    const request = { json: vi.fn() } as unknown as Request;
+
+    const response = await POST(request, createContext());
+
+    expect(response.status).toBe(429);
+    expect(request.json).not.toHaveBeenCalled();
+    expect(getDocumentById).not.toHaveBeenCalled();
+    expect(tiptapJsonToDocxBuffer).not.toHaveBeenCalled();
+  });
+
+  it("rejects over-deep content before DOCX conversion", async () => {
+    vi.mocked(getDocumentById).mockResolvedValueOnce({
+      id: "doc_1",
+      workspaceId: "vitest-workspace",
+      title: "Draft",
+      contentJson: { type: "doc" },
+      metadataJson: {},
+      plainText: "",
+      readiness: "draft",
+      status: "draft",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    let deepNode: Record<string, unknown> = { type: "text", text: "deep" };
+    for (let depth = 0; depth < RESOURCE_LIMITS.documentDepth; depth += 1) {
+      deepNode = { type: "paragraph", content: [deepNode] };
+    }
+
+    const response = await POST(
+      createJsonRequest({ title: "Deep", contentJson: { type: "doc", content: [deepNode] } }),
+      createContext(),
+    );
+
+    expect(response.status).toBe(413);
+    expect(tiptapJsonToDocxBuffer).not.toHaveBeenCalled();
   });
 
   it("returns 404 when the document does not exist", async () => {

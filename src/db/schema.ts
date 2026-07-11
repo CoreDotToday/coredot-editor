@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { check, foreignKey, index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { check, foreignKey, index, integer, primaryKey, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 import { nanoid } from "nanoid";
 
 export type TiptapJson = {
@@ -175,6 +175,26 @@ export const appSettings = sqliteTable(
   ],
 );
 
+export const requestBudgetBuckets = sqliteTable(
+  "request_budget_buckets",
+  {
+    workspaceId: text("workspace_id").notNull(),
+    principalId: text("principal_id").notNull(),
+    policyId: text("policy_id").notNull(),
+    windowStart: integer("window_start", { mode: "timestamp_ms" }).notNull(),
+    requestCount: integer("request_count").notNull(),
+    expiresAt: integer("expires_at", { mode: "timestamp_ms" }).notNull(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.workspaceId, table.principalId, table.policyId, table.windowStart],
+      name: "request_budget_buckets_pk",
+    }),
+    index("request_budget_buckets_expires_at_idx").on(table.expiresAt),
+    check("request_budget_buckets_request_count_check", sql`${table.requestCount} > 0`),
+  ],
+);
+
 export type PromptVariableSchema = {
   fields: Array<{
     name: string;
@@ -196,3 +216,4 @@ export type AiProposalRecord = typeof aiProposals.$inferSelect;
 export type NewAiProposalRecord = typeof aiProposals.$inferInsert;
 export type AppSettingsRecord = typeof appSettings.$inferSelect;
 export type NewAppSettingsRecord = typeof appSettings.$inferInsert;
+export type RequestBudgetBucketRecord = typeof requestBudgetBuckets.$inferSelect;

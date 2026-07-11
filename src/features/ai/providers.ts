@@ -25,9 +25,9 @@ export type AiProvider = {
   capabilities: AiProviderCapabilities;
   name: AiProviderName;
   model: string;
-  generateText(input: { messages: AiMessage[] }): Promise<string>;
-  streamText(input: { messages: AiMessage[] }): Promise<Response>;
-  generateReview(input: { messages: AiMessage[] }): Promise<ReviewResult>;
+  generateText(input: { messages: AiMessage[]; abortSignal?: AbortSignal }): Promise<string>;
+  streamText(input: { messages: AiMessage[]; abortSignal?: AbortSignal }): Promise<Response>;
+  generateReview(input: { messages: AiMessage[]; abortSignal?: AbortSignal }): Promise<ReviewResult>;
 };
 
 export const AI_PROVIDER_CAPABILITIES: Readonly<Record<AiProviderName, AiProviderCapabilities>> = Object.freeze({
@@ -103,6 +103,7 @@ function createOpenAiProvider(settings?: AiProviderSettings): AiProvider {
     model,
     async generateText(input) {
       const result = await generateText({
+        abortSignal: input.abortSignal,
         model: openai(model),
         messages: input.messages,
         ...generationSettings,
@@ -111,6 +112,7 @@ function createOpenAiProvider(settings?: AiProviderSettings): AiProvider {
     },
     async streamText(input) {
       const result = streamAiText({
+        abortSignal: input.abortSignal,
         model: openai(model),
         messages: input.messages,
         ...generationSettings,
@@ -119,6 +121,7 @@ function createOpenAiProvider(settings?: AiProviderSettings): AiProvider {
     },
     async generateReview(input) {
       const result = await generateObject({
+        abortSignal: input.abortSignal,
         model: openai(model),
         messages: input.messages,
         schema: reviewResultSchema,
@@ -148,6 +151,7 @@ function createCoreDotProvider(settings?: AiProviderSettings): AiProvider {
     model,
     async generateText(input) {
       const result = await generateText({
+        abortSignal: input.abortSignal,
         model: coreOpenAi(model),
         messages: input.messages,
         ...generationSettings,
@@ -156,6 +160,7 @@ function createCoreDotProvider(settings?: AiProviderSettings): AiProvider {
     },
     async streamText(input) {
       const result = streamAiText({
+        abortSignal: input.abortSignal,
         model: coreOpenAi(model),
         messages: input.messages,
         ...generationSettings,
@@ -164,6 +169,7 @@ function createCoreDotProvider(settings?: AiProviderSettings): AiProvider {
     },
     async generateReview(input) {
       const result = await generateObject({
+        abortSignal: input.abortSignal,
         model: coreOpenAi(model),
         messages: input.messages,
         schema: reviewResultSchema,
@@ -279,7 +285,7 @@ function createStubAiProvider(): AiProvider {
 async function postAnthropicMessage(input: {
   apiKey: string;
   baseUrl: string;
-  input: { messages: AiMessage[] };
+  input: { messages: AiMessage[]; abortSignal?: AbortSignal };
   maxOutputTokens: number;
   model: string;
 }) {
@@ -292,6 +298,7 @@ async function postAnthropicMessage(input: {
     .map((message) => ({ role: "user", content: message.content }));
 
   const response = await fetch(joinUrl(input.baseUrl, "messages"), {
+    signal: input.input.abortSignal,
     method: "POST",
     headers: {
       Authorization: `Bearer ${input.apiKey}`,
@@ -315,7 +322,7 @@ async function postAnthropicMessage(input: {
 async function postGeminiMessage(input: {
   apiKey: string;
   baseUrl: string;
-  input: { messages: AiMessage[] };
+  input: { messages: AiMessage[]; abortSignal?: AbortSignal };
   maxOutputTokens: number;
   model: string;
 }) {
@@ -329,6 +336,7 @@ async function postGeminiMessage(input: {
     .join("\n\n");
 
   const response = await fetch(joinUrl(input.baseUrl, `models/${encodeURIComponent(input.model)}:generateContent`), {
+    signal: input.input.abortSignal,
     method: "POST",
     headers: {
       Authorization: `Bearer ${input.apiKey}`,

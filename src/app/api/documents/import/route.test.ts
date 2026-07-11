@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createDocumentFromContent } from "@/features/documents/document-repository";
 import { docxBufferToTiptapJson } from "@/features/documents/docx-conversion";
 import { TEST_REQUEST_CONTEXT } from "@/test/auth-context";
+import { RESOURCE_LIMITS } from "@/features/security/resource-policy";
+import { setRequestBudgetForTests } from "@/features/security/request-budget";
 import { POST } from "./route";
 
 vi.mock("@/features/documents/document-repository", () => ({
@@ -26,6 +28,66 @@ function createFormRequest(file?: File) {
 describe("POST /api/documents/import", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it("returns 429 before parsing multipart data when the budget is exhausted", async () => {
+    setRequestBudgetForTests({
+      consume: vi.fn(async () => ({
+        allowed: false,
+        limit: 10,
+        remaining: 0,
+        retryAt: new Date(Date.now() + 5_000),
+      })),
+    });
+    const request = { formData: vi.fn(), headers: new Headers() } as unknown as Request;
+
+    const response = await POST(request);
+
+    expect(response.status).toBe(429);
+    expect(request.formData).not.toHaveBeenCalled();
+    expect(docxBufferToTiptapJson).not.toHaveBeenCalled();
+    expect(createDocumentFromContent).not.toHaveBeenCalled();
+  });
+
+  it("rejects an oversized file before reading its bytes", async () => {
+    const file = new File([new Uint8Array(1)], "huge.docx", { type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" });
+    Object.defineProperty(file, "size", { value: RESOURCE_LIMITS.docxBytes + 1 });
+    const arrayBuffer = vi.spyOn(file, "arrayBuffer");
+
+    const response = await POST(createFormRequest(file));
+
+    expect(response.status).toBe(413);
+    expect(arrayBuffer).not.toHaveBeenCalled();
+    expect(docxBufferToTiptapJson).not.toHaveBeenCalled();
+  });
+
+  it("rejects an obviously oversized request from Content-Length before multipart parsing", async () => {
+    const formData = vi.fn();
+    const request = {
+      formData,
+      headers: new Headers({ "content-length": String(RESOURCE_LIMITS.docxBytes + 1024 * 1024 + 1) }),
+    } as unknown as Request;
+
+    const response = await POST(request);
+
+    expect(response.status).toBe(413);
+    expect(formData).not.toHaveBeenCalled();
+  });
+
+  it("rejects converted content that exceeds the depth policy before persistence", async () => {
+    let deepNode: Record<string, unknown> = { type: "text", text: "deep" };
+    for (let depth = 0; depth < RESOURCE_LIMITS.documentDepth; depth += 1) {
+      deepNode = { type: "paragraph", content: [deepNode] };
+    }
+    vi.mocked(docxBufferToTiptapJson).mockResolvedValueOnce({
+      contentJson: { type: "doc", content: [deepNode] },
+      warnings: [],
+    });
+
+    const response = await POST(createFormRequest(new File([new Uint8Array([1])], "deep.docx")));
+
+    expect(response.status).toBe(413);
+    expect(createDocumentFromContent).not.toHaveBeenCalled();
   });
 
   it("returns 400 when the request does not include a DOCX file", async () => {

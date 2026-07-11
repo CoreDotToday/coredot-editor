@@ -32,6 +32,7 @@
     "db:migrate": "drizzle-kit migrate",
     "db:seed": "tsx src/db/seed.ts",
     "db:setup": "pnpm db:migrate && pnpm db:seed",
+    "db:claim-local-workspace": "tsx scripts/db/claim-local-workspace.ts",
     "docs:serve": "python3 -m mkdocs serve",
     "docs:build": "python3 -m mkdocs build --strict",
     "docker:rag:up": "bash scripts/rag/verify-docker-env.sh up",

@@ -7,6 +7,7 @@ import { getPromptTemplateById } from "@/features/templates/template-repository"
 import type { DocumentRecord, PromptTemplateRecord } from "@/db/schema";
 import { setProtectedRequestContextDependenciesForTests } from "@/features/auth/route-context";
 import { TEST_REQUEST_CONTEXT } from "@/test/auth-context";
+import { setRequestBudgetForTests } from "@/features/security/request-budget";
 import { POST } from "./route";
 
 vi.mock("@/features/documents/document-repository", () => ({
@@ -114,6 +115,25 @@ describe("POST /api/ai/rewrite", () => {
       ensureWorkspaceBootstrap: async () => undefined,
       getRequestContext: async () => TEST_REQUEST_CONTEXT,
     });
+  });
+
+  it("returns 429 before parsing or creating an AI provider when the budget is exhausted", async () => {
+    setRequestBudgetForTests({
+      consume: vi.fn(async () => ({
+        allowed: false,
+        limit: 20,
+        remaining: 0,
+        retryAt: new Date(Date.now() + 5_000),
+      })),
+    });
+    const request = { json: vi.fn() } as unknown as Request;
+
+    const response = await POST(request);
+
+    expect(response.status).toBe(429);
+    expect(request.json).not.toHaveBeenCalled();
+    expect(createAiProvider).not.toHaveBeenCalled();
+    expect(createAiRun).not.toHaveBeenCalled();
   });
 
   it("returns 400 for bad JSON without touching repositories", async () => {
@@ -243,22 +263,22 @@ describe("POST /api/ai/rewrite", () => {
 
     expect(response.status).toBe(200);
     expect(getDocumentsByIds).toHaveBeenCalledWith(localWorkspace, ["doc_ref"]);
-    expect(generateText).toHaveBeenCalledWith({
+    expect(generateText).toHaveBeenCalledWith(expect.objectContaining({
       messages: expect.arrayContaining([
         expect.objectContaining({
           role: "user",
           content: expect.stringContaining("Reference memo body"),
         }),
       ]),
-    });
-    expect(generateText).toHaveBeenCalledWith({
+    }));
+    expect(generateText).toHaveBeenCalledWith(expect.objectContaining({
       messages: expect.arrayContaining([
         expect.objectContaining({
           role: "user",
           content: expect.not.stringContaining("client text must be ignored"),
         }),
       ]),
-    });
+    }));
     expect(createAiRun).toHaveBeenCalledWith(
       localWorkspace,
       expect.objectContaining({
@@ -309,22 +329,22 @@ describe("POST /api/ai/rewrite", () => {
 
     expect(response.status).toBe(200);
     expect(getDocumentsByIds).toHaveBeenCalledWith(localWorkspace, ["doc_ref"]);
-    expect(generateText).toHaveBeenCalledWith({
+    expect(generateText).toHaveBeenCalledWith(expect.objectContaining({
       messages: expect.arrayContaining([
         expect.objectContaining({
           role: "user",
           content: expect.stringContaining("Reference memo body"),
         }),
       ]),
-    });
-    expect(generateText).toHaveBeenCalledWith({
+    }));
+    expect(generateText).toHaveBeenCalledWith(expect.objectContaining({
       messages: expect.arrayContaining([
         expect.objectContaining({
           role: "user",
           content: expect.not.stringContaining("Self reference"),
         }),
       ]),
-    });
+    }));
     expect(createAiRun).toHaveBeenCalledWith(
       localWorkspace,
       expect.objectContaining({
@@ -361,22 +381,22 @@ describe("POST /api/ai/rewrite", () => {
     const response = await POST(createJsonRequest(validBody));
 
     expect(response.status).toBe(200);
-    expect(generateText).toHaveBeenCalledWith({
+    expect(generateText).toHaveBeenCalledWith(expect.objectContaining({
       messages: expect.arrayContaining([
         expect.objectContaining({
           role: "system",
           content: expect.stringContaining("Selection rewrite mode"),
         }),
       ]),
-    });
-    expect(generateText).toHaveBeenCalledWith({
+    }));
+    expect(generateText).toHaveBeenCalledWith(expect.objectContaining({
       messages: expect.arrayContaining([
         expect.objectContaining({
           role: "system",
           content: expect.stringContaining("Return only a compact JSON object"),
         }),
       ]),
-    });
+    }));
   });
 
   it("extracts replacement text if a model returns a structured review JSON during selection rewrite", async () => {
@@ -553,22 +573,22 @@ describe("POST /api/ai/rewrite", () => {
     const response = await POST(createJsonRequest({ ...validBody, command: "Continue writing" }));
 
     expect(response.status).toBe(200);
-    expect(generateText).toHaveBeenCalledWith({
+    expect(generateText).toHaveBeenCalledWith(expect.objectContaining({
       messages: expect.arrayContaining([
         expect.objectContaining({
           role: "system",
           content: expect.stringContaining("Write only new continuation text"),
         }),
       ]),
-    });
-    expect(generateText).toHaveBeenCalledWith({
+    }));
+    expect(generateText).toHaveBeenCalledWith(expect.objectContaining({
       messages: expect.arrayContaining([
         expect.objectContaining({
           role: "system",
           content: expect.stringContaining("Do not repeat the selected text"),
         }),
       ]),
-    });
+    }));
     expect(completeAiRunWithProposals).toHaveBeenCalledWith(
       localWorkspace,
       "run_1",

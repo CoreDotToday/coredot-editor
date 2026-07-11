@@ -48,6 +48,36 @@ pnpm db:seed
 
 Run migrations before starting the app. The seed script is idempotent for default prompt templates.
 
+Migration `0007_request_budgets` adds the durable request-budget table and expiry index. Before applying it in production, stop writers or use your provider's maintenance window and take a verified database backup. Apply the migration, then confirm `PRAGMA foreign_key_check` is empty. Restoring the pre-migration backup is the rollback path; do not try to hand-edit migration journal state.
+
+## Claiming Legacy Local Data
+
+Migration `0006` assigns pre-workspace rows to the reserved `local` workspace. After configuring the real authenticated workspace, preview the transfer:
+
+```bash
+pnpm db:claim-local-workspace -- --workspace=clerk:org:YOUR_ORG_ID --dry-run
+```
+
+Back up the database, stop application writers, and then claim it:
+
+```bash
+pnpm db:claim-local-workspace -- --workspace=clerk:org:YOUR_ORG_ID
+```
+
+The command trims and validates the target, refuses `local`, reports counts for documents, templates, AI runs, proposals, and settings, and moves only rows whose `workspace_id` is `local`. It preflights built-in-template and settings conflicts, performs all updates in one transaction, and verifies foreign keys before commit. A conflict or failed check rolls the transaction back without partial movement.
+
+The claim is intentionally one-way: after a successful commit, use the database backup to roll back. Do not rerun it with another target expecting already-claimed rows to move; a second run is a no-op because it only selects `local` rows.
+
+## API Capacity and Failure Semantics
+
+Request budgets and resource limits are code-owned defaults documented in [Configuration](configuration.md#request-budgets). All app instances must use the same policy values and the same durable database.
+
+- `429 Request rate limit exceeded`: the workspace/principal/policy bucket is exhausted. Honor `Retry-After`; the `X-RateLimit-*` headers describe the boundary.
+- `413 Document exceeds resource limits`: reject the file/document or reduce its byte size, depth, or node count before retrying.
+- `504 Operation timed out`: import, export, or AI work crossed the 30-second operation deadline. Provider-capable calls receive an abort signal; timed-out import/export work does not continue to persistence.
+
+Monitor these statuses separately from application `5xx` errors. `OPTIONS` requests authenticate through the existing protected seam but do not consume request budget.
+
 ## Runtime LLM Settings
 
 The app stores non-secret model settings in the `app_settings` table and exposes them through the editor header's `LLM 설정` dialog. The dialog can switch between `stub`, `coredot`, `anthropic`, `gemini`, and `openai`, set model names, set Core.Today Base URL and max completion tokens, choose reasoning effort where supported, and run a connection test.
@@ -155,5 +185,8 @@ Stop any manually running `pnpm dev` process before running `pnpm e2e`. Next.js 
 - [ ] Production `DATABASE_URL` is configured.
 - [ ] AI provider secrets are configured.
 - [ ] Migrations have run.
+- [ ] A pre-migration backup has been verified and `PRAGMA foreign_key_check` is empty after migration.
+- [ ] Legacy `local` data has been dry-run and claimed when upgrading an existing deployment.
+- [ ] All app instances share the same request-budget database and policy constants.
 - [ ] Default or product-specific templates exist.
 - [ ] Logs are monitored for AI provider failures and route errors.

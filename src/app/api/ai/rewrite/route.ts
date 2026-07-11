@@ -11,6 +11,8 @@ import {
 } from "@/features/ai/ai-command-service";
 import { validateProposalTargetOccurrence } from "@/features/proposals/proposal-apply";
 import { createProtectedOptionsHandler, createProtectedRouteHandler } from "@/features/auth/route-context";
+import { enforceRequestBudget } from "@/features/security/request-budget";
+import { resourcePolicyErrorResponse, withOperationTimeout } from "@/features/security/resource-policy";
 
 const rewritePayloadSchema = aiCommandPayloadSchema.extend({
   selectedText: z
@@ -20,6 +22,9 @@ const rewritePayloadSchema = aiCommandPayloadSchema.extend({
 });
 const optionsHandler = createProtectedOptionsHandler(["POST"]);
 const postHandler = createProtectedRouteHandler(async (context, request: Request) => {
+  const budgetResponse = await enforceRequestBudget(context, "ai.rewrite");
+  if (budgetResponse) return budgetResponse;
+
   const payload = await request.json().catch(() => null);
   const result = rewritePayloadSchema.safeParse(payload);
   if (!result.success) {
@@ -83,7 +88,9 @@ const postHandler = createProtectedRouteHandler(async (context, request: Request
       referencedDocuments,
       systemPrompt: buildSelectionRewriteSystemPrompt(template.systemPrompt, body.command),
     });
-    const rewriteResult = normalizeSelectionRewriteResult(await provider.generateText({ messages }));
+    const rewriteResult = normalizeSelectionRewriteResult(
+      await withOperationTimeout((abortSignal) => provider.generateText({ messages, abortSignal })),
+    );
     const { explanation, replacementText } = rewriteResult;
     const finalizedRun = await completeAiRunWithProposals(context, run.id, replacementText, [
       {
@@ -103,6 +110,8 @@ const postHandler = createProtectedRouteHandler(async (context, request: Request
     return NextResponse.json({ run: finalizedRun?.run ?? run, proposal: finalizedRun?.proposals[0] ?? null });
   } catch (error) {
     await failAiRun(context, run.id, error instanceof Error ? error.message : "Unknown AI generation failure");
+    const resourceResponse = resourcePolicyErrorResponse(error);
+    if (resourceResponse) return resourceResponse;
     return NextResponse.json({ error: "AI generation failed" }, { status: 500 });
   }
 });

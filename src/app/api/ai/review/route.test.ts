@@ -5,6 +5,7 @@ import { getDocumentById, getDocumentsByIds } from "@/features/documents/documen
 import { getPromptTemplateById } from "@/features/templates/template-repository";
 import type { DocumentRecord, PromptTemplateRecord } from "@/db/schema";
 import { TEST_REQUEST_CONTEXT } from "@/test/auth-context";
+import { setRequestBudgetForTests } from "@/features/security/request-budget";
 import { POST } from "./route";
 
 vi.mock("@/features/documents/document-repository", () => ({
@@ -119,6 +120,26 @@ describe("POST /api/ai/review", () => {
     vi.clearAllMocks();
   });
 
+  it("returns 429 before parsing or creating an AI provider when the budget is exhausted", async () => {
+    setRequestBudgetForTests({
+      consume: vi.fn(async () => ({
+        allowed: false,
+        limit: 20,
+        remaining: 0,
+        retryAt: new Date(Date.now() + 5_000),
+      })),
+    });
+    const request = { json: vi.fn() } as unknown as Request;
+
+    const response = await POST(request);
+
+    expect(response.status).toBe(429);
+    expect(response.headers.get("Retry-After")).toBe("5");
+    expect(request.json).not.toHaveBeenCalled();
+    expect(createAiProvider).not.toHaveBeenCalled();
+    expect(createAiRun).not.toHaveBeenCalled();
+  });
+
   it("returns 400 when required template variables are missing", async () => {
     vi.mocked(getDocumentById).mockResolvedValueOnce(documentRecord);
     vi.mocked(getPromptTemplateById).mockResolvedValueOnce({
@@ -219,22 +240,22 @@ describe("POST /api/ai/review", () => {
 
     expect(response.status).toBe(200);
     expect(getDocumentsByIds).toHaveBeenCalledWith(localWorkspace, ["doc_ref"]);
-    expect(generateReview).toHaveBeenCalledWith({
+    expect(generateReview).toHaveBeenCalledWith(expect.objectContaining({
       messages: expect.arrayContaining([
         expect.objectContaining({
           role: "user",
           content: expect.stringContaining("Reference memo body"),
         }),
       ]),
-    });
-    expect(generateReview).toHaveBeenCalledWith({
+    }));
+    expect(generateReview).toHaveBeenCalledWith(expect.objectContaining({
       messages: expect.arrayContaining([
         expect.objectContaining({
           role: "user",
           content: expect.not.stringContaining("client text must be ignored"),
         }),
       ]),
-    });
+    }));
     expect(createAiRun).toHaveBeenCalledWith(
       localWorkspace,
       expect.objectContaining({
@@ -288,22 +309,22 @@ describe("POST /api/ai/review", () => {
 
     expect(response.status).toBe(200);
     expect(getDocumentsByIds).toHaveBeenCalledWith(localWorkspace, ["doc_ref"]);
-    expect(generateReview).toHaveBeenCalledWith({
+    expect(generateReview).toHaveBeenCalledWith(expect.objectContaining({
       messages: expect.arrayContaining([
         expect.objectContaining({
           role: "user",
           content: expect.stringContaining("Reference memo body"),
         }),
       ]),
-    });
-    expect(generateReview).toHaveBeenCalledWith({
+    }));
+    expect(generateReview).toHaveBeenCalledWith(expect.objectContaining({
       messages: expect.arrayContaining([
         expect.objectContaining({
           role: "user",
           content: expect.not.stringContaining("Self reference"),
         }),
       ]),
-    });
+    }));
     expect(createAiRun).toHaveBeenCalledWith(
       localWorkspace,
       expect.objectContaining({

@@ -5,9 +5,14 @@ import { completeAiRunWithProposals, createAiRun, failAiRun } from "@/features/a
 import { prepareAiCommandRequest, type AiCommandRequestFailure } from "@/features/ai/ai-command-service";
 import { applyProposalToText } from "@/features/proposals/proposal-apply";
 import { createProtectedOptionsHandler, createProtectedRouteHandler } from "@/features/auth/route-context";
+import { enforceRequestBudget } from "@/features/security/request-budget";
+import { resourcePolicyErrorResponse, withOperationTimeout } from "@/features/security/resource-policy";
 
 const optionsHandler = createProtectedOptionsHandler(["POST"]);
 const postHandler = createProtectedRouteHandler(async (context, request: Request) => {
+  const budgetResponse = await enforceRequestBudget(context, "ai.review");
+  if (budgetResponse) return budgetResponse;
+
   const payload = await request.json().catch(() => null);
   const result = aiCommandPayloadSchema.safeParse(payload);
   if (!result.success) {
@@ -51,7 +56,7 @@ const postHandler = createProtectedRouteHandler(async (context, request: Request
       referencedDocuments,
       systemPrompt: template.systemPrompt,
     });
-    const review = await provider.generateReview({ messages });
+    const review = await withOperationTimeout((abortSignal) => provider.generateReview({ messages, abortSignal }));
     const validFindings = review.findings
       .map((finding) => ({
         finding,
@@ -84,6 +89,8 @@ const postHandler = createProtectedRouteHandler(async (context, request: Request
     });
   } catch (error) {
     await failAiRun(context, run.id, error instanceof Error ? error.message : "Unknown AI generation failure");
+    const resourceResponse = resourcePolicyErrorResponse(error);
+    if (resourceResponse) return resourceResponse;
     return NextResponse.json({ error: "AI generation failed" }, { status: 500 });
   }
 });

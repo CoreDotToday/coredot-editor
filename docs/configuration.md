@@ -48,3 +48,33 @@ Move to Postgres or a hosted multi-tenant database when you add:
 - Larger collaboration workloads.
 
 Read [Architecture](ARCHITECTURE.md#sqlite-today-postgres-later) for the migration shape.
+
+## Request Budgets
+
+Mutation and AI endpoints use durable, fixed-window budgets stored in SQLite/libSQL. A bucket is scoped by workspace, authenticated principal, policy, and epoch-aligned window start, so one user or workspace cannot consume another bucket. Restarts and multiple app processes share the same database state.
+
+The defaults are intentionally code-owned rather than environment-controlled. Change `REQUEST_BUDGET_POLICIES` in `src/features/security/request-budget.ts`, review capacity, and deploy the same values to every app instance:
+
+| Policy | Limit | Window |
+| --- | ---: | ---: |
+| AI review | 20 | 60 seconds |
+| AI rewrite | 20 | 60 seconds |
+| Document create | 30 | 60 seconds |
+| DOCX export | 20 | 60 seconds |
+| DOCX import | 10 | 60 seconds |
+
+The limit includes the last allowed request. The next request receives `429` until the exclusive next fixed-window boundary. The response includes `Retry-After`, `X-RateLimit-Limit`, `X-RateLimit-Remaining`, and `X-RateLimit-Reset`. CORS/authentication `OPTIONS` requests are not budgeted. Expired buckets can be deleted by calling the request-budget pruning helper; the expiry index makes periodic cleanup efficient.
+
+## Resource Policies
+
+The server enforces these code-owned limits in `src/features/security/resource-policy.ts`:
+
+| Resource | Limit |
+| --- | ---: |
+| DOCX input | 10 MiB |
+| Tiptap document depth | 64 nodes |
+| Tiptap document count | 100,000 nodes |
+| Import, export, or AI operation | 30 seconds |
+| Document title | 500 characters |
+
+Imports reject useful oversized `Content-Length` values and `File.size` before reading file bytes. Converted imports and submitted exports are traversed iteratively before persistence or DOCX conversion. Oversized or overly deep documents return `413`; timed-out conversion/provider work returns `504`. Existing AI context schemas continue to bound commands, variables, selections, references, and submitted document text.
