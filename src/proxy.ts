@@ -1,6 +1,7 @@
 import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
 import type { NextMiddleware } from "next/server";
 import { NextResponse } from "next/server";
+import { assertProductionAuthConfigured } from "@/features/auth/production-auth-config";
 
 const isPublicRoute = createRouteMatcher([
   "/",
@@ -15,9 +16,7 @@ const clerkProxy = clerkMiddleware(async (auth, request) => {
 });
 
 const testProxy: NextMiddleware = () => {
-  if (process.env.NODE_ENV === "production") {
-    throw new Error("Test authentication is disabled in production");
-  }
+  assertProductionAuthConfigured(process.env);
 
   return NextResponse.next();
 };

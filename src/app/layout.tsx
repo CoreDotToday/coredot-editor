@@ -1,6 +1,7 @@
 import { ClerkProvider } from "@clerk/nextjs";
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
+import { assertProductionAuthConfigured } from "@/features/auth/production-auth-config";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -23,9 +24,7 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
-  if (process.env.AUTH_MODE === "test" && process.env.NODE_ENV === "production") {
-    throw new Error("Test authentication is disabled in production");
-  }
+  assertProductionAuthConfigured(process.env);
 
   const document = (
     <html

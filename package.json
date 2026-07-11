@@ -22,7 +22,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start",
+    "start": "node scripts/validate-production-auth.mjs --production && next start",
     "check": "pnpm lint && pnpm typecheck && pnpm test && pnpm build",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
@@ -40,6 +40,7 @@
     "e2e:prepare": "tsx scripts/e2e/prepare.ts",
     "e2e": "pnpm e2e:prepare && playwright test",
     "security:audit": "pnpm audit --audit-level moderate",
+    "security:verify-auth-startup": "node scripts/security/verify-production-auth-startup.mjs",
     "release:check": "pnpm lint && pnpm typecheck && pnpm test && pnpm e2e && pnpm build && pnpm security:audit"
   },
   "dependencies": {

@@ -1,4 +1,5 @@
 import { createTestRequestContext } from "./test-request-context";
+import { assertProductionAuthConfigured } from "./production-auth-config";
 
 export type WorkspaceRole = "admin" | "member" | "owner";
 
@@ -66,13 +67,6 @@ function mapClerkIdentity(identity: ClerkIdentity): RequestContext {
   };
 }
 
-function hasClerkCredentials(
-  publishableKey: string | undefined,
-  secretKey: string | undefined,
-): boolean {
-  return Boolean(publishableKey?.trim() && secretKey?.trim());
-}
-
 export function createRequestContextResolver(
   options: RequestContextResolverOptions = {},
 ): () => Promise<RequestContext> {
@@ -81,28 +75,22 @@ export function createRequestContextResolver(
   const mode = options.mode ?? (env.AUTH_MODE === "test" ? "test" : "clerk");
 
   return async () => {
-    if (mode === "test") {
-      if (environment === "production") {
-        throw new Error("Test authentication is disabled in production");
-      }
+    const authEnvironment: NodeJS.ProcessEnv = {
+      ...env,
+      AUTH_MODE: mode,
+      NODE_ENV: environment,
+    };
 
-      return createTestRequestContext(env);
+    if (options.readClerkIdentity) {
+      authEnvironment.CLERK_SECRET_KEY = options.clerkSecretKey;
+      authEnvironment.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY =
+        options.clerkPublishableKey;
     }
 
-    if (environment === "production") {
-      const credentialsAreConfigured = options.readClerkIdentity
-        ? hasClerkCredentials(
-            options.clerkPublishableKey,
-            options.clerkSecretKey,
-          )
-        : hasClerkCredentials(
-            env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY,
-            env.CLERK_SECRET_KEY,
-          );
+    assertProductionAuthConfigured(authEnvironment);
 
-      if (!credentialsAreConfigured) {
-        throw new Error("Clerk authentication is not configured");
-      }
+    if (mode === "test") {
+      return createTestRequestContext(env);
     }
 
     const readIdentity =
