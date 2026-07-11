@@ -27,6 +27,7 @@ async function createIsolatedTemplateDb() {
     CREATE TABLE prompt_templates (
       id text PRIMARY KEY NOT NULL,
       workspace_id text NOT NULL,
+      builtin_key text,
       name text NOT NULL,
       description text NOT NULL,
       category text NOT NULL,
@@ -35,7 +36,8 @@ async function createIsolatedTemplateDb() {
       is_default integer DEFAULT false NOT NULL,
       is_active integer DEFAULT true NOT NULL,
       created_at integer NOT NULL,
-      updated_at integer NOT NULL
+      updated_at integer NOT NULL,
+      UNIQUE(workspace_id, builtin_key)
     )
   `);
 

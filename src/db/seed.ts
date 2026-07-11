@@ -1,6 +1,6 @@
 import { promptTemplates, type PromptVariableSchema } from "./schema";
 
-type DefaultPromptTemplate = {
+export type DefaultPromptTemplate = {
   id: string;
   name: string;
   description: string;
@@ -187,6 +187,7 @@ export async function seedDefaultPromptTemplates(now = new Date()) {
       .values({
         id: template.id,
         workspaceId: "local",
+        builtinKey: template.id,
         name: template.name,
         description: template.description,
         category: template.category,
@@ -201,6 +202,7 @@ export async function seedDefaultPromptTemplates(now = new Date()) {
         target: promptTemplates.id,
         set: {
           workspaceId: "local",
+          builtinKey: template.id,
           name: template.name,
           description: template.description,
           category: template.category,

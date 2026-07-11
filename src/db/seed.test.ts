@@ -32,6 +32,7 @@ async function createIsolatedPromptTemplateDb() {
     CREATE TABLE prompt_templates (
       id text PRIMARY KEY NOT NULL,
       workspace_id text NOT NULL,
+      builtin_key text,
       name text NOT NULL,
       description text NOT NULL,
       category text NOT NULL,
@@ -40,7 +41,8 @@ async function createIsolatedPromptTemplateDb() {
       is_default integer DEFAULT false NOT NULL,
       is_active integer DEFAULT true NOT NULL,
       created_at integer NOT NULL,
-      updated_at integer NOT NULL
+      updated_at integer NOT NULL,
+      UNIQUE(workspace_id, builtin_key)
     )
   `);
 
@@ -107,6 +109,7 @@ describe("seedDefaultPromptTemplates", () => {
     const rows = await db
       .select({
         id: promptTemplates.id,
+        builtinKey: promptTemplates.builtinKey,
         name: promptTemplates.name,
         isDefault: promptTemplates.isDefault,
         workspaceId: promptTemplates.workspaceId,
@@ -123,5 +126,11 @@ describe("seedDefaultPromptTemplates", () => {
     ]);
     expect(rows.every((row) => row.isDefault)).toBe(true);
     expect(rows.every((row) => row.workspaceId === "local")).toBe(true);
+    expect(rows.map((row) => row.builtinKey).sort()).toEqual([
+      "tpl_contract_review",
+      "tpl_executive_rewrite",
+      "tpl_market_research",
+      "tpl_strategy_review",
+    ]);
   });
 });

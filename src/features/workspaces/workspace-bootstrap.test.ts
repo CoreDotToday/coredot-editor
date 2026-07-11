@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import * as schema from "@/db/schema";
+import { defaultPromptTemplates } from "@/db/seed";
 import { createWorkspaceBootstrap } from "./workspace-bootstrap";
 
 const tempDirs: string[] = [];
@@ -27,6 +28,7 @@ async function createIsolatedWorkspaceDb() {
     CREATE TABLE prompt_templates (
       id text PRIMARY KEY NOT NULL,
       workspace_id text NOT NULL,
+      builtin_key text,
       name text NOT NULL,
       description text NOT NULL,
       category text NOT NULL,
@@ -35,7 +37,8 @@ async function createIsolatedWorkspaceDb() {
       is_default integer DEFAULT false NOT NULL,
       is_active integer DEFAULT true NOT NULL,
       created_at integer NOT NULL,
-      updated_at integer NOT NULL
+      updated_at integer NOT NULL,
+      UNIQUE(workspace_id, builtin_key)
     )
   `);
   await db.run(sql`
@@ -61,8 +64,9 @@ describe("workspace bootstrap", () => {
     const ensureWorkspaceBootstrap = createWorkspaceBootstrap(db);
 
     await db.insert(schema.promptTemplates).values({
-      id: "legacy-local-strategy-template",
+      id: "tpl_strategy_review",
       workspaceId: workspaceA.workspaceId,
+      builtinKey: "tpl_strategy_review",
       name: "Legacy Strategy Review",
       description: "Migrated default",
       category: "strategy_review",
@@ -99,5 +103,42 @@ describe("workspace bootstrap", () => {
       aiModel: "stub-editor",
       aiProvider: "stub",
     });
+  });
+
+  it("keeps multiple built-ins in the same category unique and safe under concurrent bootstrap", async () => {
+    const db = await createIsolatedWorkspaceDb();
+    const sameCategoryBuiltins = [
+      {
+        ...defaultPromptTemplates[0]!,
+        id: "tpl_shared_category_one",
+        category: "shared_category",
+        name: "Shared Category One",
+      },
+      {
+        ...defaultPromptTemplates[1]!,
+        id: "tpl_shared_category_two",
+        category: "shared_category",
+        name: "Shared Category Two",
+      },
+    ];
+    const ensureWorkspaceBootstrap = createWorkspaceBootstrap(db, sameCategoryBuiltins);
+
+    await Promise.all([
+      ensureWorkspaceBootstrap(workspaceA),
+      ensureWorkspaceBootstrap(workspaceA),
+      ensureWorkspaceBootstrap(workspaceA),
+    ]);
+    await ensureWorkspaceBootstrap(workspaceA);
+
+    const rows = await db.all<{ builtin_key: string | null; category: string }>(sql`
+      SELECT builtin_key, category
+      FROM prompt_templates
+      WHERE workspace_id = ${workspaceA.workspaceId}
+      ORDER BY builtin_key
+    `);
+    expect(rows).toEqual([
+      { builtin_key: "tpl_shared_category_one", category: "shared_category" },
+      { builtin_key: "tpl_shared_category_two", category: "shared_category" },
+    ]);
   });
 });

@@ -62,6 +62,7 @@ function createDependencies(overrides: Partial<AiCommandServiceDependencies> = {
       description: "Template",
       id: "template_1",
       workspaceId: scope.workspaceId,
+      builtinKey: null,
       isActive: true,
       isDefault: true,
       name: "Template",

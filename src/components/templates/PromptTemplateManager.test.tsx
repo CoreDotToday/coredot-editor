@@ -12,6 +12,7 @@ function createTemplate(overrides: Partial<PromptTemplateRecord> = {}): PromptTe
   return {
     id: "tpl_1",
     workspaceId: "local",
+    builtinKey: null,
     name: "Strategy Review",
     description: "Review strategy",
     category: "strategy_review",

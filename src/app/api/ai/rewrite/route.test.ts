@@ -73,6 +73,7 @@ const documentRecord = {
 const templateRecord = {
   id: "tpl_1",
   workspaceId: "local",
+  builtinKey: null,
   name: "Rewrite",
   description: "Rewrite",
   category: "rewrite",

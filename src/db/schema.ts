@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { check, index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { check, foreignKey, index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 import { nanoid } from "nanoid";
 
 export type TiptapJson = {
@@ -34,6 +34,7 @@ export const documents = sqliteTable(
   (table) => [
     index("documents_readiness_idx").on(table.readiness),
     index("documents_workspace_status_updated_idx").on(table.workspaceId, table.status, table.updatedAt),
+    uniqueIndex("documents_workspace_id_id_unique").on(table.workspaceId, table.id),
     check("documents_status_check", sql`${table.status} in ('draft', 'archived')`),
     check("documents_readiness_check", sql`${table.readiness} in ('draft', 'needs_review', 'ready', 'approved')`),
   ],
@@ -44,6 +45,7 @@ export const promptTemplates = sqliteTable(
   {
     id: text("id").primaryKey().$defaultFn(() => nanoid()),
     workspaceId: text("workspace_id").notNull(),
+    builtinKey: text("builtin_key"),
     name: text("name").notNull(),
     description: text("description").notNull(),
     category: text("category").notNull(),
@@ -54,7 +56,11 @@ export const promptTemplates = sqliteTable(
     createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
     updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
   },
-  (table) => [index("prompt_templates_workspace_active_name_idx").on(table.workspaceId, table.isActive, table.name)],
+  (table) => [
+    index("prompt_templates_workspace_active_name_idx").on(table.workspaceId, table.isActive, table.name),
+    uniqueIndex("prompt_templates_workspace_id_id_unique").on(table.workspaceId, table.id),
+    uniqueIndex("prompt_templates_workspace_builtin_key_unique").on(table.workspaceId, table.builtinKey),
+  ],
 );
 
 export const aiRuns = sqliteTable(
@@ -62,7 +68,7 @@ export const aiRuns = sqliteTable(
   {
     id: text("id").primaryKey().$defaultFn(() => nanoid()),
     workspaceId: text("workspace_id").notNull(),
-    documentId: text("document_id").notNull().references(() => documents.id, { onDelete: "cascade" }),
+    documentId: text("document_id").notNull(),
     promptTemplateId: text("prompt_template_id").references(() => promptTemplates.id, { onDelete: "set null" }),
     commandType: text("command_type", { enum: ["selection_rewrite", "document_review"] }).notNull(),
     provider: text("provider").notNull(),
@@ -79,6 +85,12 @@ export const aiRuns = sqliteTable(
     index("ai_runs_document_id_idx").on(table.documentId),
     index("ai_runs_prompt_template_id_idx").on(table.promptTemplateId),
     index("ai_runs_workspace_document_created_idx").on(table.workspaceId, table.documentId, table.createdAt),
+    uniqueIndex("ai_runs_workspace_id_id_document_id_unique").on(table.workspaceId, table.id, table.documentId),
+    foreignKey({
+      columns: [table.workspaceId, table.documentId],
+      foreignColumns: [documents.workspaceId, documents.id],
+      name: "ai_runs_workspace_document_fk",
+    }).onDelete("cascade"),
     check("ai_runs_command_type_check", sql`${table.commandType} in ('selection_rewrite', 'document_review')`),
     check("ai_runs_status_check", sql`${table.status} in ('pending', 'streaming', 'completed', 'failed')`),
   ],
@@ -89,8 +101,8 @@ export const aiProposals = sqliteTable(
   {
     id: text("id").primaryKey().$defaultFn(() => nanoid()),
     workspaceId: text("workspace_id").notNull(),
-    aiRunId: text("ai_run_id").notNull().references(() => aiRuns.id, { onDelete: "cascade" }),
-    documentId: text("document_id").notNull().references(() => documents.id, { onDelete: "cascade" }),
+    aiRunId: text("ai_run_id").notNull(),
+    documentId: text("document_id").notNull(),
     targetText: text("target_text").notNull(),
     replacementText: text("replacement_text").notNull(),
     explanation: text("explanation").notNull(),
@@ -109,6 +121,16 @@ export const aiProposals = sqliteTable(
     index("ai_proposals_ai_run_id_idx").on(table.aiRunId),
     index("ai_proposals_document_id_idx").on(table.documentId),
     index("ai_proposals_workspace_document_created_idx").on(table.workspaceId, table.documentId, table.createdAt),
+    foreignKey({
+      columns: [table.workspaceId, table.documentId],
+      foreignColumns: [documents.workspaceId, documents.id],
+      name: "ai_proposals_workspace_document_fk",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.workspaceId, table.aiRunId, table.documentId],
+      foreignColumns: [aiRuns.workspaceId, aiRuns.id, aiRuns.documentId],
+      name: "ai_proposals_workspace_run_document_fk",
+    }).onDelete("cascade"),
     check("ai_proposals_source_check", sql`${table.source} in ('selection', 'review')`),
     check("ai_proposals_default_apply_mode_check", sql`${table.defaultApplyMode} in ('replace', 'insert_below')`),
     check(

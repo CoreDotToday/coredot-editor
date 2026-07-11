@@ -16,6 +16,7 @@ CREATE TABLE `__new_documents` (
 CREATE TABLE `__new_prompt_templates` (
 	`id` text PRIMARY KEY NOT NULL,
 	`workspace_id` text NOT NULL,
+	`builtin_key` text,
 	`name` text NOT NULL,
 	`description` text NOT NULL,
 	`category` text NOT NULL,
@@ -41,7 +42,7 @@ CREATE TABLE `__new_ai_runs` (
 	`error_message` text,
 	`created_at` integer NOT NULL,
 	`updated_at` integer NOT NULL,
-	FOREIGN KEY (`document_id`) REFERENCES `documents`(`id`) ON UPDATE no action ON DELETE cascade,
+	CONSTRAINT `ai_runs_workspace_document_fk` FOREIGN KEY (`workspace_id`, `document_id`) REFERENCES `documents`(`workspace_id`, `id`) ON UPDATE no action ON DELETE cascade,
 	FOREIGN KEY (`prompt_template_id`) REFERENCES `prompt_templates`(`id`) ON UPDATE no action ON DELETE set null,
 	CONSTRAINT "ai_runs_command_type_check" CHECK(`command_type` in ('selection_rewrite', 'document_review')),
 	CONSTRAINT "ai_runs_status_check" CHECK(`status` in ('pending', 'streaming', 'completed', 'failed'))
@@ -64,8 +65,8 @@ CREATE TABLE `__new_ai_proposals` (
 	`status` text DEFAULT 'pending' NOT NULL,
 	`created_at` integer NOT NULL,
 	`updated_at` integer NOT NULL,
-	FOREIGN KEY (`ai_run_id`) REFERENCES `ai_runs`(`id`) ON UPDATE no action ON DELETE cascade,
-	FOREIGN KEY (`document_id`) REFERENCES `documents`(`id`) ON UPDATE no action ON DELETE cascade,
+	CONSTRAINT `ai_proposals_workspace_document_fk` FOREIGN KEY (`workspace_id`, `document_id`) REFERENCES `documents`(`workspace_id`, `id`) ON UPDATE no action ON DELETE cascade,
+	CONSTRAINT `ai_proposals_workspace_run_document_fk` FOREIGN KEY (`workspace_id`, `ai_run_id`, `document_id`) REFERENCES `ai_runs`(`workspace_id`, `id`, `document_id`) ON UPDATE no action ON DELETE cascade,
 	CONSTRAINT "ai_proposals_source_check" CHECK(`source` in ('selection', 'review')),
 	CONSTRAINT "ai_proposals_default_apply_mode_check" CHECK(`default_apply_mode` in ('replace', 'insert_below')),
 	CONSTRAINT "ai_proposals_applied_mode_check" CHECK(`applied_mode` is null or `applied_mode` in ('replace', 'insert_below')),
@@ -87,8 +88,8 @@ CREATE TABLE `__new_app_settings` (
 );--> statement-breakpoint
 INSERT INTO `__new_documents` (`id`, `workspace_id`, `title`, `content_json`, `plain_text`, `status`, `readiness`, `metadata_json`, `created_at`, `updated_at`)
 SELECT `id`, 'local', `title`, `content_json`, `plain_text`, `status`, `readiness`, `metadata_json`, `created_at`, `updated_at` FROM `documents`;--> statement-breakpoint
-INSERT INTO `__new_prompt_templates` (`id`, `workspace_id`, `name`, `description`, `category`, `system_prompt`, `variable_schema_json`, `is_default`, `is_active`, `created_at`, `updated_at`)
-SELECT `id`, 'local', `name`, `description`, `category`, `system_prompt`, `variable_schema_json`, `is_default`, `is_active`, `created_at`, `updated_at` FROM `prompt_templates`;--> statement-breakpoint
+INSERT INTO `__new_prompt_templates` (`id`, `workspace_id`, `builtin_key`, `name`, `description`, `category`, `system_prompt`, `variable_schema_json`, `is_default`, `is_active`, `created_at`, `updated_at`)
+SELECT `id`, 'local', CASE WHEN `is_default` = 1 AND `id` IN ('tpl_strategy_review', 'tpl_executive_rewrite', 'tpl_market_research', 'tpl_contract_review') THEN `id` ELSE NULL END, `name`, `description`, `category`, `system_prompt`, `variable_schema_json`, `is_default`, `is_active`, `created_at`, `updated_at` FROM `prompt_templates`;--> statement-breakpoint
 INSERT INTO `__new_ai_runs` (`id`, `workspace_id`, `document_id`, `prompt_template_id`, `command_type`, `provider`, `model`, `input_summary_json`, `output_text`, `status`, `was_applied`, `error_message`, `created_at`, `updated_at`)
 SELECT `id`, 'local', `document_id`, `prompt_template_id`, `command_type`, `provider`, `model`, `input_summary_json`, `output_text`, `status`, `was_applied`, `error_message`, `created_at`, `updated_at` FROM `ai_runs`;--> statement-breakpoint
 INSERT INTO `__new_ai_proposals` (`id`, `workspace_id`, `ai_run_id`, `document_id`, `target_text`, `replacement_text`, `explanation`, `source`, `command`, `occurrence_index`, `target_from`, `target_to`, `default_apply_mode`, `applied_mode`, `status`, `created_at`, `updated_at`)
@@ -107,12 +108,36 @@ ALTER TABLE `__new_ai_proposals` RENAME TO `ai_proposals`;--> statement-breakpoi
 ALTER TABLE `__new_app_settings` RENAME TO `app_settings`;--> statement-breakpoint
 CREATE INDEX `documents_readiness_idx` ON `documents` (`readiness`);--> statement-breakpoint
 CREATE INDEX `documents_workspace_status_updated_idx` ON `documents` (`workspace_id`, `status`, `updated_at`);--> statement-breakpoint
+CREATE UNIQUE INDEX `documents_workspace_id_id_unique` ON `documents` (`workspace_id`, `id`);--> statement-breakpoint
 CREATE INDEX `prompt_templates_workspace_active_name_idx` ON `prompt_templates` (`workspace_id`, `is_active`, `name`);--> statement-breakpoint
+CREATE UNIQUE INDEX `prompt_templates_workspace_id_id_unique` ON `prompt_templates` (`workspace_id`, `id`);--> statement-breakpoint
+CREATE UNIQUE INDEX `prompt_templates_workspace_builtin_key_unique` ON `prompt_templates` (`workspace_id`, `builtin_key`);--> statement-breakpoint
 CREATE INDEX `ai_runs_document_id_idx` ON `ai_runs` (`document_id`);--> statement-breakpoint
 CREATE INDEX `ai_runs_prompt_template_id_idx` ON `ai_runs` (`prompt_template_id`);--> statement-breakpoint
 CREATE INDEX `ai_runs_workspace_document_created_idx` ON `ai_runs` (`workspace_id`, `document_id`, `created_at`);--> statement-breakpoint
+CREATE UNIQUE INDEX `ai_runs_workspace_id_id_document_id_unique` ON `ai_runs` (`workspace_id`, `id`, `document_id`);--> statement-breakpoint
 CREATE INDEX `ai_proposals_ai_run_id_idx` ON `ai_proposals` (`ai_run_id`);--> statement-breakpoint
 CREATE INDEX `ai_proposals_document_id_idx` ON `ai_proposals` (`document_id`);--> statement-breakpoint
 CREATE INDEX `ai_proposals_workspace_document_created_idx` ON `ai_proposals` (`workspace_id`, `document_id`, `created_at`);--> statement-breakpoint
 CREATE UNIQUE INDEX `app_settings_workspace_id_unique` ON `app_settings` (`workspace_id`);--> statement-breakpoint
+CREATE TRIGGER `ai_runs_prompt_template_workspace_insert`
+BEFORE INSERT ON `ai_runs`
+FOR EACH ROW
+WHEN NEW.`prompt_template_id` IS NOT NULL
+BEGIN
+	SELECT CASE WHEN NOT EXISTS (
+		SELECT 1 FROM `prompt_templates`
+		WHERE `workspace_id` = NEW.`workspace_id` AND `id` = NEW.`prompt_template_id`
+	) THEN RAISE(ABORT, 'ai_run prompt template workspace mismatch') END;
+END;--> statement-breakpoint
+CREATE TRIGGER `ai_runs_prompt_template_workspace_update`
+BEFORE UPDATE OF `workspace_id`, `prompt_template_id` ON `ai_runs`
+FOR EACH ROW
+WHEN NEW.`prompt_template_id` IS NOT NULL
+BEGIN
+	SELECT CASE WHEN NOT EXISTS (
+		SELECT 1 FROM `prompt_templates`
+		WHERE `workspace_id` = NEW.`workspace_id` AND `id` = NEW.`prompt_template_id`
+	) THEN RAISE(ABORT, 'ai_run prompt template workspace mismatch') END;
+END;--> statement-breakpoint
 PRAGMA foreign_keys=ON;
