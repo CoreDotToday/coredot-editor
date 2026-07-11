@@ -44,8 +44,22 @@ describe("production auth wiring", () => {
       scripts: Record<string, string>;
     };
 
-    expect(packageJson.scripts["release:check"]).toContain(
+    const releaseCheck = packageJson.scripts["release:check"];
+    const startupVerificationIndex = releaseCheck.indexOf(
       "pnpm security:verify-auth-startup",
     );
+    const finalBuildIndex = releaseCheck.lastIndexOf("pnpm build");
+
+    expect(startupVerificationIndex).toBeGreaterThanOrEqual(0);
+    expect(finalBuildIndex).toBeGreaterThan(startupVerificationIndex);
+  });
+
+  it("cleans up the startup process tree and proves the port is reusable", () => {
+    const startupVerification = read(
+      "scripts/security/verify-production-auth-startup.mjs",
+    );
+
+    expect(startupVerification).toContain("taskkill");
+    expect(startupVerification).toContain("assertPortIsReusable");
   });
 });

@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:net";
 
 const pnpmCommand = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
@@ -8,6 +8,18 @@ const startupTimeoutMilliseconds = 20_000;
 function terminateProcess(child) {
   if (child.exitCode !== null || child.signalCode !== null) {
     return;
+  }
+
+  if (process.platform === "win32" && child.pid) {
+    const result = spawnSync(
+      "taskkill",
+      ["/PID", String(child.pid), "/T", "/F"],
+      { stdio: "ignore" },
+    );
+
+    if (!result.error && result.status === 0) {
+      return;
+    }
   }
 
   if (process.platform !== "win32" && child.pid) {
@@ -20,6 +32,45 @@ function terminateProcess(child) {
   }
 
   child.kill("SIGTERM");
+}
+
+function tryBindPort(port) {
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+
+    server.once("error", (error) => {
+      if (error.code === "EADDRINUSE") {
+        resolve(false);
+        return;
+      }
+
+      reject(error);
+    });
+    server.listen(port, "127.0.0.1", () => {
+      server.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+
+        resolve(true);
+      });
+    });
+  });
+}
+
+async function assertPortIsReusable(port) {
+  const attempts = 20;
+
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (await tryBindPort(port)) {
+      return;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+
+  throw new Error(`Startup verification port ${String(port)} was not released`);
 }
 
 function run(command, args, options) {
@@ -202,7 +253,7 @@ async function verifyValidProductionStartupReachesReadiness() {
       reject(error);
     });
 
-    child.once("exit", (code, signal) => {
+    child.once("exit", async (code, signal) => {
       clearTimeout(timeout);
 
       if (timedOut) {
@@ -219,7 +270,12 @@ async function verifyValidProductionStartupReachesReadiness() {
         return;
       }
 
-      resolve();
+      try {
+        await assertPortIsReusable(port);
+        resolve();
+      } catch (error) {
+        reject(error);
+      }
     });
   });
 }
