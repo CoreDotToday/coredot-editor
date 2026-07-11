@@ -1,12 +1,17 @@
 import { NextResponse } from "next/server";
 import { archivePromptTemplate, updatePromptTemplate } from "@/features/templates/template-repository";
 import { promptTemplateUpdatePayloadSchema } from "@/features/templates/template-validation";
-import { createProtectedRouteHandler, requireWorkspaceAdministrator } from "@/features/auth/route-context";
+import {
+  createProtectedOptionsHandler,
+  createProtectedRouteHandler,
+  requireWorkspaceAdministrator,
+} from "@/features/auth/route-context";
 
 type Params = {
   params: Promise<{ id: string }>;
 };
 
+const optionsHandler = createProtectedOptionsHandler(["PUT", "DELETE"]);
 const putHandler = createProtectedRouteHandler(async (context, request: Request, { params }: Params) => {
   requireWorkspaceAdministrator(context);
   const { id } = await params;
@@ -40,4 +45,8 @@ export async function PUT(request: Request, params: Params) {
 
 export async function DELETE(request: Request, params: Params) {
   return deleteHandler(request, params);
+}
+
+export async function OPTIONS() {
+  return optionsHandler();
 }

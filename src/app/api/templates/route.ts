@@ -1,8 +1,13 @@
 import { NextResponse } from "next/server";
 import { createPromptTemplate, listPromptTemplates } from "@/features/templates/template-repository";
 import { promptTemplatePayloadSchema } from "@/features/templates/template-validation";
-import { createProtectedRouteHandler, requireWorkspaceAdministrator } from "@/features/auth/route-context";
+import {
+  createProtectedOptionsHandler,
+  createProtectedRouteHandler,
+  requireWorkspaceAdministrator,
+} from "@/features/auth/route-context";
 
+const optionsHandler = createProtectedOptionsHandler(["GET", "POST"]);
 const getHandler = createProtectedRouteHandler(async (context) => {
   const templates = await listPromptTemplates(context);
   return NextResponse.json({ templates });
@@ -25,4 +30,8 @@ export async function GET() {
 
 export async function POST(request: Request) {
   return postHandler(request);
+}
+
+export async function OPTIONS() {
+  return optionsHandler();
 }

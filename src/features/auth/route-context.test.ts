@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  createProtectedOptionsHandler,
   createProtectedRouteHandler,
   getProtectedPageContext,
   requireWorkspaceAdministrator,
@@ -31,6 +32,18 @@ function createDependencies(
 }
 
 describe("protected route context", () => {
+  it("returns an authenticated 204 OPTIONS response with normalized allowed methods", async () => {
+    const dependencies = createDependencies();
+    const handler = createProtectedOptionsHandler(["POST", "GET"], dependencies);
+
+    const response = await handler();
+
+    expect(response.status).toBe(204);
+    expect(response.headers.get("Allow")).toBe("GET, HEAD, POST, OPTIONS");
+    expect(await response.text()).toBe("");
+    expect(dependencies.ensureWorkspaceBootstrap).toHaveBeenCalledWith(ownerContext);
+  });
+
   it("resolves and bootstraps the workspace before invoking a route", async () => {
     const callOrder: string[] = [];
     const dependencies = createDependencies({

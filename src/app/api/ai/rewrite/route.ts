@@ -10,7 +10,7 @@ import {
   type AiCommandRequestFailure,
 } from "@/features/ai/ai-command-service";
 import { validateProposalTargetOccurrence } from "@/features/proposals/proposal-apply";
-import { createProtectedRouteHandler } from "@/features/auth/route-context";
+import { createProtectedOptionsHandler, createProtectedRouteHandler } from "@/features/auth/route-context";
 
 const rewritePayloadSchema = aiCommandPayloadSchema.extend({
   selectedText: z
@@ -18,6 +18,7 @@ const rewritePayloadSchema = aiCommandPayloadSchema.extend({
     .max(AI_CONTEXT_LIMITS.selectedTextMaxCharacters)
     .refine((value) => value.trim().length > 0),
 });
+const optionsHandler = createProtectedOptionsHandler(["POST"]);
 const postHandler = createProtectedRouteHandler(async (context, request: Request) => {
   const payload = await request.json().catch(() => null);
   const result = rewritePayloadSchema.safeParse(payload);
@@ -108,6 +109,10 @@ const postHandler = createProtectedRouteHandler(async (context, request: Request
 
 export async function POST(request: Request) {
   return postHandler(request);
+}
+
+export async function OPTIONS() {
+  return optionsHandler();
 }
 
 function aiCommandFailureResponse(failure: AiCommandRequestFailure) {

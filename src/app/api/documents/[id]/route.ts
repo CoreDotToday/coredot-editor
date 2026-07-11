@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { archiveDocument, getDocumentById, updateDocumentContent } from "@/features/documents/document-repository";
 import { documentReadinessValues } from "@/features/documents/document-metadata";
-import { createProtectedRouteHandler } from "@/features/auth/route-context";
+import { createProtectedOptionsHandler, createProtectedRouteHandler } from "@/features/auth/route-context";
 
 const updateDocumentSchema = z.object({
   title: z.string().min(1),
@@ -20,6 +20,7 @@ type Params = {
   params: Promise<{ id: string }>;
 };
 
+const optionsHandler = createProtectedOptionsHandler(["GET", "PUT", "DELETE"]);
 const getHandler = createProtectedRouteHandler(async (context, _request: Request, { params }: Params) => {
   const { id } = await params;
   const document = await getDocumentById(context, id);
@@ -63,4 +64,8 @@ export async function PUT(request: Request, params: Params) {
 
 export async function DELETE(request: Request, params: Params) {
   return deleteHandler(request, params);
+}
+
+export async function OPTIONS() {
+  return optionsHandler();
 }

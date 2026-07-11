@@ -2,11 +2,12 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { getDocumentById } from "@/features/documents/document-repository";
 import { tiptapJsonToDocxBuffer } from "@/features/documents/docx-conversion";
-import { createProtectedRouteHandler } from "@/features/auth/route-context";
+import { createProtectedOptionsHandler, createProtectedRouteHandler } from "@/features/auth/route-context";
 
 export const runtime = "nodejs";
 
 const DOCX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+const optionsHandler = createProtectedOptionsHandler(["POST"]);
 
 const exportDocumentSchema = z.object({
   title: z.string().min(1),
@@ -43,6 +44,10 @@ const postHandler = createProtectedRouteHandler(async (context, request: Request
 
 export async function POST(request: Request, params: Params) {
   return postHandler(request, params);
+}
+
+export async function OPTIONS() {
+  return optionsHandler();
 }
 
 function sanitizeFileName(value: string) {

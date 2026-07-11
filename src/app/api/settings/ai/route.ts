@@ -1,7 +1,12 @@
 import { NextResponse } from "next/server";
 import { aiSettingsPayloadSchema, getAiSettings, updateAiSettings } from "@/features/ai/ai-settings-repository";
-import { createProtectedRouteHandler, requireWorkspaceAdministrator } from "@/features/auth/route-context";
+import {
+  createProtectedOptionsHandler,
+  createProtectedRouteHandler,
+  requireWorkspaceAdministrator,
+} from "@/features/auth/route-context";
 
+const optionsHandler = createProtectedOptionsHandler(["GET", "PUT"]);
 const getHandler = createProtectedRouteHandler(async (context) => {
   const settings = await getAiSettings(context);
   return NextResponse.json({ settings, secrets: getSecretStatus() });
@@ -28,6 +33,10 @@ export async function GET() {
 
 export async function PUT(request: Request) {
   return putHandler(request);
+}
+
+export async function OPTIONS() {
+  return optionsHandler();
 }
 
 function getSecretStatus() {

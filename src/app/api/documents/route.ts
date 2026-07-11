@@ -1,12 +1,13 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { createDocumentDraft, listDocuments } from "@/features/documents/document-repository";
-import { createProtectedRouteHandler } from "@/features/auth/route-context";
+import { createProtectedOptionsHandler, createProtectedRouteHandler } from "@/features/auth/route-context";
 
 const createDocumentSchema = z.object({
   title: z.string().min(1).default("Untitled document"),
 });
 
+const optionsHandler = createProtectedOptionsHandler(["GET", "POST"]);
 const getHandler = createProtectedRouteHandler(async (context) => {
   const documents = await listDocuments(context);
   return NextResponse.json({ documents });
@@ -29,4 +30,8 @@ export async function GET() {
 
 export async function POST(request: Request) {
   return postHandler(request);
+}
+
+export async function OPTIONS() {
+  return optionsHandler();
 }

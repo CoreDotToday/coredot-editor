@@ -21,6 +21,17 @@ export type ProtectedRequestContextDependencies = {
 type ProtectedPageContextDependencies = ProtectedRequestContextDependencies & {
   redirectTo?: (location: string) => never;
 };
+type ProtectedHttpMethod = "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE" | "OPTIONS";
+
+const httpMethodOrder: readonly ProtectedHttpMethod[] = [
+  "GET",
+  "HEAD",
+  "POST",
+  "PUT",
+  "PATCH",
+  "DELETE",
+  "OPTIONS",
+];
 
 const defaultDependencies: ProtectedRequestContextDependencies = {
   ensureWorkspaceBootstrap: async (context) => {
@@ -60,6 +71,23 @@ export function createProtectedRouteHandler<TArguments extends unknown[]>(
       throw error;
     }
   };
+}
+
+export function createProtectedOptionsHandler(
+  methods: readonly Exclude<ProtectedHttpMethod, "HEAD" | "OPTIONS">[],
+  dependencies: ProtectedRequestContextDependencies = defaultDependencies,
+) {
+  const allowedMethods = new Set<ProtectedHttpMethod>(methods);
+  if (allowedMethods.has("GET")) {
+    allowedMethods.add("HEAD");
+  }
+  allowedMethods.add("OPTIONS");
+  const allow = httpMethodOrder.filter((method) => allowedMethods.has(method)).join(", ");
+
+  return createProtectedRouteHandler(
+    async () => new Response(null, { headers: { Allow: allow }, status: 204 }),
+    dependencies,
+  );
 }
 
 export async function getProtectedPageContext(

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { getProposalById, updateProposalStatus } from "@/features/proposals/proposal-repository";
-import { createProtectedRouteHandler } from "@/features/auth/route-context";
+import { createProtectedOptionsHandler, createProtectedRouteHandler } from "@/features/auth/route-context";
 
 const proposalStatusPayloadSchema = z.object({
   status: z.enum(["pending", "accepted", "rejected"]),
@@ -13,6 +13,7 @@ type ProposalRouteContext = {
   params: Promise<{ id: string }>;
 };
 
+const optionsHandler = createProtectedOptionsHandler(["PATCH"]);
 const patchHandler = createProtectedRouteHandler(async (
   requestContext,
   request: Request,
@@ -52,4 +53,8 @@ const patchHandler = createProtectedRouteHandler(async (
 
 export async function PATCH(request: Request, context: ProposalRouteContext) {
   return patchHandler(request, context);
+}
+
+export async function OPTIONS() {
+  return optionsHandler();
 }

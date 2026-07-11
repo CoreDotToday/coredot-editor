@@ -4,7 +4,7 @@ import {
   applyProposalToDocumentDraft,
   type ProposalApplicationResult,
 } from "@/features/proposals/proposal-application-service";
-import { createProtectedRouteHandler } from "@/features/auth/route-context";
+import { createProtectedOptionsHandler, createProtectedRouteHandler } from "@/features/auth/route-context";
 
 const proposalApplyPayloadSchema = z.object({
   appliedMode: z.enum(["replace", "insert_below"]),
@@ -19,6 +19,7 @@ type ProposalApplyRouteContext = {
   params: Promise<{ id: string }>;
 };
 
+const optionsHandler = createProtectedOptionsHandler(["POST"]);
 const postHandler = createProtectedRouteHandler(async (
   requestContext,
   request: Request,
@@ -46,6 +47,10 @@ const postHandler = createProtectedRouteHandler(async (
 
 export async function POST(request: Request, context: ProposalApplyRouteContext) {
   return postHandler(request, context);
+}
+
+export async function OPTIONS() {
+  return optionsHandler();
 }
 
 function proposalApplicationResponse(result: ProposalApplicationResult) {

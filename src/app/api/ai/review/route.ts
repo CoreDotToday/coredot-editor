@@ -4,8 +4,9 @@ import { buildAiMessages } from "@/features/ai/payload-builder";
 import { completeAiRunWithProposals, createAiRun, failAiRun } from "@/features/ai/ai-run-repository";
 import { prepareAiCommandRequest, type AiCommandRequestFailure } from "@/features/ai/ai-command-service";
 import { applyProposalToText } from "@/features/proposals/proposal-apply";
-import { createProtectedRouteHandler } from "@/features/auth/route-context";
+import { createProtectedOptionsHandler, createProtectedRouteHandler } from "@/features/auth/route-context";
 
+const optionsHandler = createProtectedOptionsHandler(["POST"]);
 const postHandler = createProtectedRouteHandler(async (context, request: Request) => {
   const payload = await request.json().catch(() => null);
   const result = aiCommandPayloadSchema.safeParse(payload);
@@ -89,6 +90,10 @@ const postHandler = createProtectedRouteHandler(async (context, request: Request
 
 export async function POST(request: Request) {
   return postHandler(request);
+}
+
+export async function OPTIONS() {
+  return optionsHandler();
 }
 
 function aiCommandFailureResponse(failure: AiCommandRequestFailure) {

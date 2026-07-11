@@ -102,6 +102,12 @@ function analyzeRouteMethodExports(source: string, fileName = "route.ts") {
   return { methods, violations };
 }
 
+function assertExplicitProtectedOptions(routeLabel: string, methods: readonly string[]) {
+  if (!methods.includes("OPTIONS")) {
+    throw new Error(`${routeLabel} must explicitly export protected OPTIONS`);
+  }
+}
+
 async function assertRouteMethodsReturnUnauthorized(
   routeLabel: string,
   methods: readonly string[],
@@ -137,6 +143,7 @@ describe("protected server entrypoints", () => {
       expect(source, relative(process.cwd(), routeFile)).not.toMatch(/workspaceId\s*:\s*["']local["']/);
       expect(analysis.methods.length, relative(process.cwd(), routeFile)).toBeGreaterThan(0);
       expect(analysis.violations, relative(process.cwd(), routeFile)).toEqual([]);
+      assertExplicitProtectedOptions(relative(process.cwd(), routeFile), analysis.methods);
     }
   });
 
@@ -175,6 +182,14 @@ describe("protected server entrypoints", () => {
     await expect(
       assertRouteMethodsReturnUnauthorized("fixture/route.ts", analysis.methods, fixtureModule),
     ).rejects.toThrow("fixture/route.ts#POST did not return the standard JSON 401 response");
+  });
+
+  it("rejects a protected route fixture that relies on Next's implicit OPTIONS", () => {
+    const analysis = analyzeRouteMethodExports("export async function GET() {}", "fixture/route.ts");
+
+    expect(() => assertExplicitProtectedOptions("fixture/route.ts", analysis.methods)).toThrow(
+      "fixture/route.ts must explicitly export protected OPTIONS",
+    );
   });
 
   it("requires every non-public page and server action to use the page context seam", async () => {
@@ -219,5 +234,29 @@ describe("protected server entrypoints", () => {
       await assertRouteMethodsReturnUnauthorized(routeLabel, analysis.methods, routeModule);
     }
     expect(ensureWorkspaceBootstrap).not.toHaveBeenCalled();
+  });
+
+  it("returns authenticated 204 OPTIONS with an Allow header matching each route", async () => {
+    const routeFiles = await findFiles(join(appDirectory, "api"), "route.ts");
+
+    for (const routeFile of routeFiles) {
+      const routeLabel = relative(process.cwd(), routeFile);
+      const analysis = analyzeRouteMethodExports(await readFile(routeFile, "utf8"), routeFile);
+      const routeModule = await import(pathToFileURL(routeFile).href) as Record<string, unknown>;
+      const options = routeModule.OPTIONS;
+      if (typeof options !== "function") {
+        throw new Error(`${routeLabel}#OPTIONS is not an exported function`);
+      }
+
+      const response = await options() as Response;
+      const expectedMethods = new Set(analysis.methods);
+      if (expectedMethods.has("GET")) expectedMethods.add("HEAD");
+      const actualMethods = new Set(
+        response.headers.get("Allow")?.split(",").map((method) => method.trim()).filter(Boolean) ?? [],
+      );
+      expect(response.status, routeLabel).toBe(204);
+      expect(actualMethods, routeLabel).toEqual(expectedMethods);
+      expect(await response.text(), routeLabel).toBe("");
+    }
   });
 });

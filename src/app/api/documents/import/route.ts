@@ -1,11 +1,12 @@
 import { NextResponse } from "next/server";
 import { createDocumentFromContent } from "@/features/documents/document-repository";
 import { docxBufferToTiptapJson } from "@/features/documents/docx-conversion";
-import { createProtectedRouteHandler } from "@/features/auth/route-context";
+import { createProtectedOptionsHandler, createProtectedRouteHandler } from "@/features/auth/route-context";
 
 export const runtime = "nodejs";
 
 const DOCX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+const optionsHandler = createProtectedOptionsHandler(["POST"]);
 
 const postHandler = createProtectedRouteHandler(async (context, request: Request) => {
   const formData = await request.formData().catch(() => null);
@@ -28,6 +29,10 @@ const postHandler = createProtectedRouteHandler(async (context, request: Request
 
 export async function POST(request: Request) {
   return postHandler(request);
+}
+
+export async function OPTIONS() {
+  return optionsHandler();
 }
 
 function isDocxFile(file: File) {

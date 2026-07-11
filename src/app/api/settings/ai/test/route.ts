@@ -1,8 +1,13 @@
 import { NextResponse } from "next/server";
 import { getAiSettings } from "@/features/ai/ai-settings-repository";
 import { createAiProvider } from "@/features/ai/providers";
-import { createProtectedRouteHandler, requireWorkspaceAdministrator } from "@/features/auth/route-context";
+import {
+  createProtectedOptionsHandler,
+  createProtectedRouteHandler,
+  requireWorkspaceAdministrator,
+} from "@/features/auth/route-context";
 
+const optionsHandler = createProtectedOptionsHandler(["POST"]);
 const postHandler = createProtectedRouteHandler(async (context) => {
   requireWorkspaceAdministrator(context);
   try {
@@ -23,4 +28,8 @@ const postHandler = createProtectedRouteHandler(async (context) => {
 
 export async function POST() {
   return postHandler();
+}
+
+export async function OPTIONS() {
+  return optionsHandler();
 }
