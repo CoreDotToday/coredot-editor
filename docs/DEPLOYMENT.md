@@ -73,7 +73,7 @@ The claim is intentionally one-way: after a successful commit, use the database 
 Request budgets and resource limits are code-owned defaults documented in [Configuration](configuration.md#request-budgets). All app instances must use the same policy values and the same durable database.
 
 - `429 Request rate limit exceeded`: the workspace/principal/policy bucket is exhausted. Honor `Retry-After`; the `X-RateLimit-*` headers describe the boundary.
-- `413 Document exceeds resource limits`: reject the file/document or reduce its byte size, depth, or node count before retrying.
+- `413 Document exceeds resource limits`: reject the file/document or reduce its DOCX size, complete parsed JSON size, depth, or node count before retrying.
 - `504 Operation timed out`: import, export, or AI work crossed the 30-second operation deadline. Provider-capable calls receive an abort signal; timed-out import/export work does not continue to persistence.
 
 Monitor these statuses separately from application `5xx` errors. `OPTIONS` requests authenticate through the existing protected seam but do not consume request budget.

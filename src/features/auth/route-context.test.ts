@@ -72,6 +72,40 @@ describe("protected route context", () => {
     await expect(response.json()).resolves.toEqual({ workspaceId: "workspace-a" });
   });
 
+  it("runs an authenticated guard before bootstrap and short-circuits persistence", async () => {
+    const callOrder: string[] = [];
+    const dependencies = createDependencies({
+      ensureWorkspaceBootstrap: vi.fn(async () => {
+        callOrder.push("bootstrap");
+      }),
+      getRequestContext: vi.fn(async () => {
+        callOrder.push("authenticate");
+        return ownerContext;
+      }),
+    });
+    const beforeWorkspaceBootstrap = vi.fn(async () => {
+      callOrder.push("guard");
+      return Response.json({ error: "limited" }, { status: 429 });
+    });
+    const handler = createProtectedRouteHandler(
+      async (_context: RequestContext, _request: Request) => {
+        void _context;
+        void _request;
+        callOrder.push("handler");
+        return Response.json({ ok: true });
+      },
+      { beforeWorkspaceBootstrap },
+      dependencies,
+    );
+
+    const response = await handler(new Request("http://localhost/api/documents", { method: "POST" }));
+
+    expect(response.status).toBe(429);
+    expect(callOrder).toEqual(["authenticate", "guard"]);
+    expect(beforeWorkspaceBootstrap).toHaveBeenCalledWith(ownerContext, expect.any(Request));
+    expect(dependencies.ensureWorkspaceBootstrap).not.toHaveBeenCalled();
+  });
+
   it("returns a consistent 401 without bootstrapping or parsing the body when authentication is missing", async () => {
     const dependencies = createDependencies({
       getRequestContext: vi.fn(async () => {

@@ -1,4 +1,4 @@
-import { createClient, type Client } from "@libsql/client";
+import { createClient, type Client, type InStatement } from "@libsql/client";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -74,6 +74,27 @@ describe("durable request budget", () => {
     expect(stored.rows[0]?.request_count).toBe(5);
   });
 
+  it("never exceeds the first-bucket limit across parallel independent clients", async () => {
+    const dir = await createTempDir();
+    const path = join(dir, "multi-client.db");
+    const first = await createBudgetClient(path);
+    const secondClient = createClient({ url: `file:${path}` });
+    clients.push(secondClient);
+    const policies = { test: { limit: 7, windowMs: 60_000 } };
+    const budgets = [
+      createRequestBudget({ client: first.client, policies }),
+      createRequestBudget({ client: secondClient, policies }),
+    ];
+    const now = new Date("2026-07-12T12:34:20.000Z");
+
+    const results = await Promise.all(
+      Array.from({ length: 40 }, (_, index) => budgets[index % budgets.length]!.consume({ context, now, policyId: "test" })),
+    );
+
+    expect(results.filter((result) => result.allowed)).toHaveLength(7);
+    expect((await first.client.execute("SELECT request_count FROM request_budget_buckets")).rows[0]?.request_count).toBe(7);
+  });
+
   it("persists usage across budget and client recreation", async () => {
     const dir = await createTempDir();
     const path = join(dir, "persistent.db");
@@ -133,5 +154,47 @@ describe("durable request budget", () => {
 
     await expect(budget.pruneExpired(new Date("2026-07-12T12:35:00.000Z"))).resolves.toBe(1);
     expect((await client.execute("SELECT count(*) AS count FROM request_budget_buckets")).rows[0]?.count).toBe(0);
+  });
+
+  it("prunes expired buckets automatically on production consumption without deleting active buckets", async () => {
+    const { client } = await createBudgetClient();
+    await client.execute(`
+      INSERT INTO request_budget_buckets
+        (workspace_id, principal_id, policy_id, window_start, request_count, expires_at)
+      VALUES ('expired-workspace', 'expired-principal', 'test', 0, 1, 1)
+    `);
+    const budget = createRequestBudget({
+      client,
+      policies: { test: { limit: 2, windowMs: 60_000 } },
+      pruneIntervalMs: 300_000,
+    });
+    const now = new Date("2026-07-12T12:34:20.000Z");
+
+    await budget.consume({ context, now, policyId: "test" });
+
+    const rows = await client.execute("SELECT workspace_id, request_count FROM request_budget_buckets");
+    expect(rows.rows).toEqual([expect.objectContaining({ request_count: 1, workspace_id: "workspace-a" })]);
+  });
+
+  it("bounds automatic pruning to once per interval and retries it after budget recreation", async () => {
+    const { client } = await createBudgetClient();
+    let pruneCalls = 0;
+    const tracedExecute = async (statement: InStatement) => {
+      const sql = typeof statement === "string" ? statement : statement.sql;
+      if (sql.startsWith("DELETE FROM request_budget_buckets")) pruneCalls += 1;
+      return client.execute(statement);
+    };
+    const tracedClient = { execute: tracedExecute as Client["execute"] };
+    const policies = { test: { limit: 10, windowMs: 60_000 } };
+    const first = createRequestBudget({ client: tracedClient, policies, pruneIntervalMs: 300_000 });
+    const now = new Date("2026-07-12T12:34:20.000Z");
+
+    await first.consume({ context, now, policyId: "test" });
+    await first.consume({ context, now: new Date(now.getTime() + 1_000), policyId: "test" });
+    expect(pruneCalls).toBe(1);
+
+    const recreated = createRequestBudget({ client: tracedClient, policies, pruneIntervalMs: 300_000 });
+    await recreated.consume({ context, now: new Date(now.getTime() + 2_000), policyId: "test" });
+    expect(pruneCalls).toBe(2);
   });
 });

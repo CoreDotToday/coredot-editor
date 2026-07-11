@@ -63,7 +63,7 @@ The defaults are intentionally code-owned rather than environment-controlled. Ch
 | DOCX export | 20 | 60 seconds |
 | DOCX import | 10 | 60 seconds |
 
-The limit includes the last allowed request. The next request receives `429` until the exclusive next fixed-window boundary. The response includes `Retry-After`, `X-RateLimit-Limit`, `X-RateLimit-Remaining`, and `X-RateLimit-Reset`. CORS/authentication `OPTIONS` requests are not budgeted. Expired buckets can be deleted by calling the request-budget pruning helper; the expiry index makes periodic cleanup efficient.
+The limit includes the last allowed request. The next request receives `429` until the exclusive next fixed-window boundary. The response includes `Retry-After`, `X-RateLimit-Limit`, `X-RateLimit-Remaining`, and `X-RateLimit-Reset`. Budget consumption happens after authentication but before workspace bootstrap, so an exhausted first request cannot create default templates or settings. CORS/authentication `OPTIONS` requests are not budgeted. Production consumption automatically prunes expired buckets at most once per budget instance every five minutes; concurrent instances may safely run the indexed deletion.
 
 ## Resource Policies
 
@@ -72,9 +72,10 @@ The server enforces these code-owned limits in `src/features/security/resource-p
 | Resource | Limit |
 | --- | ---: |
 | DOCX input | 10 MiB |
+| Parsed document JSON | 10 MiB |
 | Tiptap document depth | 64 nodes |
 | Tiptap document count | 100,000 nodes |
 | Import, export, or AI operation | 30 seconds |
 | Document title | 500 characters |
 
-Imports reject useful oversized `Content-Length` values and `File.size` before reading file bytes. Converted imports and submitted exports are traversed iteratively before persistence or DOCX conversion. Oversized or overly deep documents return `413`; timed-out conversion/provider work returns `504`. Existing AI context schemas continue to bound commands, variables, selections, references, and submitted document text.
+Imports reject useful oversized `Content-Length` values and `File.size` before reading file bytes. Document updates, exports, and submitted AI bodies reject oversized declared lengths before JSON parsing. Converted imports and submitted documents are traversed iteratively before persistence or DOCX conversion. The traversal counts the complete JSON representation—including text, marks, attributes, property names, and scalar values—without allocating a second full serialized copy. Oversized or overly deep documents return `413`; timed-out conversion/provider work returns `504`. Existing AI context schemas continue to bound commands, variables, selections, references, and submitted document text.

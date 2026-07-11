@@ -6,12 +6,16 @@ import { prepareAiCommandRequest, type AiCommandRequestFailure } from "@/feature
 import { applyProposalToText } from "@/features/proposals/proposal-apply";
 import { createProtectedOptionsHandler, createProtectedRouteHandler } from "@/features/auth/route-context";
 import { enforceRequestBudget } from "@/features/security/request-budget";
-import { resourcePolicyErrorResponse, withOperationTimeout } from "@/features/security/resource-policy";
+import {
+  documentResourceLimitResponse,
+  requestExceedsDocumentBodyLimit,
+  resourcePolicyErrorResponse,
+  withOperationTimeout,
+} from "@/features/security/resource-policy";
 
 const optionsHandler = createProtectedOptionsHandler(["POST"]);
 const postHandler = createProtectedRouteHandler(async (context, request: Request) => {
-  const budgetResponse = await enforceRequestBudget(context, "ai.review");
-  if (budgetResponse) return budgetResponse;
+  if (requestExceedsDocumentBodyLimit(request)) return documentResourceLimitResponse();
 
   const payload = await request.json().catch(() => null);
   const result = aiCommandPayloadSchema.safeParse(payload);
@@ -93,7 +97,7 @@ const postHandler = createProtectedRouteHandler(async (context, request: Request
     if (resourceResponse) return resourceResponse;
     return NextResponse.json({ error: "AI generation failed" }, { status: 500 });
   }
-});
+}, { beforeWorkspaceBootstrap: (context) => enforceRequestBudget(context, "ai.review") });
 
 export async function POST(request: Request) {
   return postHandler(request);

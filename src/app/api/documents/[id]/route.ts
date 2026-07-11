@@ -3,9 +3,14 @@ import { z } from "zod";
 import { archiveDocument, getDocumentById, updateDocumentContent } from "@/features/documents/document-repository";
 import { documentReadinessValues } from "@/features/documents/document-metadata";
 import { createProtectedOptionsHandler, createProtectedRouteHandler } from "@/features/auth/route-context";
+import {
+  documentResourceLimitResponse,
+  requestExceedsDocumentBodyLimit,
+  validateTiptapResource,
+} from "@/features/security/resource-policy";
 
 const updateDocumentSchema = z.object({
-  title: z.string().min(1),
+  title: z.string().trim().min(1).max(500),
   contentJson: z.object({
     type: z.literal("doc"),
     content: z.array(z.unknown()).optional(),
@@ -31,11 +36,13 @@ const getHandler = createProtectedRouteHandler(async (context, _request: Request
 });
 
 const putHandler = createProtectedRouteHandler(async (context, request: Request, { params }: Params) => {
+  if (requestExceedsDocumentBodyLimit(request)) return documentResourceLimitResponse();
   const { id } = await params;
   const result = updateDocumentSchema.safeParse(await request.json().catch(() => null));
   if (!result.success) {
     return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
   }
+  if (!validateTiptapResource(result.data.contentJson).ok) return documentResourceLimitResponse();
 
   const body = result.data;
   const document = await updateDocumentContent(context, id, body);

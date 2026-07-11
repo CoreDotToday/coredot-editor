@@ -283,7 +283,11 @@ describe("AI providers", () => {
         aiProvider: "coredot",
         aiReasoningEffort: "medium",
       });
-      const text = await provider.generateText({ messages: [{ role: "user", content: "Configured generation." }] });
+      const controller = new AbortController();
+      const text = await provider.generateText({
+        abortSignal: controller.signal,
+        messages: [{ role: "user", content: "Configured generation." }],
+      });
 
       expect(text).toBe("openai text");
       expect(provider.name).toBe("coredot");
@@ -294,6 +298,7 @@ describe("AI providers", () => {
       });
       expect(generateText).toHaveBeenCalledWith(
         expect.objectContaining({
+          abortSignal: controller.signal,
           maxOutputTokens: 64000,
           providerOptions: { openai: { reasoningEffort: "medium" } },
         }),
@@ -331,6 +336,22 @@ describe("AI providers", () => {
     }
   });
 
+  it("forwards AbortSignal to structured AI SDK review generation", async () => {
+    const { generateObject } = await import("ai");
+    const controller = new AbortController();
+    vi.mocked(generateObject).mockResolvedValueOnce({
+      object: { findings: [], summary: "No findings." },
+    } as Awaited<ReturnType<typeof generateObject>>);
+    const provider = createAiProvider({ aiProvider: "openai", aiModel: "gpt-test" });
+
+    await provider.generateReview({
+      abortSignal: controller.signal,
+      messages: [{ role: "user", content: "Review." }],
+    });
+
+    expect(generateObject).toHaveBeenCalledWith(expect.objectContaining({ abortSignal: controller.signal }));
+  });
+
   it("calls the Core.Today Anthropic proxy when the saved provider is anthropic", async () => {
     const originalApiKey = process.env.COREDOT_API_KEY;
     process.env.COREDOT_API_KEY = "test_core_today_key";
@@ -350,7 +371,11 @@ describe("AI providers", () => {
         aiProvider: "anthropic",
         aiReasoningEffort: null,
       });
-      const text = await provider.generateText({ messages: [{ role: "user", content: "Use Anthropic." }] });
+      const controller = new AbortController();
+      const text = await provider.generateText({
+        abortSignal: controller.signal,
+        messages: [{ role: "user", content: "Use Anthropic." }],
+      });
 
       expect(provider.name).toBe("anthropic");
       expect(provider.model).toBe("claude-sonnet-4.5");
@@ -360,6 +385,7 @@ describe("AI providers", () => {
         expect.objectContaining({
           body: expect.stringContaining('"max_tokens":8192'),
           method: "POST",
+          signal: controller.signal,
         }),
       );
     } finally {
@@ -391,7 +417,11 @@ describe("AI providers", () => {
         aiProvider: "gemini",
         aiReasoningEffort: null,
       });
-      const text = await provider.generateText({ messages: [{ role: "user", content: "Use Gemini." }] });
+      const controller = new AbortController();
+      const text = await provider.generateText({
+        abortSignal: controller.signal,
+        messages: [{ role: "user", content: "Use Gemini." }],
+      });
 
       expect(provider.name).toBe("gemini");
       expect(provider.model).toBe("gemini-2.5-flash");
@@ -401,6 +431,7 @@ describe("AI providers", () => {
         expect.objectContaining({
           body: expect.stringContaining('"maxOutputTokens":4096'),
           method: "POST",
+          signal: controller.signal,
         }),
       );
     } finally {

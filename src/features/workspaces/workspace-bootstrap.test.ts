@@ -4,12 +4,13 @@ import { drizzle } from "drizzle-orm/libsql";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import * as schema from "@/db/schema";
 import { defaultPromptTemplates } from "@/db/seed";
 import { createWorkspaceBootstrap } from "./workspace-bootstrap";
 import { createProtectedRouteHandler } from "@/features/auth/route-context";
 import type { RequestContext } from "@/features/auth/request-context";
+import { enforceRequestBudget, setRequestBudgetForTests } from "@/features/security/request-budget";
 
 const tempDirs: string[] = [];
 const workspaceA = { workspaceId: "workspace_a" };
@@ -61,6 +62,44 @@ async function createIsolatedWorkspaceDb() {
 }
 
 describe("workspace bootstrap", () => {
+  it("does not create templates or settings when an authenticated request exhausts its pre-bootstrap budget", async () => {
+    const db = await createIsolatedWorkspaceDb();
+    const ensureWorkspaceBootstrap = createWorkspaceBootstrap(db);
+    const context: RequestContext = {
+      authMode: "test",
+      principalId: "new-principal",
+      requestId: "limited-request",
+      role: "owner",
+      workspaceId: "limited-new-workspace",
+    };
+    setRequestBudgetForTests({
+      consume: vi.fn(async () => ({
+        allowed: false,
+        limit: 30,
+        remaining: 0,
+        retryAt: new Date(Date.now() + 60_000),
+      })),
+    });
+    const parseBody = vi.fn();
+    const handler = createProtectedRouteHandler(
+      async (_requestContext: RequestContext, _request: Request) => {
+        void _requestContext;
+        void _request;
+        await parseBody();
+        return Response.json({ ok: true });
+      },
+      { beforeWorkspaceBootstrap: (requestContext) => enforceRequestBudget(requestContext, "documents.create") },
+      { ensureWorkspaceBootstrap, getRequestContext: async () => context },
+    );
+
+    const response = await handler(new Request("http://localhost/api/documents", { method: "POST" }));
+
+    expect(response.status).toBe(429);
+    expect(parseBody).not.toHaveBeenCalled();
+    expect(await db.select().from(schema.promptTemplates)).toEqual([]);
+    expect(await db.select().from(schema.appSettings)).toEqual([]);
+  });
+
   it("bootstraps a new workspace once through concurrent first protected requests", async () => {
     const db = await createIsolatedWorkspaceDb();
     const ensureWorkspaceBootstrap = createWorkspaceBootstrap(db);

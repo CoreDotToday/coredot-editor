@@ -17,9 +17,6 @@ const MAX_MULTIPART_OVERHEAD_BYTES = 1024 * 1024;
 const optionsHandler = createProtectedOptionsHandler(["POST"]);
 
 const postHandler = createProtectedRouteHandler(async (context, request: Request) => {
-  const budgetResponse = await enforceRequestBudget(context, "documents.import");
-  if (budgetResponse) return budgetResponse;
-
   const contentLength = Number(request.headers?.get("content-length"));
   if (
     Number.isFinite(contentLength) &&
@@ -52,7 +49,7 @@ const postHandler = createProtectedRouteHandler(async (context, request: Request
   );
 
   return NextResponse.json({ document, warnings: conversion.warnings }, { status: 201 });
-});
+}, { beforeWorkspaceBootstrap: (context) => enforceRequestBudget(context, "documents.import") });
 
 export async function POST(request: Request) {
   return postHandler(request);

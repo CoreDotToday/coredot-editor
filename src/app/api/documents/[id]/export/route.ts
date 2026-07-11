@@ -5,6 +5,8 @@ import { tiptapJsonToDocxBuffer } from "@/features/documents/docx-conversion";
 import { createProtectedOptionsHandler, createProtectedRouteHandler } from "@/features/auth/route-context";
 import { enforceRequestBudget } from "@/features/security/request-budget";
 import {
+  documentResourceLimitResponse,
+  requestExceedsDocumentBodyLimit,
   resourcePolicyErrorResponse,
   validateTiptapResource,
   withOperationTimeout,
@@ -28,8 +30,7 @@ type Params = {
 };
 
 const postHandler = createProtectedRouteHandler(async (context, request: Request, { params }: Params) => {
-  const budgetResponse = await enforceRequestBudget(context, "documents.export");
-  if (budgetResponse) return budgetResponse;
+  if (requestExceedsDocumentBodyLimit(request)) return documentResourceLimitResponse();
 
   const { id } = await params;
   const document = await getDocumentById(context, id);
@@ -43,7 +44,7 @@ const postHandler = createProtectedRouteHandler(async (context, request: Request
   }
 
   if (!validateTiptapResource(result.data.contentJson).ok) {
-    return NextResponse.json({ error: "Document exceeds resource limits" }, { status: 413 });
+    return documentResourceLimitResponse();
   }
 
   let buffer: Buffer;
@@ -58,7 +59,7 @@ const postHandler = createProtectedRouteHandler(async (context, request: Request
       "Content-Type": DOCX_MIME_TYPE,
     },
   });
-});
+}, { beforeWorkspaceBootstrap: (context) => enforceRequestBudget(context, "documents.export") });
 
 export async function POST(request: Request, params: Params) {
   return postHandler(request, params);

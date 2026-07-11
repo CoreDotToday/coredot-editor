@@ -18,6 +18,13 @@ export type ProtectedRequestContextDependencies = {
   getRequestContext: () => Promise<RequestContext>;
 };
 
+export type ProtectedRouteHandlerOptions<TArguments extends unknown[]> = {
+  beforeWorkspaceBootstrap?: (
+    context: RequestContext,
+    ...args: TArguments
+  ) => Promise<Response | null>;
+};
+
 type ProtectedPageContextDependencies = ProtectedRequestContextDependencies & {
   redirectTo?: (location: string) => never;
 };
@@ -53,11 +60,21 @@ export function setProtectedRequestContextDependenciesForTests(
 
 export function createProtectedRouteHandler<TArguments extends unknown[]>(
   handler: (context: RequestContext, ...args: TArguments) => Promise<Response>,
-  dependencies: ProtectedRequestContextDependencies = defaultDependencies,
+  optionsOrDependencies:
+    | ProtectedRouteHandlerOptions<TArguments>
+    | ProtectedRequestContextDependencies = defaultDependencies,
+  explicitDependencies: ProtectedRequestContextDependencies = defaultDependencies,
 ) {
+  const isDependencies = "ensureWorkspaceBootstrap" in optionsOrDependencies;
+  const options = isDependencies ? {} : optionsOrDependencies;
+  const dependencies = isDependencies ? optionsOrDependencies : explicitDependencies;
+
   return async (...args: TArguments): Promise<Response> => {
     try {
-      const context = await getAuthenticatedWorkspaceContext(dependencies);
+      const context = await dependencies.getRequestContext();
+      const guardResponse = await options.beforeWorkspaceBootstrap?.(context, ...args);
+      if (guardResponse) return guardResponse;
+      await dependencies.ensureWorkspaceBootstrap(context);
       return await handler(context, ...args);
     } catch (error) {
       if (error instanceof AuthenticationRequiredError) {

@@ -9,6 +9,7 @@ export const REQUEST_BUDGET_POLICIES = Object.freeze({
   "documents.export": { limit: 20, windowMs: 60_000 },
   "documents.import": { limit: 10, windowMs: 60_000 },
 });
+export const REQUEST_BUDGET_PRUNE_INTERVAL_MS = 5 * 60_000;
 
 export type RequestBudgetPolicyId = keyof typeof REQUEST_BUDGET_POLICIES;
 export type RequestBudgetPolicy = { limit: number; windowMs: number };
@@ -30,7 +31,22 @@ type ConsumeInput<TPolicyId extends string> = {
 export function createRequestBudget<TPolicyId extends string>(options: {
   client: Pick<Client, "execute">;
   policies: Record<TPolicyId, RequestBudgetPolicy>;
+  pruneIntervalMs?: number;
 }) {
+  const pruneIntervalMs = options.pruneIntervalMs ?? REQUEST_BUDGET_PRUNE_INTERVAL_MS;
+  if (!Number.isSafeInteger(pruneIntervalMs) || pruneIntervalMs <= 0) {
+    throw new Error("Request budget prune interval must be a positive integer");
+  }
+  let nextPruneAtMs = 0;
+
+  async function pruneExpired(now = new Date()): Promise<number> {
+    const result = await options.client.execute({
+      sql: "DELETE FROM request_budget_buckets WHERE expires_at <= ?",
+      args: [now.getTime()],
+    });
+    return result.rowsAffected;
+  }
+
   return {
     async consume(input: ConsumeInput<TPolicyId>): Promise<RequestBudgetResult> {
       const context = input.context ?? input.scope;
@@ -45,6 +61,15 @@ export function createRequestBudget<TPolicyId extends string>(options: {
 
       const now = input.now ?? new Date();
       const nowMs = now.getTime();
+      if (nowMs >= nextPruneAtMs) {
+        nextPruneAtMs = nowMs + pruneIntervalMs;
+        try {
+          await pruneExpired(now);
+        } catch (error) {
+          nextPruneAtMs = 0;
+          throw error;
+        }
+      }
       const windowStartMs = Math.floor(nowMs / policy.windowMs) * policy.windowMs;
       const retryAtMs = windowStartMs + policy.windowMs;
 
@@ -83,13 +108,7 @@ export function createRequestBudget<TPolicyId extends string>(options: {
       };
     },
 
-    async pruneExpired(now = new Date()): Promise<number> {
-      const result = await options.client.execute({
-        sql: "DELETE FROM request_budget_buckets WHERE expires_at <= ?",
-        args: [now.getTime()],
-      });
-      return result.rowsAffected;
-    },
+    pruneExpired,
   };
 }
 

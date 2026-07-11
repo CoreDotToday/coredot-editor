@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   OperationTimeoutError,
   RESOURCE_LIMITS,
+  requestExceedsDocumentBodyLimit,
   validateTiptapResource,
   withOperationTimeout,
 } from "./resource-policy";
@@ -10,10 +11,43 @@ describe("resource policy", () => {
   it("defines the required conservative resource limits", () => {
     expect(RESOURCE_LIMITS).toEqual({
       docxBytes: 10 * 1024 * 1024,
+      documentJsonBytes: 10 * 1024 * 1024,
       documentDepth: 64,
       documentNodes: 100_000,
       operationMs: 30_000,
     });
+  });
+
+  it("rejects a shallow document whose text exceeds the complete JSON byte budget", () => {
+    const hugeText = "x".repeat(20 * 1024 * 1024);
+
+    expect(
+      validateTiptapResource({
+        type: "doc",
+        content: [{ type: "text", text: hugeText }],
+      }),
+    ).toEqual({ limit: "documentJsonBytes", ok: false });
+  });
+
+  it("counts attrs, marks, keys, and scalar values toward the byte budget", () => {
+    expect(
+      validateTiptapResource(
+        {
+          type: "doc",
+          attrs: { massiveAttribute: "x".repeat(2_000) },
+          content: [{ type: "text", marks: [{ type: "link", attrs: { href: "https://example.com" } }] }],
+        },
+        { documentDepth: 64, documentJsonBytes: 1_000, documentNodes: 100_000 },
+      ),
+    ).toEqual({ limit: "documentJsonBytes", ok: false });
+  });
+
+  it("allows bounded JSON envelope overhead in Content-Length prechecks", () => {
+    const request = new Request("http://localhost", {
+      headers: { "content-length": String(RESOURCE_LIMITS.documentJsonBytes + 1024) },
+    });
+
+    expect(requestExceedsDocumentBodyLimit(request)).toBe(false);
   });
 
   it("counts a valid Tiptap tree deterministically", () => {
@@ -47,6 +81,10 @@ describe("resource policy", () => {
 
     expect(validateTiptapResource(cyclic)).toEqual({ limit: "malformed", ok: false });
     expect(validateTiptapResource({ type: "doc", content: "not-an-array" })).toEqual({
+      limit: "malformed",
+      ok: false,
+    });
+    expect(validateTiptapResource({ type: "doc", content: ["not-a-node"] })).toEqual({
       limit: "malformed",
       ok: false,
     });

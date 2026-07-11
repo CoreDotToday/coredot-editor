@@ -1,11 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { completeAiRunWithProposals, createAiRun } from "@/features/ai/ai-run-repository";
+import { completeAiRunWithProposals, createAiRun, failAiRun } from "@/features/ai/ai-run-repository";
 import { createAiProvider } from "@/features/ai/providers";
 import { getDocumentById, getDocumentsByIds } from "@/features/documents/document-repository";
 import { getPromptTemplateById } from "@/features/templates/template-repository";
 import type { DocumentRecord, PromptTemplateRecord } from "@/db/schema";
 import { TEST_REQUEST_CONTEXT } from "@/test/auth-context";
 import { setRequestBudgetForTests } from "@/features/security/request-budget";
+import { RESOURCE_LIMITS } from "@/features/security/resource-policy";
 import { POST } from "./route";
 
 vi.mock("@/features/documents/document-repository", () => ({
@@ -138,6 +139,59 @@ describe("POST /api/ai/review", () => {
     expect(request.json).not.toHaveBeenCalled();
     expect(createAiProvider).not.toHaveBeenCalled();
     expect(createAiRun).not.toHaveBeenCalled();
+  });
+
+  it("rejects an oversized submitted AI body before JSON parsing or provider work", async () => {
+    const json = vi.fn();
+    const request = {
+      headers: new Headers({ "content-length": String(RESOURCE_LIMITS.documentJsonBytes + 1024 * 1024 + 1) }),
+      json,
+    } as unknown as Request;
+
+    const response = await POST(request);
+
+    expect(response.status).toBe(413);
+    expect(json).not.toHaveBeenCalled();
+    expect(createAiProvider).not.toHaveBeenCalled();
+    expect(createAiRun).not.toHaveBeenCalled();
+  });
+
+  it("returns 504, aborts the provider, and does not persist proposals after timeout", async () => {
+    vi.useFakeTimers();
+    vi.mocked(getDocumentById).mockResolvedValueOnce(documentRecord);
+    vi.mocked(getPromptTemplateById).mockResolvedValueOnce(templateRecord);
+    let markStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const generateReview = vi.fn(({ abortSignal }: { abortSignal?: AbortSignal }) => {
+      markStarted?.();
+      return new Promise<never>((_resolve, reject) => {
+        abortSignal?.addEventListener("abort", () => reject(abortSignal.reason));
+      });
+    });
+    vi.mocked(createAiProvider).mockReturnValueOnce({
+      capabilities: { coreTodayProxy: false, reasoningEffort: false, streaming: "buffered", structuredReview: true },
+      generateReview,
+      generateText: vi.fn(),
+      model: "stub-editor",
+      name: "stub",
+      streamText: vi.fn(),
+    });
+
+    try {
+      const pending = POST(createJsonRequest({ documentId: "doc_1", templateId: "tpl_1", command: "Review", variables: {} }));
+      await started;
+      await vi.advanceTimersByTimeAsync(RESOURCE_LIMITS.operationMs);
+      const response = await pending;
+
+      expect(response.status).toBe(504);
+      expect(generateReview.mock.calls[0]?.[0].abortSignal?.aborted).toBe(true);
+      expect(failAiRun).toHaveBeenCalledWith(TEST_REQUEST_CONTEXT, "run_1", "Operation timed out");
+      expect(completeAiRunWithProposals).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("returns 400 when required template variables are missing", async () => {

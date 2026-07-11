@@ -15,9 +15,6 @@ const getHandler = createProtectedRouteHandler(async (context) => {
 });
 
 const postHandler = createProtectedRouteHandler(async (context, request: Request) => {
-  const budgetResponse = await enforceRequestBudget(context, "documents.create");
-  if (budgetResponse) return budgetResponse;
-
   const result = createDocumentSchema.safeParse(await request.json().catch(() => null));
   if (!result.success) {
     return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
@@ -26,7 +23,7 @@ const postHandler = createProtectedRouteHandler(async (context, request: Request
   const body = result.data;
   const document = await createDocumentDraft(context, body.title);
   return NextResponse.json({ document }, { status: 201 });
-});
+}, { beforeWorkspaceBootstrap: (context) => enforceRequestBudget(context, "documents.create") });
 
 export async function GET() {
   return getHandler();

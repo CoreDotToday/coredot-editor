@@ -90,6 +90,46 @@ describe("POST /api/documents/import", () => {
     expect(createDocumentFromContent).not.toHaveBeenCalled();
   });
 
+  it("rejects a compressed DOCX whose converted text exceeds the JSON byte budget", async () => {
+    vi.mocked(docxBufferToTiptapJson).mockResolvedValueOnce({
+      contentJson: {
+        type: "doc",
+        content: [{ type: "text", text: "x".repeat(RESOURCE_LIMITS.documentJsonBytes + 1) }],
+      },
+      warnings: [],
+    });
+
+    const response = await POST(createFormRequest(new File([new Uint8Array([1])], "compressed.docx")));
+
+    expect(response.status).toBe(413);
+    expect(createDocumentFromContent).not.toHaveBeenCalled();
+  });
+
+  it("returns 504 on conversion timeout without persisting a document", async () => {
+    vi.useFakeTimers();
+    let markStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    vi.mocked(docxBufferToTiptapJson).mockImplementationOnce(async () => {
+      markStarted?.();
+      return new Promise<never>(() => undefined);
+    });
+
+    try {
+      const pending = POST(createFormRequest(new File([new Uint8Array([1])], "slow.docx")));
+      await started;
+      await vi.advanceTimersByTimeAsync(RESOURCE_LIMITS.operationMs);
+      const response = await pending;
+
+      expect(response.status).toBe(504);
+      expect(await response.json()).toEqual({ error: "Operation timed out" });
+      expect(createDocumentFromContent).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("returns 400 when the request does not include a DOCX file", async () => {
     const response = await POST(createFormRequest(new File(["not docx"], "memo.txt", { type: "text/plain" })));
 

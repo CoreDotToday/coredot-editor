@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { archiveDocument, getDocumentById, updateDocumentContent } from "@/features/documents/document-repository";
 import { setProtectedRequestContextDependenciesForTests } from "@/features/auth/route-context";
 import { TEST_REQUEST_CONTEXT } from "@/test/auth-context";
+import { RESOURCE_LIMITS } from "@/features/security/resource-policy";
 import { DELETE, GET, PUT } from "./route";
 
 vi.mock("@/features/documents/document-repository", () => ({
@@ -49,6 +50,20 @@ describe("PUT /api/documents/[id]", () => {
       readiness: "ready",
       metadataJson: { owner: "Legal", tags: ["risk"] },
     });
+  });
+
+  it("rejects oversized document update bodies before JSON parsing or persistence", async () => {
+    const json = vi.fn();
+    const request = {
+      headers: new Headers({ "content-length": String(RESOURCE_LIMITS.documentJsonBytes + 1024 * 1024 + 1) }),
+      json,
+    } as unknown as Request;
+
+    const response = await PUT(request, { params: Promise.resolve({ id: "doc_1" }) });
+
+    expect(response.status).toBe(413);
+    expect(json).not.toHaveBeenCalled();
+    expect(updateDocumentContent).not.toHaveBeenCalled();
   });
 
   it("returns 404 for direct reads and mutations of another workspace's document", async () => {

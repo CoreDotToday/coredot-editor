@@ -8,6 +8,7 @@ import type { DocumentRecord, PromptTemplateRecord } from "@/db/schema";
 import { setProtectedRequestContextDependenciesForTests } from "@/features/auth/route-context";
 import { TEST_REQUEST_CONTEXT } from "@/test/auth-context";
 import { setRequestBudgetForTests } from "@/features/security/request-budget";
+import { RESOURCE_LIMITS } from "@/features/security/resource-policy";
 import { POST } from "./route";
 
 vi.mock("@/features/documents/document-repository", () => ({
@@ -134,6 +135,59 @@ describe("POST /api/ai/rewrite", () => {
     expect(request.json).not.toHaveBeenCalled();
     expect(createAiProvider).not.toHaveBeenCalled();
     expect(createAiRun).not.toHaveBeenCalled();
+  });
+
+  it("rejects an oversized submitted AI body before JSON parsing or provider work", async () => {
+    const json = vi.fn();
+    const request = {
+      headers: new Headers({ "content-length": String(RESOURCE_LIMITS.documentJsonBytes + 1024 * 1024 + 1) }),
+      json,
+    } as unknown as Request;
+
+    const response = await POST(request);
+
+    expect(response.status).toBe(413);
+    expect(json).not.toHaveBeenCalled();
+    expect(createAiProvider).not.toHaveBeenCalled();
+    expect(createAiRun).not.toHaveBeenCalled();
+  });
+
+  it("returns 504, aborts the provider, and does not persist a proposal after timeout", async () => {
+    vi.useFakeTimers();
+    vi.mocked(getDocumentById).mockResolvedValueOnce(documentRecord);
+    vi.mocked(getPromptTemplateById).mockResolvedValueOnce(templateRecord);
+    let markStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const generateText = vi.fn(({ abortSignal }: { abortSignal?: AbortSignal }) => {
+      markStarted?.();
+      return new Promise<string>((_resolve, reject) => {
+        abortSignal?.addEventListener("abort", () => reject(abortSignal.reason));
+      });
+    });
+    vi.mocked(createAiProvider).mockReturnValueOnce({
+      capabilities: { coreTodayProxy: false, reasoningEffort: false, streaming: "buffered", structuredReview: true },
+      generateReview: vi.fn(),
+      generateText,
+      model: "stub-editor",
+      name: "stub",
+      streamText: vi.fn(),
+    });
+
+    try {
+      const pending = POST(createJsonRequest(validBody));
+      await started;
+      await vi.advanceTimersByTimeAsync(RESOURCE_LIMITS.operationMs);
+      const response = await pending;
+
+      expect(response.status).toBe(504);
+      expect(generateText.mock.calls[0]?.[0].abortSignal?.aborted).toBe(true);
+      expect(failAiRun).toHaveBeenCalledWith(TEST_REQUEST_CONTEXT, "run_1", "Operation timed out");
+      expect(completeAiRunWithProposals).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("returns 400 for bad JSON without touching repositories", async () => {

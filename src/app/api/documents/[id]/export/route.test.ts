@@ -48,6 +48,21 @@ describe("POST /api/documents/[id]/export", () => {
     expect(tiptapJsonToDocxBuffer).not.toHaveBeenCalled();
   });
 
+  it("rejects an oversized JSON request from Content-Length before parsing or lookup", async () => {
+    const json = vi.fn();
+    const request = {
+      headers: new Headers({ "content-length": String(RESOURCE_LIMITS.documentJsonBytes + 1024 * 1024 + 1) }),
+      json,
+    } as unknown as Request;
+
+    const response = await POST(request, createContext());
+
+    expect(response.status).toBe(413);
+    expect(json).not.toHaveBeenCalled();
+    expect(getDocumentById).not.toHaveBeenCalled();
+    expect(tiptapJsonToDocxBuffer).not.toHaveBeenCalled();
+  });
+
   it("rejects over-deep content before DOCX conversion", async () => {
     vi.mocked(getDocumentById).mockResolvedValueOnce({
       id: "doc_1",
@@ -73,6 +88,42 @@ describe("POST /api/documents/[id]/export", () => {
 
     expect(response.status).toBe(413);
     expect(tiptapJsonToDocxBuffer).not.toHaveBeenCalled();
+  });
+
+  it("returns 504 on conversion timeout without producing export bytes", async () => {
+    vi.useFakeTimers();
+    vi.mocked(getDocumentById).mockResolvedValueOnce({
+      id: "doc_1",
+      workspaceId: "vitest-workspace",
+      title: "Draft",
+      contentJson: { type: "doc" },
+      metadataJson: {},
+      plainText: "",
+      readiness: "draft",
+      status: "draft",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    let markStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    vi.mocked(tiptapJsonToDocxBuffer).mockImplementationOnce(async () => {
+      markStarted?.();
+      return new Promise<never>(() => undefined);
+    });
+
+    try {
+      const pending = POST(createJsonRequest({ title: "Slow", contentJson: { type: "doc" } }), createContext());
+      await started;
+      await vi.advanceTimersByTimeAsync(RESOURCE_LIMITS.operationMs);
+      const response = await pending;
+
+      expect(response.status).toBe(504);
+      expect(await response.json()).toEqual({ error: "Operation timed out" });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("returns 404 when the document does not exist", async () => {

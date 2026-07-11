@@ -12,7 +12,12 @@ import {
 import { validateProposalTargetOccurrence } from "@/features/proposals/proposal-apply";
 import { createProtectedOptionsHandler, createProtectedRouteHandler } from "@/features/auth/route-context";
 import { enforceRequestBudget } from "@/features/security/request-budget";
-import { resourcePolicyErrorResponse, withOperationTimeout } from "@/features/security/resource-policy";
+import {
+  documentResourceLimitResponse,
+  requestExceedsDocumentBodyLimit,
+  resourcePolicyErrorResponse,
+  withOperationTimeout,
+} from "@/features/security/resource-policy";
 
 const rewritePayloadSchema = aiCommandPayloadSchema.extend({
   selectedText: z
@@ -22,8 +27,7 @@ const rewritePayloadSchema = aiCommandPayloadSchema.extend({
 });
 const optionsHandler = createProtectedOptionsHandler(["POST"]);
 const postHandler = createProtectedRouteHandler(async (context, request: Request) => {
-  const budgetResponse = await enforceRequestBudget(context, "ai.rewrite");
-  if (budgetResponse) return budgetResponse;
+  if (requestExceedsDocumentBodyLimit(request)) return documentResourceLimitResponse();
 
   const payload = await request.json().catch(() => null);
   const result = rewritePayloadSchema.safeParse(payload);
@@ -114,7 +118,7 @@ const postHandler = createProtectedRouteHandler(async (context, request: Request
     if (resourceResponse) return resourceResponse;
     return NextResponse.json({ error: "AI generation failed" }, { status: 500 });
   }
-});
+}, { beforeWorkspaceBootstrap: (context) => enforceRequestBudget(context, "ai.rewrite") });
 
 export async function POST(request: Request) {
   return postHandler(request);
