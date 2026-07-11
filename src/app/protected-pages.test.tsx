@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { notFound } from "next/navigation";
 import { getProtectedPageContext } from "@/features/auth/route-context";
 import { listAiRunsForDocument } from "@/features/ai/ai-run-repository";
 import {
@@ -22,6 +23,13 @@ const workspaceBContext = {
 
 vi.mock("@/features/auth/route-context", () => ({
   getProtectedPageContext: vi.fn(async () => workspaceBContext),
+}));
+
+vi.mock("next/navigation", () => ({
+  notFound: vi.fn(() => {
+    throw new Error("NEXT_NOT_FOUND_TEST");
+  }),
+  redirect: vi.fn(),
 }));
 
 vi.mock("@/features/documents/document-repository", () => ({
@@ -70,7 +78,7 @@ describe("protected server pages", () => {
     expect(listPromptTemplates).toHaveBeenCalledWith(workspaceBContext);
   });
 
-  it("returns 404-shaped data access for a direct id only within the authenticated workspace", async () => {
+  it("passes the authenticated workspace to every direct-id page query", async () => {
     await DocumentPage({ params: Promise.resolve({ id: "workspace-b-document" }) });
 
     expect(getProtectedPageContext).toHaveBeenCalledWith("/documents/workspace-b-document");
@@ -82,5 +90,21 @@ describe("protected server pages", () => {
       excludeDocumentId: "workspace-b-document",
       limit: 24,
     });
+  });
+
+  it("invokes notFound and skips downstream queries for a cross-workspace document id", async () => {
+    vi.mocked(getDocumentById).mockResolvedValueOnce(null as never);
+
+    await expect(
+      DocumentPage({ params: Promise.resolve({ id: "workspace-a-document" }) }),
+    ).rejects.toThrow("NEXT_NOT_FOUND_TEST");
+
+    expect(getProtectedPageContext).toHaveBeenCalledWith("/documents/workspace-a-document");
+    expect(getDocumentById).toHaveBeenCalledWith(workspaceBContext, "workspace-a-document");
+    expect(notFound).toHaveBeenCalledOnce();
+    expect(listActivePromptTemplates).not.toHaveBeenCalled();
+    expect(listAiRunsForDocument).not.toHaveBeenCalled();
+    expect(listProposalsForDocument).not.toHaveBeenCalled();
+    expect(listDocumentReferenceCandidates).not.toHaveBeenCalled();
   });
 });
