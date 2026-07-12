@@ -1,8 +1,11 @@
+// @vitest-environment node
+
 import { describe, expect, it, vi } from "vitest";
 import {
   RequestBodyTooLargeError,
   OperationTimeoutError,
   RESOURCE_LIMITS,
+  parseBoundedFormData,
   parseBoundedJson,
   readBoundedRequestBytes,
   requestExceedsDocumentBodyLimit,
@@ -42,6 +45,31 @@ describe("resource policy", () => {
         },
         { documentDepth: 64, documentJsonBytes: 1_000, documentNodes: 100_000 },
       ),
+    ).toEqual({ limit: "documentJsonBytes", ok: false });
+  });
+
+  it("matches JSON.stringify byte boundaries for Unicode and enumerable own string properties", () => {
+    const attrs = Object.create(null) as Record<PropertyKey, unknown>;
+    attrs['quoted"key'] = "emoji 😀 and lone surrogate \ud800";
+    attrs.control = "line\nfeed";
+    attrs[Symbol("ignored")] = "not serialized";
+    Object.defineProperty(attrs, "hidden", { enumerable: false, value: "not serialized" });
+    const document = { attrs, content: [], type: "doc" };
+    const exactBytes = Buffer.byteLength(JSON.stringify(document));
+
+    expect(
+      validateTiptapResource(document, {
+        documentDepth: 64,
+        documentJsonBytes: exactBytes,
+        documentNodes: 100_000,
+      }),
+    ).toEqual({ depth: 1, nodes: 1, ok: true });
+    expect(
+      validateTiptapResource(document, {
+        documentDepth: 64,
+        documentJsonBytes: exactBytes - 1,
+        documentNodes: 100_000,
+      }),
     ).toEqual({ limit: "documentJsonBytes", ok: false });
   });
 
@@ -105,6 +133,44 @@ describe("resource policy", () => {
     await expect(parseBoundedJson(request, 100)).resolves.toEqual({ title: "Bounded" });
   });
 
+  it("rejects production bodyless form adapters without calling their pre-parsed fallback", async () => {
+    const formData = vi.fn(async () => new FormData());
+    const request = {
+      body: null,
+      formData,
+      headers: new Headers({ "content-type": "multipart/form-data; boundary=unsafe" }),
+      url: "http://localhost/api/documents/import",
+    } as unknown as Request;
+    vi.stubEnv("NODE_ENV", "production");
+
+    try {
+      await expect(parseBoundedFormData(request, 1_024)).rejects.toThrow();
+      expect(formData).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("parses a real bounded multipart request through its readable body", async () => {
+    const boundary = "----coredot-resource-policy-test";
+    const request = new Request("http://localhost/api/documents/import", {
+      body:
+        `--${boundary}\r\n` +
+        'Content-Disposition: form-data; name="file"; filename="memo.docx"\r\n' +
+        "Content-Type: application/octet-stream\r\n\r\n" +
+        "docx-bytes\r\n" +
+        `--${boundary}--\r\n`,
+      headers: { "content-type": `multipart/form-data; boundary=${boundary}` },
+      method: "POST",
+    });
+
+    const formData = await parseBoundedFormData(request, 1_024);
+    const file = formData.get("file") as File;
+
+    expect(file.name).toBe("memo.docx");
+    expect(file.size).toBe(10);
+  });
+
   it("counts a valid Tiptap tree deterministically", () => {
     expect(
       validateTiptapResource({
@@ -137,6 +203,38 @@ describe("resource policy", () => {
       limit: "documentNodes",
       ok: false,
     });
+  });
+
+  it("rejects 600k attrs lazily without reading a late property or snapshotting object entries", () => {
+    const attrs = Object.create(null) as Record<string, unknown>;
+    for (let index = 0; index < 600_000; index += 1) {
+      attrs[`property_${index}`] = index;
+    }
+    const readLateProperty = vi.fn(() => "must not be read");
+    Object.defineProperty(attrs, "late_property", {
+      enumerable: true,
+      get: readLateProperty,
+    });
+    const entries = vi.spyOn(Object, "entries").mockImplementation(() => {
+      throw new Error("Object.entries must not be used by resource validation");
+    });
+    const keys = vi.spyOn(Object, "keys").mockImplementation(() => {
+      throw new Error("Object.keys must not be used by resource validation");
+    });
+
+    let result: ReturnType<typeof validateTiptapResource>;
+    try {
+      result = validateTiptapResource(
+        { type: "doc", attrs, content: [] },
+        { documentDepth: 64, documentJsonBytes: 256, documentNodes: 100_000 },
+      );
+    } finally {
+      entries.mockRestore();
+      keys.mockRestore();
+    }
+
+    expect(result).toEqual({ limit: "documentJsonBytes", ok: false });
+    expect(readLateProperty).not.toHaveBeenCalled();
   });
 
   it("rejects malformed and cyclic runtime objects without recursing forever", () => {

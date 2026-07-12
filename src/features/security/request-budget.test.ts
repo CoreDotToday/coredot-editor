@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   createRequestBudget,
   enforceRequestBudget,
+  REQUEST_BUDGET_POLICIES,
   RequestBudgetUnavailableError,
   requestBudgetResponse,
   setRequestBudgetForTests,
@@ -44,6 +45,10 @@ const context = {
 };
 
 describe("durable request budget", () => {
+  it("defines a conservative provider connection-test budget", () => {
+    expect(REQUEST_BUDGET_POLICIES["ai.connection-test"]).toEqual({ limit: 5, windowMs: 60_000 });
+  });
+
   it("allows exactly the configured number of requests and rejects the next request", async () => {
     const { client } = await createBudgetClient();
     const budget = createRequestBudget({ client, policies: { test: policy } });

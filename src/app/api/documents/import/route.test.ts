@@ -1,3 +1,5 @@
+// @vitest-environment node
+
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createDocumentFromContent } from "@/features/documents/document-repository";
 import { docxBufferToTiptapJson } from "@/features/documents/docx-conversion";
@@ -15,11 +17,27 @@ vi.mock("@/features/documents/docx-conversion", () => ({
 }));
 
 async function createFormRequest(file?: File) {
-  const formData = new FormData();
-  if (file) {
-    formData.set("file", file);
-  }
-  return { body: null, formData: async () => formData, headers: new Headers() } as unknown as Request;
+  const boundary = "----coredot-editor-test-boundary";
+  const encoder = new TextEncoder();
+  const prefix = file
+    ? encoder.encode(
+        `--${boundary}\r\n` +
+          `Content-Disposition: form-data; name="file"; filename="${file.name}"\r\n` +
+          `Content-Type: ${file.type || "application/octet-stream"}\r\n\r\n`,
+      )
+    : new Uint8Array();
+  const fileBytes = file ? new Uint8Array(await file.arrayBuffer()) : new Uint8Array();
+  const suffix = encoder.encode(`${file ? "\r\n" : ""}--${boundary}--\r\n`);
+  const body = new Uint8Array(prefix.byteLength + fileBytes.byteLength + suffix.byteLength);
+  body.set(prefix, 0);
+  body.set(fileBytes, prefix.byteLength);
+  body.set(suffix, prefix.byteLength + fileBytes.byteLength);
+
+  return new Request("http://localhost/api/documents/import", {
+    body,
+    headers: { "content-type": `multipart/form-data; boundary=${boundary}` },
+    method: "POST",
+  });
 }
 
 describe("POST /api/documents/import", () => {
@@ -47,15 +65,21 @@ describe("POST /api/documents/import", () => {
   });
 
   it("rejects an oversized file before reading its bytes", async () => {
-    const file = new File([new Uint8Array(1)], "huge.docx", { type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" });
-    Object.defineProperty(file, "size", { value: RESOURCE_LIMITS.docxBytes + 1 });
-    const arrayBuffer = vi.spyOn(file, "arrayBuffer");
+    const file = new File([new Uint8Array(RESOURCE_LIMITS.docxBytes + 1)], "huge.docx", {
+      type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    });
+    const request = await createFormRequest(file);
+    const fileArrayBuffer = vi.spyOn(File.prototype, "arrayBuffer");
 
-    const response = await POST(await createFormRequest(file));
+    try {
+      const response = await POST(request);
 
-    expect(response.status).toBe(413);
-    expect(arrayBuffer).not.toHaveBeenCalled();
-    expect(docxBufferToTiptapJson).not.toHaveBeenCalled();
+      expect(response.status).toBe(413);
+      expect(fileArrayBuffer).not.toHaveBeenCalled();
+      expect(docxBufferToTiptapJson).not.toHaveBeenCalled();
+    } finally {
+      fileArrayBuffer.mockRestore();
+    }
   });
 
   it("rejects an obviously oversized request from Content-Length before multipart parsing", async () => {

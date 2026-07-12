@@ -4,6 +4,7 @@ import { OPTIONS as rewriteOptions } from "@/app/api/ai/rewrite/route";
 import { OPTIONS as documentOptions } from "@/app/api/documents/route";
 import { OPTIONS as importOptions } from "@/app/api/documents/import/route";
 import { OPTIONS as exportOptions } from "@/app/api/documents/[id]/export/route";
+import { OPTIONS as providerConnectionTestOptions } from "@/app/api/settings/ai/test/route";
 import { setRequestBudgetForTests } from "./request-budget";
 
 describe("budgeted route OPTIONS", () => {
@@ -17,9 +18,10 @@ describe("budgeted route OPTIONS", () => {
       documentOptions(),
       importOptions(),
       exportOptions(),
+      providerConnectionTestOptions(),
     ]);
 
-    expect(responses.map((response) => response.status)).toEqual([204, 204, 204, 204, 204]);
+    expect(responses.map((response) => response.status)).toEqual([204, 204, 204, 204, 204, 204]);
     expect(consume).not.toHaveBeenCalled();
   });
 });

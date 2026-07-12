@@ -81,7 +81,7 @@ Monitor these statuses separately from application `5xx` errors. `OPTIONS` reque
 
 ## Runtime LLM Settings
 
-The app stores non-secret model settings in the `app_settings` table and exposes them through the editor header's `LLM 설정` dialog. The dialog can switch between `stub`, `coredot`, `anthropic`, `gemini`, and `openai`, set model names, set Core.Today Base URL and max completion tokens, choose reasoning effort where supported, and run a connection test.
+The app stores non-secret model settings in the `app_settings` table and exposes them through the editor header's `LLM 설정` dialog. The dialog can switch between `stub`, `coredot`, `anthropic`, `gemini`, and `openai`, set model names, set Core.Today Base URL and max completion tokens, choose reasoning effort where supported, and run a connection test. Connection tests require a workspace owner/admin, consume the dedicated 5-per-minute durable request budget before workspace bootstrap or provider access, and abort after 30 seconds.
 
 API keys remain server-side environment variables. The settings API returns only boolean secret status such as whether `COREDOT_API_KEY` is configured; it never returns or accepts API key values from the browser.
 

@@ -41,6 +41,12 @@ export function validateTiptapResource(
   const seen = new WeakSet<object>();
   type Frame =
     | { kind: "array"; index: number; nodeDepth?: number; value: unknown[] }
+    | {
+        firstProperty: boolean;
+        iterator: Generator<readonly [string, unknown], void>;
+        kind: "object";
+        nodeDepth?: number;
+      }
     | { arrayNodeDepth?: number; kind: "value"; nodeDepth?: number; value: unknown };
   const stack: Frame[] = [{ kind: "value", nodeDepth: 1, value: root }];
   let maxDepth = 0;
@@ -56,9 +62,34 @@ export function validateTiptapResource(
     const current = stack.pop();
     if (!current) break;
     if (current.kind === "array") {
-      if (current.index < current.value.length) {
-        stack.push({ ...current, index: current.index + 1 });
-        stack.push({ kind: "value", nodeDepth: current.nodeDepth, value: current.value[current.index] });
+      if (current.index >= current.value.length) {
+        if (!addBytes(1)) return { limit: "documentJsonBytes", ok: false };
+        continue;
+      }
+      if (current.index > 0 && !addBytes(1)) return { limit: "documentJsonBytes", ok: false };
+      stack.push({ ...current, index: current.index + 1 });
+      stack.push({ kind: "value", nodeDepth: current.nodeDepth, value: current.value[current.index] });
+      continue;
+    }
+    if (current.kind === "object") {
+      const next = current.iterator.next();
+      if (next.done) {
+        if (!addBytes(1)) return { limit: "documentJsonBytes", ok: false };
+        continue;
+      }
+      const [key, value] = next.value;
+      if (!current.firstProperty && !addBytes(1)) {
+        return { limit: "documentJsonBytes", ok: false };
+      }
+      if (!addJsonStringBytes(key, addBytes) || !addBytes(1)) {
+        return { limit: "documentJsonBytes", ok: false };
+      }
+      stack.push({ ...current, firstProperty: false });
+      if (current.nodeDepth !== undefined && key === "content") {
+        if (!Array.isArray(value)) return { limit: "malformed", ok: false };
+        stack.push({ arrayNodeDepth: current.nodeDepth + 1, kind: "value", value });
+      } else {
+        stack.push({ kind: "value", value });
       }
       continue;
     }
@@ -91,9 +122,7 @@ export function validateTiptapResource(
     seen.add(current.value);
 
     if (Array.isArray(current.value)) {
-      if (!addBytes(2 + Math.max(0, current.value.length - 1))) {
-        return { limit: "documentJsonBytes", ok: false };
-      }
+      if (!addBytes(1)) return { limit: "documentJsonBytes", ok: false };
       if (current.arrayNodeDepth !== undefined && current.value.length > limits.documentNodes - nodes) {
         return { limit: "documentNodes", ok: false };
       }
@@ -111,22 +140,13 @@ export function validateTiptapResource(
       maxDepth = Math.max(maxDepth, current.nodeDepth);
     }
 
-    const entries = Object.entries(current.value);
-    if (!addBytes(2 + Math.max(0, entries.length - 1))) {
-      return { limit: "documentJsonBytes", ok: false };
-    }
-    for (let index = entries.length - 1; index >= 0; index -= 1) {
-      const [key, value] = entries[index]!;
-      if (!addJsonStringBytes(key, addBytes) || !addBytes(1)) {
-        return { limit: "documentJsonBytes", ok: false };
-      }
-      if (current.nodeDepth !== undefined && key === "content") {
-        if (!Array.isArray(value)) return { limit: "malformed", ok: false };
-        stack.push({ arrayNodeDepth: current.nodeDepth + 1, kind: "value", value });
-      } else {
-        stack.push({ kind: "value", value });
-      }
-    }
+    if (!addBytes(1)) return { limit: "documentJsonBytes", ok: false };
+    stack.push({
+      firstProperty: true,
+      iterator: iterateOwnEnumerableStringProperties(current.value),
+      kind: "object",
+      nodeDepth: current.nodeDepth,
+    });
   }
 
   return { depth: maxDepth, nodes, ok: true };
@@ -219,10 +239,6 @@ export async function parseBoundedJson(request: Request, maxBytes = DOCUMENT_REQ
 }
 
 export async function parseBoundedFormData(request: Request, maxBytes: number): Promise<FormData> {
-  // Test adapters and server frameworks may expose already-parsed form data
-  // without a readable body. Real network Requests always take the bounded
-  // stream path below.
-  if (!request.body && typeof request.formData === "function") return request.formData();
   const bytes = await readBoundedRequestBytes(request, maxBytes);
   const body = new ArrayBuffer(bytes.byteLength);
   new Uint8Array(body).set(bytes);
@@ -239,6 +255,14 @@ export function documentResourceLimitResponse() {
 
 function isNode(value: unknown): value is Record<string, unknown> & { type: string } {
   return Boolean(value) && typeof value === "object" && typeof (value as { type?: unknown }).type === "string";
+}
+
+function* iterateOwnEnumerableStringProperties(
+  value: object,
+): Generator<readonly [string, unknown], void> {
+  for (const key in value) {
+    if (Object.hasOwn(value, key)) yield [key, (value as Record<string, unknown>)[key]] as const;
+  }
 }
 
 function addJsonStringBytes(value: string, addBytes: (bytes: number) => boolean) {

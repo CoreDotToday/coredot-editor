@@ -2,7 +2,7 @@
 
 These routes are app-internal JSON contracts for the starter. They are documented so downstream forks can keep UI, tests, and integrations aligned while evolving the product.
 
-The app does not include authentication or workspace authorization in v1. Add those checks before exposing a fork to real users.
+Routes resolve an authenticated request context and scope persistence to its workspace. Administrative settings mutations and provider connection tests require the workspace `owner` or `admin` role.
 
 ## Documents
 
@@ -33,7 +33,7 @@ Template payloads are validated against `src/features/templates/template-validat
 | --- | --- | --- |
 | `/api/settings/ai` | `GET` | Read non-secret AI runtime settings plus secret presence booleans. |
 | `/api/settings/ai` | `PUT` | Save non-secret provider, model, Base URL, token, and reasoning settings. |
-| `/api/settings/ai/test` | `POST` | Test the current server-side provider configuration. |
+| `/api/settings/ai/test` | `POST` | Test the current server-side provider configuration as an owner/admin. Limited to 5 attempts per minute per workspace principal and aborted after 30 seconds. |
 
 API keys are not accepted or returned through these routes.
 
