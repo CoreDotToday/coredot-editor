@@ -237,6 +237,49 @@ describe("resource policy", () => {
     expect(readLateProperty).not.toHaveBeenCalled();
   });
 
+  it("rejects attrs objects deeper than the container limit before reading the rejected container", () => {
+    const readRejectedContainer = vi.fn(() => "must not be read");
+    let attrs: Record<string, unknown> = {};
+    Object.defineProperty(attrs, "late_property", {
+      enumerable: true,
+      get: readRejectedContainer,
+    });
+    for (let depth = 0; depth < 63; depth += 1) {
+      attrs = { nested: attrs };
+    }
+
+    expect(validateTiptapResource({ type: "doc", attrs })).toEqual({
+      limit: "documentDepth",
+      ok: false,
+    });
+    expect(readRejectedContainer).not.toHaveBeenCalled();
+  });
+
+  it("rejects attrs arrays deeper than the general JSON container limit", () => {
+    let attrs: unknown = { leaf: true };
+    for (let depth = 0; depth < 64; depth += 1) {
+      attrs = [attrs];
+    }
+
+    expect(validateTiptapResource({ type: "doc", attrs })).toEqual({
+      limit: "documentDepth",
+      ok: false,
+    });
+  });
+
+  it("accepts attrs containers at the depth limit without changing Tiptap node depth", () => {
+    let attrs: unknown = { leaf: true };
+    for (let depth = 0; depth < 62; depth += 1) {
+      attrs = { nested: attrs };
+    }
+
+    expect(validateTiptapResource({ type: "doc", attrs })).toEqual({
+      depth: 1,
+      nodes: 1,
+      ok: true,
+    });
+  });
+
   it("rejects malformed and cyclic runtime objects without recursing forever", () => {
     const cyclic: { content?: unknown[]; type: string } = { type: "doc" };
     cyclic.content = [cyclic];

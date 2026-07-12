@@ -40,15 +40,22 @@ export function validateTiptapResource(
   const maxJsonBytes = limits.documentJsonBytes ?? RESOURCE_LIMITS.documentJsonBytes;
   const seen = new WeakSet<object>();
   type Frame =
-    | { kind: "array"; index: number; nodeDepth?: number; value: unknown[] }
+    | { containerDepth: number; kind: "array"; index: number; nodeDepth?: number; value: unknown[] }
     | {
+        containerDepth: number;
         firstProperty: boolean;
         iterator: Generator<readonly [string, unknown], void>;
         kind: "object";
         nodeDepth?: number;
       }
-    | { arrayNodeDepth?: number; kind: "value"; nodeDepth?: number; value: unknown };
-  const stack: Frame[] = [{ kind: "value", nodeDepth: 1, value: root }];
+    | {
+        arrayNodeDepth?: number;
+        containerDepth: number;
+        kind: "value";
+        nodeDepth?: number;
+        value: unknown;
+      };
+  const stack: Frame[] = [{ containerDepth: 1, kind: "value", nodeDepth: 1, value: root }];
   let maxDepth = 0;
   let nodes = 0;
   let jsonBytes = 0;
@@ -68,7 +75,12 @@ export function validateTiptapResource(
       }
       if (current.index > 0 && !addBytes(1)) return { limit: "documentJsonBytes", ok: false };
       stack.push({ ...current, index: current.index + 1 });
-      stack.push({ kind: "value", nodeDepth: current.nodeDepth, value: current.value[current.index] });
+      stack.push({
+        containerDepth: current.containerDepth + 1,
+        kind: "value",
+        nodeDepth: current.nodeDepth,
+        value: current.value[current.index],
+      });
       continue;
     }
     if (current.kind === "object") {
@@ -87,9 +99,14 @@ export function validateTiptapResource(
       stack.push({ ...current, firstProperty: false });
       if (current.nodeDepth !== undefined && key === "content") {
         if (!Array.isArray(value)) return { limit: "malformed", ok: false };
-        stack.push({ arrayNodeDepth: current.nodeDepth + 1, kind: "value", value });
+        stack.push({
+          arrayNodeDepth: current.nodeDepth + 1,
+          containerDepth: current.containerDepth + 1,
+          kind: "value",
+          value,
+        });
       } else {
-        stack.push({ kind: "value", value });
+        stack.push({ containerDepth: current.containerDepth + 1, kind: "value", value });
       }
       continue;
     }
@@ -118,6 +135,9 @@ export function validateTiptapResource(
     if (!current.value || typeof current.value !== "object") {
       return { limit: "malformed", ok: false };
     }
+    if (current.containerDepth > limits.documentDepth) {
+      return { limit: "documentDepth", ok: false };
+    }
     if (seen.has(current.value)) return { limit: "malformed", ok: false };
     seen.add(current.value);
 
@@ -126,7 +146,13 @@ export function validateTiptapResource(
       if (current.arrayNodeDepth !== undefined && current.value.length > limits.documentNodes - nodes) {
         return { limit: "documentNodes", ok: false };
       }
-      stack.push({ kind: "array", index: 0, nodeDepth: current.arrayNodeDepth, value: current.value });
+      stack.push({
+        containerDepth: current.containerDepth,
+        kind: "array",
+        index: 0,
+        nodeDepth: current.arrayNodeDepth,
+        value: current.value,
+      });
       continue;
     }
 
@@ -142,6 +168,7 @@ export function validateTiptapResource(
 
     if (!addBytes(1)) return { limit: "documentJsonBytes", ok: false };
     stack.push({
+      containerDepth: current.containerDepth,
       firstProperty: true,
       iterator: iterateOwnEnumerableStringProperties(current.value),
       kind: "object",
