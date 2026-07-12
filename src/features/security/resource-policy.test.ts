@@ -13,6 +13,32 @@ import {
   withOperationTimeout,
 } from "./resource-policy";
 
+function createNestedAttrs(depth: number): Record<string, unknown> {
+  let attrs: Record<string, unknown> = { leaf: true };
+  for (let currentDepth = 1; currentDepth < depth; currentDepth += 1) {
+    attrs = { nested: attrs };
+  }
+  return attrs;
+}
+
+function createTiptapNodeChain(
+  depth: number,
+  deepestAttrs?: Record<string, unknown>,
+): Record<string, unknown> {
+  if (depth < 1) throw new Error("Node depth must be positive");
+  if (depth === 1) return { ...(deepestAttrs ? { attrs: deepestAttrs } : {}), type: "doc" };
+
+  let child: Record<string, unknown> = {
+    ...(deepestAttrs ? { attrs: deepestAttrs } : {}),
+    text: "leaf",
+    type: "text",
+  };
+  for (let nodeDepth = depth; nodeDepth > 2; nodeDepth -= 1) {
+    child = { content: [child], type: "paragraph" };
+  }
+  return { content: [child], type: "doc" };
+}
+
 describe("resource policy", () => {
   it("defines the required conservative resource limits", () => {
     expect(RESOURCE_LIMITS).toEqual({
@@ -244,7 +270,7 @@ describe("resource policy", () => {
       enumerable: true,
       get: readRejectedContainer,
     });
-    for (let depth = 0; depth < 63; depth += 1) {
+    for (let depth = 0; depth < 64; depth += 1) {
       attrs = { nested: attrs };
     }
 
@@ -277,6 +303,30 @@ describe("resource policy", () => {
       depth: 1,
       nodes: 1,
       ok: true,
+    });
+  });
+
+  it("allows a 64-node structural chain and rejects the 65th node", () => {
+    expect(validateTiptapResource(createTiptapNodeChain(64))).toEqual({
+      depth: 64,
+      nodes: 64,
+      ok: true,
+    });
+    expect(validateTiptapResource(createTiptapNodeChain(65))).toEqual({
+      limit: "documentDepth",
+      ok: false,
+    });
+  });
+
+  it("enforces independent attrs depth at the deepest node of a 64-node chain", () => {
+    expect(validateTiptapResource(createTiptapNodeChain(64, createNestedAttrs(64)))).toEqual({
+      depth: 64,
+      nodes: 64,
+      ok: true,
+    });
+    expect(validateTiptapResource(createTiptapNodeChain(64, createNestedAttrs(65)))).toEqual({
+      limit: "documentDepth",
+      ok: false,
     });
   });
 
