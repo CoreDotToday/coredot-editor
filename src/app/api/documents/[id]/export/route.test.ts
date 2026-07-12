@@ -186,7 +186,7 @@ describe("POST /api/documents/[id]/export", () => {
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     );
     expect(response.headers.get("Content-Disposition")).toContain('filename="Unsaved title.docx"');
-    expect(tiptapJsonToDocxBuffer).toHaveBeenCalledWith(contentJson, "Unsaved title");
+    expect(tiptapJsonToDocxBuffer).toHaveBeenCalledWith(contentJson, "Unsaved title", expect.any(AbortSignal));
     await expect(response.arrayBuffer()).resolves.toEqual(Buffer.from("docx bytes").buffer);
   });
 });

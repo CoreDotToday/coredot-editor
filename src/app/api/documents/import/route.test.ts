@@ -14,15 +14,12 @@ vi.mock("@/features/documents/docx-conversion", () => ({
   docxBufferToTiptapJson: vi.fn(),
 }));
 
-function createFormRequest(file?: File) {
+async function createFormRequest(file?: File) {
   const formData = new FormData();
   if (file) {
     formData.set("file", file);
   }
-
-  return {
-    formData: async () => formData,
-  } as Request;
+  return { body: null, formData: async () => formData, headers: new Headers() } as unknown as Request;
 }
 
 describe("POST /api/documents/import", () => {
@@ -54,7 +51,7 @@ describe("POST /api/documents/import", () => {
     Object.defineProperty(file, "size", { value: RESOURCE_LIMITS.docxBytes + 1 });
     const arrayBuffer = vi.spyOn(file, "arrayBuffer");
 
-    const response = await POST(createFormRequest(file));
+    const response = await POST(await createFormRequest(file));
 
     expect(response.status).toBe(413);
     expect(arrayBuffer).not.toHaveBeenCalled();
@@ -74,6 +71,30 @@ describe("POST /api/documents/import", () => {
     expect(formData).not.toHaveBeenCalled();
   });
 
+  it("cancels an oversized chunked multipart body when Content-Length is missing", async () => {
+    const cancel = vi.fn();
+    const request = {
+      body: {
+        getReader: () => ({
+          cancel,
+          read: vi.fn().mockResolvedValueOnce({
+            done: false,
+            value: new Uint8Array(RESOURCE_LIMITS.docxBytes + 1024 * 1024 + 1),
+          }),
+          releaseLock: vi.fn(),
+        }),
+      },
+      headers: new Headers(),
+    } as unknown as Request;
+
+    const response = await POST(request);
+
+    expect(response.status).toBe(413);
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(docxBufferToTiptapJson).not.toHaveBeenCalled();
+    expect(createDocumentFromContent).not.toHaveBeenCalled();
+  });
+
   it("rejects converted content that exceeds the depth policy before persistence", async () => {
     let deepNode: Record<string, unknown> = { type: "text", text: "deep" };
     for (let depth = 0; depth < RESOURCE_LIMITS.documentDepth; depth += 1) {
@@ -84,7 +105,7 @@ describe("POST /api/documents/import", () => {
       warnings: [],
     });
 
-    const response = await POST(createFormRequest(new File([new Uint8Array([1])], "deep.docx")));
+    const response = await POST(await createFormRequest(new File([new Uint8Array([1])], "deep.docx")));
 
     expect(response.status).toBe(413);
     expect(createDocumentFromContent).not.toHaveBeenCalled();
@@ -99,7 +120,7 @@ describe("POST /api/documents/import", () => {
       warnings: [],
     });
 
-    const response = await POST(createFormRequest(new File([new Uint8Array([1])], "compressed.docx")));
+    const response = await POST(await createFormRequest(new File([new Uint8Array([1])], "compressed.docx")));
 
     expect(response.status).toBe(413);
     expect(createDocumentFromContent).not.toHaveBeenCalled();
@@ -117,7 +138,7 @@ describe("POST /api/documents/import", () => {
     });
 
     try {
-      const pending = POST(createFormRequest(new File([new Uint8Array([1])], "slow.docx")));
+      const pending = POST(await createFormRequest(new File([new Uint8Array([1])], "slow.docx")));
       await started;
       await vi.advanceTimersByTimeAsync(RESOURCE_LIMITS.operationMs);
       const response = await pending;
@@ -131,7 +152,7 @@ describe("POST /api/documents/import", () => {
   });
 
   it("returns 400 when the request does not include a DOCX file", async () => {
-    const response = await POST(createFormRequest(new File(["not docx"], "memo.txt", { type: "text/plain" })));
+    const response = await POST(await createFormRequest(new File(["not docx"], "memo.txt", { type: "text/plain" })));
 
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({ error: "DOCX file is required" });
@@ -164,7 +185,7 @@ describe("POST /api/documents/import", () => {
     });
 
     const response = await POST(
-      createFormRequest(
+      await createFormRequest(
         new File([new Uint8Array([1, 2, 3])], "Contract Draft.docx", {
           type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         }),

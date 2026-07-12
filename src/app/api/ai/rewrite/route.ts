@@ -14,6 +14,7 @@ import { createProtectedOptionsHandler, createProtectedRouteHandler } from "@/fe
 import { enforceRequestBudget } from "@/features/security/request-budget";
 import {
   documentResourceLimitResponse,
+  parseBoundedJson,
   requestExceedsDocumentBodyLimit,
   resourcePolicyErrorResponse,
   withOperationTimeout,
@@ -29,7 +30,14 @@ const optionsHandler = createProtectedOptionsHandler(["POST"]);
 const postHandler = createProtectedRouteHandler(async (context, request: Request) => {
   if (requestExceedsDocumentBodyLimit(request)) return documentResourceLimitResponse();
 
-  const payload = await request.json().catch(() => null);
+  let payload: unknown;
+  try {
+    payload = await parseBoundedJson(request);
+  } catch (error) {
+    const resourceResponse = resourcePolicyErrorResponse(error);
+    if (resourceResponse) return resourceResponse;
+    payload = null;
+  }
   const result = rewritePayloadSchema.safeParse(payload);
   if (!result.success) {
     return NextResponse.json({ error: "Invalid request body" }, { status: 400 });

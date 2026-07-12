@@ -21,7 +21,8 @@
   ],
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "pnpm build:docx-worker && next build",
+    "build:docx-worker": "esbuild src/features/documents/docx-conversion-worker.mjs --bundle --platform=node --format=cjs --target=node20 --outfile=src/features/documents/.generated/docx-conversion-worker.cjs",
     "start": "node scripts/validate-production-auth.mjs --production && next start",
     "check": "pnpm lint && pnpm typecheck && pnpm test && pnpm build",
     "lint": "eslint .",
@@ -41,7 +42,7 @@
     "e2e:prepare": "tsx scripts/e2e/prepare.ts",
     "e2e": "pnpm e2e:prepare && playwright test",
     "security:audit": "pnpm audit --audit-level moderate",
-    "security:verify-auth-startup": "node scripts/security/verify-production-auth-startup.mjs",
+    "security:verify-auth-startup": "pnpm build:docx-worker && node scripts/security/verify-production-auth-startup.mjs",
     "release:check": "pnpm lint && pnpm typecheck && pnpm test && pnpm e2e && pnpm security:verify-auth-startup && pnpm build && pnpm security:audit"
   },
   "dependencies": {
@@ -83,6 +84,7 @@
     "@types/react-dom": "^19",
     "@vitejs/plugin-react": "^6.0.1",
     "drizzle-kit": "^0.31.10",
+    "esbuild": "^0.25.12",
     "eslint": "^9",
     "eslint-config-next": "16.2.6",
     "jsdom": "^29.1.1",

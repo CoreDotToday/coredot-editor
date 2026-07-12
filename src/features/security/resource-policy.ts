@@ -8,6 +8,7 @@ export const RESOURCE_LIMITS = Object.freeze({
   operationMs: 30_000,
 });
 const DOCUMENT_JSON_ENVELOPE_BYTES = 1024 * 1024;
+export const DOCUMENT_REQUEST_BODY_BYTES = RESOURCE_LIMITS.documentJsonBytes + DOCUMENT_JSON_ENVELOPE_BYTES;
 
 type TiptapLimits = { documentDepth: number; documentJsonBytes?: number; documentNodes: number };
 type TiptapValidation =
@@ -21,6 +22,13 @@ export class OperationTimeoutError extends Error {
   }
 }
 
+export class RequestBodyTooLargeError extends Error {
+  constructor(message = "Request body exceeds resource limits") {
+    super(message);
+    this.name = "RequestBodyTooLargeError";
+  }
+}
+
 export function validateTiptapResource(
   root: unknown,
   limits: TiptapLimits = RESOURCE_LIMITS,
@@ -31,9 +39,10 @@ export function validateTiptapResource(
 
   const maxJsonBytes = limits.documentJsonBytes ?? RESOURCE_LIMITS.documentJsonBytes;
   const seen = new WeakSet<object>();
-  const stack: Array<{ arrayNodeDepth?: number; nodeDepth?: number; value: unknown }> = [
-    { nodeDepth: 1, value: root },
-  ];
+  type Frame =
+    | { kind: "array"; index: number; nodeDepth?: number; value: unknown[] }
+    | { arrayNodeDepth?: number; kind: "value"; nodeDepth?: number; value: unknown };
+  const stack: Frame[] = [{ kind: "value", nodeDepth: 1, value: root }];
   let maxDepth = 0;
   let nodes = 0;
   let jsonBytes = 0;
@@ -46,6 +55,13 @@ export function validateTiptapResource(
   while (stack.length > 0) {
     const current = stack.pop();
     if (!current) break;
+    if (current.kind === "array") {
+      if (current.index < current.value.length) {
+        stack.push({ ...current, index: current.index + 1 });
+        stack.push({ kind: "value", nodeDepth: current.nodeDepth, value: current.value[current.index] });
+      }
+      continue;
+    }
     if (current.nodeDepth !== undefined && !isNode(current.value)) {
       return { limit: "malformed", ok: false };
     }
@@ -78,9 +94,10 @@ export function validateTiptapResource(
       if (!addBytes(2 + Math.max(0, current.value.length - 1))) {
         return { limit: "documentJsonBytes", ok: false };
       }
-      for (let index = current.value.length - 1; index >= 0; index -= 1) {
-        stack.push({ nodeDepth: current.arrayNodeDepth, value: current.value[index] });
+      if (current.arrayNodeDepth !== undefined && current.value.length > limits.documentNodes - nodes) {
+        return { limit: "documentNodes", ok: false };
       }
+      stack.push({ kind: "array", index: 0, nodeDepth: current.arrayNodeDepth, value: current.value });
       continue;
     }
 
@@ -105,9 +122,9 @@ export function validateTiptapResource(
       }
       if (current.nodeDepth !== undefined && key === "content") {
         if (!Array.isArray(value)) return { limit: "malformed", ok: false };
-        stack.push({ arrayNodeDepth: current.nodeDepth + 1, value });
+        stack.push({ arrayNodeDepth: current.nodeDepth + 1, kind: "value", value });
       } else {
-        stack.push({ value });
+        stack.push({ kind: "value", value });
       }
     }
   }
@@ -140,6 +157,9 @@ export async function withOperationTimeout<T>(
 }
 
 export function resourcePolicyErrorResponse(error: unknown): Response | null {
+  if (error instanceof RequestBodyTooLargeError) {
+    return documentResourceLimitResponse();
+  }
   if (error instanceof OperationTimeoutError) {
     return NextResponse.json({ error: "Operation timed out" }, { status: 504 });
   }
@@ -150,7 +170,67 @@ export function requestExceedsDocumentBodyLimit(request: Request) {
   const contentLength = request.headers?.get("content-length");
   return contentLength !== null &&
     /^\d+$/.test(contentLength) &&
-    Number(contentLength) > RESOURCE_LIMITS.documentJsonBytes + DOCUMENT_JSON_ENVELOPE_BYTES;
+    Number(contentLength) > DOCUMENT_REQUEST_BODY_BYTES;
+}
+
+/**
+ * Read a Web Request body without trusting Content-Length. The stream is cancelled
+ * as soon as the actual byte count crosses the configured in-memory boundary.
+ */
+export async function readBoundedRequestBytes(request: Request, maxBytes: number): Promise<Uint8Array> {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) throw new Error("Body limit must be a non-negative integer");
+  const declaredLength = request.headers?.get("content-length");
+  if (declaredLength !== null && /^\d+$/.test(declaredLength) && Number(declaredLength) > maxBytes) {
+    throw new RequestBodyTooLargeError();
+  }
+
+  const reader = request.body?.getReader();
+  if (!reader) return new Uint8Array();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      totalBytes += chunk.value.byteLength;
+      if (totalBytes > maxBytes) {
+        const error = new RequestBodyTooLargeError();
+        await Promise.resolve(reader.cancel(error)).catch(() => undefined);
+        throw error;
+      }
+      chunks.push(chunk.value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const bytes = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
+export async function parseBoundedJson(request: Request, maxBytes = DOCUMENT_REQUEST_BODY_BYTES): Promise<unknown> {
+  const bytes = await readBoundedRequestBytes(request, maxBytes);
+  return JSON.parse(new TextDecoder().decode(bytes)) as unknown;
+}
+
+export async function parseBoundedFormData(request: Request, maxBytes: number): Promise<FormData> {
+  // Test adapters and server frameworks may expose already-parsed form data
+  // without a readable body. Real network Requests always take the bounded
+  // stream path below.
+  if (!request.body && typeof request.formData === "function") return request.formData();
+  const bytes = await readBoundedRequestBytes(request, maxBytes);
+  const body = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(body).set(bytes);
+  return new Request(request.url || "http://localhost", {
+    body,
+    headers: request.headers,
+    method: "POST",
+  }).formData();
 }
 
 export function documentResourceLimitResponse() {

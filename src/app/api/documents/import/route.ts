@@ -5,6 +5,7 @@ import { createProtectedOptionsHandler, createProtectedRouteHandler } from "@/fe
 import { enforceRequestBudget } from "@/features/security/request-budget";
 import {
   RESOURCE_LIMITS,
+  parseBoundedFormData,
   resourcePolicyErrorResponse,
   validateTiptapResource,
   withOperationTimeout,
@@ -25,10 +26,16 @@ const postHandler = createProtectedRouteHandler(async (context, request: Request
     return payloadTooLargeResponse();
   }
 
-  const formData = await request.formData().catch(() => null);
+  let formData: FormData | null = null;
+  try {
+    formData = await parseBoundedFormData(request, RESOURCE_LIMITS.docxBytes + MAX_MULTIPART_OVERHEAD_BYTES);
+  } catch (error) {
+    const resourceResponse = resourcePolicyErrorResponse(error);
+    if (resourceResponse) return resourceResponse;
+  }
   const file = formData?.get("file");
 
-  if (!(file instanceof File) || !isDocxFile(file)) {
+  if (!isUploadedFile(file) || !isDocxFile(file)) {
     return NextResponse.json({ error: "DOCX file is required" }, { status: 400 });
   }
 
@@ -37,7 +44,7 @@ const postHandler = createProtectedRouteHandler(async (context, request: Request
   const buffer = Buffer.from(await file.arrayBuffer());
   let conversion: Awaited<ReturnType<typeof docxBufferToTiptapJson>>;
   try {
-    conversion = await withOperationTimeout(() => docxBufferToTiptapJson(buffer));
+    conversion = await withOperationTimeout((signal) => docxBufferToTiptapJson(buffer, signal));
   } catch (error) {
     return resourcePolicyErrorResponse(error) ?? NextResponse.json({ error: "DOCX import failed" }, { status: 500 });
   }
@@ -61,6 +68,15 @@ export async function OPTIONS() {
 
 function isDocxFile(file: File) {
   return file.name.toLowerCase().endsWith(".docx") || file.type === DOCX_MIME_TYPE;
+}
+
+function isUploadedFile(value: unknown): value is File {
+  return Boolean(value) &&
+    typeof value === "object" &&
+    typeof (value as File).arrayBuffer === "function" &&
+    typeof (value as File).name === "string" &&
+    typeof (value as File).size === "number" &&
+    typeof (value as File).type === "string";
 }
 
 function getDocumentTitleFromFileName(fileName: string) {

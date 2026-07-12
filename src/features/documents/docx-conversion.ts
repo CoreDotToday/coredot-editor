@@ -1,207 +1,81 @@
-import { generateJSON } from "@tiptap/html/server";
-import {
-  Document,
-  ExternalHyperlink,
-  HeadingLevel,
-  LevelFormat,
-  Packer,
-  Paragraph,
-  TextRun,
-} from "docx";
-import mammoth from "mammoth";
+import { Worker as NodeWorker } from "node:worker_threads";
+import { resolve as resolvePath } from "node:path";
+import { pathToFileURL } from "node:url";
 import type { TiptapJson } from "@/db/schema";
-import { createDocumentSchemaExtensions } from "./tiptap-extensions";
 
-type TiptapNode = {
-  attrs?: Record<string, unknown>;
-  content?: unknown[];
-  marks?: Array<{ attrs?: Record<string, unknown>; type?: string }>;
-  text?: string;
-  type?: string;
-};
+type ImportResult = { contentJson: TiptapJson; warnings: string[] };
+type WorkerRequest =
+  | { bytes: Uint8Array; operation: "import" }
+  | { contentJson: TiptapJson; operation: "export"; title: string }
+  | { blockForMs: number; operation: "block-for-test" };
+type WorkerResponse<T> =
+  | { ok: true; protocol: "coredot-docx-worker-v1"; result: T }
+  | { error: { message: string; name?: string; stack?: string }; ok: false; protocol: "coredot-docx-worker-v1" };
 
-type DocxInlineNode = TextRun | ExternalHyperlink;
-
-const ORDERED_LIST_REFERENCE = "coredot-ordered-list";
-
-export async function docxBufferToTiptapJson(buffer: Buffer) {
-  const result = await mammoth.convertToHtml({ buffer });
-  const html = result.value.trim() || "<p></p>";
-  const contentJson = normalizeTiptapJson(generateJSON(html, createDocumentSchemaExtensions()));
-
-  return {
-    contentJson,
-    warnings: result.messages.map((message) => message.message).filter(Boolean),
-  };
+export function docxBufferToTiptapJson(buffer: Buffer, signal?: AbortSignal): Promise<ImportResult> {
+  const bytes = Uint8Array.from(buffer);
+  return runDocxWorker<ImportResult>({ bytes, operation: "import" }, signal, [bytes.buffer]);
 }
 
-export async function tiptapJsonToDocxBuffer(contentJson: TiptapJson, title = "Document") {
-  const children = renderBlockNodes(contentJson.content ?? []);
-  const document = new Document({
-    creator: "Coredot Editor",
-    description: "Exported from Coredot Editor",
-    numbering: {
-      config: [
-        {
-          reference: ORDERED_LIST_REFERENCE,
-          levels: [
-            {
-              level: 0,
-              format: LevelFormat.DECIMAL,
-              text: "%1.",
-              style: {
-                paragraph: {
-                  indent: { left: 720, hanging: 260 },
-                },
-              },
-            },
-          ],
-        },
-      ],
-    },
-    sections: [
-      {
-        children: children.length > 0 ? children : [new Paragraph("")],
-      },
-    ],
-    title,
-  });
-
-  return Packer.toBuffer(document);
+export async function tiptapJsonToDocxBuffer(
+  contentJson: TiptapJson,
+  title = "Document",
+  signal?: AbortSignal,
+): Promise<Buffer> {
+  const bytes = await runDocxWorker<Uint8Array>({ contentJson, operation: "export", title }, signal);
+  return Buffer.from(bytes);
 }
 
-function normalizeTiptapJson(value: Record<string, unknown>): TiptapJson {
-  return {
-    type: "doc",
-    content: Array.isArray(value.content) && value.content.length > 0 ? value.content : [{ type: "paragraph" }],
-  };
+export function runDocxWorkerForTests(input: { blockForMs: number }, signal?: AbortSignal): Promise<null> {
+  if (process.env.NODE_ENV !== "test") throw new Error("DOCX worker test operation is test-only");
+  return runDocxWorker<null>({ blockForMs: input.blockForMs, operation: "block-for-test" }, signal);
 }
 
-function renderBlockNodes(nodes: unknown[]): Paragraph[] {
-  return nodes.flatMap((node) => (isTiptapNode(node) ? renderBlockNode(node) : []));
-}
+function runDocxWorker<T>(request: WorkerRequest, signal?: AbortSignal, transferList: ArrayBuffer[] = []): Promise<T> {
+  if (signal?.aborted) return Promise.reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
 
-function renderBlockNode(node: TiptapNode): Paragraph[] {
-  if (node.type === "heading") {
-    return [
-      new Paragraph({
-        children: renderInlineNodes(node.content ?? []),
-        heading: getHeadingLevel(node.attrs?.level),
-      }),
-    ];
-  }
+  return new Promise<T>((resolve, reject) => {
+    // Turbopack cannot package node:worker_threads entries through the browser
+    // worker URL transform. The production build emits one self-contained Node
+    // worker and Next's documented output tracing includes it in deployment artifacts.
+    const workerUrl = pathToFileURL(resolvePath(
+      process.cwd(),
+      process.env.NODE_ENV === "production"
+        ? "src/features/documents/.generated/docx-conversion-worker.cjs"
+        : "src/features/documents/docx-conversion-worker.mjs",
+    ));
+    // The worker bundle needs no parent test/dev loaders. Inheriting
+    // loader hooks can inject protocol messages onto parentPort before ours.
+    const WorkerConstructor = NodeWorker;
+    const worker = new WorkerConstructor(workerUrl, { execArgv: [] });
+    let settled = false;
 
-  if (node.type === "bulletList" || node.type === "orderedList" || node.type === "taskList") {
-    return renderList(node);
-  }
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener("abort", handleAbort);
+      worker.removeAllListeners();
+      void worker.terminate();
+      callback();
+    };
+    const handleAbort = () => finish(() => reject(signal?.reason ?? new DOMException("Aborted", "AbortError")));
 
-  if (node.type === "blockquote") {
-    return (node.content ?? []).flatMap((child) => {
-      if (!isTiptapNode(child)) {
-        return [];
-      }
-
-      return [
-        new Paragraph({
-          children: renderInlineNodes(child.content ?? []),
-          indent: { left: 360 },
-        }),
-      ];
+    signal?.addEventListener("abort", handleAbort, { once: true });
+    worker.once("error", (error) => finish(() => reject(error)));
+    worker.once("exit", (code) => {
+      if (code !== 0) finish(() => reject(new Error(`DOCX conversion worker exited with code ${code}`)));
     });
-  }
-
-  if (node.type === "codeBlock") {
-    return [
-      new Paragraph({
-        children: [new TextRun({ font: "Courier New", text: getNodeText(node) })],
-      }),
-    ];
-  }
-
-  return [
-    new Paragraph({
-      children: renderInlineNodes(node.content ?? []),
-    }),
-  ];
-}
-
-function renderList(node: TiptapNode): Paragraph[] {
-  return (node.content ?? []).flatMap((child) => {
-    if (!isTiptapNode(child) || (child.type !== "listItem" && child.type !== "taskItem")) {
-      return [];
-    }
-
-    const textPrefix = child.type === "taskItem" ? getTaskPrefix(child) : "";
-    const children = [...(textPrefix ? [new TextRun(textPrefix)] : []), ...renderInlineNodes(child.content ?? [])];
-
-    return [
-      new Paragraph({
-        bullet: node.type === "bulletList" || node.type === "taskList" ? { level: 0 } : undefined,
-        children: children.length > 0 ? children : [new TextRun("")],
-        numbering: node.type === "orderedList" ? { reference: ORDERED_LIST_REFERENCE, level: 0 } : undefined,
-      }),
-    ];
+    worker.on("message", (response: WorkerResponse<T>) => {
+      if (!response || response.protocol !== "coredot-docx-worker-v1") return;
+      if (response.ok) {
+        finish(() => resolve(response.result));
+      } else {
+        const error = new Error(response.error.message);
+        error.name = response.error.name ?? "Error";
+        error.stack = response.error.stack ?? error.stack;
+        finish(() => reject(error));
+      }
+    });
+    worker.postMessage(request, transferList);
   });
-}
-
-function renderInlineNodes(nodes: unknown[]): DocxInlineNode[] {
-  const children = nodes.flatMap((node) => {
-    if (!isTiptapNode(node)) {
-      return [];
-    }
-
-    if (typeof node.text === "string") {
-      return [renderTextNode(node)];
-    }
-
-    if (node.type === "hardBreak") {
-      return [new TextRun({ break: 1 })];
-    }
-
-    return renderInlineNodes(node.content ?? []);
-  });
-
-  return children.length > 0 ? children : [new TextRun("")];
-}
-
-function renderTextNode(node: TiptapNode): DocxInlineNode {
-  const marks = node.marks ?? [];
-  const link = marks.find((mark) => mark.type === "link" && typeof mark.attrs?.href === "string");
-  const textRun = new TextRun({
-    bold: marks.some((mark) => mark.type === "bold"),
-    italics: marks.some((mark) => mark.type === "italic"),
-    strike: marks.some((mark) => mark.type === "strike"),
-    style: link ? "Hyperlink" : undefined,
-    text: node.text ?? "",
-  });
-
-  return link
-    ? new ExternalHyperlink({
-        children: [textRun],
-        link: String(link.attrs?.href),
-      })
-    : textRun;
-}
-
-function getHeadingLevel(level: unknown) {
-  if (level === 1) return HeadingLevel.HEADING_1;
-  if (level === 2) return HeadingLevel.HEADING_2;
-  if (level === 3) return HeadingLevel.HEADING_3;
-  return HeadingLevel.HEADING_4;
-}
-
-function getTaskPrefix(node: TiptapNode) {
-  return node.attrs?.checked ? "[x] " : "[ ] ";
-}
-
-function getNodeText(node: TiptapNode): string {
-  if (typeof node.text === "string") {
-    return node.text;
-  }
-
-  return (node.content ?? []).map((child) => (isTiptapNode(child) ? getNodeText(child) : "")).join("");
-}
-
-function isTiptapNode(value: unknown): value is TiptapNode {
-  return Boolean(value) && typeof value === "object";
 }

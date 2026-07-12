@@ -1,4 +1,4 @@
-import type { Client } from "@libsql/client";
+import type { Client, InStatement } from "@libsql/client";
 import { NextResponse } from "next/server";
 import type { RequestContext } from "@/features/auth/request-context";
 
@@ -10,6 +10,10 @@ export const REQUEST_BUDGET_POLICIES = Object.freeze({
   "documents.import": { limit: 10, windowMs: 60_000 },
 });
 export const REQUEST_BUDGET_PRUNE_INTERVAL_MS = 5 * 60_000;
+/** Keep expired buckets for at least five minutes so moderately skewed instances cannot recreate allowance. */
+export const REQUEST_BUDGET_CLOCK_SKEW_GRACE_MS = 5 * 60_000;
+const REQUEST_BUDGET_BUSY_RETRY_ATTEMPTS = 3;
+const REQUEST_BUDGET_BUSY_RETRY_DELAY_MS = 25;
 
 export type RequestBudgetPolicyId = keyof typeof REQUEST_BUDGET_POLICIES;
 export type RequestBudgetPolicy = { limit: number; windowMs: number };
@@ -28,21 +32,33 @@ type ConsumeInput<TPolicyId extends string> = {
   now?: Date;
 };
 
+export class RequestBudgetUnavailableError extends Error {
+  constructor(message = "Request budget storage is temporarily unavailable", options?: ErrorOptions) {
+    super(message, options);
+    this.name = "RequestBudgetUnavailableError";
+  }
+}
+
 export function createRequestBudget<TPolicyId extends string>(options: {
   client: Pick<Client, "execute">;
   policies: Record<TPolicyId, RequestBudgetPolicy>;
   pruneIntervalMs?: number;
+  retryDelayMs?: number;
 }) {
   const pruneIntervalMs = options.pruneIntervalMs ?? REQUEST_BUDGET_PRUNE_INTERVAL_MS;
   if (!Number.isSafeInteger(pruneIntervalMs) || pruneIntervalMs <= 0) {
     throw new Error("Request budget prune interval must be a positive integer");
+  }
+  const retryDelayMs = options.retryDelayMs ?? REQUEST_BUDGET_BUSY_RETRY_DELAY_MS;
+  if (!Number.isSafeInteger(retryDelayMs) || retryDelayMs < 0) {
+    throw new Error("Request budget retry delay must be a non-negative integer");
   }
   let nextPruneAtMs = 0;
 
   async function pruneExpired(now = new Date()): Promise<number> {
     const result = await options.client.execute({
       sql: "DELETE FROM request_budget_buckets WHERE expires_at <= ?",
-      args: [now.getTime()],
+      args: [now.getTime() - REQUEST_BUDGET_CLOCK_SKEW_GRACE_MS],
     });
     return result.rowsAffected;
   }
@@ -61,21 +77,12 @@ export function createRequestBudget<TPolicyId extends string>(options: {
 
       const now = input.now ?? new Date();
       const nowMs = now.getTime();
-      if (nowMs >= nextPruneAtMs) {
-        nextPruneAtMs = nowMs + pruneIntervalMs;
-        try {
-          await pruneExpired(now);
-        } catch (error) {
-          nextPruneAtMs = 0;
-          throw error;
-        }
-      }
       const windowStartMs = Math.floor(nowMs / policy.windowMs) * policy.windowMs;
       const retryAtMs = windowStartMs + policy.windowMs;
 
       // A single UPSERT is the concurrency boundary. SQLite serializes this write and
       // the WHERE predicate prevents the stored counter from ever exceeding the limit.
-      const result = await options.client.execute({
+      const statement = {
         sql: `
           INSERT INTO request_budget_buckets (
             workspace_id, principal_id, policy_id, window_start, request_count, expires_at
@@ -95,17 +102,31 @@ export function createRequestBudget<TPolicyId extends string>(options: {
           retryAtMs,
           policy.limit,
         ],
-      });
+      };
+      const result = await executeAtomicConsumeWithRetry(options.client, statement, retryDelayMs);
 
       const count = result.rows[0]?.request_count;
       const allowed = typeof count === "number" || typeof count === "bigint";
       const numericCount = allowed ? Number(count) : policy.limit;
-      return {
+      const budgetResult = {
         allowed,
         limit: policy.limit,
         remaining: Math.max(0, policy.limit - numericCount),
         retryAt: new Date(retryAtMs),
       };
+
+      // Retention is maintenance, not part of admission. Run it only after the
+      // atomic consume committed and never turn successful admission into a 500.
+      if (nowMs >= nextPruneAtMs) {
+        nextPruneAtMs = nowMs + pruneIntervalMs;
+        try {
+          await pruneExpired(now);
+        } catch {
+          // Best effort. A later interval or process instance will retry.
+        }
+      }
+
+      return budgetResult;
     },
 
     pruneExpired,
@@ -122,8 +143,20 @@ export async function enforceRequestBudget(
   now = new Date(),
 ): Promise<Response | null> {
   const budget = activeRequestBudget ?? (await getDefaultRequestBudget());
-  const result = await budget.consume({ context, now, policyId });
-  return result.allowed ? null : requestBudgetResponse(result, now);
+  try {
+    const result = await budget.consume({ context, now, policyId });
+    return result.allowed ? null : requestBudgetResponse(result, now);
+  } catch (error) {
+    if (error instanceof RequestBudgetUnavailableError) return requestBudgetUnavailableResponse();
+    throw error;
+  }
+}
+
+export function requestBudgetUnavailableResponse() {
+  return NextResponse.json(
+    { error: "Request rate limit temporarily unavailable" },
+    { status: 503, headers: { "Retry-After": "1" } },
+  );
 }
 
 export function requestBudgetResponse(result: RequestBudgetResult, now = new Date()) {
@@ -162,4 +195,35 @@ async function getDefaultRequestBudget() {
     defaultRequestBudget = createRequestBudget({ client: sqliteClient, policies: REQUEST_BUDGET_POLICIES });
   }
   return defaultRequestBudget;
+}
+
+async function executeAtomicConsumeWithRetry(
+  client: Pick<Client, "execute">,
+  statement: InStatement,
+  retryDelayMs: number,
+) {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < REQUEST_BUDGET_BUSY_RETRY_ATTEMPTS; attempt += 1) {
+    try {
+      return await client.execute(statement);
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableSqliteContention(error)) throw error;
+      if (attempt + 1 < REQUEST_BUDGET_BUSY_RETRY_ATTEMPTS) {
+        await delay(retryDelayMs * 2 ** attempt);
+      }
+    }
+  }
+  throw new RequestBudgetUnavailableError(undefined, { cause: lastError });
+}
+
+function isRetryableSqliteContention(error: unknown) {
+  if (!error || typeof error !== "object") return false;
+  const code = "code" in error ? String(error.code).toUpperCase() : "";
+  const message = "message" in error ? String(error.message) : "";
+  return code === "SQLITE_BUSY" || code === "SQLITE_LOCKED" || /database (?:is )?locked/i.test(message);
+}
+
+function delay(milliseconds: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
 }

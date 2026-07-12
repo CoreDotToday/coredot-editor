@@ -3,7 +3,13 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { createRequestBudget, requestBudgetResponse } from "./request-budget";
+import {
+  createRequestBudget,
+  enforceRequestBudget,
+  RequestBudgetUnavailableError,
+  requestBudgetResponse,
+  setRequestBudgetForTests,
+} from "./request-budget";
 
 const tempDirs: string[] = [];
 const clients: Client[] = [];
@@ -152,8 +158,106 @@ describe("durable request budget", () => {
     expect(response.headers.get("X-RateLimit-Remaining")).toBe("0");
     expect(response.headers.get("X-RateLimit-Reset")).toBe("1783859700");
 
-    await expect(budget.pruneExpired(new Date("2026-07-12T12:35:00.000Z"))).resolves.toBe(1);
+    await expect(budget.pruneExpired(new Date("2026-07-12T12:40:00.000Z"))).resolves.toBe(1);
     expect((await client.execute("SELECT count(*) AS count FROM request_budget_buckets")).rows[0]?.count).toBe(0);
+  });
+
+  it("keeps recently expired buckets through clock skew and cannot recreate allowance after an ahead instance prunes", async () => {
+    const { client } = await createBudgetClient();
+    const budget = createRequestBudget({ client, policies: { test: { limit: 1, windowMs: 60_000 } } });
+    const behind = new Date("2026-07-12T12:34:59.000Z");
+    const ahead = new Date("2026-07-12T12:36:01.000Z");
+
+    await budget.consume({ context, now: behind, policyId: "test" });
+    await expect(budget.pruneExpired(ahead)).resolves.toBe(0);
+    await expect(budget.consume({ context, now: behind, policyId: "test" })).resolves.toMatchObject({
+      allowed: false,
+    });
+  });
+
+  it("returns the consume result even when best-effort pruning fails", async () => {
+    const { client } = await createBudgetClient();
+    const execute = async (statement: InStatement) => {
+      const sql = typeof statement === "string" ? statement : statement.sql;
+      if (sql.startsWith("DELETE FROM request_budget_buckets")) throw new Error("prune unavailable");
+      return client.execute(statement);
+    };
+    const budget = createRequestBudget({
+      client: { execute: execute as Client["execute"] },
+      policies: { test: { limit: 1, windowMs: 60_000 } },
+    });
+
+    await expect(budget.consume({ context, now: new Date("2026-07-12T12:34:20.000Z"), policyId: "test" }))
+      .resolves.toMatchObject({ allowed: true });
+  });
+
+  it("retries transient SQLITE_BUSY failures around the atomic consume", async () => {
+    const { client } = await createBudgetClient();
+    let attempts = 0;
+    const execute = async (statement: InStatement) => {
+      const sql = typeof statement === "string" ? statement : statement.sql;
+      if (sql.includes("INSERT INTO request_budget_buckets") && attempts++ < 2) {
+        throw Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" });
+      }
+      return client.execute(statement);
+    };
+    const budget = createRequestBudget({
+      client: { execute: execute as Client["execute"] },
+      policies: { test: { limit: 1, windowMs: 60_000 } },
+      retryDelayMs: 1,
+    });
+
+    await expect(budget.consume({ context, now: new Date("2026-07-12T12:34:20.000Z"), policyId: "test" }))
+      .resolves.toMatchObject({ allowed: true });
+    expect(attempts).toBe(3);
+  });
+
+  it("recovers when another SQLite client briefly holds the write lock", async () => {
+    const dir = await createTempDir();
+    const path = join(dir, "write-lock.db");
+    const { client } = await createBudgetClient(path);
+    const blocker = createClient({ url: `file:${path}` });
+    clients.push(blocker);
+    await blocker.execute("BEGIN IMMEDIATE");
+    const budget = createRequestBudget({
+      client,
+      policies: { test: { limit: 1, windowMs: 60_000 } },
+      retryDelayMs: 25,
+    });
+    const release = setTimeout(() => void blocker.execute("COMMIT"), 20);
+
+    try {
+      await expect(budget.consume({ context, policyId: "test" })).resolves.toMatchObject({ allowed: true });
+    } finally {
+      clearTimeout(release);
+      await blocker.execute("ROLLBACK").catch(() => undefined);
+    }
+  });
+
+  it("fails closed with 503 and Retry-After after bounded busy retries", async () => {
+    const execute = async (statement: InStatement) => {
+      const sql = typeof statement === "string" ? statement : statement.sql;
+      if (sql.includes("INSERT INTO request_budget_buckets")) {
+        throw Object.assign(new Error("database is locked"), { code: "SQLITE_LOCKED" });
+      }
+      return { rows: [], rowsAffected: 0 } as never;
+    };
+    const budget = createRequestBudget({
+      client: { execute: execute as Client["execute"] },
+      policies: { test: { limit: 1, windowMs: 60_000 } },
+      retryDelayMs: 1,
+    });
+
+    await expect(budget.consume({ context, policyId: "test" })).rejects.toBeInstanceOf(RequestBudgetUnavailableError);
+    setRequestBudgetForTests({
+      consume: async () => {
+        throw new RequestBudgetUnavailableError();
+      },
+    });
+    const response = await enforceRequestBudget(context, "ai.review");
+    expect(response?.status).toBe(503);
+    expect(response?.headers.get("Retry-After")).toBe("1");
+    await expect(response?.json()).resolves.toEqual({ error: "Request rate limit temporarily unavailable" });
   });
 
   it("prunes expired buckets automatically on production consumption without deleting active buckets", async () => {

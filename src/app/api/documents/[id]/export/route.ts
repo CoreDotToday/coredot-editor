@@ -6,6 +6,7 @@ import { createProtectedOptionsHandler, createProtectedRouteHandler } from "@/fe
 import { enforceRequestBudget } from "@/features/security/request-budget";
 import {
   documentResourceLimitResponse,
+  parseBoundedJson,
   requestExceedsDocumentBodyLimit,
   resourcePolicyErrorResponse,
   validateTiptapResource,
@@ -38,7 +39,15 @@ const postHandler = createProtectedRouteHandler(async (context, request: Request
     return NextResponse.json({ error: "Document not found" }, { status: 404 });
   }
 
-  const result = exportDocumentSchema.safeParse(await request.json().catch(() => null));
+  let payload: unknown;
+  try {
+    payload = await parseBoundedJson(request);
+  } catch (error) {
+    const resourceResponse = resourcePolicyErrorResponse(error);
+    if (resourceResponse) return resourceResponse;
+    payload = null;
+  }
+  const result = exportDocumentSchema.safeParse(payload);
   if (!result.success) {
     return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
   }
@@ -49,7 +58,8 @@ const postHandler = createProtectedRouteHandler(async (context, request: Request
 
   let buffer: Buffer;
   try {
-    buffer = await withOperationTimeout(() => tiptapJsonToDocxBuffer(result.data.contentJson, result.data.title));
+    buffer = await withOperationTimeout((signal) =>
+      tiptapJsonToDocxBuffer(result.data.contentJson, result.data.title, signal));
   } catch (error) {
     return resourcePolicyErrorResponse(error) ?? NextResponse.json({ error: "DOCX export failed" }, { status: 500 });
   }

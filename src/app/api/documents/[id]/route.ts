@@ -5,7 +5,9 @@ import { documentReadinessValues } from "@/features/documents/document-metadata"
 import { createProtectedOptionsHandler, createProtectedRouteHandler } from "@/features/auth/route-context";
 import {
   documentResourceLimitResponse,
+  parseBoundedJson,
   requestExceedsDocumentBodyLimit,
+  resourcePolicyErrorResponse,
   validateTiptapResource,
 } from "@/features/security/resource-policy";
 
@@ -38,7 +40,15 @@ const getHandler = createProtectedRouteHandler(async (context, _request: Request
 const putHandler = createProtectedRouteHandler(async (context, request: Request, { params }: Params) => {
   if (requestExceedsDocumentBodyLimit(request)) return documentResourceLimitResponse();
   const { id } = await params;
-  const result = updateDocumentSchema.safeParse(await request.json().catch(() => null));
+  let payload: unknown;
+  try {
+    payload = await parseBoundedJson(request);
+  } catch (error) {
+    const resourceResponse = resourcePolicyErrorResponse(error);
+    if (resourceResponse) return resourceResponse;
+    payload = null;
+  }
+  const result = updateDocumentSchema.safeParse(payload);
   if (!result.success) {
     return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
   }

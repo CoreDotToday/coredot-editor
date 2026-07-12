@@ -156,6 +156,30 @@ describe("POST /api/ai/review", () => {
     expect(createAiRun).not.toHaveBeenCalled();
   });
 
+  it("rejects an oversized chunked AI body despite a falsely small Content-Length", async () => {
+    const cancel = vi.fn();
+    const request = {
+      body: {
+        getReader: () => ({
+          cancel,
+          read: vi.fn().mockResolvedValueOnce({
+            done: false,
+            value: new Uint8Array(RESOURCE_LIMITS.documentJsonBytes + 1024 * 1024 + 1),
+          }),
+          releaseLock: vi.fn(),
+        }),
+      },
+      headers: new Headers({ "content-length": "1" }),
+    } as unknown as Request;
+
+    const response = await POST(request);
+
+    expect(response.status).toBe(413);
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(createAiProvider).not.toHaveBeenCalled();
+    expect(createAiRun).not.toHaveBeenCalled();
+  });
+
   it("returns 504, aborts the provider, and does not persist proposals after timeout", async () => {
     vi.useFakeTimers();
     vi.mocked(getDocumentById).mockResolvedValueOnce(documentRecord);

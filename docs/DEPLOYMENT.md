@@ -73,6 +73,7 @@ The claim is intentionally one-way: after a successful commit, use the database 
 Request budgets and resource limits are code-owned defaults documented in [Configuration](configuration.md#request-budgets). All app instances must use the same policy values and the same durable database.
 
 - `429 Request rate limit exceeded`: the workspace/principal/policy bucket is exhausted. Honor `Retry-After`; the `X-RateLimit-*` headers describe the boundary.
+- `503 Request rate limit temporarily unavailable`: SQLite remained busy or locked after the bounded admission retry. The request was rejected before downstream work; honor `Retry-After` and investigate sustained database write contention.
 - `413 Document exceeds resource limits`: reject the file/document or reduce its DOCX size, complete parsed JSON size, depth, or node count before retrying.
 - `504 Operation timed out`: import, export, or AI work crossed the 30-second operation deadline. Provider-capable calls receive an abort signal; timed-out import/export work does not continue to persistence.
 

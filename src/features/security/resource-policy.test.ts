@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  RequestBodyTooLargeError,
   OperationTimeoutError,
   RESOURCE_LIMITS,
+  parseBoundedJson,
+  readBoundedRequestBytes,
   requestExceedsDocumentBodyLimit,
   validateTiptapResource,
   withOperationTimeout,
@@ -50,6 +53,58 @@ describe("resource policy", () => {
     expect(requestExceedsDocumentBodyLimit(request)).toBe(false);
   });
 
+  it("counts streamed bytes when Content-Length is missing or falsely small", async () => {
+    for (const headers of [undefined, { "content-length": "1" }]) {
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode("1234"));
+          controller.enqueue(new TextEncoder().encode("5678"));
+          controller.close();
+        },
+      });
+      const request = new Request("http://localhost", {
+        body,
+        // Node's Request requires duplex for a streaming request body.
+        // @ts-expect-error Node-specific RequestInit extension
+        duplex: "half",
+        headers,
+        method: "POST",
+      });
+
+      await expect(readBoundedRequestBytes(request, 7)).rejects.toBeInstanceOf(RequestBodyTooLargeError);
+    }
+  });
+
+  it("cancels a chunked request stream immediately after its byte budget is exceeded", async () => {
+    const cancel = vi.fn();
+    const request = {
+      body: {
+        getReader: () => ({
+          cancel,
+          read: vi
+            .fn()
+            .mockResolvedValueOnce({ done: false, value: new Uint8Array([1, 2, 3]) })
+            .mockResolvedValueOnce({ done: false, value: new Uint8Array([4, 5, 6]) }),
+          releaseLock: vi.fn(),
+        }),
+      },
+      headers: new Headers(),
+    } as unknown as Request;
+
+    await expect(readBoundedRequestBytes(request, 5)).rejects.toBeInstanceOf(RequestBodyTooLargeError);
+    expect(cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("parses a bounded JSON stream without trusting Content-Length", async () => {
+    const request = new Request("http://localhost", {
+      body: JSON.stringify({ title: "Bounded" }),
+      headers: { "content-length": "1" },
+      method: "POST",
+    });
+
+    await expect(parseBoundedJson(request, 100)).resolves.toEqual({ title: "Bounded" });
+  });
+
   it("counts a valid Tiptap tree deterministically", () => {
     expect(
       validateTiptapResource({
@@ -73,6 +128,15 @@ describe("resource policy", () => {
         { documentDepth: 2, documentNodes: 10 },
       ),
     ).toEqual({ limit: "documentDepth", ok: false });
+  });
+
+  it("rejects a 600k-node content array before scheduling every child", () => {
+    const content = Array.from({ length: 600_000 }, () => ({ type: "paragraph" }));
+
+    expect(validateTiptapResource({ type: "doc", content })).toEqual({
+      limit: "documentNodes",
+      ok: false,
+    });
   });
 
   it("rejects malformed and cyclic runtime objects without recursing forever", () => {

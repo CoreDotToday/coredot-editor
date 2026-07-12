@@ -28,6 +28,7 @@
 # next.js
 /.next/
 /out/
+/src/features/documents/.generated/
 
 # production
 /build

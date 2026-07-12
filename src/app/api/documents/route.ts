@@ -3,6 +3,7 @@ import { z } from "zod";
 import { createDocumentDraft, listDocuments } from "@/features/documents/document-repository";
 import { createProtectedOptionsHandler, createProtectedRouteHandler } from "@/features/auth/route-context";
 import { enforceRequestBudget } from "@/features/security/request-budget";
+import { parseBoundedJson, resourcePolicyErrorResponse } from "@/features/security/resource-policy";
 
 const createDocumentSchema = z.object({
   title: z.string().trim().min(1).max(500).default("Untitled document"),
@@ -15,7 +16,15 @@ const getHandler = createProtectedRouteHandler(async (context) => {
 });
 
 const postHandler = createProtectedRouteHandler(async (context, request: Request) => {
-  const result = createDocumentSchema.safeParse(await request.json().catch(() => null));
+  let payload: unknown;
+  try {
+    payload = await parseBoundedJson(request);
+  } catch (error) {
+    const resourceResponse = resourcePolicyErrorResponse(error);
+    if (resourceResponse) return resourceResponse;
+    payload = null;
+  }
+  const result = createDocumentSchema.safeParse(payload);
   if (!result.success) {
     return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
   }

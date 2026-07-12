@@ -89,6 +89,8 @@ The currently rendered contribution types are:
 
 `DocumentEditor` resolves these contributions through `useEditorPlugins()`. The compatibility function `createDocumentSchemaExtensions()` is intentionally narrower: it calls only the server-safe core document plugin so DOCX import/export routes do not load React UI plugins or browser-only code.
 
+DOCX import/export routes execute a pure conversion core in a dedicated Node worker thread. Development uses the tracked ESM worker directly; production builds a self-contained Node worker bundle and includes it in server/serverless artifacts through Next output-file tracing. The route deadline aborts and terminates that worker, which keeps CPU-heavy ZIP/XML or document generation work off the request event loop and prevents a timed-out import from persisting later. Request streams are byte-counted before multipart or JSON parsing; document trees are then checked with a lazy, iterative node/depth/complete-JSON traversal.
+
 See [PLUGINS.md](PLUGINS.md) for the plugin authoring guide and test checklist.
 
 ### Editor Language Pack
