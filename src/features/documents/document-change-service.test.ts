@@ -326,6 +326,35 @@ describe("document change service", () => {
     expect(await db.select().from(documentChangeProposals)).toHaveLength(2);
   });
 
+  it("audits range-backed proposals in their final server application order", async () => {
+    const db = await createChangeDatabase();
+    await seedDocument(db);
+    await seedProposal(db, { id: "proposal_early", replacement: "A", target: "alpha" });
+    await seedProposal(db, { id: "proposal_late", replacement: "B", target: "beta" });
+    await db.update(aiProposals).set({ source: "selection", targetFrom: 1, targetTo: 6 })
+      .where(eq(aiProposals.id, "proposal_early"));
+    await db.update(aiProposals).set({ source: "selection", targetFrom: 7, targetTo: 11 })
+      .where(eq(aiProposals.id, "proposal_late"));
+    const changes = createDocumentChangeService(db);
+
+    const result = await changes.applyProposalBatch(context, {
+      documentId: "doc_1",
+      draft: draft("alpha beta"),
+      expectedRevision: 0,
+      proposals: [
+        { mode: "replace", proposalId: "proposal_early" },
+        { mode: "replace", proposalId: "proposal_late" },
+      ],
+    });
+
+    expect(result).toMatchObject({ ok: true, document: { plainText: "A B" } });
+    const links = await db.select().from(documentChangeProposals).orderBy(asc(documentChangeProposals.ordinal));
+    expect(links.map(({ ordinal, proposalId }) => ({ ordinal, proposalId }))).toEqual([
+      { ordinal: 0, proposalId: "proposal_late" },
+      { ordinal: 1, proposalId: "proposal_early" },
+    ]);
+  });
+
   it("audits an explicitly requested one-item batch as a batch", async () => {
     const db = await createChangeDatabase();
     await seedDocument(db);

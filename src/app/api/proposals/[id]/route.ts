@@ -36,9 +36,11 @@ const patchHandler = createProtectedRouteHandler(async (
     if (existingProposal) {
       return NextResponse.json(
         {
-          error: expectedStatus && existingProposal.status !== expectedStatus
-            ? "Proposal status changed"
-            : "Proposal update conflict",
+          error: existingProposal.status === "accepted"
+            ? "Accepted proposals may only be reset by document change undo"
+            : expectedStatus && existingProposal.status !== expectedStatus
+              ? "Proposal status changed"
+              : "Proposal update conflict",
           proposal: existingProposal,
         },
         { status: 409 },

@@ -2112,7 +2112,9 @@ describe("DocumentShell", () => {
   it("preserves a newer local draft when an accepted proposal can no longer be reconciled", async () => {
     const user = userEvent.setup();
     const acceptedPatch = createDeferredResponse();
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockReturnValueOnce(acceptedPatch.promise);
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockReturnValueOnce(acceptedPatch.promise)
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "Document revision conflict" }), { status: 409 }));
 
     render(
       <DocumentShell
@@ -2153,6 +2155,11 @@ describe("DocumentShell", () => {
     expect(screen.getByRole("status", { name: "문서 저장 상태" })).toHaveTextContent("저장되지 않음");
     expect(screen.getByText("수락됨")).toBeInTheDocument();
     expect(screen.getByRole("alert")).toHaveTextContent("제안 상태를 업데이트하지 못했습니다.");
+
+    await user.click(screen.getByRole("button", { name: "저장" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(fetchMock.mock.calls[1]?.[0]).toBe("/api/documents/doc_1");
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toMatchObject({ expectedRevision: 0 });
   });
 
   it("reapplies an accepted proposal to newer local edits and keeps the new server revision as its dirty base", async () => {
@@ -2706,6 +2713,47 @@ describe("DocumentShell", () => {
     expect(screen.getByRole("textbox", { name: "문서 제목" })).toHaveValue("Edited during batch");
     expect(screen.getByTestId("mock-document-body")).toHaveTextContent("A B");
     expect(screen.getByRole("status", { name: "문서 저장 상태" })).toHaveTextContent("저장되지 않음");
+  });
+
+  it("keeps the old revision base when accepted bulk proposals cannot be reconciled", async () => {
+    const user = userEvent.setup();
+    const acceptedBatch = createDeferredResponse();
+    const proposal = { ...createProposal("proposal_alpha", "pending", "alpha"), replacementText: "A" };
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockReturnValueOnce(acceptedBatch.promise)
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "Document revision conflict" }), { status: 409 }));
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Bulk draft", "alpha")}
+        proposals={[proposal]}
+        templates={[createTemplate("tpl_1", "Board review")]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "대기 중인 모든 제안 수락" }));
+    await user.click(screen.getByRole("button", { name: "Mock body edit" }));
+    await act(async () => {
+      acceptedBatch.resolve(new Response(JSON.stringify({
+        change: { id: "change_batch" },
+        document: {
+          ...createDocumentWithContent("doc_1", "Bulk draft", "A"),
+          revision: 1,
+        },
+        proposals: [{ ...proposal, appliedMode: "replace", status: "accepted" }],
+      })));
+      await acceptedBatch.promise;
+    });
+
+    expect(screen.getByTestId("mock-document-body")).toHaveTextContent("fresh edited body");
+    expect(screen.getByText("수락됨")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("제안 상태를 업데이트하지 못했습니다.");
+
+    await user.click(screen.getByRole("button", { name: "저장" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(fetchMock.mock.calls[1]?.[0]).toBe("/api/documents/doc_1");
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toMatchObject({ expectedRevision: 0 });
   });
 
   it("bulk accepts range-backed proposals from the end of the document first", async () => {

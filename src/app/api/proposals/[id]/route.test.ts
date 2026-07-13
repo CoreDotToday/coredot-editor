@@ -25,7 +25,7 @@ function createProposalRecord(overrides: Record<string, unknown> = {}) {
     createdAt: new Date("2026-01-01T00:00:00.000Z"),
     updatedAt: new Date("2026-01-01T00:00:00.000Z"),
     ...overrides,
-  } as Awaited<ReturnType<typeof updateProposalStatus>>;
+  } as NonNullable<Awaited<ReturnType<typeof getProposalById>>>;
 }
 
 function createJsonRequest(body: unknown) {
@@ -79,11 +79,42 @@ describe("PATCH /api/proposals/[id]", () => {
     expect(updateProposalStatus).not.toHaveBeenCalled();
   });
 
+  it.each(["pending", "rejected"] as const)(
+    "rejects changing an accepted proposal to %s outside document change undo",
+    async (status) => {
+      vi.mocked(updateProposalStatus).mockResolvedValueOnce(null as never);
+      vi.mocked(getProposalById).mockResolvedValueOnce(createProposalRecord({ status: "accepted" }));
+
+      const response = await PATCH(
+        createJsonRequest({ status, ...(status === "rejected" ? { expectedStatus: "accepted" } : {}) }),
+        createContext(),
+      );
+
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({
+        error: "Accepted proposals may only be reset by document change undo",
+        proposal: { id: "proposal_1", status: "accepted" },
+      });
+    },
+  );
+
+  it("allows a rejected proposal to return to pending", async () => {
+    vi.mocked(updateProposalStatus).mockResolvedValueOnce(createProposalRecord({ status: "pending" }));
+
+    const response = await PATCH(
+      createJsonRequest({ status: "pending", expectedStatus: "rejected" }),
+      createContext(),
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ proposal: { id: "proposal_1", status: "pending" } });
+  });
+
   it("returns 409 when the proposal status changed from the caller expectation", async () => {
     vi.mocked(updateProposalStatus).mockResolvedValueOnce(
       null as unknown as Awaited<ReturnType<typeof updateProposalStatus>>,
     );
-    vi.mocked(getProposalById).mockResolvedValueOnce(createProposalRecord({ status: "accepted" }));
+    vi.mocked(getProposalById).mockResolvedValueOnce(createProposalRecord({ status: "rejected" }));
 
     const response = await PATCH(
       createJsonRequest({ status: "rejected", expectedStatus: "pending" }),
@@ -93,7 +124,7 @@ describe("PATCH /api/proposals/[id]", () => {
     expect(response.status).toBe(409);
     expect(await response.json()).toMatchObject({
       error: "Proposal status changed",
-      proposal: { id: "proposal_1", status: "accepted" },
+      proposal: { id: "proposal_1", status: "rejected" },
     });
     expect(updateProposalStatus).toHaveBeenCalledWith(TEST_REQUEST_CONTEXT, "proposal_1", "rejected", undefined, {
       expectedStatus: "pending",

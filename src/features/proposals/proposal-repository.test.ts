@@ -185,7 +185,7 @@ describe("proposal repository", () => {
     });
   });
 
-  it("lists proposals for a document and updates proposal status", async () => {
+  it("lists proposals for a document and rejects a pending proposal", async () => {
     const db = await createIsolatedProposalDb();
     const repository = createProposalRepository(db);
     const firstProposal = await repository.createProposal(workspaceA, {
@@ -206,15 +206,95 @@ describe("proposal repository", () => {
     const updatedProposal = await repository.updateProposalStatus(
       workspaceA,
       firstProposal.id,
-      "accepted",
-      "insert_below",
+      "rejected",
     );
     const proposals = await repository.listProposalsForDocument(workspaceA, "doc_1");
 
-    expect(updatedProposal?.status).toBe("accepted");
-    expect(updatedProposal?.appliedMode).toBe("insert_below");
+    expect(updatedProposal?.status).toBe("rejected");
+    expect(updatedProposal?.appliedMode).toBeNull();
     expect(proposals).toHaveLength(1);
-    expect(proposals[0]).toMatchObject({ id: firstProposal.id, appliedMode: "insert_below", status: "accepted" });
+    expect(proposals[0]).toMatchObject({ id: firstProposal.id, appliedMode: null, status: "rejected" });
+  });
+
+  it("does not let generic repository callers bypass transactional proposal acceptance", async () => {
+    const db = await createIsolatedProposalDb();
+    const repository = createProposalRepository(db);
+    const proposal = await repository.createProposal(workspaceA, {
+      aiRunId: "run_1",
+      documentId: "doc_1",
+      targetText: "old",
+      replacementText: "new",
+      explanation: "Clearer.",
+    });
+
+    const updatedProposal = await repository.updateProposalStatus(
+      workspaceA,
+      proposal.id,
+      "accepted",
+      "replace",
+      { expectedStatus: "pending" },
+    );
+
+    expect(updatedProposal).toBeNull();
+    await expect(repository.getProposalById(workspaceA, proposal.id)).resolves.toMatchObject({
+      appliedMode: null,
+      status: "pending",
+    });
+  });
+
+  it.each(["pending", "rejected"] as const)(
+    "does not transition an accepted proposal to %s outside transactional undo",
+    async (status) => {
+      const db = await createIsolatedProposalDb();
+      const repository = createProposalRepository(db);
+      const proposal = await repository.createProposal(workspaceA, {
+        aiRunId: "run_1",
+        documentId: "doc_1",
+        targetText: "old",
+        replacementText: "new",
+        explanation: "Clearer.",
+      });
+      await db.update(schema.aiProposals).set({ appliedMode: "replace", status: "accepted" });
+
+      const updatedProposal = await repository.updateProposalStatus(
+        workspaceA,
+        proposal.id,
+        status,
+        undefined,
+        { expectedStatus: "accepted" },
+      );
+
+      expect(updatedProposal).toBeNull();
+      await expect(repository.getProposalById(workspaceA, proposal.id)).resolves.toMatchObject({
+        appliedMode: "replace",
+        status: "accepted",
+      });
+    },
+  );
+
+  it("allows a rejected proposal to return to pending", async () => {
+    const db = await createIsolatedProposalDb();
+    const repository = createProposalRepository(db);
+    const proposal = await repository.createProposal(workspaceA, {
+      aiRunId: "run_1",
+      documentId: "doc_1",
+      targetText: "old",
+      replacementText: "new",
+      explanation: "Clearer.",
+    });
+    await repository.updateProposalStatus(workspaceA, proposal.id, "rejected", undefined, {
+      expectedStatus: "pending",
+    });
+
+    const restoredProposal = await repository.updateProposalStatus(
+      workspaceA,
+      proposal.id,
+      "pending",
+      undefined,
+      { expectedStatus: "rejected" },
+    );
+
+    expect(restoredProposal).toMatchObject({ appliedMode: null, status: "pending" });
   });
 
   it("does not update a proposal when the expected status is stale", async () => {

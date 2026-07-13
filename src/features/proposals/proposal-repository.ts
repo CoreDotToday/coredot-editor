@@ -1,4 +1,4 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import { db } from "@/db/client";
 import { aiProposals, type NewAiProposalRecord } from "@/db/schema";
 import type { WorkspaceScope } from "@/features/auth/request-context";
@@ -55,20 +55,27 @@ export function createProposalRepository(database: ProposalDatabase = db) {
       scope: WorkspaceScope,
       id: string,
       status: "pending" | "accepted" | "rejected",
-      appliedMode?: "replace" | "insert_below",
+      _appliedMode?: "replace" | "insert_below",
       options: { expectedStatus?: "pending" | "accepted" | "rejected" } = {},
     ) {
+      if (status === "accepted") return null;
+
       const whereClause = options.expectedStatus
         ? and(
             eq(aiProposals.workspaceId, scope.workspaceId),
             eq(aiProposals.id, id),
+            inArray(aiProposals.status, ["pending", "rejected"]),
             eq(aiProposals.status, options.expectedStatus),
           )
-        : and(eq(aiProposals.workspaceId, scope.workspaceId), eq(aiProposals.id, id));
+        : and(
+            eq(aiProposals.workspaceId, scope.workspaceId),
+            eq(aiProposals.id, id),
+            inArray(aiProposals.status, ["pending", "rejected"]),
+          );
       const [proposal] = await database
         .update(aiProposals)
         .set({
-          appliedMode: status === "accepted" ? appliedMode ?? null : null,
+          appliedMode: null,
           status,
           updatedAt: new Date(),
         })

@@ -1022,10 +1022,6 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
         });
       const proposalForState: AiReviewProposal =
         updatedProposal ?? { ...previousProposal, appliedMode: status === "accepted" ? applyMode : null, status };
-      if (status === "accepted" && appliedServerResponse?.document) {
-        serverContentSignatureRef.current = createProposalContentSignature(appliedServerResponse.document.contentJson);
-        updateServerRevision(serverRevisionRef, appliedServerResponse.document.revision);
-      }
 
       if (status === "accepted") {
         const baseDraft = draftVersionRef.current === startingDraftVersion ? draft : draftRef.current;
@@ -1051,6 +1047,8 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
             }
             nextDraft = { ...baseDraft, contentJson: reconciled.contentJson };
           }
+          serverContentSignatureRef.current = createProposalContentSignature(appliedServerResponse.document.contentJson);
+          updateServerRevision(serverRevisionRef, appliedServerResponse.document.revision);
           draftVersionRef.current += 1;
           draftRef.current = nextDraft;
           setDraft(nextDraft);
@@ -1267,8 +1265,6 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
           throw new Error("Incomplete proposal batch response");
         }
 
-        serverContentSignatureRef.current = createProposalContentSignature(applyResponse.document.contentJson);
-        updateServerRevision(serverRevisionRef, applyResponse.document.revision);
         const hasNewerLocalDraft = draftVersionRef.current !== startingDraftVersion;
         const reconciliationBase = hasNewerLocalDraft ? draftRef.current : submittedDraft;
         const reconciled = buildAcceptedDraftState(reconciliationBase, pendingProposals);
@@ -1281,6 +1277,8 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
           return;
         }
 
+        serverContentSignatureRef.current = createProposalContentSignature(applyResponse.document.contentJson);
+        updateServerRevision(serverRevisionRef, applyResponse.document.revision);
         const serverDraft = createDraftFromDocumentSnapshot(applyResponse.document);
         const nextDraft = hasNewerLocalDraft
           ? { ...reconciliationBase, contentJson: reconciled.nextContentJson }

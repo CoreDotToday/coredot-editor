@@ -226,13 +226,13 @@ export function createDocumentChangeService(database: DocumentChangeDatabase = d
             })
             .returning();
           if (!change) throw new Error("Document change audit insert returned no row");
-          await transaction.insert(documentChangeProposals).values(requested.map((item) => ({
+          await transaction.insert(documentChangeProposals).values(ordered.map((proposal, ordinal) => ({
             workspaceId: context.workspaceId,
             changeId: change.id,
             documentId: input.documentId,
-            proposalId: item.proposal.id,
-            appliedMode: item.mode,
-            ordinal: item.ordinal,
+            proposalId: proposal.id,
+            appliedMode: proposal.changeItem.mode,
+            ordinal,
           })));
 
           return { change, document: updatedDocument, ok: true, proposals: updatedProposals } as const;
