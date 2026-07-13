@@ -140,6 +140,14 @@ async function applyDocumentCreationKeyMigration(client: Awaited<ReturnType<type
   }
 }
 
+async function applyAiIdempotencyMigration(client: Awaited<ReturnType<typeof createLegacyDatabase>>) {
+  const migration = await readFile(resolve(process.cwd(), "drizzle/0011_ai_idempotency.sql"), "utf8");
+  for (const statement of migration.split("--> statement-breakpoint")) {
+    const sql = statement.trim();
+    if (sql) await client.execute(sql);
+  }
+}
+
 describe("workspace ownership migration", () => {
   it("adds tenant-safe document change relations with valid foreign keys", async () => {
     const client = await createLegacyDatabase();
@@ -217,6 +225,66 @@ describe("workspace ownership migration", () => {
       ) VALUES (
         'same_key_other_workspace', 'workspace_b', 'recovery-key-123456', 'Separate',
         '{"type":"doc"}', '', 'draft', 'draft', '{}', 0, 3000, 3000
+      )
+    `)).resolves.toBeDefined();
+    expect((await client.execute("PRAGMA foreign_key_check")).rows).toEqual([]);
+  });
+
+  it("adds nullable AI idempotency identity to existing runs and enforces workspace-scoped uniqueness", async () => {
+    const client = await createLegacyDatabase();
+    await applyWorkspaceOwnershipMigration(client);
+    await applyRequestBudgetMigration(client);
+    await applyDocumentRevisionMigration(client);
+    await applyDocumentChangesMigration(client);
+    await applyDocumentCreationKeyMigration(client);
+    await applyAiIdempotencyMigration(client);
+
+    expect((await client.execute(
+      "SELECT output_text, idempotency_key, operation_fingerprint, retry_not_before_at FROM ai_runs WHERE id = 'legacy_run'",
+    )).rows).toEqual([
+      expect.objectContaining({
+        idempotency_key: null,
+        operation_fingerprint: null,
+        output_text: "Output",
+        retry_not_before_at: null,
+      }),
+    ]);
+    expect((await client.execute(
+      "SELECT result_ordinal FROM ai_proposals WHERE id = 'legacy_proposal'",
+    )).rows).toEqual([expect.objectContaining({ result_ordinal: null })]);
+    await client.execute(`
+      UPDATE ai_runs
+      SET idempotency_key = 'review-key', operation_fingerprint = 'fingerprint-a'
+      WHERE id = 'legacy_run'
+    `);
+    await expect(client.execute(`
+      INSERT INTO ai_runs (
+        id, workspace_id, document_id, prompt_template_id, command_type, provider, model,
+        idempotency_key, operation_fingerprint, input_summary_json, output_text, status,
+        was_applied, created_at, updated_at
+      ) VALUES (
+        'duplicate_run', 'local', 'legacy_doc', 'tpl_strategy_review', 'document_review',
+        'stub', 'stub-editor', 'review-key', 'fingerprint-b', '{}', '', 'pending', 0, 3000, 3000
+      )
+    `)).rejects.toThrow();
+
+    await client.execute(`
+      INSERT INTO documents (
+        id, workspace_id, title, content_json, plain_text, status, readiness,
+        metadata_json, revision, created_at, updated_at
+      ) VALUES (
+        'workspace_b_doc_for_ai', 'workspace_b', 'Workspace B', '{"type":"doc"}', '',
+        'draft', 'draft', '{}', 0, 3000, 3000
+      )
+    `);
+    await expect(client.execute(`
+      INSERT INTO ai_runs (
+        id, workspace_id, document_id, prompt_template_id, command_type, provider, model,
+        idempotency_key, operation_fingerprint, input_summary_json, output_text, status,
+        was_applied, created_at, updated_at
+      ) VALUES (
+        'workspace_b_run', 'workspace_b', 'workspace_b_doc_for_ai', NULL, 'document_review',
+        'stub', 'stub-editor', 'review-key', 'fingerprint-b', '{}', '', 'pending', 0, 3000, 3000
       )
     `)).resolves.toBeDefined();
     expect((await client.execute("PRAGMA foreign_key_check")).rows).toEqual([]);

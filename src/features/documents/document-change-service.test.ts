@@ -79,6 +79,7 @@ async function createChangeDatabase() {
       target_from integer,
       target_to integer,
       default_apply_mode text DEFAULT 'replace' NOT NULL,
+      result_ordinal integer,
       applied_mode text,
       status text DEFAULT 'pending' NOT NULL,
       created_at integer NOT NULL,
@@ -86,6 +87,8 @@ async function createChangeDatabase() {
     );
     CREATE UNIQUE INDEX ai_proposals_workspace_id_id_document_id_unique
       ON ai_proposals(workspace_id, id, document_id);
+    CREATE UNIQUE INDEX ai_proposals_workspace_run_result_ordinal_unique
+      ON ai_proposals(workspace_id, ai_run_id, result_ordinal);
     CREATE TABLE document_changes (
       id text PRIMARY KEY NOT NULL,
       workspace_id text NOT NULL,

@@ -1876,9 +1876,241 @@ describe("DocumentShell", () => {
         }),
       );
     });
+    const rewriteRequest = fetchMock.mock.calls.find(([url]) => url === "/api/ai/rewrite")?.[1] as RequestInit;
+    expect(new Headers(rewriteRequest.headers).get("Idempotency-Key")).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+    );
     await screen.findByRole("region", { name: "선택 AI 결과" });
     expect(screen.getAllByText("selected text").length).toBeGreaterThan(0);
     expect(screen.getAllByText("revenue grew 8%").length).toBeGreaterThan(0);
+  });
+
+  it("reuses the idempotency key when the user retries a selection rewrite after a 5xx response", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "Failed" }), { status: 500 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ run: createAiRun("run_retry"), proposal: null })));
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "selected text in document")}
+        templates={[createTemplate("tpl_1", "Rewrite template")]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Mock selection command" }));
+    await screen.findByText("선택 영역 처리에 실패했습니다. 다시 시도하세요.");
+    await user.click(screen.getByRole("button", { name: "Mock selection command" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+
+    const keys = fetchMock.mock.calls.map(([, init]) =>
+      new Headers((init as RequestInit).headers).get("Idempotency-Key"),
+    );
+    expect(keys[0]).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(keys[1]).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(keys[1]).toBe(keys[0]);
+  });
+
+  it("reuses the idempotency key when the user retries after the rewrite response is lost", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ run: createAiRun("run_retry"), proposal: null })));
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "selected text in document")}
+        templates={[createTemplate("tpl_1", "Rewrite template")]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Mock selection command" }));
+    await screen.findByText("선택 영역 처리에 실패했습니다. 다시 시도하세요.");
+    await user.click(screen.getByRole("button", { name: "Mock selection command" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+
+    const keys = fetchMock.mock.calls.map(([, init]) =>
+      new Headers((init as RequestInit).headers).get("Idempotency-Key"),
+    );
+    expect(keys[1]).toBe(keys[0]);
+  });
+
+  it("uses a fresh idempotency key when the serialized rewrite body changes after a failed attempt", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "Failed" }), { status: 500 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ run: createAiRun("run_retry"), proposal: null })));
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "selected text in document")}
+        templates={[createTemplate("tpl_1", "Rewrite template")]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Mock selection command" }));
+    await screen.findByText("선택 영역 처리에 실패했습니다. 다시 시도하세요.");
+    await user.click(screen.getByRole("button", { name: "Mock body edit" }));
+    await user.click(screen.getByRole("button", { name: "Mock selection command" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+
+    const requests = fetchMock.mock.calls.map(([, init]) => init as RequestInit);
+    expect(requests[0].body).not.toBe(requests[1].body);
+    expect(new Headers(requests[1].headers).get("Idempotency-Key")).not.toBe(
+      new Headers(requests[0].headers).get("Idempotency-Key"),
+    );
+  });
+
+  it.each([408, 409, 429, 503])(
+    "reuses the idempotency key when a selection rewrite returns retryable status %i",
+    async (status) => {
+      const user = userEvent.setup();
+      const fetchMock = vi
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValueOnce(new Response(JSON.stringify({ error: "Retry later" }), { status }))
+        .mockResolvedValueOnce(new Response(JSON.stringify({ run: createAiRun("run_retry"), proposal: null })));
+
+      render(
+        <DocumentShell
+          aiRuns={[]}
+          document={createDocumentWithContent("doc_1", "Market Entry Memo", "selected text in document")}
+          templates={[createTemplate("tpl_1", "Rewrite template")]}
+        />,
+      );
+
+      await user.click(screen.getByRole("button", { name: "Mock selection command" }));
+      await screen.findByText("선택 영역 처리에 실패했습니다. 다시 시도하세요.");
+      await user.click(screen.getByRole("button", { name: "Mock selection command" }));
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+
+      const keys = fetchMock.mock.calls.map(([, init]) =>
+        new Headers((init as RequestInit).headers).get("Idempotency-Key"),
+      );
+      expect(keys[1]).toBe(keys[0]);
+    },
+  );
+
+  it("clears a retained idempotency key after a successful selection rewrite retry", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "Retry later" }), { status: 500 }))
+      .mockResolvedValue(
+        new Response(JSON.stringify({ run: createAiRun("run_success"), proposal: null })),
+      );
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "selected text in document")}
+        templates={[createTemplate("tpl_1", "Rewrite template")]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Mock selection command" }));
+    await screen.findByText("선택 영역 처리에 실패했습니다. 다시 시도하세요.");
+    await user.click(screen.getByRole("button", { name: "Mock selection command" }));
+    await waitFor(() => expect(screen.queryByTestId("mock-selection-command-running")).not.toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: "Mock selection command" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+
+    const keys = fetchMock.mock.calls.map(([, init]) =>
+      new Headers((init as RequestInit).headers).get("Idempotency-Key"),
+    );
+    expect(keys[1]).toBe(keys[0]);
+    expect(keys[2]).not.toBe(keys[1]);
+  });
+
+  it("clears a retained idempotency key after a definitive selection rewrite 4xx", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "Retry later" }), { status: 500 }))
+      .mockResolvedValueOnce(new Response("{", { status: 400 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ run: createAiRun("run_retry"), proposal: null })));
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "selected text in document")}
+        templates={[createTemplate("tpl_1", "Rewrite template")]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Mock selection command" }));
+    await screen.findByText("선택 영역 처리에 실패했습니다. 다시 시도하세요.");
+    await user.click(screen.getByRole("button", { name: "Mock selection command" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    await user.click(screen.getByRole("button", { name: "Mock selection command" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+
+    const keys = fetchMock.mock.calls.map(([, init]) =>
+      new Headers((init as RequestInit).headers).get("Idempotency-Key"),
+    );
+    expect(keys[1]).toBe(keys[0]);
+    expect(keys[2]).not.toBe(keys[1]);
+  });
+
+  it("clears a retained rewrite key after a non-allowlisted redirect response", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "Retry later" }), { status: 500 }))
+      .mockResolvedValueOnce(new Response("{", { status: 302 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ run: createAiRun("run_retry"), proposal: null })));
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "selected text in document")}
+        templates={[createTemplate("tpl_1", "Rewrite template")]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Mock selection command" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    await user.click(screen.getByRole("button", { name: "Mock selection command" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    await user.click(screen.getByRole("button", { name: "Mock selection command" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+
+    const keys = fetchMock.mock.calls.map(([, init]) =>
+      new Headers((init as RequestInit).headers).get("Idempotency-Key"),
+    );
+    expect(keys[1]).toBe(keys[0]);
+    expect(keys[2]).not.toBe(keys[1]);
+  });
+
+  it("retains a rewrite key when a 200 response body cannot be consumed", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response("{", { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ run: createAiRun("run_retry"), proposal: null })));
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "selected text in document")}
+        templates={[createTemplate("tpl_1", "Rewrite template")]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Mock selection command" }));
+    await screen.findByText("선택 영역 처리에 실패했습니다. 다시 시도하세요.");
+    await user.click(screen.getByRole("button", { name: "Mock selection command" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+
+    const keys = fetchMock.mock.calls.map(([, init]) =>
+      new Headers((init as RequestInit).headers).get("Idempotency-Key"),
+    );
+    expect(keys[1]).toBe(keys[0]);
   });
 
   it("passes selected document references to selection rewrite requests", async () => {
@@ -2383,6 +2615,10 @@ describe("DocumentShell", () => {
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledTimes(5);
     });
+    const idempotencyKeys = fetchMock.mock.calls.map(([, init]) =>
+      new Headers((init as RequestInit).headers).get("Idempotency-Key"),
+    );
+    expect(new Set(idempotencyKeys).size).toBe(5);
     expect(screen.getByTestId("mock-selection-command-running")).toHaveTextContent("5");
     expect(screen.getByTestId("mock-selection-command-limit")).toBeInTheDocument();
     expect(screen.getByText("AI 요청은 동시에 최대 5개까지 실행할 수 있습니다. 하나가 완료된 뒤 다시 요청하세요.")).toBeInTheDocument();
@@ -2424,6 +2660,128 @@ describe("DocumentShell", () => {
         body: expect.stringContaining('"documentText":"fresh edited body"'),
       }),
     );
+    const reviewRequest = fetchMock.mock.calls.find(([url]) => url === "/api/ai/review")?.[1] as RequestInit;
+    expect(new Headers(reviewRequest.headers).get("Idempotency-Key")).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+    );
+  });
+
+  it("reuses the idempotency key when a document review is retried after a 5xx response", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "Retry later" }), { status: 503 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ review: { summary: "ok", findings: [] }, proposals: [] })),
+      );
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "document body")}
+        templates={[createTemplate("tpl_1", "Board review")]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "문서 검토" }));
+    await screen.findByText("검토에 실패했습니다. 다시 시도하세요.");
+    await user.click(screen.getByRole("button", { name: "문서 검토" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+
+    const keys = fetchMock.mock.calls.map(([, init]) =>
+      new Headers((init as RequestInit).headers).get("Idempotency-Key"),
+    );
+    expect(keys[1]).toBe(keys[0]);
+  });
+
+  it("uses a fresh idempotency key when the serialized review body changes after a failed attempt", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "Retry later" }), { status: 500 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ review: { summary: "ok", findings: [] }, proposals: [] })),
+      );
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "document body")}
+        templates={[createTemplate("tpl_1", "Board review")]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "문서 검토" }));
+    await screen.findByText("검토에 실패했습니다. 다시 시도하세요.");
+    await user.click(screen.getByRole("button", { name: "Mock body edit" }));
+    await user.click(screen.getByRole("button", { name: "문서 검토" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+
+    const requests = fetchMock.mock.calls.map(([, init]) => init as RequestInit);
+    expect(requests[0].body).not.toBe(requests[1].body);
+    expect(new Headers(requests[1].headers).get("Idempotency-Key")).not.toBe(
+      new Headers(requests[0].headers).get("Idempotency-Key"),
+    );
+  });
+
+  it("clears a retained review key after a non-allowlisted redirect response", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "Retry later" }), { status: 500 }))
+      .mockResolvedValueOnce(new Response("{", { status: 302 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ review: { summary: "ok", findings: [] }, proposals: [] })),
+      );
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "document body")}
+        templates={[createTemplate("tpl_1", "Board review")]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "문서 검토" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    await user.click(screen.getByRole("button", { name: "문서 검토" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    await user.click(screen.getByRole("button", { name: "문서 검토" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+
+    const keys = fetchMock.mock.calls.map(([, init]) =>
+      new Headers((init as RequestInit).headers).get("Idempotency-Key"),
+    );
+    expect(keys[1]).toBe(keys[0]);
+    expect(keys[2]).not.toBe(keys[1]);
+  });
+
+  it("retains a review key when a 200 response body cannot be consumed", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response("{", { status: 200 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ review: { summary: "ok", findings: [] }, proposals: [] })),
+      );
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "document body")}
+        templates={[createTemplate("tpl_1", "Board review")]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "문서 검토" }));
+    await screen.findByText("검토에 실패했습니다. 다시 시도하세요.");
+    await user.click(screen.getByRole("button", { name: "문서 검토" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+
+    const keys = fetchMock.mock.calls.map(([, init]) =>
+      new Headers((init as RequestInit).headers).get("Idempotency-Key"),
+    );
+    expect(keys[1]).toBe(keys[0]);
   });
 
   it("shows review summary and skipped proposals after a document review", async () => {

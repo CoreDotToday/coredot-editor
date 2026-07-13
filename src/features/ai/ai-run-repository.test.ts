@@ -4,8 +4,9 @@ import { drizzle } from "drizzle-orm/libsql";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import * as schema from "@/db/schema";
+import { executeAiOperation } from "./ai-execution";
 import { createAiRunRepository } from "./ai-run-repository";
 
 const tempDirs: string[] = [];
@@ -69,6 +70,9 @@ async function createIsolatedAiRunDb() {
       command_type text NOT NULL,
       provider text NOT NULL,
       model text NOT NULL,
+      idempotency_key text,
+      operation_fingerprint text,
+      retry_not_before_at integer,
       input_summary_json text NOT NULL,
       output_text text DEFAULT '' NOT NULL,
       status text NOT NULL,
@@ -77,6 +81,7 @@ async function createIsolatedAiRunDb() {
       created_at integer NOT NULL,
       updated_at integer NOT NULL,
       UNIQUE(workspace_id, id, document_id),
+      UNIQUE(workspace_id, idempotency_key),
       FOREIGN KEY (workspace_id, document_id) REFERENCES documents(workspace_id, id) ON DELETE CASCADE,
       FOREIGN KEY (prompt_template_id) REFERENCES prompt_templates(id) ON DELETE SET NULL
     )
@@ -96,6 +101,7 @@ async function createIsolatedAiRunDb() {
       target_from integer,
       target_to integer,
       default_apply_mode text DEFAULT 'replace' NOT NULL,
+      result_ordinal integer,
       applied_mode text,
       status text DEFAULT 'pending' NOT NULL,
       created_at integer NOT NULL,
@@ -103,6 +109,7 @@ async function createIsolatedAiRunDb() {
       FOREIGN KEY (workspace_id, document_id) REFERENCES documents(workspace_id, id) ON DELETE CASCADE,
       FOREIGN KEY (workspace_id, ai_run_id, document_id)
         REFERENCES ai_runs(workspace_id, id, document_id) ON DELETE CASCADE,
+      UNIQUE(workspace_id, ai_run_id, result_ordinal),
       CONSTRAINT "no_bad_targets" CHECK(target_text <> 'bad')
     )
   `);
@@ -200,15 +207,253 @@ describe("AI run repository", () => {
       inputSummaryJson: { selectedTextLength: 4 },
     });
     const completedRun = await repository.completeAiRun(workspaceA, run.id, "New text");
+    const duplicateCompletion = await repository.completeAiRun(workspaceA, run.id, "late completion");
     const failedRun = await repository.failAiRun(workspaceA, run.id, "late failure");
     const runs = await repository.listAiRunsForDocument(workspaceA, "doc_1");
 
     expect(run.status).toBe("pending");
     expect(completedRun?.status).toBe("completed");
     expect(completedRun?.outputText).toBe("New text");
-    expect(failedRun?.status).toBe("failed");
-    expect(failedRun?.errorMessage).toBe("late failure");
+    expect(duplicateCompletion).toBeNull();
+    expect(failedRun).toBeNull();
     expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({ errorMessage: null, outputText: "New text", status: "completed" });
+  });
+
+  it("atomically claims one workspace-scoped key and replays the exact durable run with proposals", async () => {
+    const db = await createIsolatedAiRunDb();
+    const repository = createAiRunRepository(db);
+    const input = {
+      commandType: "document_review" as const,
+      documentId: "doc_1",
+      idempotencyKey: "shared-key",
+      inputSummaryJson: { documentTextLength: 4 },
+      model: "stub-editor",
+      operationFingerprint: "fingerprint-review-doc-1",
+      promptTemplateId: "tpl_1",
+      provider: "stub",
+    };
+
+    const [first, second] = await Promise.all([
+      repository.claimAiRun(workspaceA, input),
+      repository.claimAiRun(workspaceA, input),
+    ]);
+
+    expect([first.kind, second.kind].sort()).toEqual(["claimed", "in_progress"]);
+    const claimed = first.kind === "claimed" ? first : second;
+    if (claimed.kind !== "claimed") throw new Error("Expected one claimant");
+
+    const finalized = await repository.completeAiRunWithProposals(workspaceA, claimed.run.id, "durable review", [
+      {
+        documentId: "doc_1",
+        explanation: "First.",
+        replacementText: "First replacement",
+        targetText: "First target",
+      },
+      {
+        documentId: "doc_1",
+        explanation: "Second.",
+        replacementText: "Second replacement",
+        targetText: "Second target",
+      },
+    ]);
+    const replay = await repository.claimAiRun(workspaceA, input);
+    const stored = await repository.getAiRunByIdempotencyKey(workspaceA, "shared-key");
+
+    expect(finalized?.proposals.map((proposal) => [proposal.resultOrdinal, proposal.targetText])).toEqual([
+      [0, "First target"],
+      [1, "Second target"],
+    ]);
+    expect(replay).toMatchObject({
+      kind: "completed",
+      proposals: [
+        { replacementText: "First replacement", resultOrdinal: 0 },
+        { replacementText: "Second replacement", resultOrdinal: 1 },
+      ],
+      run: { id: claimed.run.id, outputText: "durable review", status: "completed" },
+    });
+    expect(stored).toEqual(expect.objectContaining({
+      proposals: [
+        expect.objectContaining({ replacementText: "First replacement", resultOrdinal: 0 }),
+        expect.objectContaining({ replacementText: "Second replacement", resultOrdinal: 1 }),
+      ],
+      run: expect.objectContaining({ id: claimed.run.id, status: "completed" }),
+    }));
+  });
+
+  it("keeps identical keys independent across workspaces and conflicts on a fingerprint mismatch", async () => {
+    const db = await createIsolatedAiRunDb();
+    const repository = createAiRunRepository(db);
+    const common = {
+      commandType: "document_review" as const,
+      idempotencyKey: "tenant-key",
+      inputSummaryJson: {},
+      model: "stub-editor",
+      operationFingerprint: "fingerprint-a",
+      provider: "stub",
+    };
+
+    const first = await repository.claimAiRun(workspaceA, {
+      ...common,
+      documentId: "doc_1",
+      promptTemplateId: "tpl_1",
+    });
+    const otherWorkspace = await repository.claimAiRun(workspaceB, {
+      ...common,
+      documentId: "doc_b",
+      promptTemplateId: "tpl_b",
+    });
+    const mismatch = await repository.claimAiRun(workspaceA, {
+      ...common,
+      documentId: "doc_1",
+      operationFingerprint: "fingerprint-b",
+      promptTemplateId: "tpl_1",
+    });
+
+    expect(first.kind).toBe("claimed");
+    expect(otherWorkspace.kind).toBe("claimed");
+    expect(mismatch).toEqual({ kind: "conflict" });
+    await expect(repository.listAiRunsForDocument(workspaceA, "doc_1")).resolves.toHaveLength(1);
+    await expect(repository.listAiRunsForDocument(workspaceB, "doc_b")).resolves.toHaveLength(1);
+  });
+
+  it("allows exactly one concurrent retrier to atomically reclaim a failed key", async () => {
+    const db = await createIsolatedAiRunDb();
+    const repository = createAiRunRepository(db);
+    const input = {
+      commandType: "selection_rewrite" as const,
+      documentId: "doc_1",
+      idempotencyKey: "retry-key",
+      inputSummaryJson: { selectedTextLength: 4 },
+      model: "stub-editor",
+      operationFingerprint: "fingerprint-rewrite",
+      promptTemplateId: "tpl_1",
+      provider: "stub",
+    };
+    const initial = await repository.claimAiRun(workspaceA, input);
+    if (initial.kind !== "claimed") throw new Error("Expected initial claim");
+    await repository.failAiRun(workspaceA, initial.run.id, "AI generation failed");
+
+    const [firstRetry, secondRetry] = await Promise.all([
+      repository.claimAiRun(workspaceA, input),
+      repository.claimAiRun(workspaceA, input),
+    ]);
+
+    expect([firstRetry.kind, secondRetry.kind].sort()).toEqual(["claimed", "in_progress"]);
+    expect(firstRetry.kind === "claimed" ? firstRetry.run.id : secondRetry.kind === "claimed" ? secondRetry.run.id : null)
+      .toBe(initial.run.id);
+  });
+
+  it("keeps timeout or abort failures non-reclaimable until stale-run recovery explicitly releases them", async () => {
+    const db = await createIsolatedAiRunDb();
+    const repository = createAiRunRepository(db);
+    const input = {
+      commandType: "selection_rewrite" as const,
+      documentId: "doc_1",
+      idempotencyKey: "blocked-retry-key",
+      inputSummaryJson: { selectedTextLength: 4 },
+      model: "stub-editor",
+      operationFingerprint: "blocked-retry-fingerprint",
+      promptTemplateId: "tpl_1",
+      provider: "stub",
+    };
+    const initial = await repository.claimAiRun(workspaceA, input);
+    if (initial.kind !== "claimed") throw new Error("Expected initial claim");
+    const retryNotBeforeAt = new Date(Date.now() + 60_000);
+    await repository.failAiRun(workspaceA, initial.run.id, "Operation timed out", { retryNotBeforeAt });
+
+    const retry = await repository.claimAiRun(workspaceA, input);
+
+    expect(retry).toMatchObject({
+      kind: "in_progress",
+      run: { id: initial.run.id, retryNotBeforeAt, status: "failed" },
+    });
+
+    await db.update(schema.aiRuns)
+      .set({ retryNotBeforeAt: new Date(Date.now() - 1) })
+      .where(sql`${schema.aiRuns.id} = ${initial.run.id}`);
+    await expect(repository.claimAiRun(workspaceA, input)).resolves.toMatchObject({
+      kind: "claimed",
+      run: { id: initial.run.id, retryNotBeforeAt: null, status: "pending" },
+    });
+  });
+
+  it("allows exactly one provider execution when concurrent executors retry the same failed key", async () => {
+    const db = await createIsolatedAiRunDb();
+    const repository = createAiRunRepository(db);
+    const runInput = {
+      commandType: "document_review" as const,
+      documentId: "doc_1",
+      inputSummaryJson: {},
+      promptTemplateId: "tpl_1",
+    };
+    const claimInput = {
+      ...runInput,
+      idempotencyKey: "executor-retry-key",
+      model: "stub-editor",
+      operationFingerprint: "executor-retry-fingerprint",
+      provider: "stub",
+    };
+    const initial = await repository.claimAiRun(workspaceA, claimInput);
+    if (initial.kind !== "claimed") throw new Error("Expected initial claim");
+    await repository.failAiRun(workspaceA, initial.run.id, "AI generation failed");
+
+    let releaseExecution!: () => void;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const execute = vi.fn(async () => {
+      markStarted();
+      await new Promise<void>((resolve) => {
+        releaseExecution = resolve;
+      });
+      return "completed output";
+    });
+    const runExecutor = () => executeAiOperation<{ documentId: string }, { name: string }, string, string>({
+      admission: {
+        kind: "ai_execution_admitted",
+        operation: "review",
+        requestId: crypto.randomUUID(),
+        startedAt: Date.now(),
+      },
+      claimAiRun: repository.claimAiRun,
+      completeAiRunWithProposals: (scope, id, outputText, proposals) =>
+        repository.completeAiRunWithProposals(
+          scope,
+          id,
+          outputText,
+          proposals as Parameters<typeof repository.completeAiRunWithProposals>[3],
+        ),
+      deadlineMs: 5_000,
+      execute,
+      failAiRun: repository.failAiRun,
+      getAiRunByIdempotencyKey: repository.getAiRunByIdempotencyKey,
+      idempotencyKey: claimInput.idempotencyKey,
+      mapDurableResult: ({ run }) => run.outputText ?? "",
+      mapFinalizedResult: ({ run }) => run.outputText ?? "",
+      operationFingerprint: claimInput.operationFingerprint,
+      preflight: async () => ({ ok: true, value: { documentId: "doc_1" } }),
+      prepareFinalization: (output) => ({ outputText: output, proposals: [] }),
+      resolveProvider: async () => ({
+        model: "stub-editor",
+        ok: true,
+        provider: { name: "stub" },
+        providerName: "stub",
+      }),
+      runInput,
+      scope: workspaceA,
+    });
+
+    const first = runExecutor();
+    await started;
+    const secondResult = await runExecutor();
+    expect(secondResult).toMatchObject({ code: "ai_operation_in_progress", ok: false, status: 409 });
+    releaseExecution();
+    const firstResult = await first;
+
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(firstResult).toMatchObject({ ok: true, replayed: false, value: "completed output" });
   });
 
   it("rolls back proposal inserts when finalizing an AI run fails", async () => {

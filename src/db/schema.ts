@@ -83,6 +83,9 @@ export const aiRuns = sqliteTable(
     commandType: text("command_type", { enum: ["selection_rewrite", "document_review"] }).notNull(),
     provider: text("provider").notNull(),
     model: text("model").notNull(),
+    idempotencyKey: text("idempotency_key"),
+    operationFingerprint: text("operation_fingerprint"),
+    retryNotBeforeAt: integer("retry_not_before_at", { mode: "timestamp_ms" }),
     inputSummaryJson: text("input_summary_json", { mode: "json" }).$type<Record<string, unknown>>().notNull(),
     outputText: text("output_text").notNull().default(""),
     status: text("status", { enum: ["pending", "streaming", "completed", "failed"] }).notNull(),
@@ -95,6 +98,7 @@ export const aiRuns = sqliteTable(
     index("ai_runs_document_id_idx").on(table.documentId),
     index("ai_runs_prompt_template_id_idx").on(table.promptTemplateId),
     index("ai_runs_workspace_document_created_idx").on(table.workspaceId, table.documentId, table.createdAt),
+    uniqueIndex("ai_runs_workspace_idempotency_key_unique").on(table.workspaceId, table.idempotencyKey),
     uniqueIndex("ai_runs_workspace_id_id_document_id_unique").on(table.workspaceId, table.id, table.documentId),
     foreignKey({
       columns: [table.workspaceId, table.documentId],
@@ -122,6 +126,7 @@ export const aiProposals = sqliteTable(
     targetFrom: integer("target_from"),
     targetTo: integer("target_to"),
     defaultApplyMode: text("default_apply_mode", { enum: ["replace", "insert_below"] }).notNull().default("replace"),
+    resultOrdinal: integer("result_ordinal"),
     appliedMode: text("applied_mode", { enum: ["replace", "insert_below"] }),
     status: text("status", { enum: ["pending", "accepted", "rejected"] }).notNull().default("pending"),
     createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
@@ -131,6 +136,11 @@ export const aiProposals = sqliteTable(
     index("ai_proposals_ai_run_id_idx").on(table.aiRunId),
     index("ai_proposals_document_id_idx").on(table.documentId),
     index("ai_proposals_workspace_document_created_idx").on(table.workspaceId, table.documentId, table.createdAt),
+    uniqueIndex("ai_proposals_workspace_run_result_ordinal_unique").on(
+      table.workspaceId,
+      table.aiRunId,
+      table.resultOrdinal,
+    ),
     uniqueIndex("ai_proposals_workspace_id_id_document_id_unique").on(table.workspaceId, table.id, table.documentId),
     foreignKey({
       columns: [table.workspaceId, table.documentId],
@@ -291,7 +301,10 @@ export type PromptTemplateRecord = typeof promptTemplates.$inferSelect;
 export type NewPromptTemplateRecord = typeof promptTemplates.$inferInsert;
 export type AiRunRecord = typeof aiRuns.$inferSelect;
 export type NewAiRunRecord = typeof aiRuns.$inferInsert;
-export type AiProposalRecord = typeof aiProposals.$inferSelect;
+type AiProposalDatabaseRecord = typeof aiProposals.$inferSelect;
+export type AiProposalRecord = Omit<AiProposalDatabaseRecord, "resultOrdinal"> & {
+  resultOrdinal?: number | null;
+};
 export type NewAiProposalRecord = typeof aiProposals.$inferInsert;
 export type DocumentChangeRecord = typeof documentChanges.$inferSelect;
 export type NewDocumentChangeRecord = typeof documentChanges.$inferInsert;

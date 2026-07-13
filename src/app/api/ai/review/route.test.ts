@@ -1,5 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { completeAiRunWithProposals, createAiRun, failAiRun } from "@/features/ai/ai-run-repository";
+import {
+  claimAiRun,
+  completeAiRunWithProposals,
+  failAiRun,
+  getAiRunByIdempotencyKey,
+} from "@/features/ai/ai-run-repository";
 import { createAiProvider } from "@/features/ai/providers";
 import { getDocumentById, getDocumentsByIds } from "@/features/documents/document-repository";
 import { getPromptTemplateById } from "@/features/templates/template-repository";
@@ -7,6 +12,8 @@ import type { DocumentRecord, PromptTemplateRecord } from "@/db/schema";
 import { TEST_REQUEST_CONTEXT } from "@/test/auth-context";
 import { setRequestBudgetForTests } from "@/features/security/request-budget";
 import { RESOURCE_LIMITS } from "@/features/security/resource-policy";
+import { createAiOperationFingerprint } from "@/features/ai/ai-execution";
+import { aiCommandPayloadSchema } from "@/features/ai/types";
 import { POST } from "./route";
 
 vi.mock("@/features/documents/document-repository", () => ({
@@ -19,8 +26,22 @@ vi.mock("@/features/templates/template-repository", () => ({
 }));
 
 vi.mock("@/features/ai/ai-run-repository", () => ({
+  claimAiRun: vi.fn(async (_scope, input) => ({
+    kind: "claimed",
+    run: { id: "run_1", ...input, status: "pending" },
+  })),
   completeAiRunWithProposals: vi.fn(async (_scope, id, outputText, proposals) => ({
-    run: { id, outputText, status: "completed" },
+    run: {
+      commandType: "document_review",
+      createdAt: new Date("2026-01-01T00:00:00.000Z"),
+      id,
+      idempotencyKey: "must-not-leak",
+      inputSummaryJson: { prompt: "must-not-leak" },
+      operationFingerprint: "must-not-leak",
+      outputText,
+      status: "completed",
+      workspaceId: "must-not-leak",
+    },
     proposals: proposals.map((proposal: Record<string, unknown>, index: number) => ({
       id: `proposal_${index + 1}`,
       status: "pending",
@@ -29,6 +50,7 @@ vi.mock("@/features/ai/ai-run-repository", () => ({
   })),
   createAiRun: vi.fn(async (_scope, input) => ({ id: "run_1", ...input, status: "pending" })),
   failAiRun: vi.fn(),
+  getAiRunByIdempotencyKey: vi.fn(async () => null),
 }));
 
 const localWorkspace = TEST_REQUEST_CONTEXT;
@@ -111,9 +133,10 @@ const templateRecord = {
   updatedAt: new Date("2026-01-01T00:00:00.000Z"),
 } satisfies PromptTemplateRecord;
 
-function createJsonRequest(body: unknown) {
+function createJsonRequest(body: unknown, idempotencyKey?: string) {
   return new Request("http://localhost/api/ai/review", {
     method: "POST",
+    headers: idempotencyKey === undefined ? undefined : { "Idempotency-Key": idempotencyKey },
     body: JSON.stringify(body),
   });
 }
@@ -123,7 +146,114 @@ describe("POST /api/ai/review", () => {
     vi.clearAllMocks();
   });
 
-  it("returns 429 before parsing or creating an AI provider when the budget is exhausted", async () => {
+  it("validates the Idempotency-Key after the body and before budget or provider work", async () => {
+    const consume = vi.fn(async () => ({
+      allowed: true,
+      limit: 20,
+      remaining: 19,
+      retryAt: new Date(Date.now() + 60_000),
+    }));
+    setRequestBudgetForTests({ consume });
+    const response = await POST(createJsonRequest({
+      command: "Review",
+      documentId: "doc_1",
+      templateId: "tpl_1",
+      variables: {},
+    }, "contains spaces"));
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "Invalid Idempotency-Key header" });
+    expect(consume).not.toHaveBeenCalled();
+    expect(createAiProvider).not.toHaveBeenCalled();
+  });
+
+  it("replays exact durable review output for an explicit matching key", async () => {
+    const replayBody = {
+      command: "Review",
+      documentId: "doc_1",
+      templateId: "tpl_1",
+      variables: {},
+    };
+    const normalized = aiCommandPayloadSchema.parse(replayBody);
+    const operationFingerprint = await createAiOperationFingerprint("review", {
+      ...normalized,
+      documentTextSource: "persisted",
+    });
+    const durableReview = {
+      findings: [{
+        problem: "Durable problem",
+        reason: "Durable reason",
+        replacementText: "Durable replacement",
+        targetText: "growth was good",
+      }],
+      summary: "Durable summary",
+    };
+    vi.mocked(getAiRunByIdempotencyKey).mockResolvedValueOnce({
+      proposals: [{
+        command: null,
+        defaultApplyMode: "replace",
+        explanation: "Durable problem: Durable reason",
+        id: "durable_proposal",
+        occurrenceIndex: 0,
+        replacementText: "Durable replacement",
+        source: "review",
+        status: "pending",
+        targetFrom: null,
+        targetText: "growth was good",
+        targetTo: null,
+      }],
+      run: {
+        commandType: "document_review",
+        createdAt: new Date("2026-01-01T00:00:00.000Z"),
+        id: "durable_run",
+        idempotencyKey: "review-key",
+        operationFingerprint,
+        outputText: JSON.stringify(durableReview),
+        status: "completed",
+        workspaceId: "must-not-leak",
+        inputSummaryJson: { prompt: "must-not-leak" },
+      },
+    } as never);
+
+    const response = await POST(createJsonRequest(replayBody, "review-key"));
+
+    expect(response.status).toBe(200);
+    const responseBody = await response.json();
+    expect(responseBody).toMatchObject({
+      proposals: [{ id: "durable_proposal", replacementText: "Durable replacement" }],
+      review: { summary: "Durable summary" },
+      run: { id: "durable_run" },
+      skippedProposalCount: 0,
+    });
+    expect(Object.keys(responseBody.run).sort()).toEqual(["commandType", "createdAt", "id", "status"]);
+    expect(JSON.stringify(responseBody)).not.toMatch(/must-not-leak|review-key|operationFingerprint|idempotencyKey|workspaceId|inputSummaryJson/);
+    expect(claimAiRun).not.toHaveBeenCalled();
+    expect(createAiProvider).not.toHaveBeenCalled();
+  });
+
+  it("generates a server UUID for a missing compatibility header on a fresh operation", async () => {
+    vi.mocked(getDocumentById).mockResolvedValueOnce(documentRecord);
+    vi.mocked(getPromptTemplateById).mockResolvedValueOnce(templateRecord);
+
+    const response = await POST(createJsonRequest({
+      command: "Review",
+      documentId: "doc_1",
+      templateId: "tpl_1",
+      variables: {},
+    }));
+
+    expect(response.status).toBe(200);
+    expect(claimAiRun).toHaveBeenCalledWith(
+      localWorkspace,
+      expect.objectContaining({
+        idempotencyKey: expect.stringMatching(
+          /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+        ),
+      }),
+    );
+  });
+
+  it("preserves 429 headers without reading the request body when the budget is exhausted", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
     try {
@@ -135,15 +265,17 @@ describe("POST /api/ai/review", () => {
           retryAt: new Date(Date.now() + 5_000),
         })),
       });
-      const request = { json: vi.fn() } as unknown as Request;
-
-      const response = await POST(request);
+      const read = vi.fn();
+      const response = await POST({
+        body: { getReader: () => ({ read }) },
+        headers: new Headers({ "content-length": "128", "Idempotency-Key": "budget-key" }),
+      } as unknown as Request);
 
       expect(response.status).toBe(429);
       expect(response.headers.get("Retry-After")).toBe("5");
-      expect(request.json).not.toHaveBeenCalled();
+      expect(read).not.toHaveBeenCalled();
       expect(createAiProvider).not.toHaveBeenCalled();
-      expect(createAiRun).not.toHaveBeenCalled();
+      expect(claimAiRun).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }
@@ -161,7 +293,7 @@ describe("POST /api/ai/review", () => {
     expect(response.status).toBe(413);
     expect(json).not.toHaveBeenCalled();
     expect(createAiProvider).not.toHaveBeenCalled();
-    expect(createAiRun).not.toHaveBeenCalled();
+    expect(claimAiRun).not.toHaveBeenCalled();
   });
 
   it("rejects an oversized chunked AI body despite a falsely small Content-Length", async () => {
@@ -185,7 +317,73 @@ describe("POST /api/ai/review", () => {
     expect(response.status).toBe(413);
     expect(cancel).toHaveBeenCalledTimes(1);
     expect(createAiProvider).not.toHaveBeenCalled();
-    expect(createAiRun).not.toHaveBeenCalled();
+    expect(claimAiRun).not.toHaveBeenCalled();
+  });
+
+  it("bounds a stalled request body stream with the remaining admission deadline", async () => {
+    vi.useFakeTimers();
+    const cancel = vi.fn();
+    const releaseLock = vi.fn();
+    const read = vi.fn(async () => new Promise(() => undefined));
+    setRequestBudgetForTests({
+      consume: vi.fn(async () => ({
+        allowed: true,
+        limit: 20,
+        remaining: 19,
+        retryAt: new Date(Date.now() + 60_000),
+      })),
+    });
+    let response: Response | undefined;
+
+    try {
+      void POST({
+        body: { getReader: () => ({ cancel, read, releaseLock }) },
+        headers: new Headers({ "content-length": "128", "Idempotency-Key": "stalled-body-key" }),
+      } as unknown as Request).then((value) => {
+        response = value;
+      });
+      await vi.advanceTimersByTimeAsync(RESOURCE_LIMITS.operationMs);
+
+      expect(response?.status).toBe(504);
+      expect(cancel).toHaveBeenCalledTimes(1);
+      expect(releaseLock).toHaveBeenCalledTimes(1);
+      expect(getDocumentById).not.toHaveBeenCalled();
+      expect(createAiProvider).not.toHaveBeenCalled();
+      expect(claimAiRun).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("returns 408 and cancels a stalled body stream when the request is aborted", async () => {
+    const controller = new AbortController();
+    const cancel = vi.fn();
+    const releaseLock = vi.fn();
+    const read = vi.fn(async () => new Promise(() => undefined));
+    setRequestBudgetForTests({
+      consume: vi.fn(async () => ({
+        allowed: true,
+        limit: 20,
+        remaining: 19,
+        retryAt: new Date(Date.now() + 60_000),
+      })),
+    });
+    const pending = POST({
+      body: { getReader: () => ({ cancel, read, releaseLock }) },
+      headers: new Headers({ "content-length": "128", "Idempotency-Key": "aborted-body-key" }),
+      signal: controller.signal,
+    } as unknown as Request);
+    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(1));
+
+    controller.abort();
+    const response = await pending;
+
+    expect(response.status).toBe(408);
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(releaseLock).toHaveBeenCalledTimes(1);
+    expect(getDocumentById).not.toHaveBeenCalled();
+    expect(createAiProvider).not.toHaveBeenCalled();
+    expect(claimAiRun).not.toHaveBeenCalled();
   });
 
   it("returns 504, aborts the provider, and does not persist proposals after timeout", async () => {
@@ -219,7 +417,12 @@ describe("POST /api/ai/review", () => {
 
       expect(response.status).toBe(504);
       expect(generateReview.mock.calls[0]?.[0].abortSignal?.aborted).toBe(true);
-      expect(failAiRun).toHaveBeenCalledWith(TEST_REQUEST_CONTEXT, "run_1", "Operation timed out");
+      expect(failAiRun).toHaveBeenCalledWith(
+        TEST_REQUEST_CONTEXT,
+        "run_1",
+        "Operation timed out",
+        { retryNotBeforeAt: expect.any(Date) },
+      );
       expect(completeAiRunWithProposals).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
@@ -250,7 +453,7 @@ describe("POST /api/ai/review", () => {
       error: "Invalid template variables",
       details: { audience: "Audience 필드는 필수입니다." },
     });
-    expect(createAiRun).not.toHaveBeenCalled();
+    expect(claimAiRun).not.toHaveBeenCalled();
   });
 
   it("creates pending proposals for every structured finding", async () => {
@@ -267,13 +470,16 @@ describe("POST /api/ai/review", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({
+    const responseBody = await response.json();
+    expect(responseBody).toMatchObject({
       run: { id: "run_1", status: "completed" },
       review: { summary: "Two findings." },
       proposals: [{ targetText: "growth was good" }, { targetText: "someone should follow up" }],
       skippedProposalCount: 1,
     });
-    expect(createAiRun).toHaveBeenCalledWith(
+    expect(Object.keys(responseBody.run).sort()).toEqual(["commandType", "createdAt", "id", "status"]);
+    expect(JSON.stringify(responseBody)).not.toMatch(/must-not-leak|operationFingerprint|idempotencyKey|workspaceId|inputSummaryJson/);
+    expect(claimAiRun).toHaveBeenCalledWith(
       localWorkspace,
       expect.objectContaining({ commandType: "document_review" }),
     );
@@ -342,7 +548,7 @@ describe("POST /api/ai/review", () => {
         }),
       ]),
     }));
-    expect(createAiRun).toHaveBeenCalledWith(
+    expect(claimAiRun).toHaveBeenCalledWith(
       localWorkspace,
       expect.objectContaining({
         inputSummaryJson: expect.objectContaining({
@@ -411,7 +617,7 @@ describe("POST /api/ai/review", () => {
         }),
       ]),
     }));
-    expect(createAiRun).toHaveBeenCalledWith(
+    expect(claimAiRun).toHaveBeenCalledWith(
       localWorkspace,
       expect.objectContaining({
         inputSummaryJson: expect.objectContaining({
@@ -493,7 +699,7 @@ describe("POST /api/ai/review", () => {
       proposals: [],
       skippedProposalCount: 3,
     });
-    expect(createAiRun).toHaveBeenCalledWith(
+    expect(claimAiRun).toHaveBeenCalledWith(
       localWorkspace,
       expect.objectContaining({ inputSummaryJson: expect.objectContaining({ documentTextLength: 0 }) }),
     );
@@ -567,6 +773,6 @@ describe("POST /api/ai/review", () => {
 
     expect(response.status).toBe(500);
     expect(await response.json()).toEqual({ error: "AI generation failed" });
-    expect(createAiRun).not.toHaveBeenCalled();
+    expect(claimAiRun).not.toHaveBeenCalled();
   });
 });

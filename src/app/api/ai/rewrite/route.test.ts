@@ -2,13 +2,20 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getDocumentById, getDocumentsByIds } from "@/features/documents/document-repository";
 import { getAiSettings } from "@/features/ai/ai-settings-repository";
 import { createAiProvider } from "@/features/ai/providers";
-import { completeAiRunWithProposals, createAiRun, failAiRun } from "@/features/ai/ai-run-repository";
+import {
+  claimAiRun,
+  completeAiRunWithProposals,
+  failAiRun,
+  getAiRunByIdempotencyKey,
+} from "@/features/ai/ai-run-repository";
 import { getPromptTemplateById } from "@/features/templates/template-repository";
 import type { DocumentRecord, PromptTemplateRecord } from "@/db/schema";
 import { setProtectedRequestContextDependenciesForTests } from "@/features/auth/route-context";
 import { TEST_REQUEST_CONTEXT } from "@/test/auth-context";
 import { setRequestBudgetForTests } from "@/features/security/request-budget";
 import { RESOURCE_LIMITS } from "@/features/security/resource-policy";
+import { createAiOperationFingerprint } from "@/features/ai/ai-execution";
+import { aiCommandPayloadSchema } from "@/features/ai/types";
 import { POST } from "./route";
 
 vi.mock("@/features/documents/document-repository", () => ({
@@ -21,8 +28,22 @@ vi.mock("@/features/templates/template-repository", () => ({
 }));
 
 vi.mock("@/features/ai/ai-run-repository", () => ({
+  claimAiRun: vi.fn(async (_scope, input) => ({
+    kind: "claimed",
+    run: { id: "run_1", ...input, status: "pending" },
+  })),
   completeAiRunWithProposals: vi.fn(async (_scope, id, outputText, proposals) => ({
-    run: { id, outputText, status: "completed" },
+    run: {
+      commandType: "selection_rewrite",
+      createdAt: new Date("2026-01-01T00:00:00.000Z"),
+      id,
+      idempotencyKey: "must-not-leak",
+      inputSummaryJson: { prompt: "must-not-leak" },
+      operationFingerprint: "must-not-leak",
+      outputText,
+      status: "completed",
+      workspaceId: "must-not-leak",
+    },
     proposals: proposals.map((proposal: Record<string, unknown>, index: number) => ({
       id: `proposal_${index + 1}`,
       status: "pending",
@@ -31,6 +52,7 @@ vi.mock("@/features/ai/ai-run-repository", () => ({
   })),
   createAiRun: vi.fn(async (_scope, input) => ({ id: "run_1", ...input, status: "pending" })),
   failAiRun: vi.fn(async (_scope, id, errorMessage) => ({ id, errorMessage, status: "failed" })),
+  getAiRunByIdempotencyKey: vi.fn(async () => null),
 }));
 
 const localWorkspace = TEST_REQUEST_CONTEXT;
@@ -94,9 +116,10 @@ const templateRecord = {
   updatedAt: new Date("2026-01-01T00:00:00.000Z"),
 } satisfies PromptTemplateRecord;
 
-function createJsonRequest(body: unknown) {
+function createJsonRequest(body: unknown, idempotencyKey?: string) {
   return new Request("http://localhost/api/ai/rewrite", {
     method: "POST",
+    headers: idempotencyKey === undefined ? undefined : { "Idempotency-Key": idempotencyKey },
     body: JSON.stringify(body),
   });
 }
@@ -120,7 +143,102 @@ describe("POST /api/ai/rewrite", () => {
     });
   });
 
-  it("returns 429 before parsing or creating an AI provider when the budget is exhausted", async () => {
+  it("rejects a malformed idempotency header before budget, preflight, or provider work", async () => {
+    const consume = vi.fn(async () => ({
+      allowed: true,
+      limit: 20,
+      remaining: 19,
+      retryAt: new Date(Date.now() + 60_000),
+    }));
+    setRequestBudgetForTests({ consume });
+
+    const response = await POST(createJsonRequest(validBody, "invalid key"));
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "Invalid Idempotency-Key header" });
+    expect(consume).not.toHaveBeenCalled();
+    expect(getDocumentById).not.toHaveBeenCalled();
+    expect(createAiProvider).not.toHaveBeenCalled();
+    expect(claimAiRun).not.toHaveBeenCalled();
+  });
+
+  it("returns a bounded in-progress conflict without starting provider execution", async () => {
+    const normalized = aiCommandPayloadSchema.parse(validBody);
+    const operationFingerprint = await createAiOperationFingerprint("rewrite", {
+      ...normalized,
+      documentTextSource: "persisted",
+    });
+    vi.mocked(getAiRunByIdempotencyKey).mockResolvedValueOnce({
+      proposals: [],
+      run: {
+        id: "run_in_progress",
+        idempotencyKey: "rewrite-key",
+        operationFingerprint,
+        status: "pending",
+      },
+    } as never);
+
+    const response = await POST(createJsonRequest(validBody, "rewrite-key"));
+
+    expect(response.status).toBe(409);
+    const responseBody = await response.json();
+    expect(responseBody).toMatchObject({
+      code: "ai_operation_in_progress",
+      error: "AI operation is already in progress",
+    });
+    expect(createAiProvider).not.toHaveBeenCalled();
+    expect(claimAiRun).not.toHaveBeenCalled();
+  });
+
+  it("replays the exact durable rewrite with the same safe public run shape", async () => {
+    const normalized = aiCommandPayloadSchema.parse(validBody);
+    const operationFingerprint = await createAiOperationFingerprint("rewrite", {
+      ...normalized,
+      documentTextSource: "persisted",
+    });
+    vi.mocked(getAiRunByIdempotencyKey).mockResolvedValueOnce({
+      proposals: [{
+        appliedMode: null,
+        command: validBody.command,
+        defaultApplyMode: "replace",
+        explanation: "Durable explanation.",
+        id: "durable_proposal",
+        occurrenceIndex: null,
+        replacementText: "Durable replacement",
+        source: "selection",
+        status: "pending",
+        targetFrom: null,
+        targetText: validBody.selectedText,
+        targetTo: null,
+      }],
+      run: {
+        commandType: "selection_rewrite",
+        createdAt: new Date("2026-01-01T00:00:00.000Z"),
+        id: "durable_run",
+        idempotencyKey: "rewrite-replay-key",
+        inputSummaryJson: { prompt: "must-not-leak" },
+        operationFingerprint,
+        outputText: "Durable replacement",
+        status: "completed",
+        workspaceId: "must-not-leak",
+      },
+    } as never);
+
+    const response = await POST(createJsonRequest(validBody, "rewrite-replay-key"));
+    const responseBody = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(responseBody).toMatchObject({
+      proposal: { id: "durable_proposal", replacementText: "Durable replacement" },
+      run: { id: "durable_run", status: "completed" },
+    });
+    expect(Object.keys(responseBody.run).sort()).toEqual(["commandType", "createdAt", "id", "status"]);
+    expect(JSON.stringify(responseBody)).not.toMatch(/must-not-leak|rewrite-replay-key|operationFingerprint|idempotencyKey|workspaceId|inputSummaryJson/);
+    expect(createAiProvider).not.toHaveBeenCalled();
+    expect(claimAiRun).not.toHaveBeenCalled();
+  });
+
+  it("returns 429 without reading the request body when the budget is exhausted", async () => {
     setRequestBudgetForTests({
       consume: vi.fn(async () => ({
         allowed: false,
@@ -129,14 +247,16 @@ describe("POST /api/ai/rewrite", () => {
         retryAt: new Date(Date.now() + 5_000),
       })),
     });
-    const request = { json: vi.fn() } as unknown as Request;
-
-    const response = await POST(request);
+    const read = vi.fn();
+    const response = await POST({
+      body: { getReader: () => ({ read }) },
+      headers: new Headers({ "content-length": "128", "Idempotency-Key": "budget-key" }),
+    } as unknown as Request);
 
     expect(response.status).toBe(429);
-    expect(request.json).not.toHaveBeenCalled();
+    expect(read).not.toHaveBeenCalled();
     expect(createAiProvider).not.toHaveBeenCalled();
-    expect(createAiRun).not.toHaveBeenCalled();
+    expect(claimAiRun).not.toHaveBeenCalled();
   });
 
   it("rejects an oversized submitted AI body before JSON parsing or provider work", async () => {
@@ -151,7 +271,7 @@ describe("POST /api/ai/rewrite", () => {
     expect(response.status).toBe(413);
     expect(json).not.toHaveBeenCalled();
     expect(createAiProvider).not.toHaveBeenCalled();
-    expect(createAiRun).not.toHaveBeenCalled();
+    expect(claimAiRun).not.toHaveBeenCalled();
   });
 
   it("returns 504, aborts the provider, and does not persist a proposal after timeout", async () => {
@@ -185,7 +305,12 @@ describe("POST /api/ai/rewrite", () => {
 
       expect(response.status).toBe(504);
       expect(generateText.mock.calls[0]?.[0].abortSignal?.aborted).toBe(true);
-      expect(failAiRun).toHaveBeenCalledWith(TEST_REQUEST_CONTEXT, "run_1", "Operation timed out");
+      expect(failAiRun).toHaveBeenCalledWith(
+        TEST_REQUEST_CONTEXT,
+        "run_1",
+        "Operation timed out",
+        { retryNotBeforeAt: expect.any(Date) },
+      );
       expect(completeAiRunWithProposals).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
@@ -227,7 +352,7 @@ describe("POST /api/ai/rewrite", () => {
     expect(response.status).toBe(404);
     expect(getDocumentById).toHaveBeenCalledWith(workspaceBContext, "workspace-a-document");
     expect(getAiSettings).not.toHaveBeenCalled();
-    expect(createAiRun).not.toHaveBeenCalled();
+    expect(claimAiRun).not.toHaveBeenCalled();
   });
 
   it("returns 404 when the template is missing before selected text validation", async () => {
@@ -241,7 +366,7 @@ describe("POST /api/ai/rewrite", () => {
 
     expect(response.status).toBe(404);
     expect(await response.json()).toEqual({ error: "Template not found" });
-    expect(createAiRun).not.toHaveBeenCalled();
+    expect(claimAiRun).not.toHaveBeenCalled();
   });
 
   it("creates a completed AI run and pending proposal for selected text", async () => {
@@ -251,17 +376,19 @@ describe("POST /api/ai/rewrite", () => {
     const response = await POST(createJsonRequest(validBody));
 
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({
+    const responseBody = await response.json();
+    expect(responseBody).toMatchObject({
       run: { id: "run_1", status: "completed" },
       proposal: {
         id: "proposal_1",
-        documentId: "doc_1",
         targetText: "Old text",
         replacementText: "Improved text",
         status: "pending",
       },
     });
-    expect(createAiRun).toHaveBeenCalledWith(
+    expect(Object.keys(responseBody.run).sort()).toEqual(["commandType", "createdAt", "id", "status"]);
+    expect(JSON.stringify(responseBody)).not.toMatch(/must-not-leak|operationFingerprint|idempotencyKey|workspaceId|inputSummaryJson/);
+    expect(claimAiRun).toHaveBeenCalledWith(
       localWorkspace,
       expect.objectContaining({
         commandType: "selection_rewrite",
@@ -335,7 +462,7 @@ describe("POST /api/ai/rewrite", () => {
         }),
       ]),
     }));
-    expect(createAiRun).toHaveBeenCalledWith(
+    expect(claimAiRun).toHaveBeenCalledWith(
       localWorkspace,
       expect.objectContaining({
         inputSummaryJson: expect.objectContaining({
@@ -401,7 +528,7 @@ describe("POST /api/ai/rewrite", () => {
         }),
       ]),
     }));
-    expect(createAiRun).toHaveBeenCalledWith(
+    expect(claimAiRun).toHaveBeenCalledWith(
       localWorkspace,
       expect.objectContaining({
         inputSummaryJson: expect.objectContaining({
@@ -720,7 +847,7 @@ describe("POST /api/ai/rewrite", () => {
 
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({ error: "Selected text must match exactly once in the document" });
-    expect(createAiRun).not.toHaveBeenCalled();
+    expect(claimAiRun).not.toHaveBeenCalled();
     expect(completeAiRunWithProposals).not.toHaveBeenCalled();
   });
 
@@ -760,7 +887,7 @@ describe("POST /api/ai/rewrite", () => {
 
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({ error: "Selected text must match exactly once in the document" });
-    expect(createAiRun).not.toHaveBeenCalled();
+    expect(claimAiRun).not.toHaveBeenCalled();
     expect(completeAiRunWithProposals).not.toHaveBeenCalled();
   });
 
@@ -776,7 +903,7 @@ describe("POST /api/ai/rewrite", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(createAiRun).toHaveBeenCalledWith(
+    expect(claimAiRun).toHaveBeenCalledWith(
       localWorkspace,
       expect.objectContaining({
         inputSummaryJson: expect.objectContaining({
@@ -808,7 +935,7 @@ describe("POST /api/ai/rewrite", () => {
 
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({ error: "Selected text occurrence was not found in the document" });
-    expect(createAiRun).not.toHaveBeenCalled();
+    expect(claimAiRun).not.toHaveBeenCalled();
     expect(completeAiRunWithProposals).not.toHaveBeenCalled();
   });
 
@@ -823,7 +950,7 @@ describe("POST /api/ai/rewrite", () => {
 
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({ error: "Selected text must match exactly once in the document" });
-    expect(createAiRun).not.toHaveBeenCalled();
+    expect(claimAiRun).not.toHaveBeenCalled();
     expect(completeAiRunWithProposals).not.toHaveBeenCalled();
   });
 
@@ -838,7 +965,7 @@ describe("POST /api/ai/rewrite", () => {
 
     expect(response.status).toBe(500);
     expect(await response.json()).toEqual({ error: "AI generation failed" });
-    expect(createAiRun).not.toHaveBeenCalled();
+    expect(claimAiRun).not.toHaveBeenCalled();
     expect(failAiRun).not.toHaveBeenCalled();
   });
 
@@ -855,7 +982,7 @@ describe("POST /api/ai/rewrite", () => {
     expect(await response.json()).toEqual({ error: "Selected text must match exactly once in the document" });
     expect(getAiSettings).not.toHaveBeenCalled();
     expect(createAiProvider).not.toHaveBeenCalled();
-    expect(createAiRun).not.toHaveBeenCalled();
+    expect(claimAiRun).not.toHaveBeenCalled();
   });
 
   it("returns 500 and fails the run when finalizing proposals fails", async () => {
@@ -867,7 +994,7 @@ describe("POST /api/ai/rewrite", () => {
 
     expect(response.status).toBe(500);
     expect(await response.json()).toEqual({ error: "AI generation failed" });
-    expect(failAiRun).toHaveBeenCalledWith(localWorkspace, "run_1", "finalize failed");
+    expect(failAiRun).toHaveBeenCalledWith(localWorkspace, "run_1", "AI generation failed");
     expect(completeAiRunWithProposals).toHaveBeenCalledWith(
       localWorkspace,
       "run_1",
@@ -904,6 +1031,6 @@ describe("POST /api/ai/rewrite", () => {
 
     expect(response.status).toBe(500);
     expect(await response.json()).toEqual({ error: "AI generation failed" });
-    expect(failAiRun).toHaveBeenCalledWith(localWorkspace, "run_1", "provider unavailable");
+    expect(failAiRun).toHaveBeenCalledWith(localWorkspace, "run_1", "AI generation failed");
   });
 });

@@ -30,6 +30,13 @@ export class RequestBodyTooLargeError extends Error {
   }
 }
 
+export class RequestBodyAbortedError extends Error {
+  constructor(message = "Request aborted") {
+    super(message);
+    this.name = "RequestBodyAbortedError";
+  }
+}
+
 export function validateTiptapResource(
   root: unknown,
   limits: TiptapLimits = RESOURCE_LIMITS,
@@ -219,6 +226,9 @@ export function resourcePolicyErrorResponse(error: unknown): Response | null {
   if (error instanceof OperationTimeoutError) {
     return NextResponse.json({ error: "Operation timed out" }, { status: 504 });
   }
+  if (error instanceof RequestBodyAbortedError) {
+    return NextResponse.json({ error: "Request aborted" }, { status: 408 });
+  }
   return null;
 }
 
@@ -233,31 +243,77 @@ export function requestExceedsDocumentBodyLimit(request: Request) {
  * Read a Web Request body without trusting Content-Length. The stream is cancelled
  * as soon as the actual byte count crosses the configured in-memory boundary.
  */
-export async function readBoundedRequestBytes(request: Request, maxBytes: number): Promise<Uint8Array> {
+export async function readBoundedRequestBytes(
+  request: Request,
+  maxBytes: number,
+  options: { deadlineMs?: number; requestSignal?: AbortSignal } = {},
+): Promise<Uint8Array> {
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) throw new Error("Body limit must be a non-negative integer");
   const declaredLength = request.headers?.get("content-length");
   if (declaredLength !== null && /^\d+$/.test(declaredLength) && Number(declaredLength) > maxBytes) {
     throw new RequestBodyTooLargeError();
   }
+  if (options.requestSignal?.aborted) throw new RequestBodyAbortedError();
+  if (options.deadlineMs !== undefined && options.deadlineMs <= 0) throw new OperationTimeoutError();
 
   const reader = request.body?.getReader();
   if (!reader) return new Uint8Array();
+  const timeoutError = new OperationTimeoutError();
+  const requestAbortError = new RequestBodyAbortedError();
+  let interruption: OperationTimeoutError | RequestBodyAbortedError | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let rejectInterruption!: (error: Error) => void;
+  const interrupted = new Promise<never>((_resolve, reject) => {
+    rejectInterruption = reject;
+  });
+  void interrupted.catch(() => undefined);
+  const stop = (error: OperationTimeoutError | RequestBodyAbortedError) => {
+    if (interruption) return;
+    interruption = error;
+    try {
+      const cancelled = reader.cancel(error);
+      void Promise.resolve(cancelled).catch(() => undefined);
+    } catch {
+      // Cancellation is best-effort; the bounded response must not wait on a stalled reader.
+    }
+    rejectInterruption(error);
+  };
+  const abortForRequest = () => stop(requestAbortError);
+  if (options.requestSignal?.aborted) {
+    abortForRequest();
+  } else {
+    options.requestSignal?.addEventListener("abort", abortForRequest, { once: true });
+    if (options.deadlineMs !== undefined) timer = setTimeout(() => stop(timeoutError), options.deadlineMs);
+  }
   const chunks: Uint8Array[] = [];
   let totalBytes = 0;
   try {
     while (true) {
-      const chunk = await reader.read();
+      if (interruption) throw interruption;
+      const chunk = await Promise.race([reader.read(), interrupted]);
+      if (interruption) throw interruption;
       if (chunk.done) break;
       totalBytes += chunk.value.byteLength;
       if (totalBytes > maxBytes) {
         const error = new RequestBodyTooLargeError();
-        await Promise.resolve(reader.cancel(error)).catch(() => undefined);
+        try {
+          const cancelled = reader.cancel(error);
+          void Promise.resolve(cancelled).catch(() => undefined);
+        } catch {
+          // The size error remains authoritative if stream cancellation is unavailable.
+        }
         throw error;
       }
       chunks.push(chunk.value);
     }
   } finally {
-    reader.releaseLock();
+    if (timer) clearTimeout(timer);
+    options.requestSignal?.removeEventListener("abort", abortForRequest);
+    try {
+      reader.releaseLock();
+    } catch {
+      // A cancelled or non-conforming reader may already have released its lock.
+    }
   }
 
   const bytes = new Uint8Array(totalBytes);
@@ -269,8 +325,12 @@ export async function readBoundedRequestBytes(request: Request, maxBytes: number
   return bytes;
 }
 
-export async function parseBoundedJson(request: Request, maxBytes = DOCUMENT_REQUEST_BODY_BYTES): Promise<unknown> {
-  const bytes = await readBoundedRequestBytes(request, maxBytes);
+export async function parseBoundedJson(
+  request: Request,
+  maxBytes = DOCUMENT_REQUEST_BODY_BYTES,
+  options?: { deadlineMs?: number; requestSignal?: AbortSignal },
+): Promise<unknown> {
+  const bytes = await readBoundedRequestBytes(request, maxBytes, options);
   return JSON.parse(new TextDecoder().decode(bytes)) as unknown;
 }
 

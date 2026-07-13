@@ -51,6 +51,9 @@ async function createIsolatedProposalDb() {
       command_type text NOT NULL,
       provider text NOT NULL,
       model text NOT NULL,
+      idempotency_key text,
+      operation_fingerprint text,
+      retry_not_before_at integer,
       input_summary_json text NOT NULL,
       output_text text DEFAULT '' NOT NULL,
       status text NOT NULL,
@@ -59,6 +62,7 @@ async function createIsolatedProposalDb() {
       created_at integer NOT NULL,
       updated_at integer NOT NULL,
       UNIQUE(workspace_id, id, document_id),
+      UNIQUE(workspace_id, idempotency_key),
       FOREIGN KEY (workspace_id, document_id) REFERENCES documents(workspace_id, id) ON DELETE CASCADE
     )
   `);
@@ -78,13 +82,15 @@ async function createIsolatedProposalDb() {
       target_from integer,
       target_to integer,
       default_apply_mode text DEFAULT 'replace' NOT NULL,
+      result_ordinal integer,
       applied_mode text,
       status text DEFAULT 'pending' NOT NULL,
       created_at integer NOT NULL,
       updated_at integer NOT NULL,
       FOREIGN KEY (workspace_id, document_id) REFERENCES documents(workspace_id, id) ON DELETE CASCADE,
       FOREIGN KEY (workspace_id, ai_run_id, document_id)
-        REFERENCES ai_runs(workspace_id, id, document_id) ON DELETE CASCADE
+        REFERENCES ai_runs(workspace_id, id, document_id) ON DELETE CASCADE,
+      UNIQUE(workspace_id, ai_run_id, result_ordinal)
     )
   `);
 

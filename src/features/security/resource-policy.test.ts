@@ -2,6 +2,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 import {
+  RequestBodyAbortedError,
   RequestBodyTooLargeError,
   OperationTimeoutError,
   RESOURCE_LIMITS,
@@ -147,6 +148,53 @@ describe("resource policy", () => {
     } as unknown as Request;
 
     await expect(readBoundedRequestBytes(request, 5)).rejects.toBeInstanceOf(RequestBodyTooLargeError);
+    expect(cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("cancels a stalled body reader when the request is aborted", async () => {
+    const controller = new AbortController();
+    const cancel = vi.fn();
+    const releaseLock = vi.fn();
+    const request = {
+      body: {
+        getReader: () => ({
+          cancel,
+          read: vi.fn(async () => new Promise(() => undefined)),
+          releaseLock,
+        }),
+      },
+      headers: new Headers(),
+    } as unknown as Request;
+    const pending = readBoundedRequestBytes(request, 100, { requestSignal: controller.signal });
+
+    controller.abort();
+
+    await expect(pending).rejects.toBeInstanceOf(RequestBodyAbortedError);
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(releaseLock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not swallow an abort when cancellation resolves the pending read first", async () => {
+    const controller = new AbortController();
+    let resolveRead!: (result: { done: true; value?: undefined }) => void;
+    const read = vi.fn(async () => new Promise<{ done: true; value?: undefined }>((resolve) => {
+      resolveRead = resolve;
+    }));
+    const cancel = vi.fn(async () => {
+      resolveRead({ done: true });
+    });
+    const request = {
+      body: {
+        getReader: () => ({ cancel, read, releaseLock: vi.fn() }),
+      },
+      headers: new Headers(),
+    } as unknown as Request;
+    const pending = readBoundedRequestBytes(request, 100, { requestSignal: controller.signal });
+    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(1));
+
+    controller.abort();
+
+    await expect(pending).rejects.toBeInstanceOf(RequestBodyAbortedError);
     expect(cancel).toHaveBeenCalledTimes(1);
   });
 

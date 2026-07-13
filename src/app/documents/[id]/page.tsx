@@ -28,7 +28,12 @@ export default async function DocumentPage({ params }: DocumentPageProps) {
 
   return (
     <DocumentShell
-      aiRuns={aiRuns}
+      aiRuns={aiRuns.map((run) => ({
+        commandType: run.commandType,
+        createdAt: run.createdAt,
+        id: run.id,
+        status: run.status,
+      }))}
       document={{
         id: document.id,
         title: document.title,
@@ -38,14 +43,32 @@ export default async function DocumentPage({ params }: DocumentPageProps) {
         metadataJson: document.metadataJson,
         readiness: document.readiness,
       }}
-      proposals={proposals}
+      proposals={proposals.map((proposal) => ({
+        appliedMode: proposal.appliedMode,
+        command: proposal.command,
+        defaultApplyMode: proposal.defaultApplyMode,
+        explanation: proposal.explanation,
+        id: proposal.id,
+        occurrenceIndex: proposal.occurrenceIndex,
+        replacementText: proposal.replacementText,
+        source: proposal.source,
+        status: proposal.status,
+        targetFrom: proposal.targetFrom,
+        targetText: proposal.targetText,
+        targetTo: proposal.targetTo,
+      }))}
       referenceDocuments={referenceDocuments.map((referenceDocument) => ({
         id: referenceDocument.id,
         title: referenceDocument.title,
         plainText: referenceDocument.plainText,
         updatedAt: referenceDocument.updatedAt,
       }))}
-      templates={templates}
+      templates={templates.map((template) => ({
+        category: template.category,
+        id: template.id,
+        name: template.name,
+        variableSchemaJson: template.variableSchemaJson,
+      }))}
     />
   );
 }

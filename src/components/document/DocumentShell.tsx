@@ -52,6 +52,10 @@ import {
   writeAiWorkspaceSessionsForDocument,
 } from "@/features/ai/ai-workspace-session-store";
 import { buildAiContextSnapshot } from "@/features/ai/ai-context-snapshot";
+import {
+  postAiOperation,
+  type AiIdempotencyKeyCache,
+} from "@/features/ai/ai-idempotency-client";
 import { resolveDocumentShortcut } from "@/features/commands/document-command-manifest";
 import { buildDocumentOutline, type DocumentOutlineItem } from "@/features/documents/document-outline";
 import {
@@ -353,6 +357,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
   const intentionalNavigationRef = useRef(false);
   const conflictCopyRef = useRef<{ id: string; revision: number } | null>(null);
   const conflictCopyCreationKeyRef = useRef<string | null>(null);
+  const aiIdempotencyKeyCacheRef = useRef<AiIdempotencyKeyCache>(new Map());
   const serverContentSignatureRef = useRef(createProposalContentSignature(incomingDocument.contentJson));
   const serverRevisionRef = useRef(incomingDocument.revision);
   const [serverRevision, setServerRevision] = useState(incomingDocument.revision);
@@ -746,12 +751,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
     ]);
 
     try {
-      const response = await fetch("/api/ai/rewrite", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
+      const requestBody = JSON.stringify({
           documentId: document.id,
           templateId: selectedTemplate.id,
           command,
@@ -769,14 +769,18 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
           documentText: extractPlainTextFromTiptap(draft.contentJson),
           beforeContext: "",
           afterContext: "",
-        }),
-      });
+        });
+      const result = await postAiOperation<RewriteResponse>(
+        aiIdempotencyKeyCacheRef.current,
+        "/api/ai/rewrite",
+        requestBody,
+      );
 
-      if (!response.ok) {
+      if (!result.ok) {
         throw new Error("Failed to rewrite selection");
       }
 
-      const body = (await response.json()) as RewriteResponse;
+      const body = result.body;
       if (body.proposal) {
         const proposalSelectionRange = getProposalSelectionRange(body.proposal, context);
         setReviewProposals((currentProposals) => [body.proposal!, ...currentProposals]);
@@ -1098,25 +1102,24 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
     setTemplateVariableErrors({});
 
     try {
-      const response = await fetch("/api/ai/review", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
+      const requestBody = JSON.stringify({
           documentId: document.id,
           templateId: selectedTemplate.id,
           command: "Review document",
           variables: variablesForReview,
           documentText: extractPlainTextFromTiptap(draft.contentJson),
-        }),
-      });
+        });
+      const result = await postAiOperation<ReviewResponse>(
+        aiIdempotencyKeyCacheRef.current,
+        "/api/ai/review",
+        requestBody,
+      );
 
-      if (!response.ok) {
+      if (!result.ok) {
         throw new Error("Failed to run review");
       }
 
-      const body = (await response.json()) as ReviewResponse;
+      const body = result.body;
       setReviewProposals(body.proposals ?? []);
       setReviewSummary({
         findingCount: body.review?.findings?.length ?? body.proposals?.length ?? 0,
