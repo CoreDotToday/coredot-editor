@@ -33,6 +33,7 @@ async function createIsolatedDocumentDb() {
       status text DEFAULT 'draft' NOT NULL,
       readiness text DEFAULT 'draft' NOT NULL,
       metadata_json text DEFAULT '{}' NOT NULL,
+      revision integer DEFAULT 0 NOT NULL,
       created_at integer NOT NULL,
       updated_at integer NOT NULL,
       CONSTRAINT "documents_status_check" CHECK(status in ('draft', 'archived')),
@@ -57,6 +58,7 @@ describe("document repository", () => {
     expect(document.readiness).toBe("draft");
     expect(document.metadataJson).toEqual({});
     expect(document.status).toBe("draft");
+    expect(document.revision).toBe(0);
     expect(documents.some((item) => item.id === document.id)).toBe(true);
   });
 
@@ -82,6 +84,7 @@ describe("document repository", () => {
     });
     expect(document.plainText).toBe("Contract\nImported body");
     expect(document.status).toBe("draft");
+    expect(document.revision).toBe(0);
   });
 
   it("archives an existing document and removes it from draft listings", async () => {
@@ -109,37 +112,77 @@ describe("document repository", () => {
     await expect(archiveDocument(workspaceA, document.id)).resolves.toBeNull();
   });
 
-  it("returns null when updating an archived document", async () => {
+  it("returns not_found when saving an archived document", async () => {
     const db = await createIsolatedDocumentDb();
-    const { archiveDocument, createDocumentDraft, updateDocumentContent } = createDocumentRepository(db);
+    const { archiveDocument, createDocumentDraft, saveDocumentDraft } = createDocumentRepository(db);
     const document = await createDocumentDraft(workspaceA, "Market Entry Memo");
     await archiveDocument(workspaceA, document.id);
 
     await expect(
-      updateDocumentContent(workspaceA, document.id, {
+      saveDocumentDraft(workspaceA, document.id, {
         title: "Updated Memo",
         contentJson: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "Updated" }] }] },
+        expectedRevision: 0,
       }),
-    ).resolves.toBeNull();
+    ).resolves.toEqual({ status: "not_found" });
   });
 
-  it("updates document content together with readiness and metadata", async () => {
+  it("atomically saves the expected revision and rejects a stale save without overwriting", async () => {
     const db = await createIsolatedDocumentDb();
-    const { createDocumentDraft, updateDocumentContent } = createDocumentRepository(db);
+    const { createDocumentDraft, saveDocumentDraft } = createDocumentRepository(db);
     const document = await createDocumentDraft(workspaceA, "Market Entry Memo");
 
-    const updated = await updateDocumentContent(workspaceA, document.id, {
+    const saved = await saveDocumentDraft(workspaceA, document.id, {
       title: "Updated Memo",
       contentJson: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "Updated" }] }] },
       metadataJson: { owner: "Legal", tags: ["risk"] },
       readiness: "needs_review",
+      expectedRevision: 0,
     });
 
-    expect(updated).toMatchObject({
-      metadataJson: { owner: "Legal", tags: ["risk"] },
-      plainText: "Updated",
-      readiness: "needs_review",
+    expect(saved).toMatchObject({
+      status: "success",
+      document: {
+        metadataJson: { owner: "Legal", tags: ["risk"] },
+        plainText: "Updated",
+        readiness: "needs_review",
+        revision: 1,
+      },
     });
+
+    const stale = await saveDocumentDraft(workspaceA, document.id, {
+      title: "Stale overwrite",
+      contentJson: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "Stale" }] }] },
+      expectedRevision: 0,
+    });
+
+    expect(stale).toMatchObject({
+      status: "revision_conflict",
+      latest: { title: "Updated Memo", plainText: "Updated", revision: 1 },
+    });
+  });
+
+  it("allows exactly one of two parallel saves from the same revision", async () => {
+    const db = await createIsolatedDocumentDb();
+    const { createDocumentDraft, saveDocumentDraft } = createDocumentRepository(db);
+    const document = await createDocumentDraft(workspaceA, "Parallel Memo");
+
+    const results = await Promise.all([
+      saveDocumentDraft(workspaceA, document.id, {
+        title: "Writer A",
+        contentJson: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "A" }] }] },
+        expectedRevision: 0,
+      }),
+      saveDocumentDraft(workspaceA, document.id, {
+        title: "Writer B",
+        contentJson: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "B" }] }] },
+        expectedRevision: 0,
+      }),
+    ]);
+
+    expect(results.filter((result) => result.status === "success")).toHaveLength(1);
+    const conflict = results.find((result) => result.status === "revision_conflict");
+    expect(conflict).toMatchObject({ status: "revision_conflict", latest: { revision: 1 } });
   });
 
   it("lists reference candidates while excluding the current and archived documents", async () => {
@@ -189,11 +232,12 @@ describe("document repository", () => {
     await expect(repository.getDocumentsByIds(workspaceB, [document.id])).resolves.toEqual([]);
     await expect(repository.listDocuments(workspaceB)).resolves.toEqual([]);
     await expect(
-      repository.updateDocumentContent(workspaceB, document.id, {
+      repository.saveDocumentDraft(workspaceB, document.id, {
         title: "Hijacked",
         contentJson: { type: "doc", content: [{ type: "paragraph" }] },
+        expectedRevision: 0,
       }),
-    ).resolves.toBeNull();
+    ).resolves.toEqual({ status: "not_found" });
     await expect(repository.archiveDocument(workspaceB, document.id)).resolves.toBeNull();
 
     await expect(repository.getDocumentById(workspaceA, document.id)).resolves.toMatchObject({

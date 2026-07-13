@@ -84,7 +84,7 @@ import { DocumentSourceView } from "./DocumentSourceView";
 import { buildDocumentCommandRegistry } from "./commands/document-command-registry";
 import type { SelectionAiResultPreview } from "./SelectionAiResultPopover";
 
-type ShellDocument = Pick<DocumentRecord, "id" | "title" | "contentJson" | "plainText"> &
+type ShellDocument = Pick<DocumentRecord, "id" | "title" | "contentJson" | "plainText" | "revision"> &
   Partial<Pick<DocumentRecord, "metadataJson" | "readiness">>;
 type ShellTemplate = Pick<PromptTemplateRecord, "id" | "name" | "category" | "variableSchemaJson">;
 type ShellTemplateField = ShellTemplate["variableSchemaJson"]["fields"][number];
@@ -143,6 +143,7 @@ type DocumentSnapshot = {
   contentJson: TiptapJson;
   metadataJson: DocumentMetadata;
   readiness: DocumentReadiness;
+  revision: number;
 };
 
 type AiSnapshot = {
@@ -304,8 +305,9 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
       contentJson: document.contentJson,
       metadataJson: document.metadataJson ?? {},
       readiness: document.readiness ?? "draft",
+      revision: document.revision,
     }),
-    [document.contentJson, document.id, document.metadataJson, document.readiness, document.title],
+    [document.contentJson, document.id, document.metadataJson, document.readiness, document.revision, document.title],
   );
   const initialDraft = useMemo(
     () => ({
@@ -320,6 +322,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
   const draftRef = useRef<DraftState>(initialDraft);
   const draftVersionRef = useRef(0);
   const serverContentSignatureRef = useRef(createProposalContentSignature(incomingDocument.contentJson));
+  const serverRevisionRef = useRef(incomingDocument.revision);
   const [saveState, setSaveState] = useState<SaveState>("saved");
   const [language, setLanguage] = useState<EditorLanguage>(() => readStoredEditorLanguage());
   const [selectionCommand, setSelectionCommand] = useState<SelectionCommandPayload | null>(null);
@@ -431,10 +434,12 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
     observedDocument.title !== incomingDocument.title ||
     observedDocument.contentJson !== incomingDocument.contentJson ||
     observedDocument.metadataJson !== incomingDocument.metadataJson ||
-    observedDocument.readiness !== incomingDocument.readiness
+    observedDocument.readiness !== incomingDocument.readiness ||
+    observedDocument.revision !== incomingDocument.revision
   ) {
     setObservedDocument(incomingDocument);
     serverContentSignatureRef.current = createProposalContentSignature(incomingDocument.contentJson);
+    serverRevisionRef.current = incomingDocument.revision;
 
     if (saveState === "saved") {
       setDraft(initialDraft);
@@ -752,6 +757,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
   const saveDraft = useCallback(async () => {
     const savingVersion = draftVersionRef.current;
     const savingDraft = draft;
+    const expectedRevision = serverRevisionRef.current;
 
     setSaveState("saving");
 
@@ -761,7 +767,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify(savingDraft),
+        body: JSON.stringify({ ...savingDraft, expectedRevision }),
       });
 
       if (!response.ok) {
@@ -769,6 +775,9 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
       }
 
       const body = (await response.json().catch(() => ({}))) as { document?: DocumentSnapshot };
+      if (body.document) {
+        serverRevisionRef.current = body.document.revision;
+      }
       if (draftVersionRef.current === savingVersion) {
         serverContentSignatureRef.current = createProposalContentSignature(
           body.document?.contentJson ?? savingDraft.contentJson,
@@ -970,6 +979,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
         updatedProposal ?? { ...previousProposal, appliedMode: status === "accepted" ? applyMode : null, status };
       if (status === "accepted" && appliedServerResponse?.document) {
         serverContentSignatureRef.current = createProposalContentSignature(appliedServerResponse.document.contentJson);
+        serverRevisionRef.current = appliedServerResponse.document.revision;
       }
 
       if (status === "accepted") {
@@ -1204,6 +1214,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
 
           const serverDraft = createDraftFromDocumentSnapshot(applyResponse.document);
           nextServerContentSignature = createProposalContentSignature(applyResponse.document.contentJson);
+          serverRevisionRef.current = applyResponse.document.revision;
           nextDraft = serverDraft;
           updatedProposalById.set(proposal.id, applyResponse.proposal);
           nextAppliedChanges.push({

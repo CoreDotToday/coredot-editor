@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { archiveDocument, getDocumentById, updateDocumentContent } from "@/features/documents/document-repository";
+import { archiveDocument, getDocumentById, saveDocumentDraft } from "@/features/documents/document-repository";
 import { setProtectedRequestContextDependenciesForTests } from "@/features/auth/route-context";
 import { TEST_REQUEST_CONTEXT } from "@/test/auth-context";
 import { RESOURCE_LIMITS } from "@/features/security/resource-policy";
@@ -8,11 +8,15 @@ import { DELETE, GET, PUT } from "./route";
 vi.mock("@/features/documents/document-repository", () => ({
   archiveDocument: vi.fn(),
   getDocumentById: vi.fn(),
-  updateDocumentContent: vi.fn(async (_scope, id, input) => ({
-    id,
-    ...input,
-    plainText: "Updated body",
-    status: "draft",
+  saveDocumentDraft: vi.fn(async (_scope, id, input) => ({
+    status: "success",
+    document: {
+      id,
+      ...input,
+      revision: input.expectedRevision + 1,
+      plainText: "Updated body",
+      status: "draft",
+    },
   })),
 }));
 
@@ -39,16 +43,18 @@ describe("PUT /api/documents/[id]", () => {
         contentJson: { type: "doc", content: [] },
         readiness: "ready",
         metadataJson: { owner: "Legal", tags: ["risk"] },
+        expectedRevision: 3,
       }),
       { params: Promise.resolve({ id: "doc_1" }) },
     );
 
     expect(response.status).toBe(200);
-    expect(updateDocumentContent).toHaveBeenCalledWith(TEST_REQUEST_CONTEXT, "doc_1", {
+    expect(saveDocumentDraft).toHaveBeenCalledWith(TEST_REQUEST_CONTEXT, "doc_1", {
       title: "Updated Memo",
       contentJson: { type: "doc", content: [] },
       readiness: "ready",
       metadataJson: { owner: "Legal", tags: ["risk"] },
+      expectedRevision: 3,
     });
   });
 
@@ -63,7 +69,48 @@ describe("PUT /api/documents/[id]", () => {
 
     expect(response.status).toBe(413);
     expect(json).not.toHaveBeenCalled();
-    expect(updateDocumentContent).not.toHaveBeenCalled();
+    expect(saveDocumentDraft).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["missing", undefined],
+    ["negative", -1],
+    ["fractional", 0.5],
+  ])("returns 400 when expectedRevision is %s", async (_label, expectedRevision) => {
+    const response = await PUT(
+      createJsonRequest({
+        title: "Updated Memo",
+        contentJson: { type: "doc", content: [] },
+        ...(expectedRevision === undefined ? {} : { expectedRevision }),
+      }),
+      { params: Promise.resolve({ id: "doc_1" }) },
+    );
+
+    expect(response.status).toBe(400);
+    expect(saveDocumentDraft).not.toHaveBeenCalled();
+  });
+
+  it("returns a stable 409 conflict response with the latest document", async () => {
+    vi.mocked(saveDocumentDraft).mockResolvedValueOnce({
+      status: "revision_conflict",
+      latest: { id: "doc_1", title: "Newer", revision: 4 },
+    } as never);
+
+    const response = await PUT(
+      createJsonRequest({
+        title: "Stale",
+        contentJson: { type: "doc", content: [] },
+        expectedRevision: 3,
+      }),
+      { params: Promise.resolve({ id: "doc_1" }) },
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: "Document revision conflict",
+      reason: "revision_conflict",
+      document: { id: "doc_1", title: "Newer", revision: 4 },
+    });
   });
 
   it("returns 404 for direct reads and mutations of another workspace's document", async () => {
@@ -78,13 +125,13 @@ describe("PUT /api/documents/[id]", () => {
       getRequestContext: async () => workspaceBContext,
     });
     vi.mocked(getDocumentById).mockResolvedValueOnce(null as never);
-    vi.mocked(updateDocumentContent).mockResolvedValueOnce(null as never);
+    vi.mocked(saveDocumentDraft).mockResolvedValueOnce({ status: "not_found" } as never);
     vi.mocked(archiveDocument).mockResolvedValueOnce(null as never);
     const params = { params: Promise.resolve({ id: "workspace-a-document" }) };
 
     const readResponse = await GET(new Request("http://localhost/api/documents/workspace-a-document"), params);
     const updateResponse = await PUT(
-      createJsonRequest({ title: "Blocked", contentJson: { type: "doc", content: [] } }),
+      createJsonRequest({ title: "Blocked", contentJson: { type: "doc", content: [] }, expectedRevision: 0 }),
       params,
     );
     const archiveResponse = await DELETE(
@@ -96,7 +143,7 @@ describe("PUT /api/documents/[id]", () => {
     expect(updateResponse.status).toBe(404);
     expect(archiveResponse.status).toBe(404);
     expect(getDocumentById).toHaveBeenCalledWith(workspaceBContext, "workspace-a-document");
-    expect(updateDocumentContent).toHaveBeenCalledWith(
+    expect(saveDocumentDraft).toHaveBeenCalledWith(
       workspaceBContext,
       "workspace-a-document",
       expect.objectContaining({ title: "Blocked" }),

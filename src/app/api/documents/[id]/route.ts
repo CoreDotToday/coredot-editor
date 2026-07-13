@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { archiveDocument, getDocumentById, updateDocumentContent } from "@/features/documents/document-repository";
+import { archiveDocument, getDocumentById, saveDocumentDraft } from "@/features/documents/document-repository";
 import { documentReadinessValues } from "@/features/documents/document-metadata";
 import { createProtectedOptionsHandler, createProtectedRouteHandler } from "@/features/auth/route-context";
 import {
@@ -21,6 +21,7 @@ const updateDocumentSchema = z.object({
     .record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.array(z.string()), z.null()]))
     .optional(),
   readiness: z.enum(documentReadinessValues).optional(),
+  expectedRevision: z.number().int().nonnegative(),
 });
 
 type Params = {
@@ -55,11 +56,21 @@ const putHandler = createProtectedRouteHandler(async (context, request: Request,
   if (!validateTiptapResource(result.data.contentJson).ok) return documentResourceLimitResponse();
 
   const body = result.data;
-  const document = await updateDocumentContent(context, id, body);
-  if (!document) {
+  const saveResult = await saveDocumentDraft(context, id, body);
+  if (saveResult.status === "not_found") {
     return NextResponse.json({ error: "Document not found" }, { status: 404 });
   }
-  return NextResponse.json({ document });
+  if (saveResult.status === "revision_conflict") {
+    return NextResponse.json(
+      {
+        error: "Document revision conflict",
+        reason: "revision_conflict",
+        document: saveResult.latest,
+      },
+      { status: 409 },
+    );
+  }
+  return NextResponse.json({ document: saveResult.document });
 });
 
 const deleteHandler = createProtectedRouteHandler(async (context, _request: Request, { params }: Params) => {

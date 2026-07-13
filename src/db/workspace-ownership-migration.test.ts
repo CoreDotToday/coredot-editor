@@ -116,7 +116,29 @@ async function applyRequestBudgetMigration(client: Awaited<ReturnType<typeof cre
   }
 }
 
+async function applyDocumentRevisionMigration(client: Awaited<ReturnType<typeof createLegacyDatabase>>) {
+  const migration = await readFile(resolve(process.cwd(), "drizzle/0008_document_revision.sql"), "utf8");
+  for (const statement of migration.split("--> statement-breakpoint")) {
+    const sql = statement.trim();
+    if (sql) await client.execute(sql);
+  }
+}
+
 describe("workspace ownership migration", () => {
+  it("adds revision zero to populated documents without disturbing data or foreign keys", async () => {
+    const client = await createLegacyDatabase();
+    await applyWorkspaceOwnershipMigration(client);
+    await applyRequestBudgetMigration(client);
+    await applyDocumentRevisionMigration(client);
+
+    expect((await client.execute("SELECT title, revision FROM documents WHERE id = 'legacy_doc'")).rows).toEqual([
+      expect.objectContaining({ revision: 0, title: "Legacy memo" }),
+    ]);
+    expect((await client.execute("PRAGMA foreign_key_check")).rows).toEqual([]);
+    await expect(client.execute("UPDATE documents SET revision = -1 WHERE id = 'legacy_doc'"))
+      .rejects.toThrow();
+  });
+
   it("applies request budgets on a populated 0006 database without disturbing data or foreign keys", async () => {
     const client = await createLegacyDatabase();
     await applyWorkspaceOwnershipMigration(client);

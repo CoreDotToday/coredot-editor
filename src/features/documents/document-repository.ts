@@ -128,7 +128,7 @@ export function createDocumentRepository(database: DocumentDatabase = db) {
         .slice(0, limit);
     },
 
-    async updateDocumentContent(
+    async saveDocumentDraft(
       scope: WorkspaceScope,
       id: string,
       input: {
@@ -136,6 +136,7 @@ export function createDocumentRepository(database: DocumentDatabase = db) {
         contentJson: TiptapJson;
         metadataJson?: DocumentMetadata;
         readiness?: DocumentReadiness;
+        expectedRevision: number;
       },
     ) {
       const now = new Date();
@@ -147,6 +148,7 @@ export function createDocumentRepository(database: DocumentDatabase = db) {
           metadataJson: input.metadataJson === undefined ? undefined : normalizeDocumentMetadata(input.metadataJson),
           plainText: extractPlainTextFromTiptap(input.contentJson),
           readiness: input.readiness === undefined ? undefined : normalizeDocumentReadiness(input.readiness),
+          revision: input.expectedRevision + 1,
           updatedAt: now,
         })
         .where(
@@ -154,11 +156,31 @@ export function createDocumentRepository(database: DocumentDatabase = db) {
             eq(documents.workspaceId, scope.workspaceId),
             eq(documents.id, id),
             eq(documents.status, "draft"),
+            eq(documents.revision, input.expectedRevision),
           ),
         )
         .returning();
 
-      return rows[0] ?? null;
+      const savedDocument = rows[0];
+      if (savedDocument) {
+        return { document: savedDocument, status: "success" as const };
+      }
+
+      const [latest] = await database
+        .select()
+        .from(documents)
+        .where(
+          and(
+            eq(documents.workspaceId, scope.workspaceId),
+            eq(documents.id, id),
+            eq(documents.status, "draft"),
+          ),
+        )
+        .limit(1);
+
+      return latest
+        ? { latest, status: "revision_conflict" as const }
+        : { status: "not_found" as const };
     },
 
     async archiveDocument(scope: WorkspaceScope, id: string) {
@@ -188,5 +210,5 @@ export const listDocuments = defaultRepository.listDocuments;
 export const getDocumentById = defaultRepository.getDocumentById;
 export const getDocumentsByIds = defaultRepository.getDocumentsByIds;
 export const listDocumentReferenceCandidates = defaultRepository.listDocumentReferenceCandidates;
-export const updateDocumentContent = defaultRepository.updateDocumentContent;
+export const saveDocumentDraft = defaultRepository.saveDocumentDraft;
 export const archiveDocument = defaultRepository.archiveDocument;

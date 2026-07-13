@@ -28,6 +28,7 @@ export const documents = sqliteTable(
       .notNull()
       .default(sql`'{}'`)
       .$defaultFn(() => ({})),
+    revision: integer("revision").notNull().default(0),
     createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
     updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
   },
@@ -37,6 +38,7 @@ export const documents = sqliteTable(
     uniqueIndex("documents_workspace_id_id_unique").on(table.workspaceId, table.id),
     check("documents_status_check", sql`${table.status} in ('draft', 'archived')`),
     check("documents_readiness_check", sql`${table.readiness} in ('draft', 'needs_review', 'ready', 'approved')`),
+    check("documents_revision_check", sql`${table.revision} >= 0`),
   ],
 );
 

@@ -36,6 +36,7 @@ async function createIsolatedProposalApplicationDb() {
       status text DEFAULT 'draft' NOT NULL,
       readiness text DEFAULT 'draft' NOT NULL,
       metadata_json text DEFAULT '{}' NOT NULL,
+      revision integer DEFAULT 0 NOT NULL,
       created_at integer NOT NULL,
       updated_at integer NOT NULL
     )
@@ -143,13 +144,14 @@ describe("proposal application service", () => {
       metadataJson: { owner: "Strategy" },
       plainText: "revenue grew 8%",
       readiness: "draft",
+      revision: 1,
       title: "Market Entry Memo",
     });
     expect(result.document.contentJson).toEqual(createDocumentContent("revenue grew 8%"));
     const [savedProposal] = await db.select().from(aiProposals).where(eq(aiProposals.id, "proposal_1"));
     const [savedDocument] = await db.select().from(documents).where(eq(documents.id, "doc_1"));
     expect(savedProposal).toMatchObject({ appliedMode: "replace", status: "accepted" });
-    expect(savedDocument).toMatchObject({ plainText: "revenue grew 8%" });
+    expect(savedDocument).toMatchObject({ plainText: "revenue grew 8%", revision: 1 });
   });
 
   it("returns a proposal conflict without changing the document when the expected status is stale", async () => {
@@ -175,6 +177,7 @@ describe("proposal application service", () => {
     });
     expect(document).toMatchObject({
       plainText: "growth was good",
+      revision: 0,
       title: "Market Entry Memo",
     });
   });
@@ -208,7 +211,7 @@ describe("proposal application service", () => {
       proposal: { id: "proposal_1", status: "pending" },
     });
     expect(proposal).toMatchObject({ appliedMode: null, status: "pending" });
-    expect(document).toMatchObject({ plainText: "growth was good", title: "Market Entry Memo" });
+    expect(document).toMatchObject({ plainText: "growth was good", revision: 0, title: "Market Entry Memo" });
   });
 
   it("does not accept a proposal when its document is no longer active", async () => {

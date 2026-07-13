@@ -34,6 +34,7 @@ async function createIsolatedProposalDb() {
       status text DEFAULT 'draft' NOT NULL,
       readiness text DEFAULT 'draft' NOT NULL,
       metadata_json text DEFAULT '{}' NOT NULL,
+      revision integer DEFAULT 0 NOT NULL,
       created_at integer NOT NULL,
       updated_at integer NOT NULL,
       UNIQUE(workspace_id, id)

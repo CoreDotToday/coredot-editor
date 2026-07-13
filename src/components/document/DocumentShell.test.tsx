@@ -220,6 +220,7 @@ function createDocument(id: string, title: string) {
     title,
     contentJson: { type: "doc" as const, content: [{ type: "paragraph" }] },
     plainText: "",
+    revision: 0,
   };
 }
 
@@ -232,6 +233,7 @@ function createDocumentWithContent(id: string, title: string, paragraphText: str
       content: [{ type: "paragraph", content: [{ type: "text", text: paragraphText }] }],
     },
     plainText: paragraphText,
+    revision: 0,
   };
 }
 
@@ -398,6 +400,7 @@ describe("DocumentShell", () => {
           title: "Market Entry Memo",
           contentJson: { type: "doc", content: [{ type: "paragraph" }] },
           plainText: "",
+          revision: 0,
         }}
         templates={[]}
         aiRuns={[]}
@@ -540,6 +543,60 @@ describe("DocumentShell", () => {
         body: expect.stringContaining("fresh edited body"),
       }),
     );
+    const [, saveInit] = fetchMock.mock.calls[0]!;
+    expect(JSON.parse(String(saveInit?.body))).toMatchObject({ expectedRevision: 0 });
+  });
+
+  it("advances the expected revision after each successful save", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ document: { ...createDocument("doc_1", "First save"), revision: 1 } })),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ document: { ...createDocument("doc_1", "Second save"), revision: 2 } })),
+      );
+
+    render(<DocumentShell aiRuns={[]} document={createDocument("doc_1", "Initial")} templates={[]} />);
+    const titleInput = screen.getByRole("textbox", { name: "문서 제목" });
+
+    fireEvent.change(titleInput, { target: { value: "First save" } });
+    fireEvent.click(screen.getByRole("button", { name: "저장" }));
+    await waitFor(() => expect(screen.getByText("저장됨")).toBeInTheDocument());
+
+    fireEvent.change(titleInput, { target: { value: "Second save" } });
+    fireEvent.click(screen.getByRole("button", { name: "저장" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toMatchObject({ expectedRevision: 0 });
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toMatchObject({ expectedRevision: 1 });
+  });
+
+  it("preserves the local draft and does not retry automatically after a revision conflict", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          error: "Document revision conflict",
+          reason: "revision_conflict",
+          document: { ...createDocument("doc_1", "Server version"), revision: 1 },
+        }),
+        { status: 409 },
+      ),
+    );
+
+    render(<DocumentShell aiRuns={[]} document={createDocument("doc_1", "Initial")} templates={[]} />);
+    const titleInput = screen.getByRole("textbox", { name: "문서 제목" });
+    fireEvent.change(titleInput, { target: { value: "Local unsaved version" } });
+    fireEvent.click(screen.getByRole("button", { name: "저장" }));
+    await act(async () => Promise.resolve());
+
+    expect(titleInput).toHaveValue("Local unsaved version");
+    expect(screen.getByText("저장 실패")).toBeInTheDocument();
+
+    await act(async () => {
+      vi.advanceTimersByTime(5000);
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("blocks internal sidebar navigation while local edits are unsaved", () => {
@@ -1796,6 +1853,43 @@ describe("DocumentShell", () => {
     expect(screen.getByText("저장됨")).toBeInTheDocument();
   });
 
+  it("uses the revision returned by proposal application for the next draft save", async () => {
+    const user = userEvent.setup();
+    const appliedDocument = {
+      ...createDocumentWithContent("doc_1", "Market Entry Memo", "revenue grew 8%"),
+      metadataJson: {},
+      readiness: "draft" as const,
+      revision: 1,
+    };
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({
+          document: appliedDocument,
+          proposal: { ...createProposal("proposal_1"), appliedMode: "replace", status: "accepted" },
+        })),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ document: { ...appliedDocument, title: "Edited after proposal", revision: 2 } })),
+      );
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "growth was good")}
+        proposals={[createProposal("proposal_1")]}
+        templates={[createTemplate("tpl_1", "Board review")]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "growth was good 제안으로 교체" }));
+    await user.clear(screen.getByRole("textbox", { name: "문서 제목" }));
+    await user.type(screen.getByRole("textbox", { name: "문서 제목" }), "Edited after proposal");
+    await user.click(screen.getByRole("button", { name: "저장" }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toMatchObject({ expectedRevision: 1 });
+  });
+
   it("replaces accepted proposal text across selected list items in the local draft", async () => {
     const user = userEvent.setup();
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
@@ -1809,6 +1903,7 @@ describe("DocumentShell", () => {
           id: "doc_1",
           title: "List review",
           plainText: "First item.\nSecond item.\nThird item.",
+          revision: 0,
           contentJson: {
             type: "doc" as const,
             content: [
@@ -1874,6 +1969,7 @@ describe("DocumentShell", () => {
           id: "doc_1",
           title: "List review",
           plainText: "First item.\nSecond item.\nThird item.",
+          revision: 0,
           contentJson: {
             type: "doc" as const,
             content: [
@@ -1933,6 +2029,7 @@ describe("DocumentShell", () => {
           id: "doc_1",
           title: "Stale selection",
           plainText: "Edited text\nTarget text",
+          revision: 0,
           contentJson: {
             type: "doc" as const,
             content: [
@@ -2230,6 +2327,7 @@ describe("DocumentShell", () => {
           id: "doc_1",
           title: "Range bulk accept",
           plainText: "Alpha.\nBeta.",
+          revision: 0,
           contentJson: {
             type: "doc" as const,
             content: [

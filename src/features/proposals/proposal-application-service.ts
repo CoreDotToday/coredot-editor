@@ -161,6 +161,7 @@ export function createProposalApplicationService(database: ProposalApplicationDa
             .set({
               contentJson: appliedDraft.contentJson,
               plainText: extractPlainTextFromTiptap(appliedDraft.contentJson),
+              revision: document.revision + 1,
               updatedAt: now,
             })
             .where(
@@ -168,6 +169,7 @@ export function createProposalApplicationService(database: ProposalApplicationDa
                 eq(documents.workspaceId, scope.workspaceId),
                 eq(documents.id, proposal.documentId),
                 eq(documents.status, "draft"),
+                eq(documents.revision, document.revision),
               ),
             )
             .returning();
