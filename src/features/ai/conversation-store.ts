@@ -5,6 +5,7 @@ import {
   type Conversation,
   type ConversationPage,
   type ConversationResult,
+  type ConversationSummary,
   type CreateConversationInput,
   decodeConversationCursor,
   encodeConversationCursor,
@@ -17,6 +18,7 @@ import {
 export type ConversationStorageMode = "database" | "local";
 export type ConversationSyncStatus = "saved" | "saving" | "unsaved";
 export type StoredConversationView = Conversation & { syncStatus: ConversationSyncStatus };
+export type StoredConversationSummary = ConversationSummary & { syncStatus: ConversationSyncStatus };
 export type StoreResult<T> = ConversationResult<T> | { ok: false; reason: "unavailable" };
 
 export interface ConversationStore {
@@ -27,6 +29,7 @@ export interface ConversationStore {
     input: { archived: boolean; expectedVersion: number },
   ): Promise<StoreResult<StoredConversationView>>;
   create(input: CreateConversationInput): Promise<StoreResult<StoredConversationView>>;
+  get(documentId: string, conversationId: string): Promise<StoreResult<StoredConversationView>>;
   fork(
     documentId: string,
     conversationId: string,
@@ -37,7 +40,7 @@ export interface ConversationStore {
     documentId: string;
     includeArchived?: boolean;
     limit?: number;
-  }): Promise<StoreResult<{ items: StoredConversationView[]; nextCursor: string | null }>>;
+  }): Promise<StoreResult<{ items: StoredConversationSummary[]; nextCursor: string | null }>>;
   rename(
     documentId: string,
     conversationId: string,
@@ -62,6 +65,7 @@ type Repository = {
     input: { archived: boolean; expectedVersion: number },
   ) => Promise<ConversationResult<Conversation>>;
   create: (context: never, input: CreateConversationInput) => Promise<ConversationResult<Conversation>>;
+  get: (context: never, conversationId: string) => Promise<ConversationResult<Conversation>>;
   fork: (
     context: never,
     conversationId: string,
@@ -108,6 +112,9 @@ export function createRepositoryConversationStore<TContext>(repository: Reposito
     async create(input: CreateConversationInput) {
       return saved(await wrap(() => repository.create(context, input)));
     },
+    async get(_documentId: string, conversationId: string) {
+      return saved(await wrap(() => repository.get(context, conversationId)));
+    },
     async fork(
       _documentId: string,
       conversationId: string,
@@ -148,6 +155,7 @@ type RepositoryWithContext<TContext> = Omit<Repository, keyof Repository> & {
     input: { archived: boolean; expectedVersion: number },
   ) => Promise<ConversationResult<Conversation>>;
   create: (context: TContext, input: CreateConversationInput) => Promise<ConversationResult<Conversation>>;
+  get: (context: TContext, conversationId: string) => Promise<ConversationResult<Conversation>>;
   fork: (
     context: TContext,
     conversationId: string,
@@ -225,8 +233,22 @@ export function createLocalConversationStore(storage: StorageLike, workspaceId: 
     : result;
 
   return {
+    async get(documentId, conversationId) {
+      const result = read(documentId);
+      if (!result.ok) return result;
+      const activeRecord = findActiveLocalConversation(result.value, conversationId);
+      return activeRecord
+        ? { ok: true, value: toStoredConversationView(activeRecord.conversation) }
+        : { ok: false, reason: "not_found" };
+    },
+
     async list(input) {
-      const cursor = input.cursor ? decodeConversationCursor(input.cursor) : null;
+      const cursorScope = {
+        documentId: input.documentId,
+        includeArchived: input.includeArchived ?? false,
+        workspaceId,
+      };
+      const cursor = input.cursor ? decodeConversationCursor(input.cursor, cursorScope) : null;
       if (input.cursor && !cursor) return { ok: false, reason: "invalid" };
       const result = read(input.documentId);
       if (!result.ok) return result;
@@ -235,7 +257,7 @@ export function createLocalConversationStore(storage: StorageLike, workspaceId: 
         return { ok: false, reason: "invalid" };
       }
       const sorted = result.value
-        .filter((conversation) => !conversation.retentionExpiresAt || conversation.retentionExpiresAt.getTime() > Date.now())
+        .filter(isActiveLocalConversation)
         .filter((conversation) => input.includeArchived || !conversation.archived)
         .filter((conversation) => !cursor ||
           conversation.updatedAt.getTime() < cursor.updatedAt.getTime() ||
@@ -247,9 +269,9 @@ export function createLocalConversationStore(storage: StorageLike, workspaceId: 
       return {
         ok: true,
         value: {
-          items: items.map(toStoredConversationView),
+          items: items.map(toStoredConversationSummary),
           nextCursor: page.length > limit && last
-            ? encodeConversationCursor(last.updatedAt, last.id)
+            ? encodeConversationCursor(last.updatedAt, last.id, cursorScope)
             : null,
         },
       };
@@ -262,13 +284,12 @@ export function createLocalConversationStore(storage: StorageLike, workspaceId: 
       const fingerprint = localFingerprint({ ...input, retentionExpiresAt: input.retentionExpiresAt?.toISOString() ?? null });
       const existing = current.value.find((conversation) => conversation.creationKey === input.creationKey);
       if (existing) {
+        if (!isActiveLocalConversation(existing)) return { ok: false, reason: "not_found" };
         return existing.creationFingerprint === fingerprint
           ? { ok: true, replayed: true, value: toStoredConversationView(existing) }
           : { ok: false, reason: "conflict" };
       }
-      const activeCount = current.value.filter((conversation) =>
-        !conversation.retentionExpiresAt || conversation.retentionExpiresAt.getTime() > Date.now()
-      ).length;
+      const activeCount = current.value.filter(isActiveLocalConversation).length;
       if (activeCount >= CONVERSATION_LIMITS.conversationsPerDocument) {
         return { ok: false, reason: "limit" };
       }
@@ -313,9 +334,9 @@ export function createLocalConversationStore(storage: StorageLike, workspaceId: 
       if (!isValidAppendInput(input)) return { ok: false, reason: "invalid" };
       const current = read(documentId);
       if (!current.ok) return current;
-      const index = current.value.findIndex((conversation) => conversation.id === conversationId);
-      if (index < 0) return { ok: false, reason: "not_found" };
-      const conversation = current.value[index]!;
+      const activeRecord = findActiveLocalConversation(current.value, conversationId);
+      if (!activeRecord) return { ok: false, reason: "not_found" };
+      const { conversation, index } = activeRecord;
       const fingerprint = localFingerprint({
         aiRunId: input.aiRunId ?? null,
         command: input.command ?? null,
@@ -405,20 +426,20 @@ export function createLocalConversationStore(storage: StorageLike, workspaceId: 
       }
       const current = read(documentId);
       if (!current.ok) return current;
+      const activeSource = findActiveLocalConversation(current.value, conversationId);
+      if (!activeSource) return { ok: false, reason: "not_found" };
       const fingerprint = localFingerprint({ conversationId, throughMessageId: input.throughMessageId, title });
       const existing = current.value.find((conversation) => conversation.creationKey === input.creationKey);
       if (existing) {
+        if (!isActiveLocalConversation(existing)) return { ok: false, reason: "not_found" };
         return existing.creationFingerprint === fingerprint
           ? { ok: true, replayed: true, value: toStoredConversationView(existing) }
           : { ok: false, reason: "conflict" };
       }
-      const source = current.value.find((conversation) => conversation.id === conversationId);
-      if (!source) return { ok: false, reason: "not_found" };
+      const source = activeSource.conversation;
       const throughIndex = source.messages.findIndex((message) => message.id === input.throughMessageId);
       if (throughIndex < 0) return { ok: false, reason: "not_found" };
-      const activeCount = current.value.filter((conversation) =>
-        !conversation.retentionExpiresAt || conversation.retentionExpiresAt.getTime() > Date.now()
-      ).length;
+      const activeCount = current.value.filter(isActiveLocalConversation).length;
       if (activeCount >= CONVERSATION_LIMITS.conversationsPerDocument) {
         return { ok: false, reason: "limit" };
       }
@@ -461,9 +482,9 @@ export function createLocalConversationStore(storage: StorageLike, workspaceId: 
   ): Promise<StoreResult<StoredConversationView>> {
     const current = read(documentId);
     if (!current.ok) return current;
-    const index = current.value.findIndex((conversation) => conversation.id === conversationId);
-    if (index < 0) return { ok: false, reason: "not_found" };
-    const conversation = current.value[index]!;
+    const activeRecord = findActiveLocalConversation(current.value, conversationId);
+    if (!activeRecord) return { ok: false, reason: "not_found" };
+    const { conversation, index } = activeRecord;
     if (isNoChange(conversation)) {
       return { ok: true, replayed: true, value: toStoredConversationView(conversation) };
     }
@@ -472,6 +493,17 @@ export function createLocalConversationStore(storage: StorageLike, workspaceId: 
     const persisted = write(documentId, current.value.with(index, next));
     return publicResult(persisted.ok ? { ok: true, value: next } : persisted);
   }
+}
+
+function isActiveLocalConversation(conversation: LocalConversation) {
+  return !conversation.retentionExpiresAt || conversation.retentionExpiresAt.getTime() > Date.now();
+}
+
+function findActiveLocalConversation(conversations: LocalConversation[], conversationId: string) {
+  const index = conversations.findIndex((conversation) => conversation.id === conversationId);
+  if (index < 0) return null;
+  const conversation = conversations[index]!;
+  return isActiveLocalConversation(conversation) ? { conversation, index } : null;
 }
 
 export function resolveConversationStorageMode(value: string | undefined): ConversationStorageMode {
@@ -511,6 +543,12 @@ function toStoredConversationView(conversation: LocalConversation): StoredConver
     updatedAt: conversation.updatedAt,
     version: conversation.version,
   };
+}
+
+function toStoredConversationSummary(conversation: LocalConversation): StoredConversationSummary {
+  const { messages: _messages, ...summary } = toStoredConversationView(conversation);
+  void _messages;
+  return summary;
 }
 
 function toPublicLocalMessage(message: LocalMessage): Conversation["messages"][number] {

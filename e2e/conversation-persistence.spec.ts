@@ -31,11 +31,36 @@ test("persists, reloads, shares, and archives an AI conversation", async ({ brow
   await expect(workspace.getByText(/대화 저장 중/)).toBeVisible();
   await expect(workspace.getByText("이 문서에 저장됨")).toHaveCount(0);
 
+  const createdResponsePromise = page.waitForResponse((response) =>
+    response.request().method() === "POST" && /\/api\/documents\/[^/]+\/conversations$/.test(response.url())
+  );
   releaseCreate();
+  const createdResponse = await createdResponsePromise;
+  const createdPayload = await createdResponse.json() as { conversation: { id: string } };
   await expect(workspace.getByText(`Stub rewrite: ${body}`)).toBeVisible({ timeout: 15_000 });
   await expect(workspace.getByText("이 문서에 저장됨")).toBeVisible();
 
+  const documentId = new URL(documentUrl).pathname.split("/").at(-1)!;
+  const summaryResponse = await page.request.get(`/api/documents/${documentId}/conversations?limit=1`);
+  expect(summaryResponse.ok()).toBe(true);
+  const summaryPayload = await summaryResponse.json() as {
+    conversations: Array<Record<string, unknown>>;
+    nextCursor: string | null;
+  };
+  expect(summaryPayload.conversations[0]?.id).toBe(createdPayload.conversation.id);
+  expect(summaryPayload.conversations[0]).not.toHaveProperty("messages");
+  expect(summaryPayload).toHaveProperty("nextCursor");
+
+  const detailResponsePromise = page.waitForResponse((response) =>
+    response.request().method() === "GET" &&
+    response.url().endsWith(`/api/conversations/${createdPayload.conversation.id}`)
+  );
   await page.reload();
+  const detailResponse = await detailResponsePromise;
+  expect(detailResponse.ok()).toBe(true);
+  expect(await detailResponse.json()).toMatchObject({
+    conversation: { id: createdPayload.conversation.id, messages: { length: 2 } },
+  });
   const reloadedWorkspace = page.getByRole("complementary", { name: "AI 작업 영역" });
   await reloadedWorkspace.getByRole("tab", { name: "대화" }).click();
   await expect(reloadedWorkspace.getByRole("tab", { name: "한국어로 번역" })).toBeVisible();

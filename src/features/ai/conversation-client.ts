@@ -25,7 +25,7 @@ const messageSchema = z.object({
   role: z.enum(["assistant", "user"]),
   scopeLabel: z.string().nullable(),
 }).strict();
-const conversationSchema = z.object({
+const conversationSummarySchema = z.object({
   archived: z.boolean(),
   command: z.string(),
   createdAt: dateSchema,
@@ -34,21 +34,24 @@ const conversationSchema = z.object({
   latestAiRunId: nullableIdSchema,
   latestProposalId: nullableIdSchema,
   messageCount: z.number().int().nonnegative(),
-  messages: z.array(messageSchema),
   retentionExpiresAt: dateSchema.nullable(),
   status: z.enum(["failed", "idle"]),
   title: z.string(),
   updatedAt: dateSchema,
   version: z.number().int().positive(),
+}).strict();
+const conversationSchema = conversationSummarySchema.extend({
+  messages: z.array(messageSchema),
 }).strict().refine((value) => value.messageCount === value.messages.length);
 const mutationResponseSchema = z.object({
   conversation: conversationSchema,
   replayed: z.boolean(),
 }).strict();
 const listResponseSchema = z.object({
-  conversations: z.array(conversationSchema),
+  conversations: z.array(conversationSummarySchema),
   nextCursor: z.string().min(1).nullable(),
 }).strict();
+const detailResponseSchema = z.object({ conversation: conversationSchema }).strict();
 
 export function createHttpConversationStore(
   request: RequestFunction = (input, init) => fetch(input, init),
@@ -71,6 +74,20 @@ export function createHttpConversationStore(
   }
 
   return {
+    async get(_documentId, conversationId) {
+      const response = await safelyRequest(
+        request,
+        `/api/conversations/${encodeURIComponent(conversationId)}`,
+        { method: "GET" },
+      );
+      if (!response) return { ok: false, reason: "unavailable" };
+      if (!response.ok) return failureFromResponse(response);
+      const parsed = detailResponseSchema.safeParse(await safelyReadJson(response));
+      return parsed.success
+        ? { ok: true, value: parseConversation(parsed.data.conversation) }
+        : { ok: false, reason: "unavailable" };
+    },
+
     async list(input) {
       const search = new URLSearchParams();
       if (input.cursor) search.set("cursor", input.cursor);
@@ -90,7 +107,7 @@ export function createHttpConversationStore(
       return {
         ok: true,
         value: {
-          items: parsed.data.conversations.map(parseConversation),
+          items: parsed.data.conversations.map(parseConversationSummary),
           nextCursor: parsed.data.nextCursor,
         },
       };
@@ -150,6 +167,16 @@ export function createHttpConversationStore(
         method: "POST",
       });
     },
+  };
+}
+
+function parseConversationSummary(value: z.infer<typeof conversationSummarySchema>) {
+  return {
+    ...value,
+    createdAt: new Date(value.createdAt),
+    retentionExpiresAt: value.retentionExpiresAt ? new Date(value.retentionExpiresAt) : null,
+    syncStatus: "saved" as const,
+    updatedAt: new Date(value.updatedAt),
   };
 }
 

@@ -38,6 +38,12 @@ Never store provider API keys in browser state, localStorage, prompt templates, 
 
 The DOCX importer/exporter preserves common structure but does not provide full Microsoft Word fidelity. Validate it against your own document corpus before depending on it for legal, financial, or regulated workflows.
 
+## Collection And Retention Policy
+
+Public collection routes are cursor-paged and bounded, but operators still need capacity monitoring, backup, and restore procedures for long-lived workspaces. Conversation retention timestamps and archive flags are metadata, not an automatic deletion promise. This release intentionally performs no destructive pruning because audit records, pending operations, legal holds, and linked AI Run/Proposal records require an explicit deployment policy first.
+
+Select one code-owned Project Profile per deployment with `PROJECT_PROFILE_ID`. Profile changes can tighten future writes while unchanged unknown legacy metadata remains readable; test Profile rollouts against a database copy before changing a production deployment.
+
 ## Release Gate
 
 Run this before publishing a production fork:

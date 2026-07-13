@@ -1,7 +1,8 @@
-import { and, asc, desc, eq, inArray, isNull, lte, or } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, lt, lte, or } from "drizzle-orm";
 import { db } from "@/db/client";
 import { aiProposals, aiRuns, type NewAiProposalRecord, type NewAiRunRecord } from "@/db/schema";
 import type { WorkspaceScope } from "@/features/auth/request-context";
+import { decodeCollectionCursor, encodeCollectionCursor } from "@/features/pagination/collection-cursor";
 
 type AiRunDatabase = typeof db;
 
@@ -268,11 +269,57 @@ export function createAiRunRepository(database: AiRunDatabase = db) {
         .select()
         .from(aiRuns)
         .where(and(eq(aiRuns.workspaceId, scope.workspaceId), eq(aiRuns.documentId, documentId)))
-        .orderBy(desc(aiRuns.createdAt));
+        .orderBy(desc(aiRuns.createdAt), desc(aiRuns.id))
+        .limit(50);
+    },
+
+    async listAiRunSummariesPage(
+      scope: WorkspaceScope,
+      documentId: string,
+      input: { cursor?: string; limit?: number } = {},
+    ) {
+      const limit = normalizePageLimit(input.limit);
+      const cursorScope = {
+        collection: "ai-runs",
+        documentId,
+        workspaceId: scope.workspaceId,
+      } as const;
+      const cursor = input.cursor ? decodeCollectionCursor(input.cursor, cursorScope) : null;
+      const rows = await database
+        .select({
+          commandType: aiRuns.commandType,
+          createdAt: aiRuns.createdAt,
+          id: aiRuns.id,
+          status: aiRuns.status,
+        })
+        .from(aiRuns)
+        .where(and(
+          eq(aiRuns.workspaceId, scope.workspaceId),
+          eq(aiRuns.documentId, documentId),
+          cursor
+            ? or(
+                lt(aiRuns.createdAt, cursor.timestamp),
+                and(eq(aiRuns.createdAt, cursor.timestamp), lt(aiRuns.id, cursor.id)),
+              )
+            : undefined,
+        ))
+        .orderBy(desc(aiRuns.createdAt), desc(aiRuns.id))
+        .limit(limit + 1);
+      const items = rows.slice(0, limit);
+      return {
+        items,
+        nextCursor: rows.length > limit && items.length > 0
+          ? encodeCollectionCursor({ id: items.at(-1)!.id, timestamp: items.at(-1)!.createdAt }, cursorScope)
+          : null,
+      };
     },
 
     getAiRunByIdempotencyKey,
   };
+}
+
+function normalizePageLimit(value: number | undefined) {
+  return Number.isSafeInteger(value) ? Math.max(1, Math.min(value ?? 20, 50)) : 20;
 }
 
 const defaultRepository = createAiRunRepository();
@@ -284,3 +331,4 @@ export const completeAiRunWithProposals = defaultRepository.completeAiRunWithPro
 export const failAiRun = defaultRepository.failAiRun;
 export const getAiRunByIdempotencyKey = defaultRepository.getAiRunByIdempotencyKey;
 export const listAiRunsForDocument = defaultRepository.listAiRunsForDocument;
+export const listAiRunSummariesPage = defaultRepository.listAiRunSummariesPage;

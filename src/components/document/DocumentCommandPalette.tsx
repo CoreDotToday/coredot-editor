@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { ModalSurface } from "@/components/ui/ModalSurface";
 import type {
   DocumentCommandAction,
   DocumentCommandGroup,
@@ -31,10 +32,6 @@ export function DocumentCommandPalette({ actions, messages, onClose }: DocumentC
   const activeOptionId = visibleResults[selectedIndex]
     ? getCommandOptionId(paletteId, visibleResults[selectedIndex].action.id)
     : undefined;
-
-  useEffect(() => {
-    inputRef.current?.focus();
-  }, []);
 
   useEffect(() => {
     optionRefs.current[selectedIndex]?.scrollIntoView?.({ block: "nearest" });
@@ -71,25 +68,17 @@ export function DocumentCommandPalette({ actions, messages, onClose }: DocumentC
     }
   };
 
-  const handleDialogKeyDown = (event: KeyboardEvent<HTMLElement>) => {
-    if (event.key !== "Escape") return;
-
-    event.preventDefault();
-    onClose();
-  };
-
   let optionIndex = 0;
 
   return (
-    <div className="fixed inset-0 z-[70] flex items-start justify-center bg-zinc-950/20 px-4 pt-[12vh]">
-      <button aria-label={messages.title} className="absolute inset-0 cursor-default" onClick={onClose} type="button" />
-      <section
-        aria-label={messages.title}
-        aria-modal="true"
-        className="relative z-10 w-full max-w-xl overflow-hidden rounded-lg border border-zinc-200 bg-white shadow-2xl shadow-zinc-950/20"
-        onKeyDown={handleDialogKeyDown}
-        role="dialog"
-      >
+    <ModalSurface
+      aria-label={messages.title}
+      className="max-h-[calc(100vh-2rem)] w-full max-w-xl overflow-hidden rounded-lg border border-zinc-200 bg-white p-0 shadow-2xl shadow-zinc-950/20"
+      initialFocusRef={inputRef}
+      onClose={onClose}
+      overlayClassName="fixed inset-0 flex items-start justify-center bg-zinc-950/20 px-4 pt-[12vh]"
+      unstyled
+    >
         <div className="border-b border-zinc-200 p-3">
           <label className="sr-only" htmlFor="document-command-palette-query">
             {messages.searchLabel}
@@ -172,8 +161,7 @@ export function DocumentCommandPalette({ actions, messages, onClose }: DocumentC
           )}
         </div>
         <footer className="border-t border-zinc-200 px-4 py-2 text-xs text-zinc-500">{messages.footerHint}</footer>
-      </section>
-    </div>
+    </ModalSurface>
   );
 }
 

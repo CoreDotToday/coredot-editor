@@ -10,9 +10,10 @@ import {
   CONVERSATION_REQUEST_DEADLINE_MS,
   conversationFailureResponse,
   conversationMutationResponse,
-  toPublicConversation,
+  toPublicConversationSummary,
 } from "@/features/ai/conversation-http";
 import { createProtectedOptionsHandler, createProtectedRouteHandler } from "@/features/auth/route-context";
+import { InvalidCollectionCursorError } from "@/features/pagination/collection-cursor";
 import { enforceRequestBudget } from "@/features/security/request-budget";
 import { parseBoundedJson, resourcePolicyErrorResponse } from "@/features/security/resource-policy";
 
@@ -51,15 +52,23 @@ const getHandler = createProtectedRouteHandler(async (context, request: Request,
   if (!id.success || !query.success) {
     return NextResponse.json({ error: "Invalid query parameters" }, { status: 400 });
   }
-  const result = await listConversations(context, {
-    cursor: query.data.cursor,
-    documentId: id.data,
-    includeArchived: query.data.includeArchived,
-    limit: query.data.limit,
-  });
+  let result: Awaited<ReturnType<typeof listConversations>>;
+  try {
+    result = await listConversations(context, {
+      cursor: query.data.cursor,
+      documentId: id.data,
+      includeArchived: query.data.includeArchived,
+      limit: query.data.limit,
+    });
+  } catch (error) {
+    if (error instanceof InvalidCollectionCursorError) {
+      return NextResponse.json({ error: "Invalid collection cursor" }, { status: 400 });
+    }
+    throw error;
+  }
   if (!result.ok) return conversationFailureResponse(result.reason);
   return NextResponse.json({
-    conversations: result.value.items.map(toPublicConversation),
+    conversations: result.value.items.map(toPublicConversationSummary),
     nextCursor: result.value.nextCursor,
   });
 });

@@ -40,7 +40,7 @@ The home page, public documentation links, sign-in, and sign-up remain public. D
 Repositories require Workspace context and include Workspace ID in every lookup and mutation condition. Route handlers do not fetch a record by naked ID and authorize it afterward.
 
 - Members can list, create, read, edit, archive, import, and export documents; run AI commands; and manage Proposals and Conversations.
-- Owners and admins can additionally manage prompt templates, AI settings, and Project Profile selection.
+- Owners and admins can additionally manage prompt templates and AI settings. Project Profile selection is a server deployment setting, not a workspace mutation.
 - Personal Workspace Principals act as owners.
 - Cross-Workspace access returns not found so record existence is not disclosed.
 
@@ -154,15 +154,19 @@ A Conversation repository seam has two adapters: local browser storage for expli
 
 Database Conversations and messages carry Workspace ID, Document ID, nullable AI Run and Proposal links, timestamps, archive state, and retention metadata. Private document text is not copied into general logs.
 
+Collection endpoints return stable opaque cursor pages ordered by `(updatedAt, id)` or `(createdAt, id)`. Conversation list items never contain message bodies; the selected transcript is fetched through a scoped detail endpoint and can be retried independently. Loading an older page appends only unseen IDs so optimistic or already-mutated sessions are not overwritten by stale summaries. Retention is deliberately non-destructive in this release: no background task prunes audit records, pending work, or foreign-key targets.
+
 ### Project Profile
 
 A code-defined Project Profile supplies metadata fields, readiness states and allowed transitions, list filters, labels, and default template references. The editor metadata panel, document list, validation, and template defaults derive from this one definition.
 
 The default profile preserves today's owner, due date, category, tags, and four readiness states. Example profiles demonstrate legal review and research writing without changing the host modules.
 
+The active Profile is selected once per deployment through server-only `PROJECT_PROFILE_ID`. Unknown IDs fail fast. There is no per-Workspace Profile selector in this release.
+
 ### Shared modal surface
 
-Settings dialogs, command palette, and compact workspace drawer reuse one accessible modal-surface module for initial focus, focus containment, Escape handling, focus restoration, background inertness, and scroll locking.
+Settings dialogs, command palette, interchange confirmations, and both compact workspace drawers reuse one stack-aware accessible modal-surface module for initial focus, focus containment, topmost-only Escape/backdrop handling, focus restoration, background inertness, scroll locking, and global shortcut suppression.
 
 ### Batch D acceptance
 

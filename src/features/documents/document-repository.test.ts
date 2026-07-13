@@ -6,6 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import * as schema from "@/db/schema";
+import { getProjectProfile } from "@/features/projects/default-project-profiles";
+import { defineProjectProfile } from "@/features/projects/project-profile";
 import { createDocumentRepository } from "./document-repository";
 
 const tempDirs: string[] = [];
@@ -50,6 +52,185 @@ async function createIsolatedDocumentDb() {
 }
 
 describe("document repository", () => {
+  it("returns bounded stable summary pages without full document content", async () => {
+    const db = await createIsolatedDocumentDb();
+    const repository = createDocumentRepository(db);
+    const created = await Promise.all(Array.from({ length: 4 }, (_, index) =>
+      repository.createDocumentFromContent(workspaceA, `Memo ${String(index)}`, {
+        type: "doc",
+        content: [{ type: "paragraph", content: [{ type: "text", text: `body-${String(index)}-${"x".repeat(600)}` }] }],
+      })));
+    const tiedAt = new Date("2026-01-02T00:00:00.000Z");
+    await db.update(schema.documents).set({ updatedAt: tiedAt });
+
+    const first = await repository.listDocumentSummaries(workspaceA, { limit: 2 });
+    const second = await repository.listDocumentSummaries(workspaceA, {
+      cursor: first.nextCursor ?? undefined,
+      limit: 2,
+    });
+
+    const expectedIds = created.map(({ id }) => id).sort().reverse();
+    expect(first.items.map(({ id }) => id)).toEqual(expectedIds.slice(0, 2));
+    expect(second.items.map(({ id }) => id)).toEqual(expectedIds.slice(2));
+    expect(first.nextCursor).toEqual(expect.any(String));
+    expect(second.nextCursor).toBeNull();
+    expect(first.items[0]).not.toHaveProperty("contentJson");
+    expect(first.items.every(({ plainText }) => plainText.length <= 400)).toBe(true);
+
+    await expect(repository.listDocumentSummaries(workspaceA, {
+      cursor: first.nextCursor ?? undefined,
+      limit: 2,
+      query: "different-filter",
+    })).rejects.toMatchObject({ name: "InvalidCollectionCursorError" });
+    await expect(repository.listDocumentSummaries(workspaceB, {
+      cursor: first.nextCursor ?? undefined,
+      limit: 2,
+    })).rejects.toMatchObject({ name: "InvalidCollectionCursorError" });
+  });
+
+  it("rejects malformed document summary cursors", async () => {
+    const db = await createIsolatedDocumentDb();
+    const repository = createDocumentRepository(db);
+
+    await expect(repository.listDocumentSummaries(workspaceA, { cursor: "not-a-cursor" }))
+      .rejects.toMatchObject({ name: "InvalidCollectionCursorError" });
+  });
+
+  it("applies exact typed Project Profile metadata filters in the database", async () => {
+    const db = await createIsolatedDocumentDb();
+    const profile = defineProjectProfile({
+      defaultTemplateIds: [],
+      id: "typed-filter",
+      labels: { en: { name: "Typed" }, ko: { name: "타입" } },
+      metadataFields: [
+        { filterable: true, id: "billable", labels: { en: "Billable", ko: "청구" }, type: "boolean" },
+        { filterable: true, id: "owner", labels: { en: "Owner", ko: "소유자" }, type: "text" },
+        { filterable: true, id: "score", labels: { en: "Score", ko: "점수" }, type: "number" },
+        { filterable: true, id: "stage", labels: { en: "Stage", ko: "단계" }, options: ["open", "closed"], type: "select" },
+        { filterable: true, id: "tags", labels: { en: "Tags", ko: "태그" }, type: "tags" },
+      ],
+      readiness: [{ id: "draft", labels: { en: "Draft", ko: "초안" }, transitions: [] }],
+    });
+    const repository = createDocumentRepository(db, { projectProfile: profile });
+    await repository.createDocumentFromDraft(workspaceA, {
+      title: "Matching",
+      contentJson: { type: "doc", content: [{ type: "paragraph" }] },
+      metadataJson: { billable: false, owner: "123", score: 1.5, stage: "open", tags: ["risk", "msa"] },
+      readiness: "draft",
+    });
+    await repository.createDocumentFromDraft(workspaceA, {
+      title: "Other",
+      contentJson: { type: "doc", content: [{ type: "paragraph" }] },
+      metadataJson: { billable: true, score: 2, stage: "closed", tags: ["brisk"] },
+      readiness: "draft",
+    });
+
+    await expect(repository.listDocumentSummaries(workspaceA, { metadataKey: "billable", metadataValue: "false" }))
+      .resolves.toMatchObject({ items: [{ title: "Matching" }] });
+    await expect(repository.listDocumentSummaries(workspaceA, { metadataKey: "score", metadataValue: "1.5" }))
+      .resolves.toMatchObject({ items: [{ title: "Matching" }] });
+    await expect(repository.listDocumentSummaries(workspaceA, { metadataKey: "stage", metadataValue: "open" }))
+      .resolves.toMatchObject({ items: [{ title: "Matching" }] });
+    await expect(repository.listDocumentSummaries(workspaceA, { metadataKey: "tags", metadataValue: "risk" }))
+      .resolves.toMatchObject({ items: [{ title: "Matching" }] });
+    await expect(repository.listDocumentSummaries(workspaceA, { metadataKey: "tags", metadataValue: "ris" }))
+      .resolves.toMatchObject({ items: [] });
+    await expect(repository.listDocumentSummaries(workspaceA, { metadataKey: "score", metadataValue: "abc" }))
+      .rejects.toMatchObject({ name: "InvalidDocumentSummaryFilterError" });
+    await expect(repository.listDocumentSummaries(workspaceA, { metadataKey: "billable", metadataValue: "nope" }))
+      .rejects.toMatchObject({ name: "InvalidDocumentSummaryFilterError" });
+    await expect(repository.listDocumentSummaries(workspaceA, { metadataKey: "stage", metadataValue: "missing" }))
+      .rejects.toMatchObject({ name: "InvalidDocumentSummaryFilterError" });
+    await expect(repository.listDocumentSummaries(workspaceA, { metadataKey: "unknown", metadataValue: "value" }))
+      .rejects.toMatchObject({ name: "InvalidDocumentSummaryFilterError" });
+    await expect(repository.listDocumentSummaries(workspaceA, { metadataKey: "score" }))
+      .rejects.toMatchObject({ name: "InvalidDocumentSummaryFilterError" });
+    await expect(repository.listDocumentSummaries(workspaceA, { metadataValue: "1.5" }))
+      .rejects.toMatchObject({ name: "InvalidDocumentSummaryFilterError" });
+  });
+
+  it("treats malformed persisted metadata JSON as empty while evaluating filters", async () => {
+    const db = await createIsolatedDocumentDb();
+    const repository = createDocumentRepository(db);
+    const valid = await repository.createDocumentFromDraft(workspaceA, {
+      title: "Valid metadata",
+      contentJson: { type: "doc", content: [{ type: "paragraph" }] },
+      metadataJson: { owner: "Legal" },
+      readiness: "draft",
+    });
+    const corrupt = await repository.createDocumentFromDraft(workspaceA, {
+      title: "Corrupt metadata",
+      contentJson: { type: "doc", content: [{ type: "paragraph" }] },
+      metadataJson: { owner: "Legal" },
+      readiness: "draft",
+    });
+    await db.run(sql`update documents set metadata_json = '{' where id = ${corrupt.id}`);
+
+    await expect(repository.listDocumentSummaries(workspaceA, {
+      metadataKey: "owner",
+      metadataValue: "Legal",
+    })).resolves.toMatchObject({ items: [{ id: valid.id, title: "Valid metadata" }] });
+  });
+
+  it("does not coerce malformed legacy JSON metadata into typed filter matches", async () => {
+    const db = await createIsolatedDocumentDb();
+    const profile = defineProjectProfile({
+      defaultTemplateIds: [],
+      id: "legacy-filter-types",
+      labels: { en: { name: "Legacy" }, ko: { name: "레거시" } },
+      metadataFields: [
+        { filterable: true, id: "billable", labels: { en: "Billable", ko: "청구" }, type: "boolean" },
+        { filterable: true, id: "owner", labels: { en: "Owner", ko: "소유자" }, type: "text" },
+        { filterable: true, id: "score", labels: { en: "Score", ko: "점수" }, type: "number" },
+        { filterable: true, id: "stage", labels: { en: "Stage", ko: "단계" }, options: ["open"], type: "select" },
+        { filterable: true, id: "tags", labels: { en: "Tags", ko: "태그" }, type: "tags" },
+      ],
+      readiness: [{ id: "draft", labels: { en: "Draft", ko: "초안" }, transitions: [] }],
+    });
+    const repository = createDocumentRepository(db, { projectProfile: profile });
+    const now = new Date("2026-01-01T00:00:00.000Z");
+    const baseDocument = {
+      workspaceId: workspaceA.workspaceId,
+      contentJson: { type: "doc" as const, content: [{ type: "paragraph" as const }] },
+      plainText: "",
+      readiness: "draft" as const,
+      status: "draft" as const,
+      createdAt: now,
+      updatedAt: now,
+    };
+    await db.insert(schema.documents).values([
+      {
+        ...baseDocument,
+        id: "valid-types",
+        title: "Valid types",
+        metadataJson: { billable: false, owner: "123", score: 0, stage: "open", tags: ["risk"] },
+      },
+      {
+        ...baseDocument,
+        id: "legacy-types",
+        title: "Legacy malformed types",
+        metadataJson: {
+          billable: "false",
+          owner: 123,
+          score: "not-a-number",
+          stage: ["open"],
+          tags: "risk",
+        },
+      },
+    ]);
+
+    for (const [metadataKey, metadataValue] of [
+      ["billable", "false"],
+      ["owner", "123"],
+      ["score", "0"],
+      ["stage", "open"],
+      ["tags", "risk"],
+    ] as const) {
+      const page = await repository.listDocumentSummaries(workspaceA, { metadataKey, metadataValue });
+      expect(page.items.map(({ id }) => id), `${metadataKey} must preserve its JSON type`).toEqual(["valid-types"]);
+    }
+  });
+
   it("creates a draft document with Tiptap JSON and plain text", async () => {
     const db = await createIsolatedDocumentDb();
     const { createDocumentDraft, listDocuments } = createDocumentRepository(db);
@@ -65,6 +246,84 @@ describe("document repository", () => {
     expect(document.status).toBe("draft");
     expect(document.revision).toBe(0);
     expect(documents.some((item) => item.id === document.id)).toBe(true);
+  });
+
+  it("allows an incomplete required-field draft and blocks readiness until it is completed", async () => {
+    const db = await createIsolatedDocumentDb();
+    const profile = defineProjectProfile({
+      defaultTemplateIds: [],
+      id: "required-draft",
+      labels: { en: { name: "Required draft" }, ko: { name: "필수 초안" } },
+      metadataFields: [
+        { id: "owner", labels: { en: "Owner", ko: "소유자" }, maxLength: 10, required: true, type: "text" },
+      ],
+      readiness: [
+        { id: "draft", labels: { en: "Draft", ko: "초안" }, transitions: ["needs_review"] },
+        { id: "needs_review", labels: { en: "Review", ko: "검토" }, transitions: ["draft"] },
+      ],
+    });
+    const repository = createDocumentRepository(db, { projectProfile: profile });
+
+    const document = await repository.createDocumentDraft(workspaceA, "Incomplete draft");
+    const blocked = await repository.saveDocumentDraft(workspaceA, document.id, {
+      title: document.title,
+      contentJson: document.contentJson,
+      expectedRevision: 0,
+      readiness: "needs_review",
+    });
+    const saved = await repository.saveDocumentDraft(workspaceA, document.id, {
+      title: document.title,
+      contentJson: document.contentJson,
+      expectedRevision: 0,
+      metadataJson: { owner: "Legal" },
+      readiness: "needs_review",
+    });
+
+    expect(blocked).toEqual({
+      status: "invalid_profile",
+      violation: { fieldId: "owner", ok: false, reason: "required" },
+    });
+    expect(saved).toMatchObject({ status: "success", document: { metadataJson: { owner: "Legal" }, readiness: "needs_review" } });
+    if (saved.status !== "success") throw new Error("Expected required metadata transition to succeed");
+    const returnedToDraft = await repository.saveDocumentDraft(workspaceA, document.id, {
+      title: document.title,
+      contentJson: document.contentJson,
+      expectedRevision: 1,
+      metadataJson: {},
+      readiness: "draft",
+    });
+    expect(returnedToDraft).toMatchObject({
+      status: "success",
+      document: { metadataJson: {}, readiness: "draft", revision: 2 },
+    });
+    const incompleteDraftSave = await repository.saveDocumentDraft(workspaceA, document.id, {
+      title: "Still incomplete",
+      contentJson: document.contentJson,
+      expectedRevision: 2,
+    });
+    expect(incompleteDraftSave).toMatchObject({
+      status: "success",
+      document: { metadataJson: {}, readiness: "draft", revision: 3 },
+    });
+    const blockedAgain = await repository.saveDocumentDraft(workspaceA, document.id, {
+      title: "Cannot leave draft",
+      contentJson: document.contentJson,
+      expectedRevision: 3,
+      readiness: "needs_review",
+    });
+    expect(blockedAgain).toEqual({
+      status: "invalid_profile",
+      violation: { fieldId: "owner", ok: false, reason: "required" },
+    });
+    await expect(repository.createDocumentFromDraft(workspaceA, {
+      title: "Oversized",
+      contentJson: { type: "doc", content: [{ type: "paragraph" }] },
+      metadataJson: { owner: "x".repeat(11) },
+      readiness: "draft",
+    })).rejects.toMatchObject({
+      name: "ProjectProfileViolationError",
+      violation: { fieldId: "owner", ok: false, reason: "invalid_length" },
+    });
   });
 
   it("creates a document from converted Tiptap content and derives plain text", async () => {
@@ -291,6 +550,69 @@ describe("document repository", () => {
     expect(stale).toMatchObject({
       status: "revision_conflict",
       latest: { title: "Updated Memo", plainText: "Updated", revision: 1 },
+    });
+  });
+
+  it("enforces Project Profile metadata on direct repository creation", async () => {
+    const db = await createIsolatedDocumentDb();
+    const { createDocumentFromDraft } = createDocumentRepository(db, {
+      projectProfile: getProjectProfile("legal-review"),
+    });
+
+    await expect(createDocumentFromDraft(workspaceA, {
+      title: "Contract",
+      contentJson: { type: "doc", content: [{ type: "paragraph" }] },
+      metadataJson: { researchQuestion: "Out of profile" },
+      readiness: "draft",
+    })).rejects.toMatchObject({
+      name: "ProjectProfileViolationError",
+      violation: { fieldId: "researchQuestion", reason: "unknown_field" },
+    });
+  });
+
+  it("preserves unknown legacy metadata while enforcing legal readiness transitions", async () => {
+    const db = await createIsolatedDocumentDb();
+    const defaultRepository = createDocumentRepository(db);
+    const document = await defaultRepository.createDocumentDraft(workspaceA, "Legacy contract");
+    await db.run(sql`UPDATE documents SET metadata_json = '{"legacyWorkflow":"keep-me"}' WHERE id = ${document.id}`);
+    const legalRepository = createDocumentRepository(db, {
+      projectProfile: getProjectProfile("legal-review"),
+    });
+
+    const saved = await legalRepository.saveDocumentDraft(workspaceA, document.id, {
+      title: "Reviewed contract",
+      contentJson: { type: "doc", content: [{ type: "paragraph" }] },
+      metadataJson: { counterparty: "Core Dot" },
+      readiness: "needs_review",
+      expectedRevision: 0,
+    });
+    expect(saved).toMatchObject({
+      status: "success",
+      document: {
+        metadataJson: { counterparty: "Core Dot", legacyWorkflow: "keep-me" },
+        readiness: "needs_review",
+        revision: 1,
+      },
+    });
+
+    const rejected = await legalRepository.saveDocumentDraft(workspaceA, document.id, {
+      title: "Illegally approved contract",
+      contentJson: { type: "doc", content: [{ type: "paragraph" }] },
+      readiness: "approved",
+      expectedRevision: 1,
+    });
+    expect(rejected).toEqual({
+      status: "invalid_profile",
+      violation: {
+        current: "needs_review",
+        next: "approved",
+        reason: "invalid_readiness_transition",
+      },
+    });
+    await expect(legalRepository.getDocumentById(workspaceA, document.id)).resolves.toMatchObject({
+      readiness: "needs_review",
+      revision: 1,
+      title: "Reviewed contract",
     });
   });
 

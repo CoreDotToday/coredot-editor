@@ -40,6 +40,8 @@ export type Conversation = {
   version: number;
 };
 
+export type ConversationSummary = Omit<Conversation, "messages">;
+
 export type ConversationFailureReason = "conflict" | "invalid" | "limit" | "not_found";
 export type ConversationResult<T> =
   | { ok: false; reason: ConversationFailureReason }
@@ -72,7 +74,12 @@ export type AppendConversationInput = {
   status: ConversationStatus;
 };
 
-export type ConversationPage = { items: Conversation[]; nextCursor: string | null };
+export type ConversationPage = { items: ConversationSummary[]; nextCursor: string | null };
+export type ConversationCursorScope = {
+  documentId: string;
+  includeArchived: boolean;
+  workspaceId: string;
+};
 
 export function isValidCreateInput(input: CreateConversationInput) {
   return isValidKey(input.creationKey) &&
@@ -107,14 +114,22 @@ export function isValidKey(value: string) {
   return value.length >= 16 && value.length <= 128 && /^[A-Za-z0-9_-]+$/.test(value);
 }
 
-export function encodeConversationCursor(updatedAt: Date, id: string) {
-  const bytes = new TextEncoder().encode(JSON.stringify({ id, updatedAt: updatedAt.getTime() }));
+export function encodeConversationCursor(updatedAt: Date, id: string, scope: ConversationCursorScope) {
+  const bytes = new TextEncoder().encode(JSON.stringify({
+    i: id,
+    s: fingerprintConversationCursorScope(scope),
+    t: updatedAt.getTime(),
+    v: 2,
+  }));
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/u, "");
 }
 
-export function decodeConversationCursor(value: string): { id: string; updatedAt: Date } | null {
+export function decodeConversationCursor(
+  value: string,
+  scope: ConversationCursorScope,
+): { id: string; updatedAt: Date } | null {
   if (!value || value.length > 512 || !/^[A-Za-z0-9_-]+$/u.test(value)) return null;
   try {
     const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
@@ -123,16 +138,35 @@ export function decodeConversationCursor(value: string): { id: string; updatedAt
     const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
     const parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown;
     if (!parsed || typeof parsed !== "object") return null;
-    const candidate = parsed as { id?: unknown; updatedAt?: unknown };
+    const candidate = parsed as { i?: unknown; s?: unknown; t?: unknown; v?: unknown };
     if (
-      typeof candidate.id !== "string" ||
-      candidate.id.length < 1 ||
-      candidate.id.length > 256 ||
-      !Number.isSafeInteger(candidate.updatedAt)
+      candidate.v !== 2 ||
+      typeof candidate.i !== "string" ||
+      candidate.i.length < 1 ||
+      candidate.i.length > 256 ||
+      candidate.s !== fingerprintConversationCursorScope(scope) ||
+      !Number.isSafeInteger(candidate.t)
     ) return null;
-    const updatedAt = new Date(Number(candidate.updatedAt));
-    return Number.isFinite(updatedAt.getTime()) ? { id: candidate.id, updatedAt } : null;
+    const updatedAt = new Date(Number(candidate.t));
+    return Number.isFinite(updatedAt.getTime()) ? { id: candidate.i, updatedAt } : null;
   } catch {
     return null;
   }
+}
+
+function fingerprintConversationCursorScope(scope: ConversationCursorScope) {
+  const value = JSON.stringify([
+    "conversations",
+    scope.workspaceId,
+    scope.documentId,
+    scope.includeArchived,
+  ]);
+  let first = 0x811c9dc5;
+  let second = 0x9e3779b9;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    first = Math.imul(first ^ code, 0x01000193);
+    second = Math.imul(second ^ code, 0x85ebca6b);
+  }
+  return `${(first >>> 0).toString(16).padStart(8, "0")}${(second >>> 0).toString(16).padStart(8, "0")}`;
 }

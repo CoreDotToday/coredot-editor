@@ -5,6 +5,7 @@ import type {
   TiptapJson,
 } from "@/db/schema";
 import type { ProposalApplyMode } from "@/features/proposals/proposal-transaction";
+import type { ProjectProfileViolation } from "@/features/projects/project-profile";
 
 export type DocumentSessionDraft = {
   title: string;
@@ -67,6 +68,7 @@ export type DocumentSaveResult =
       localDraft: DocumentSessionDraft;
       serverDocument: DocumentSessionDocument;
     }
+  | { kind: "invalid_profile"; status: number; violation: ProjectProfileViolation }
   | { kind: "failed"; status: number | null };
 
 export type ProposalApplyPayload = {
@@ -104,6 +106,17 @@ export class DocumentSessionConflictError extends DocumentSessionRequestError {
   }
 }
 
+export class DocumentSessionInvalidProfileError extends DocumentSessionRequestError {
+  constructor(
+    status: number,
+    body: Record<string, unknown>,
+    readonly violation: ProjectProfileViolation,
+  ) {
+    super(status, body);
+    this.name = "DocumentSessionInvalidProfileError";
+  }
+}
+
 export function createDocumentSessionClient(request: RequestFunction = fetch) {
   async function readBody(response: Response): Promise<Record<string, unknown>> {
     const body = await response.json().catch(() => ({}));
@@ -123,6 +136,10 @@ export function createDocumentSessionClient(request: RequestFunction = fetch) {
       isDocumentSessionDocument(body.document)
     ) {
       throw new DocumentSessionConflictError(response.status, body, body.document);
+    }
+    const profileViolation = !response.ok ? parseProjectProfileViolation(body.violation) : null;
+    if (!response.ok && body.reason === "invalid_project_profile" && profileViolation) {
+      throw new DocumentSessionInvalidProfileError(response.status, body, profileViolation);
     }
     if (!response.ok) throw new DocumentSessionRequestError(response.status, body);
 
@@ -172,6 +189,10 @@ export function createDocumentSessionClient(request: RequestFunction = fetch) {
         isDocumentSessionDocument(body.document)
       ) {
         return { kind: "conflict", localDraft, serverDocument: body.document };
+      }
+      const profileViolation = !response.ok ? parseProjectProfileViolation(body.violation) : null;
+      if (!response.ok && body.reason === "invalid_project_profile" && profileViolation) {
+        return { kind: "invalid_profile", status: response.status, violation: profileViolation };
       }
       return { kind: "failed", status: response.status };
     },
@@ -314,4 +335,39 @@ function isDocumentSessionHistoryChange(value: unknown): value is DocumentSessio
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseProjectProfileViolation(value: unknown): ProjectProfileViolation | null {
+  if (!isRecord(value)) return null;
+  const reason = value.reason;
+  if (
+    value.ok === false &&
+    typeof value.fieldId === "string" &&
+    typeof reason === "string" &&
+    isProjectMetadataViolationReason(reason)
+  ) {
+    return { fieldId: value.fieldId, ok: false, reason };
+  }
+  if (
+    reason === "invalid_readiness_transition" &&
+    isDocumentReadiness(value.current) &&
+    isDocumentReadiness(value.next)
+  ) {
+    return { current: value.current, next: value.next, reason };
+  }
+  return null;
+}
+
+function isProjectMetadataViolationReason(
+  value: string,
+): value is "invalid_length" | "invalid_option" | "invalid_type" | "required" | "unknown_field" {
+  return value === "invalid_length" ||
+    value === "invalid_option" ||
+    value === "invalid_type" ||
+    value === "required" ||
+    value === "unknown_field";
+}
+
+function isDocumentReadiness(value: unknown): value is DocumentReadiness {
+  return value === "draft" || value === "needs_review" || value === "ready" || value === "approved";
 }

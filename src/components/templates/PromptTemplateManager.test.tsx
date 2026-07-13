@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PromptTemplateRecord } from "@/db/schema";
 import { PromptTemplateManager } from "./PromptTemplateManager";
+import { getProjectProfile } from "@/features/projects/default-project-profiles";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -38,6 +39,22 @@ function createDeferredResponse() {
 }
 
 describe("PromptTemplateManager", () => {
+  it("selects and labels the active profile default by stable builtin key", () => {
+    render(
+      <PromptTemplateManager
+        projectProfile={getProjectProfile("legal-review")}
+        templates={[
+          createTemplate({ id: "strategy", builtinKey: "tpl_strategy_review", name: "A Strategy Review" }),
+          createTemplate({ id: "contract", builtinKey: "tpl_contract_review", name: "Z Contract Review" }),
+        ]}
+      />,
+    );
+
+    expect(screen.getByLabelText("이름")).toHaveValue("Z Contract Review");
+    expect(screen.getByText("프로필 기본값")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Z Contract Review/ })).toHaveAttribute("aria-current", "page");
+  });
+
   it("renders editable template fields", () => {
     render(
       <PromptTemplateManager

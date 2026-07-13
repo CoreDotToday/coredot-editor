@@ -43,6 +43,9 @@ The repository keeps `"private": true` in `package.json` to prevent accidental n
 - Proposal-based review and rewrite flows with redline previews, accept/reject, bulk handling, and conservative local undo.
 - Server-side proposal application transaction so accepted proposals persist document content and proposal status together.
 - Document-scoped AI workspace with review, conversation, context inspector, and change-history tabs.
+- Code-defined Project Profiles for reusable metadata, readiness transitions, list filters, labels, and default templates.
+- Cursor-paged document, AI run, proposal, and conversation collections with lazy transcript/proposal detail loading.
+- Shared accessible modal behavior for settings, command palette, interchange confirmation, and compact drawers.
 - DOCX import/export MVP for headings, paragraphs, lists, links, and common inline marks.
 - Korean-first editor UI with English switching.
 - Unit, component, route, repository, and Playwright E2E tests.

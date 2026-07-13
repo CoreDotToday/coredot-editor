@@ -1,4 +1,5 @@
 import { promptTemplates, type PromptVariableSchema } from "./schema";
+import { BUILTIN_TEMPLATE_KEYS } from "@/features/templates/builtin-template-keys";
 
 export type DefaultPromptTemplate = {
   id: string;
@@ -61,7 +62,7 @@ function prompt(...sections: string[]) {
 
 export const defaultPromptTemplates: DefaultPromptTemplate[] = [
   {
-    id: "tpl_strategy_review",
+    id: BUILTIN_TEMPLATE_KEYS.strategyReview,
     name: "Strategy Review",
     description: "Evaluate strategic clarity, evidence, risks, and executive readability.",
     category: "strategy_review",
@@ -90,7 +91,7 @@ export const defaultPromptTemplates: DefaultPromptTemplate[] = [
     variableSchema: strategyVariableSchema,
   },
   {
-    id: "tpl_executive_rewrite",
+    id: BUILTIN_TEMPLATE_KEYS.executiveRewrite,
     name: "Executive Rewrite",
     description: "Rewrite selected text for concise executive communication.",
     category: "executive_rewrite",
@@ -119,7 +120,7 @@ export const defaultPromptTemplates: DefaultPromptTemplate[] = [
     variableSchema: strategyVariableSchema,
   },
   {
-    id: "tpl_market_research",
+    id: BUILTIN_TEMPLATE_KEYS.marketResearch,
     name: "Market Research Critique",
     description: "Check market claims, assumptions, segmentation, and evidence gaps.",
     category: "market_research",
@@ -148,7 +149,7 @@ export const defaultPromptTemplates: DefaultPromptTemplate[] = [
     variableSchema: strategyVariableSchema,
   },
   {
-    id: "tpl_contract_review",
+    id: BUILTIN_TEMPLATE_KEYS.contractReview,
     name: "Contract Review",
     description: "Review contract clauses for risks and propose redline-ready edits.",
     category: "contract_review",

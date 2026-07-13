@@ -9,6 +9,7 @@ import * as schema from "@/db/schema";
 import { aiProposals, documentChangeProposals, documentChanges, documents, type TiptapJson } from "@/db/schema";
 import type { RequestContext } from "@/features/auth/request-context";
 import { DOCUMENT_REQUEST_BODY_BYTES } from "@/features/security/resource-policy";
+import { getProjectProfile } from "@/features/projects/default-project-profiles";
 import { createDocumentChangeService } from "./document-change-service";
 import { extractPlainTextFromTiptap } from "./tiptap-text";
 
@@ -210,6 +211,58 @@ describe("document change service", () => {
     expect(result).toMatchObject({ ok: false, reason: "revision_conflict", document: { revision: 1 } });
     expect(await db.select().from(documentChanges)).toHaveLength(0);
     expect(await db.select().from(aiProposals)).toMatchObject([{ status: "pending" }]);
+  });
+
+  it("enforces the active profile and preserves legacy metadata during proposal application", async () => {
+    const db = await createChangeDatabase();
+    await seedDocument(db);
+    await db.update(documents).set({ metadataJson: { legacyWorkflow: "keep-me" } }).where(eq(documents.id, "doc_1"));
+    await seedProposal(db, { id: "proposal_1", replacement: "new", target: "target" });
+    const changes = createDocumentChangeService(db, {
+      projectProfile: getProjectProfile("legal-review"),
+    });
+
+    const applied = await changes.applyProposal(context, {
+      documentId: "doc_1",
+      draft: {
+        ...draft("target"),
+        metadataJson: { counterparty: "Core Dot" },
+      },
+      expectedRevision: 0,
+      proposalId: "proposal_1",
+      mode: "replace",
+    });
+    expect(applied).toMatchObject({
+      ok: true,
+      document: {
+        metadataJson: { counterparty: "Core Dot", legacyWorkflow: "keep-me" },
+        readiness: "needs_review",
+      },
+    });
+
+    await seedProposal(db, { id: "proposal_2", replacement: "newer", target: "new" });
+    const rejected = await changes.applyProposal(context, {
+      documentId: "doc_1",
+      draft: {
+        ...draft("new"),
+        metadataJson: { counterparty: "Core Dot" },
+        readiness: "approved",
+      },
+      expectedRevision: 1,
+      proposalId: "proposal_2",
+      mode: "replace",
+    });
+    expect(rejected).toEqual({
+      ok: false,
+      reason: "invalid_profile",
+      violation: {
+        current: "needs_review",
+        next: "approved",
+        reason: "invalid_readiness_transition",
+      },
+    });
+    expect(await db.select().from(aiProposals).where(eq(aiProposals.id, "proposal_2")))
+      .toMatchObject([{ status: "pending" }]);
   });
 
   it("rolls back every proposal when one bulk target is stale", async () => {

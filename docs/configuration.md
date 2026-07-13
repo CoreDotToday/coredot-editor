@@ -20,6 +20,18 @@ Coredot Editor keeps runtime configuration explicit. Server-side secrets live in
 | `COREDOT_GEMINI_MODEL` | `gemini-2.5-flash` | Initial Gemini model through Core.Today. |
 | `COREDOT_GEMINI_BASE_URL` | `https://api.core.today/llm/gemini/v1beta` | Initial Core.Today Gemini Base URL. |
 | `COREDOT_MAX_COMPLETION_TOKENS` | `32768` | Initial maximum output tokens for Core.Today proxy calls. |
+| `PROJECT_PROFILE_ID` | `default` | Server-owned code-defined Project Profile. Valid built-ins are `default`, `legal-review`, and `research-writing`; unknown values fail startup/request resolution instead of falling back. |
+| `CONVERSATION_STORAGE` | `database` | Conversation adapter. Use `database` for authenticated durable workspaces; `local` is an explicit browser-only demo mode. Unknown values fail closed. |
+
+## Project Profiles
+
+`PROJECT_PROFILE_ID` is resolved only on the server and applies consistently to every workspace served by that deployment. It is not a per-workspace administrative setting. A Profile defines metadata fields and field types, readiness states and allowed transitions, filterable fields, localized labels, and stable built-in template references. The same Profile drives document creation/update validation, proposal application, metadata controls, list filters, readiness badges, and default-template selection.
+
+Profile definitions must have a non-empty stable ID, localized name, at least one readiness state beginning with `draft`, unique field/state/template identifiers, valid transition targets, and options only for `select` fields. Select values, booleans, finite numbers, calendar dates, tags, text length, and readiness transitions are validated before persistence. Required metadata may be omitted while the target readiness is `draft`, but every required field must be present before leaving `draft`; returning to `draft` allows the document to become incomplete again. Existing unknown metadata keys are preserved only when unchanged so a Profile deployment does not silently destroy legacy data.
+
+## Conversation Storage And Retention
+
+Database conversation lists return bounded metadata summaries and load the selected transcript through a separate workspace-scoped detail route. `CONVERSATION_STORAGE=local` keeps the same store interface for an explicit single-browser demo, but it is not durable across browsers. Archive and retention fields control visibility and policy metadata; the application does not run destructive pruning automatically. Deployments that add deletion must first define audit, pending-operation, backup, legal-hold, and foreign-key behavior.
 
 ## AI Providers
 

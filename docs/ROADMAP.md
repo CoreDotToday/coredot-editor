@@ -14,7 +14,7 @@ Coredot Editor v1 is a working open-source AI document editor starter. The roadm
 ## v1.2: AI Work Context And Run Metadata
 
 - Show command scope, selected/source snippet, provider, model, status, elapsed time, and failure reason in the AI workspace.
-- Move document-scoped AI workspace sessions from the client adapter to database-backed conversation and message tables.
+- Extend the database-backed conversation summaries and lazy transcript detail with search and explicit deployment-owned retention jobs after audit/legal-hold policy is defined.
 - Persist prompt/context snapshots on `ai_runs` after defining storage limits and retention policy.
 - Group active and completed AI work so users can keep editing without losing track of long-running requests.
 - Extend the current AI context inspector with run-specific provider/model data and retrieved source snippets.

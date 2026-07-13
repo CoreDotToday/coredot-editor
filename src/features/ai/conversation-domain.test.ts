@@ -14,10 +14,14 @@ describe("conversation domain", () => {
 
   it("round-trips a client-safe stable list cursor and rejects malformed cursors", () => {
     const updatedAt = new Date("2026-01-02T03:04:05.678Z");
-    const cursor = encodeConversationCursor(updatedAt, "conversation-한글");
-    expect(decodeConversationCursor(cursor)).toEqual({ id: "conversation-한글", updatedAt });
-    expect(decodeConversationCursor("not-a-cursor")).toBeNull();
-    expect(decodeConversationCursor("x".repeat(513))).toBeNull();
+    const scope = { documentId: "doc-a", includeArchived: false, workspaceId: "workspace-a" };
+    const cursor = encodeConversationCursor(updatedAt, "conversation-한글", scope);
+    expect(cursor).not.toContain("workspace-a");
+    expect(decodeConversationCursor(cursor, scope)).toEqual({ id: "conversation-한글", updatedAt });
+    expect(decodeConversationCursor(cursor, { ...scope, documentId: "doc-b" })).toBeNull();
+    expect(decodeConversationCursor(cursor, { ...scope, includeArchived: true })).toBeNull();
+    expect(decodeConversationCursor("not-a-cursor", scope)).toBeNull();
+    expect(decodeConversationCursor("x".repeat(513), scope)).toBeNull();
   });
 
   it("requires an AI run whenever a proposal link is appended", () => {

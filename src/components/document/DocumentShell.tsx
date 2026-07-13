@@ -15,9 +15,11 @@ import {
   PlusCircle,
 } from "lucide-react";
 import { nanoid } from "nanoid";
+import { z } from "zod";
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -35,6 +37,7 @@ import {
   type AiWorkspaceChatSession,
 } from "@/components/ai/AiWorkspacePanel";
 import { AiSettingsDialog } from "@/components/settings/AiSettingsDialog";
+import { isModalSurfaceActive, ModalSurface } from "@/components/ui/ModalSurface";
 import { getTemplateVariableLabel, PromptTemplatePanel } from "@/components/templates/PromptTemplatePanel";
 import type {
   AiProposalRecord,
@@ -48,7 +51,11 @@ import type {
 import type { FidelityReport } from "@/features/documents/document-interchange";
 import { fetchDocumentInterchange } from "@/features/documents/document-interchange-fetch";
 import { buildAiContextSnapshot } from "@/features/ai/ai-context-snapshot";
-import type { ConversationStorageMode, StoredConversationView } from "@/features/ai/conversation-store";
+import type {
+  ConversationStorageMode,
+  StoredConversationSummary,
+  StoredConversationView,
+} from "@/features/ai/conversation-store";
 import { useDocumentConversations } from "@/features/ai/use-document-conversations";
 import {
   postAiOperation,
@@ -59,6 +66,7 @@ import { buildDocumentOutline, type DocumentOutlineItem } from "@/features/docum
 import {
   createDocumentSessionClient,
   DocumentSessionConflictError,
+  DocumentSessionInvalidProfileError,
   DocumentSessionRequestError,
   type DocumentSessionChange,
   type DocumentSessionHistoryChange,
@@ -100,6 +108,12 @@ import { DocumentInterchangeDialog } from "./DocumentInterchangeDialog";
 import { buildDocumentCommandRegistry } from "./commands/document-command-registry";
 import type { DocumentCommandAction } from "./commands/document-command-types";
 import type { SelectionAiResultPreview } from "./SelectionAiResultPopover";
+import { getProjectProfile } from "@/features/projects/default-project-profiles";
+import {
+  PROJECT_METADATA_LIMITS,
+  type ProjectProfile,
+  type ProjectProfileViolation,
+} from "@/features/projects/project-profile";
 
 type ShellDocument = Pick<DocumentRecord, "id" | "title" | "contentJson" | "plainText" | "revision"> &
   Partial<Pick<DocumentRecord, "metadataJson" | "readiness">>;
@@ -120,20 +134,25 @@ type ShellProposal = Pick<
   | "defaultApplyMode"
   | "appliedMode"
   | "status"
->;
+> & { isTruncated?: boolean };
 export type SaveState = "saved" | "dirty" | "saving" | "failed";
 export type EditorSurface = "editor" | "source";
 
 type DocumentShellProps = {
   conversationStorageMode?: ConversationStorageMode;
   conversationWorkspaceId?: string;
+  defaultTemplateId?: string;
   document: ShellDocument;
   initialConversationLoadFailed?: boolean;
-  initialConversations?: StoredConversationView[];
+  initialConversationNextCursor?: string | null;
+  initialConversations?: Array<StoredConversationSummary | StoredConversationView>;
   referenceDocuments?: AiDocumentReferenceCandidate[];
   templates: ShellTemplate[];
   aiRuns: ShellAiRun[];
+  aiRunsNextCursor?: string | null;
   proposals?: ShellProposal[];
+  proposalsNextCursor?: string | null;
+  projectProfile?: ProjectProfile;
   pluginContributions?: Partial<EditorPluginContributions>;
   /** Additional plugins appended to the app defaults. */
   plugins?: EditorPlugin[];
@@ -178,8 +197,11 @@ type DocumentSnapshot = {
 
 type AiSnapshot = {
   aiRuns: ShellAiRun[];
+  documentId: string;
   proposals: ShellProposal[];
 };
+
+type DocumentAsyncScope = { documentId: string; generation: number };
 
 type ReviewResponse = {
   review?: {
@@ -199,6 +221,7 @@ type RewriteResponse = {
 const MAX_CONCURRENT_SELECTION_COMMANDS = 5;
 const AUTOSAVE_DEBOUNCE_MS = 1000;
 const COMPACT_WORKSPACE_MEDIA_QUERY = "(max-width: 1279px)";
+const COMPACT_SIDEBAR_MEDIA_QUERY = "(max-width: 1023px)";
 
 function resolveServerRevision(
   currentRevision: number,
@@ -328,16 +351,34 @@ function getCompactWorkspaceLayoutServerSnapshot() {
   return false;
 }
 
+function subscribeCompactSidebarLayout(onStoreChange: () => void) {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") return () => {};
+  const mediaQuery = window.matchMedia(COMPACT_SIDEBAR_MEDIA_QUERY);
+  mediaQuery.addEventListener("change", onStoreChange);
+  return () => mediaQuery.removeEventListener("change", onStoreChange);
+}
+
+function getCompactSidebarLayoutSnapshot() {
+  return typeof window !== "undefined" &&
+    typeof window.matchMedia === "function" &&
+    window.matchMedia(COMPACT_SIDEBAR_MEDIA_QUERY).matches;
+}
+
 export function DocumentShell({
   aiRuns,
+  aiRunsNextCursor = null,
   conversationStorageMode = "local",
   conversationWorkspaceId = "local-workspace",
+  defaultTemplateId,
   document,
   initialConversationLoadFailed = false,
+  initialConversationNextCursor = null,
   initialConversations,
   pluginContributions,
   plugins,
   proposals = [],
+  proposalsNextCursor = null,
+  projectProfile = getProjectProfile("default"),
   referenceDocuments = [],
   templates,
 }: DocumentShellProps) {
@@ -345,14 +386,19 @@ export function DocumentShell({
     <DocumentShellContent
       key={document.id}
       aiRuns={aiRuns}
+      aiRunsNextCursor={aiRunsNextCursor}
       conversationStorageMode={conversationStorageMode}
       conversationWorkspaceId={conversationWorkspaceId}
+      defaultTemplateId={defaultTemplateId}
       document={document}
       initialConversationLoadFailed={initialConversationLoadFailed}
+      initialConversationNextCursor={initialConversationNextCursor}
       initialConversations={initialConversations}
       pluginContributions={pluginContributions}
       plugins={plugins}
       proposals={proposals}
+      proposalsNextCursor={proposalsNextCursor}
+      projectProfile={projectProfile}
       referenceDocuments={referenceDocuments}
       templates={templates}
     />
@@ -361,20 +407,26 @@ export function DocumentShell({
 
 function DocumentShellContent({
   aiRuns,
+  aiRunsNextCursor = null,
   conversationStorageMode = "local",
   conversationWorkspaceId = "local-workspace",
+  defaultTemplateId,
   document,
   initialConversationLoadFailed = false,
+  initialConversationNextCursor = null,
   initialConversations,
   pluginContributions,
   plugins,
   proposals = [],
+  proposalsNextCursor = null,
+  projectProfile = getProjectProfile("default"),
   referenceDocuments = [],
   templates,
 }: DocumentShellProps) {
+  const initialTemplate = getInitialTemplate(templates, defaultTemplateId);
   const initialTemplateVariables = useMemo(
-    () => mergeMissingTemplateVariableDefaults(templates[0] ?? null, {}),
-    [templates],
+    () => mergeMissingTemplateVariableDefaults(initialTemplate, {}),
+    [initialTemplate],
   );
   const incomingDocument = useMemo(
     () => ({
@@ -401,6 +453,7 @@ function DocumentShellContent({
   const draftVersionRef = useRef(0);
   const persistedDraftVersionRef = useRef(0);
   const saveRequestGenerationRef = useRef(0);
+  const documentAsyncScopeRef = useRef<DocumentAsyncScope>({ documentId: document.id, generation: 0 });
   const intentionalNavigationRef = useRef(false);
   const conflictCopyRef = useRef<{ id: string; revision: number } | null>(null);
   const conflictCopyCreationKeyRef = useRef<string | null>(null);
@@ -409,6 +462,7 @@ function DocumentShellContent({
   const serverRevisionRef = useRef(incomingDocument.revision);
   const [serverRevision, setServerRevision] = useState(incomingDocument.revision);
   const [saveState, setSaveState] = useState<SaveState>("saved");
+  const [projectProfileViolation, setProjectProfileViolation] = useState<ProjectProfileViolation | null>(null);
   const [saveConflict, setSaveConflict] = useState<{
     localDraft: DraftState;
     serverDocument: DocumentSnapshot;
@@ -426,6 +480,7 @@ function DocumentShellContent({
     documentId: document.id,
     initialConversations,
     initialLoadFailed: initialConversationLoadFailed,
+    initialNextCursor: initialConversationNextCursor,
     storageMode: conversationStorageMode,
     workspaceId: conversationWorkspaceId,
   });
@@ -445,10 +500,14 @@ function DocumentShellContent({
   const aiWorkspaceIdRef = useRef(0);
   const runningSelectionCommandsRef = useRef<RunningSelectionAiCommand[]>([]);
   const [observedDocument, setObservedDocument] = useState<DocumentSnapshot>(incomingDocument);
-  const [observedAiSnapshot, setObservedAiSnapshot] = useState<AiSnapshot>({ aiRuns, proposals });
-  const [selectedTemplateId, setSelectedTemplateId] = useState(templates[0]?.id ?? "");
+  const [observedAiSnapshot, setObservedAiSnapshot] = useState<AiSnapshot>({ aiRuns, documentId: document.id, proposals });
+  const [selectedTemplateId, setSelectedTemplateId] = useState(initialTemplate?.id ?? "");
   const [reviewProposals, setReviewProposals] = useState<AiReviewProposal[]>(proposals);
   const [reviewRuns, setReviewRuns] = useState<AiRunHistoryItem[]>(aiRuns);
+  const [runsCursor, setRunsCursor] = useState(aiRunsNextCursor);
+  const [proposalCursor, setProposalCursor] = useState(proposalsNextCursor);
+  const [isLoadingRuns, setIsLoadingRuns] = useState(false);
+  const [isLoadingProposals, setIsLoadingProposals] = useState(false);
   const [reviewSummary, setReviewSummary] = useState<AiReviewSummary | null>(null);
   const [isReviewing, setIsReviewing] = useState(false);
   const [reviewError, setReviewError] = useState("");
@@ -460,8 +519,37 @@ function DocumentShellContent({
     getCompactWorkspaceLayoutSnapshot,
     getCompactWorkspaceLayoutServerSnapshot,
   );
+  const isCompactSidebar = useSyncExternalStore(
+    subscribeCompactSidebarLayout,
+    getCompactSidebarLayoutSnapshot,
+    getCompactWorkspaceLayoutServerSnapshot,
+  );
   const [workspaceOpenOverride, setWorkspaceOpenOverride] = useState<boolean | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const isActiveDocumentAsyncScope = useCallback((scope: DocumentAsyncScope) =>
+    scope.documentId === documentAsyncScopeRef.current.documentId &&
+    scope.generation === documentAsyncScopeRef.current.generation, []);
+
+  useLayoutEffect(() => {
+    if (documentAsyncScopeRef.current.documentId !== document.id) {
+      documentAsyncScopeRef.current = {
+        documentId: document.id,
+        generation: documentAsyncScopeRef.current.generation + 1,
+      };
+      saveRequestGenerationRef.current += 1;
+    }
+    return () => {
+      documentAsyncScopeRef.current = {
+        ...documentAsyncScopeRef.current,
+        generation: documentAsyncScopeRef.current.generation + 1,
+      };
+      saveRequestGenerationRef.current += 1;
+    };
+  }, [document.id]);
+
+  useEffect(() => subscribeCompactSidebarLayout(() => {
+    if (!getCompactSidebarLayoutSnapshot()) setIsSidebarOpen(false);
+  }), []);
   const [isCreatingDocument, setIsCreatingDocument] = useState(false);
   const [editorSurface, setEditorSurface] = useState<EditorSurface>("editor");
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
@@ -476,9 +564,15 @@ function DocumentShellContent({
   }, [document.id]);
   const activeTemplateId = templates.some((template) => template.id === selectedTemplateId)
     ? selectedTemplateId
-    : templates[0]?.id ?? "";
+    : initialTemplate?.id ?? "";
   const selectedTemplate = templates.find((template) => template.id === activeTemplateId) ?? null;
   const messages = editorMessages[language];
+  const projectProfileErrorTitle = language === "ko"
+    ? "프로젝트 프로필 확인 필요"
+    : "Project Profile action required";
+  const projectProfileErrorMessage = projectProfileViolation
+    ? formatProjectProfileViolation(projectProfile, projectProfileViolation, language)
+    : "";
   const shellPlugins = useMemo(
     () => plugins ? [...defaultEditorPlugins, ...plugins] : defaultEditorPlugins,
     [plugins],
@@ -529,6 +623,11 @@ function DocumentShellContent({
     enterRevisionConflictRecovery(error.serverDocument);
     return true;
   }, [enterRevisionConflictRecovery]);
+  const recoverProjectProfileViolation = useCallback((error: unknown) => {
+    if (!(error instanceof DocumentSessionInvalidProfileError)) return false;
+    setProjectProfileViolation(error.violation);
+    return true;
+  }, []);
   const updateRunningSelectionCommands = useCallback(
     (updater: (commands: RunningSelectionAiCommand[]) => RunningSelectionAiCommand[]) => {
       const nextCommands = updater(runningSelectionCommandsRef.current);
@@ -559,7 +658,7 @@ function DocumentShellContent({
 
   useEffect(() => {
     const handleDocumentShortcut = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || pendingDocxExport) return;
+      if (event.defaultPrevented || pendingDocxExport || isModalSurfaceActive()) return;
       const commandId = resolveDocumentShortcut(event);
       if (!commandId) {
         return;
@@ -601,7 +700,7 @@ function DocumentShellContent({
       isDocumentNavigation ? "reset" : "advance",
     ));
 
-    if (saveState === "saved") {
+    if (isDocumentNavigation || saveState === "saved") {
       setDraft(initialDraft);
       setSelectionCommand(null);
       setSelectionAiResult(null);
@@ -614,6 +713,7 @@ function DocumentShellContent({
       setIsLoadingDocumentChanges(false);
       setDocumentChangesError("");
       setUndoChangeError("");
+      setProjectProfileViolation(null);
       setSaveConflict(null);
       setSaveConflictNotice("");
       setEditorSurface("editor");
@@ -621,9 +721,11 @@ function DocumentShellContent({
       setIsFindOpen(false);
       setActiveOutlineItemId(null);
       setOutlineFocusRequest(null);
-      setSelectedTemplateId(templates[0]?.id ?? "");
+      setSelectedTemplateId(getInitialTemplate(templates, defaultTemplateId)?.id ?? "");
       setReviewProposals(proposals);
       setReviewRuns(aiRuns);
+      setRunsCursor(aiRunsNextCursor);
+      setProposalCursor(proposalsNextCursor);
       setReviewSummary(null);
       setIsReviewing(false);
       setReviewError("");
@@ -635,9 +737,15 @@ function DocumentShellContent({
     }
   }
 
-  if (observedAiSnapshot.aiRuns !== aiRuns || observedAiSnapshot.proposals !== proposals) {
-    setObservedAiSnapshot({ aiRuns, proposals });
+  if (
+    observedAiSnapshot.documentId !== document.id ||
+    observedAiSnapshot.aiRuns !== aiRuns ||
+    observedAiSnapshot.proposals !== proposals
+  ) {
+    setObservedAiSnapshot({ aiRuns, documentId: document.id, proposals });
     setReviewRuns(aiRuns);
+    setRunsCursor(aiRunsNextCursor);
+    setProposalCursor(proposalsNextCursor);
     if (!reviewSummary || reviewProposals.length > 0) {
       setReviewProposals(proposals);
     }
@@ -674,6 +782,7 @@ function DocumentShellContent({
       ? { ...currentConflict, localDraft: { ...currentConflict.localDraft, ...nextDraft } }
       : null);
     setSaveConflictNotice("");
+    setProjectProfileViolation(null);
     setSaveState("dirty");
   }, []);
   const handleMetadataChange = useCallback((change: { metadataJson?: DocumentMetadata; readiness?: DocumentReadiness }) => {
@@ -687,6 +796,7 @@ function DocumentShellContent({
       ? { ...currentConflict, localDraft: { ...currentConflict.localDraft, ...change } }
       : null);
     setSaveConflictNotice("");
+    setProjectProfileViolation(null);
     setSaveState("dirty");
   }, []);
 
@@ -796,6 +906,7 @@ function DocumentShellContent({
       return;
     }
 
+    const requestScope = documentAsyncScopeRef.current;
     const runningCommandId = createWorkspaceClientId(aiWorkspaceIdRef, "selection_job");
     const chatSessionCreatedAt = new Date();
     const chatUserMessage: AiWorkspaceChatMessage = {
@@ -854,6 +965,7 @@ function DocumentShellContent({
       if (!result.ok) {
         throw new Error("Failed to rewrite selection");
       }
+      if (!isActiveDocumentAsyncScope(requestScope)) return;
 
       const body = result.body;
       if (body.proposal) {
@@ -905,12 +1017,16 @@ function DocumentShellContent({
       }
       if (!body.proposal) conversations.markConversationIdle(conversationAttempt);
     } catch {
+      if (!isActiveDocumentAsyncScope(requestScope)) return;
       await conversations.failConversation(conversationAttempt);
+      if (!isActiveDocumentAsyncScope(requestScope)) return;
       setReviewError(messages.errors.selectionRewriteFailed);
     } finally {
-      updateRunningSelectionCommands((currentCommands) =>
-        currentCommands.filter((runningCommand) => runningCommand.id !== runningCommandId),
-      );
+      if (isActiveDocumentAsyncScope(requestScope)) {
+        updateRunningSelectionCommands((currentCommands) =>
+          currentCommands.filter((runningCommand) => runningCommand.id !== runningCommandId),
+        );
+      }
     }
   }, [
     document.id,
@@ -919,6 +1035,7 @@ function DocumentShellContent({
     language,
     messages,
     conversations,
+    isActiveDocumentAsyncScope,
     selectedTemplate,
     templateVariables,
     updateRunningSelectionCommands,
@@ -926,15 +1043,18 @@ function DocumentShellContent({
 
   const saveDraft = useCallback(async () => {
     if (saveConflict) return;
+    const requestScope = documentAsyncScopeRef.current;
     const requestGeneration = saveRequestGenerationRef.current + 1;
     saveRequestGenerationRef.current = requestGeneration;
     const savingVersion = draftVersionRef.current;
     const savingDraft = draft;
     const expectedRevision = serverRevisionRef.current;
 
+    setProjectProfileViolation(null);
     setSaveState("saving");
 
     const result = await documentSessionClient.save(document.id, savingDraft, expectedRevision);
+    if (!isActiveDocumentAsyncScope(requestScope)) return;
     if (result.kind === "saved") {
       persistedDraftVersionRef.current = Math.max(persistedDraftVersionRef.current, savingVersion);
       adoptServerRevision(result.document.revision);
@@ -954,9 +1074,15 @@ function DocumentShellContent({
       enterRevisionConflictRecovery(result.serverDocument);
       return;
     }
+    if (result.kind === "invalid_profile") {
+      if (requestGeneration !== saveRequestGenerationRef.current) return;
+      setProjectProfileViolation(result.violation);
+      setSaveState(draftVersionRef.current === savingVersion ? "failed" : "dirty");
+      return;
+    }
     if (requestGeneration !== saveRequestGenerationRef.current) return;
     setSaveState(draftVersionRef.current === savingVersion ? "failed" : "dirty");
-  }, [adoptServerRevision, document.id, draft, enterRevisionConflictRecovery, saveConflict]);
+  }, [adoptServerRevision, document.id, draft, enterRevisionConflictRecovery, isActiveDocumentAsyncScope, saveConflict]);
 
   useEffect(() => {
     if (saveState !== "dirty" || saveConflict) {
@@ -1227,6 +1353,7 @@ function DocumentShellContent({
       return;
     }
 
+    const requestScope = documentAsyncScopeRef.current;
     setIsReviewing(true);
     setReviewError("");
     setActiveProposalId(null);
@@ -1251,9 +1378,10 @@ function DocumentShellContent({
       if (!result.ok) {
         throw new Error("Failed to run review");
       }
+      if (!isActiveDocumentAsyncScope(requestScope)) return;
 
       const body = result.body;
-      setReviewProposals(body.proposals ?? []);
+      setReviewProposals((current) => prependItemsById(current, body.proposals ?? []));
       setReviewSummary({
         findingCount: body.review?.findings?.length ?? body.proposals?.length ?? 0,
         proposalCount: body.proposals?.length ?? 0,
@@ -1264,20 +1392,34 @@ function DocumentShellContent({
         setReviewRuns((currentRuns) => [body.run!, ...currentRuns]);
       }
     } catch {
-      setReviewError(messages.errors.reviewFailed);
+      if (isActiveDocumentAsyncScope(requestScope)) setReviewError(messages.errors.reviewFailed);
     } finally {
-      setIsReviewing(false);
+      if (isActiveDocumentAsyncScope(requestScope)) setIsReviewing(false);
     }
-  }, [document.id, draft.contentJson, messages, selectedTemplate, templateVariables]);
+  }, [document.id, draft.contentJson, isActiveDocumentAsyncScope, messages, selectedTemplate, templateVariables]);
 
   const updateProposalStatus = useCallback(async (
     proposalId: string,
     status: AiReviewProposal["status"],
     applyMode: AiProposalApplyMode = "replace",
   ) => {
-    const previousProposal = reviewProposals.find((proposal) => proposal.id === proposalId);
+    const requestScope = documentAsyncScopeRef.current;
+    let previousProposal = reviewProposals.find((proposal) => proposal.id === proposalId);
     if (!previousProposal) {
       return;
+    }
+    if (status === "accepted") setProjectProfileViolation(null);
+    if (status === "accepted" && previousProposal.isTruncated) {
+      try {
+        previousProposal = await fetchProposalDetail(previousProposal.id);
+        if (!isActiveDocumentAsyncScope(requestScope)) return;
+        const hydratedProposal = previousProposal;
+        setReviewProposals((current) => current.map((proposal) =>
+          proposal.id === hydratedProposal.id ? hydratedProposal : proposal));
+      } catch {
+        if (isActiveDocumentAsyncScope(requestScope)) setReviewError(messages.errors.updateProposalFailed);
+        return;
+      }
     }
 
     const startingDraftVersion = draftVersionRef.current;
@@ -1317,6 +1459,7 @@ function DocumentShellContent({
           status,
           expectedStatus: previousProposal.status,
         });
+      if (!isActiveDocumentAsyncScope(requestScope)) return;
       const proposalForState: AiReviewProposal =
         updatedProposal ?? { ...previousProposal, appliedMode: status === "accepted" ? applyMode : null, status };
 
@@ -1375,6 +1518,12 @@ function DocumentShellContent({
         setActiveProposalId(null);
       }
     } catch (error) {
+      if (!isActiveDocumentAsyncScope(requestScope)) return;
+      if (recoverProjectProfileViolation(error)) {
+        setSelectionApplicationNotice("");
+        setReviewError("");
+        return;
+      }
       if (recoverSessionRevisionConflict(error)) {
         setSelectionApplicationNotice("");
         setReviewError("");
@@ -1397,9 +1546,11 @@ function DocumentShellContent({
     adoptServerRevision,
     document.id,
     draft,
+    isActiveDocumentAsyncScope,
     messages.errors,
     messages.selectionResult.appliedNotice,
     reviewProposals,
+    recoverProjectProfileViolation,
     recoverSessionRevisionConflict,
     selectionAiResult,
     selectionProposalContexts,
@@ -1414,13 +1565,45 @@ function DocumentShellContent({
     void updateProposalStatus(proposalId, status, applyMode);
   }, [updateProposalStatus]);
 
+  const loadProposalDetail = useCallback(async (proposalId: string) => {
+    const requestScope = documentAsyncScopeRef.current;
+    try {
+      const proposal = await fetchProposalDetail(proposalId);
+      if (!isActiveDocumentAsyncScope(requestScope)) return;
+      setReviewProposals((current) => current.map((candidate) => candidate.id === proposal.id ? proposal : candidate));
+      setActiveProposalId(proposalId);
+      setReviewError("");
+    } catch {
+      if (isActiveDocumentAsyncScope(requestScope)) setReviewError(messages.errors.updateProposalFailed);
+    }
+  }, [isActiveDocumentAsyncScope, messages.errors.updateProposalFailed]);
+
   const updatePendingProposalStatuses = useCallback(async (status: "accepted" | "rejected") => {
-    const pendingProposals = reviewProposals.filter((proposal) => proposal.status === "pending");
+    if (proposalCursor !== null) {
+      return;
+    }
+    const requestScope = documentAsyncScopeRef.current;
+    let pendingProposals = reviewProposals.filter((proposal) => proposal.status === "pending");
     if (pendingProposals.length === 0) {
       return;
     }
+    if (status === "accepted") setProjectProfileViolation(null);
 
     const startingDraftVersion = draftVersionRef.current;
+
+    if (status === "accepted" && pendingProposals.some((proposal) => proposal.isTruncated)) {
+      try {
+        const hydrated = await Promise.all(pendingProposals.map((proposal) =>
+          proposal.isTruncated ? fetchProposalDetail(proposal.id) : Promise.resolve(proposal)));
+        if (!isActiveDocumentAsyncScope(requestScope)) return;
+        const hydratedById = new Map(hydrated.map((proposal) => [proposal.id, proposal]));
+        setReviewProposals((current) => current.map((proposal) => hydratedById.get(proposal.id) ?? proposal));
+        pendingProposals = hydrated;
+      } catch {
+        if (isActiveDocumentAsyncScope(requestScope)) setReviewError(messages.errors.updateProposalFailed);
+        return;
+      }
+    }
 
     const buildAcceptedDraftState = (baseDraft: DraftState, proposalsToAccept: AiReviewProposal[]) => {
       let nextContentJson = baseDraft.contentJson;
@@ -1482,6 +1665,7 @@ function DocumentShellContent({
             id: proposal.id,
           })),
         });
+        if (!isActiveDocumentAsyncScope(requestScope)) return;
         const hasNewerLocalDraft = draftVersionRef.current !== startingDraftVersion;
         const reconciliationBase = hasNewerLocalDraft ? draftRef.current : submittedDraft;
         const reconciled = buildAcceptedDraftState(reconciliationBase, pendingProposals);
@@ -1516,7 +1700,10 @@ function DocumentShellContent({
         setUndoChangeError("");
         setActiveProposalId(null);
       } catch (error) {
-        if (recoverSessionRevisionConflict(error)) {
+        if (!isActiveDocumentAsyncScope(requestScope)) return;
+        if (recoverProjectProfileViolation(error)) {
+          setReviewError("");
+        } else if (recoverSessionRevisionConflict(error)) {
           setReviewError("");
         } else {
           setReviewError(messages.errors.updateProposalFailed);
@@ -1535,10 +1722,12 @@ function DocumentShellContent({
           status,
           expectedStatus: proposal.status,
         });
+        if (!isActiveDocumentAsyncScope(requestScope)) return;
         if (updatedProposal) {
           updatedProposals.push(updatedProposal);
         }
       } catch (error) {
+        if (!isActiveDocumentAsyncScope(requestScope)) return;
         updateFailed = true;
         if (isProposalStatusConflictError(error)) {
           conflictProposal = error.proposal;
@@ -1565,10 +1754,13 @@ function DocumentShellContent({
     adoptServerRevision,
     document.id,
     draft,
+    isActiveDocumentAsyncScope,
     messages.errors.staleSelection,
     messages.errors.updateProposalFailed,
+    recoverProjectProfileViolation,
     recoverSessionRevisionConflict,
     reviewProposals,
+    proposalCursor,
     selectionProposalContexts,
   ]);
 
@@ -1586,25 +1778,74 @@ function DocumentShellContent({
     );
   }, [handleSelectionCommand, selectionCommand]);
 
+  const loadMoreRuns = useCallback(async () => {
+    if (!runsCursor || isLoadingRuns) return;
+    const requestScope = documentAsyncScopeRef.current;
+    setIsLoadingRuns(true);
+    try {
+      const response = await fetch(
+        `/api/documents/${encodeURIComponent(document.id)}/ai-runs?cursor=${encodeURIComponent(runsCursor)}&limit=20`,
+      );
+      if (!response.ok) throw new Error("Failed to load AI runs");
+      const body = aiRunPageResponseSchema.parse(await response.json());
+      if (!isActiveDocumentAsyncScope(requestScope)) return;
+      setReviewRuns((current) => mergeItemsById(current, body.runs.map((run) => ({
+        ...run,
+        createdAt: new Date(run.createdAt),
+      }))));
+      setRunsCursor(body.nextCursor);
+    } catch {
+      if (isActiveDocumentAsyncScope(requestScope)) setReviewError(messages.errors.reviewFailed);
+    } finally {
+      if (isActiveDocumentAsyncScope(requestScope)) setIsLoadingRuns(false);
+    }
+  }, [document.id, isActiveDocumentAsyncScope, isLoadingRuns, messages.errors.reviewFailed, runsCursor]);
+
+  const loadMoreProposals = useCallback(async () => {
+    if (!proposalCursor || isLoadingProposals) return;
+    const requestScope = documentAsyncScopeRef.current;
+    setIsLoadingProposals(true);
+    try {
+      const response = await fetch(
+        `/api/documents/${encodeURIComponent(document.id)}/proposals?cursor=${encodeURIComponent(proposalCursor)}&limit=20`,
+      );
+      if (!response.ok) throw new Error("Failed to load proposals");
+      const body = proposalPageResponseSchema.parse(await response.json());
+      if (!isActiveDocumentAsyncScope(requestScope)) return;
+      setReviewProposals((current) => mergeItemsById(current, body.proposals));
+      setProposalCursor(body.nextCursor);
+    } catch {
+      if (isActiveDocumentAsyncScope(requestScope)) setReviewError(messages.errors.reviewFailed);
+    } finally {
+      if (isActiveDocumentAsyncScope(requestScope)) setIsLoadingProposals(false);
+    }
+  }, [document.id, isActiveDocumentAsyncScope, isLoadingProposals, messages.errors.reviewFailed, proposalCursor]);
+
   const loadDocumentChanges = useCallback(async (cursor?: string) => {
     if (documentChangesLoadingRef.current || (cursor === undefined && documentChangesLoadedRef.current)) return;
+    const requestScope = documentAsyncScopeRef.current;
     documentChangesLoadingRef.current = true;
     setIsLoadingDocumentChanges(true);
     setDocumentChangesError("");
     try {
       const history = await documentSessionClient.listChanges(document.id, { cursor, limit: 20 });
+      if (!isActiveDocumentAsyncScope(requestScope)) return;
       setDocumentChanges((currentChanges) => mergeDocumentChanges(currentChanges, history.changes));
       setDocumentChangesNextCursor(history.nextCursor);
       if (cursor === undefined) {
         documentChangesLoadedRef.current = true;
       }
     } catch {
-      setDocumentChangesError(messages.aiWorkspace.changeLoadFailed);
+      if (isActiveDocumentAsyncScope(requestScope)) {
+        setDocumentChangesError(messages.aiWorkspace.changeLoadFailed);
+      }
     } finally {
-      documentChangesLoadingRef.current = false;
-      setIsLoadingDocumentChanges(false);
+      if (isActiveDocumentAsyncScope(requestScope)) {
+        documentChangesLoadingRef.current = false;
+        setIsLoadingDocumentChanges(false);
+      }
     }
-  }, [document.id, messages.aiWorkspace.changeLoadFailed]);
+  }, [document.id, isActiveDocumentAsyncScope, messages.aiWorkspace.changeLoadFailed]);
 
   const undoAppliedChange = useCallback(async (changeId: string) => {
     const change = documentChanges.find((item) => item.id === changeId);
@@ -1618,11 +1859,14 @@ function DocumentShellContent({
       return;
     }
 
+    const requestScope = documentAsyncScopeRef.current;
     const startingDraftVersion = draftVersionRef.current;
+    setProjectProfileViolation(null);
     setUndoChangeError("");
 
     try {
       const result = await documentSessionClient.undoChange(changeId, serverRevisionRef.current);
+      if (!isActiveDocumentAsyncScope(requestScope)) return;
       const updatedProposalById = new Map(result.proposals.map((proposal) => [proposal.id, proposal]));
       setReviewProposals((currentProposals) => {
         const currentProposalIds = new Set(currentProposals.map((proposal) => proposal.id));
@@ -1653,7 +1897,10 @@ function DocumentShellContent({
       setSaveConflict(null);
       setSaveState("saved");
     } catch (error) {
-      if (recoverSessionRevisionConflict(error)) {
+      if (!isActiveDocumentAsyncScope(requestScope)) return;
+      if (recoverProjectProfileViolation(error)) {
+        setUndoChangeError("");
+      } else if (recoverSessionRevisionConflict(error)) {
         setUndoChangeError("");
       } else {
         setUndoChangeError(messages.aiWorkspace.undoConflict);
@@ -1662,7 +1909,9 @@ function DocumentShellContent({
   }, [
     adoptServerRevision,
     documentChanges,
+    isActiveDocumentAsyncScope,
     messages.aiWorkspace.undoConflict,
+    recoverProjectProfileViolation,
     recoverSessionRevisionConflict,
     saveState,
   ]);
@@ -1717,7 +1966,7 @@ function DocumentShellContent({
     [draft.contentJson, draft.title, messages.shell.untitledDocument],
   );
   const aiContextSnapshot = useMemo(() => {
-    const selectedTemplateForSnapshot = selectedTemplate ?? templates[0] ?? null;
+    const selectedTemplateForSnapshot = selectedTemplate ?? initialTemplate;
     const templateForSnapshot = selectionCommand?.template ?? selectedTemplateForSnapshot;
     if (!templateForSnapshot) return null;
     const contentJsonForSnapshot = selectionCommand?.contentJson ?? draft.contentJson;
@@ -1764,12 +2013,12 @@ function DocumentShellContent({
     draft.metadataJson,
     draft.readiness,
     draft.title,
+    initialTemplate,
     messages.shell.untitledDocument,
     referenceDocuments,
     selectedTemplate,
     selectionCommand,
     templateVariables,
-    templates,
   ]);
   const selectOutlineItem = useCallback((item: DocumentOutlineItem) => {
     setActiveOutlineItemId(item.id);
@@ -1902,9 +2151,11 @@ function DocumentShellContent({
         />
 
         <DocumentMetadataPanel
+          language={language}
           metadata={draft.metadataJson}
           messages={messages.metadataPanel}
           onChange={handleMetadataChange}
+          profile={projectProfile}
           readiness={draft.readiness}
         />
 
@@ -1919,7 +2170,14 @@ function DocumentShellContent({
         />
 
         <div className="border-t border-zinc-200">
-          <AiRunHistory language={language} messages={messages.history} runs={reviewRuns} />
+          <AiRunHistory
+            hasMore={runsCursor !== null}
+            isLoadingMore={isLoadingRuns}
+            language={language}
+            messages={messages.history}
+            onLoadMore={() => void loadMoreRuns()}
+            runs={reviewRuns}
+          />
         </div>
       </div>
     </>
@@ -1935,28 +2193,39 @@ function DocumentShellContent({
       conversationLoadState={conversations.loadState}
       errorMessage={reviewError}
       hasMoreChanges={documentChangesNextCursor !== null}
+      hasMoreConversations={conversations.hasMore}
       isLoadingChanges={isLoadingDocumentChanges}
+      isLoadingMoreConversations={conversations.isLoadingMore}
       isReviewing={isReviewing}
       isRunningCommand={isRewritingSelection}
       language={language}
       layout={layout}
       messages={messages.aiWorkspace}
       onArchiveChatSession={archiveAiChatSession}
-      onBulkUpdateProposalStatus={updatePendingProposalStatuses}
+      onBulkUpdateProposalStatus={proposalCursor === null ? updatePendingProposalStatuses : undefined}
       onChangesOpen={loadDocumentChanges}
       onClose={onClose}
       onFocusProposal={setActiveProposalId}
+      hasMoreProposals={proposalCursor !== null}
+      isLoadingMoreProposals={isLoadingProposals}
+      onLoadMoreProposals={() => void loadMoreProposals()}
+      onLoadProposalDetail={(proposalId) => void loadProposalDetail(proposalId)}
       onForkChatSession={forkAiChatSession}
       onLoadMoreChanges={documentChangesNextCursor !== null
         ? () => void loadDocumentChanges(documentChangesNextCursor)
         : undefined}
+      onLoadMoreConversations={() => void conversations.loadMore()}
       onReviewDocument={runDocumentReview}
       onRenameChatSession={renameAiChatSession}
+      onSelectChatSession={(sessionId) => void conversations.loadConversationDetail(sessionId)}
       onRetryConversation={() => void (conversations.hasPendingRetries
         ? conversations.retryLastMutation()
         : conversations.loadState === "failed"
           ? conversations.reload()
-          : conversations.retryLastMutation())}
+          : conversations.loadMoreErrorReason
+            ? conversations.loadMore()
+            : conversations.retryLastMutation())}
+      onRetryChatSession={(sessionId) => void conversations.loadConversationDetail(sessionId, true)}
       onUndoChange={undoAppliedChange}
       onUpdateProposalStatus={updateProposalStatusLocally}
       proposals={reviewProposals}
@@ -2015,18 +2284,18 @@ function DocumentShellContent({
         {renderSidebarContent()}
       </aside>
 
-      {isSidebarOpen ? (
-        <div className="fixed inset-0 z-50 flex bg-zinc-950/20 lg:hidden">
-          <aside className="relative z-10 flex h-full w-[min(18rem,100vw)] shrink-0 flex-col border-r border-zinc-200 bg-zinc-50 shadow-2xl shadow-zinc-950/20">
+      {isSidebarOpen && isCompactSidebar ? (
+        <ModalSurface
+          aria-label={messages.shell.openSidebar}
+          className="h-full w-[min(18rem,100vw)] bg-zinc-50 p-0"
+          onClose={() => setIsSidebarOpen(false)}
+          overlayClassName="fixed inset-0 flex items-stretch justify-start bg-zinc-950/20 p-0 lg:hidden"
+          unstyled
+        >
+          <aside className="flex h-full flex-col border-r border-zinc-200 bg-zinc-50 shadow-2xl shadow-zinc-950/20">
             {renderSidebarContent()}
           </aside>
-          <button
-            aria-label={messages.shell.closeSidebar}
-            className="min-w-0 flex-1 cursor-default"
-            onClick={() => setIsSidebarOpen(false)}
-            type="button"
-          />
-        </div>
+        </ModalSurface>
       ) : null}
 
       <section aria-label={messages.editor.workspaceLabel} className="flex min-w-0 flex-1 flex-col bg-white">
@@ -2134,6 +2403,20 @@ function DocumentShellContent({
             </button>
           </div>
         </header>
+
+        {projectProfileViolation ? (
+          <section
+            aria-labelledby="project-profile-error-title"
+            aria-live="assertive"
+            className="shrink-0 border-b border-red-200 bg-red-50 px-4 py-3 text-red-900"
+            role="alert"
+          >
+            <h2 className="text-sm font-semibold" id="project-profile-error-title">
+              {projectProfileErrorTitle}
+            </h2>
+            <p className="mt-1 text-sm leading-5">{projectProfileErrorMessage}</p>
+          </section>
+        ) : null}
 
         {docxExportError ? (
           <section
@@ -2290,15 +2573,15 @@ function DocumentShellContent({
         <>
           {renderWorkspacePanel("side")}
           {isCompactWorkspace ? (
-            <div className="fixed inset-0 z-50 flex justify-end bg-zinc-950/20 xl:hidden">
-              <button
-                aria-label={messages.aiWorkspace.close}
-                className="min-w-0 flex-1 cursor-default"
-                onClick={() => setWorkspaceOpen(false)}
-                type="button"
-              />
+            <ModalSurface
+              aria-label={messages.shell.review}
+              className="ml-auto h-full w-[min(100vw,24rem)] bg-white p-0"
+              onClose={() => setWorkspaceOpen(false)}
+              overlayClassName="fixed inset-0 flex items-stretch justify-end bg-zinc-950/20 p-0 xl:hidden"
+              unstyled
+            >
               {renderWorkspacePanel("drawer", () => setWorkspaceOpen(false))}
-            </div>
+            </ModalSurface>
           ) : null}
         </>
       ) : null}
@@ -2318,6 +2601,67 @@ function collectTemplateVariables(template: ShellTemplate, values: Record<string
     variables[field.name] = values[field.name] ?? "";
     return variables;
   }, {});
+}
+
+function formatProjectProfileViolation(
+  profile: ProjectProfile,
+  violation: ProjectProfileViolation,
+  language: EditorLanguage,
+) {
+  const profileLabel = language === "ko"
+    ? `${profile.labels.ko.name} 프로필`
+    : `${profile.labels.en.name} profile`;
+
+  if ("fieldId" in violation) {
+    const field = profile.metadataFields.find((candidate) => candidate.id === violation.fieldId);
+    const fieldLabel = field?.labels[language] ?? violation.fieldId;
+
+    if (language === "ko") {
+      switch (violation.reason) {
+        case "required":
+          return `${profileLabel}: ${fieldLabel} 필드는 필수입니다.`;
+        case "invalid_length":
+          if (field?.type === "tags") {
+            const maxItems = field.maxItems ?? PROJECT_METADATA_LIMITS.maxTagCount;
+            const itemMaxLength = field.itemMaxLength ?? PROJECT_METADATA_LIMITS.maxTagLength;
+            return `${profileLabel}: ${fieldLabel} 값은 최대 ${maxItems}개, 항목당 ${itemMaxLength}자까지 입력할 수 있습니다.`;
+          }
+          return `${profileLabel}: ${fieldLabel} 값은 최대 ${field?.maxLength ?? PROJECT_METADATA_LIMITS.maxTextLength}자까지 입력할 수 있습니다.`;
+        case "invalid_option":
+          return `${profileLabel}: ${fieldLabel} 값이 허용된 옵션이 아닙니다. 목록에서 다시 선택하세요.`;
+        case "invalid_type":
+          return `${profileLabel}: ${fieldLabel} 값의 형식이 올바르지 않습니다. 필드 형식에 맞게 수정하세요.`;
+        case "unknown_field":
+          return `${profileLabel}: ${fieldLabel} 필드는 현재 프로필에 없습니다. 값을 제거한 뒤 다시 저장하세요.`;
+      }
+    }
+
+    switch (violation.reason) {
+      case "required":
+        return `${profileLabel}: ${fieldLabel} is required.`;
+      case "invalid_length":
+        if (field?.type === "tags") {
+          const maxItems = field.maxItems ?? PROJECT_METADATA_LIMITS.maxTagCount;
+          const itemMaxLength = field.itemMaxLength ?? PROJECT_METADATA_LIMITS.maxTagLength;
+          return `${profileLabel}: ${fieldLabel} accepts up to ${maxItems} items and ${itemMaxLength} characters per item.`;
+        }
+        return `${profileLabel}: ${fieldLabel} accepts up to ${field?.maxLength ?? PROJECT_METADATA_LIMITS.maxTextLength} characters.`;
+      case "invalid_option":
+        return `${profileLabel}: ${fieldLabel} is not an allowed option. Select a value from the list.`;
+      case "invalid_type":
+        return `${profileLabel}: ${fieldLabel} has an invalid value type. Enter a value that matches the field.`;
+      case "unknown_field":
+        return `${profileLabel}: ${fieldLabel} is not part of the active profile. Remove it and save again.`;
+    }
+  }
+
+  const currentLabel = profile.readiness.find((state) => state.id === violation.current)?.labels[language]
+    ?? violation.current;
+  const nextLabel = profile.readiness.find((state) => state.id === violation.next)?.labels[language]
+    ?? violation.next;
+  return language === "ko"
+    ? `${profileLabel}: ${currentLabel} 상태에서 ${nextLabel} 상태로 바로 변경할 수 없습니다. 허용된 준비 상태를 선택하세요.`
+    : `${profileLabel}: readiness cannot move directly from ${currentLabel} to ${nextLabel}. Select an allowed state.`;
 }
 
 function getReferencedDocumentsForSnapshot(
@@ -2398,6 +2742,10 @@ function mergeMissingTemplateVariableDefaults(template: ShellTemplate | null, va
   );
 }
 
+function getInitialTemplate(templates: readonly ShellTemplate[], defaultTemplateId?: string) {
+  return templates.find((template) => template.id === defaultTemplateId) ?? templates[0] ?? null;
+}
+
 function getTemplateVariableDefaultValue(field: ShellTemplateField) {
   if (field.type === "select") {
     return field.options?.find((option) => option.toLowerCase() === "executive") ?? field.options?.[0] ?? "";
@@ -2430,3 +2778,63 @@ function getDefaultApplyModeForCommand(command: string): AiProposalApplyMode {
     ? "insert_below"
     : "replace";
 }
+
+function mergeItemsById<T extends { id: string }>(current: readonly T[], incoming: readonly T[]) {
+  const currentIds = new Set(current.map(({ id }) => id));
+  return [...current, ...incoming.filter(({ id }) => !currentIds.has(id))];
+}
+
+function prependItemsById<T extends { id: string }>(current: readonly T[], incoming: readonly T[]) {
+  const incomingIds = new Set(incoming.map(({ id }) => id));
+  return [...incoming, ...current.filter(({ id }) => !incomingIds.has(id))];
+}
+
+async function fetchProposalDetail(proposalId: string): Promise<AiReviewProposal> {
+  const response = await fetch(`/api/proposals/${encodeURIComponent(proposalId)}`);
+  if (!response.ok) throw new Error("Failed to load proposal detail");
+  const body = proposalDetailResponseSchema.parse(await response.json());
+  if (body.proposal.id !== proposalId) throw new Error("Mismatched proposal detail");
+  return { ...body.proposal, isTruncated: false };
+}
+
+const parseableDateStringSchema = z.string().refine(
+  (value) => Number.isFinite(Date.parse(value)),
+  "Expected a parseable date string",
+);
+
+const aiRunPageResponseSchema = z.object({
+  nextCursor: z.string().min(1).nullable(),
+  runs: z.array(z.object({
+    commandType: z.enum(["selection_rewrite", "document_review"]),
+    createdAt: parseableDateStringSchema,
+    id: z.string().min(1),
+    status: z.enum(["pending", "streaming", "completed", "failed"]),
+  }).strict()),
+}).strict();
+
+const proposalSchema = z.object({
+  appliedMode: z.enum(["replace", "insert_below"]).nullable(),
+  command: z.string().nullable(),
+  defaultApplyMode: z.enum(["replace", "insert_below"]),
+  explanation: z.string(),
+  id: z.string().min(1),
+  occurrenceIndex: z.number().int().nullable(),
+  replacementText: z.string(),
+  source: z.enum(["selection", "review"]),
+  status: z.enum(["pending", "accepted", "rejected"]),
+  targetFrom: z.number().int().nullable(),
+  targetText: z.string(),
+  targetTo: z.number().int().nullable(),
+}).strict();
+
+const proposalDetailResponseSchema = z.object({
+  proposal: proposalSchema,
+}).strict();
+
+const proposalPageResponseSchema = z.object({
+  nextCursor: z.string().min(1).nullable(),
+  proposals: z.array(proposalSchema.extend({
+    createdAt: parseableDateStringSchema,
+    isTruncated: z.boolean(),
+  }).strict()),
+}).strict();

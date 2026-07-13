@@ -18,7 +18,7 @@ export type AiReviewProposal = Pick<
       AiProposalRecord,
       "source" | "command" | "occurrenceIndex" | "targetFrom" | "targetTo" | "defaultApplyMode" | "appliedMode"
     >
-  >;
+  > & { isTruncated?: boolean };
 export type AiProposalApplyMode = "replace" | "insert_below";
 export type AiReviewSummary = {
   findingCount: number;
@@ -39,6 +39,10 @@ type AiReviewPanelProps = {
   selectedTemplateName: string;
   onBulkUpdateProposalStatus?: (status: "accepted" | "rejected") => void;
   onFocusProposal?: (proposalId: string) => void;
+  onLoadMore?: () => void;
+  onLoadProposalDetail?: (proposalId: string) => void;
+  hasMore?: boolean;
+  isLoadingMore?: boolean;
   onReviewDocument: () => void;
   onUpdateProposalStatus: (
     proposalId: string,
@@ -61,6 +65,10 @@ export function AiReviewPanel({
   isReviewing,
   onBulkUpdateProposalStatus,
   onFocusProposal,
+  onLoadMore,
+  onLoadProposalDetail,
+  hasMore = false,
+  isLoadingMore = false,
   messages = editorMessages[DEFAULT_EDITOR_LANGUAGE].aiReview,
   onReviewDocument,
   onUpdateProposalStatus,
@@ -123,7 +131,7 @@ export function AiReviewPanel({
         </p>
       ) : (
         <div className="mt-5 space-y-4">
-          {pendingProposalCount > 0 && onBulkUpdateProposalStatus ? (
+          {!hasMore && pendingProposalCount > 0 && onBulkUpdateProposalStatus ? (
             <div className="flex flex-wrap justify-end gap-2">
               <button
                 aria-label={messages.acceptAllPendingProposals}
@@ -206,6 +214,20 @@ export function AiReviewPanel({
                   ) : null}
                 </div>
                 <div className="mt-3 space-y-2 text-sm leading-6">
+                  {proposal.isTruncated ? (
+                    <div className="flex items-center justify-between gap-3 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                      <span>일부 내용 미리보기</span>
+                      {onLoadProposalDetail ? (
+                        <button
+                          className="font-medium underline underline-offset-2"
+                          onClick={() => onLoadProposalDetail(proposal.id)}
+                          type="button"
+                        >
+                          전체 제안 보기
+                        </button>
+                      ) : null}
+                    </div>
+                  ) : null}
                   <p className="text-zinc-500">{proposal.explanation}</p>
                   <p className="text-zinc-700">
                     <span className="font-medium text-zinc-950">{getTargetLabel(proposal, messages)}</span>{" "}
@@ -224,6 +246,16 @@ export function AiReviewPanel({
               </li>
             ))}
           </ul>
+          {hasMore && onLoadMore ? (
+            <button
+              className="mt-4 w-full rounded-md border border-zinc-300 px-3 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-50 disabled:text-zinc-400"
+              disabled={isLoadingMore}
+              onClick={onLoadMore}
+              type="button"
+            >
+              {isLoadingMore ? "불러오는 중..." : "이전 제안 더 보기"}
+            </button>
+          ) : null}
         </div>
       )}
     </section>

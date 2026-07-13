@@ -16,6 +16,13 @@ import {
 } from "@/db/schema";
 import { retrySqliteContention } from "@/db/sqlite-contention";
 import type { RequestContext } from "@/features/auth/request-context";
+import { resolveActiveProjectProfile } from "@/features/projects/active-project-profile";
+import { getProjectProfile } from "@/features/projects/default-project-profiles";
+import {
+  validateProjectDocumentState,
+  type ProjectProfile,
+  type ProjectProfileViolation,
+} from "@/features/projects/project-profile";
 import {
   DOCUMENT_REQUEST_BODY_BYTES,
   RESOURCE_LIMITS,
@@ -89,9 +96,11 @@ export type DocumentChangeResult =
       limit?: DraftValidationLimit;
       ok: false;
       proposals?: AiProposalRecord[];
+      violation?: ProjectProfileViolation;
       reason:
         | "invalid_batch"
         | "invalid_draft"
+        | "invalid_profile"
         | "invalid_revision"
         | "not_found"
         | "proposal_apply_failed"
@@ -113,7 +122,12 @@ class DocumentChangeStatusRollback extends Error {
   }
 }
 
-export function createDocumentChangeService(database: DocumentChangeDatabase = db) {
+export function createDocumentChangeService(
+  database: DocumentChangeDatabase = db,
+  options: { projectProfile?: ProjectProfile } = {},
+) {
+  const projectProfile = options.projectProfile ?? getProjectProfile("default");
+
   async function applyProposalOperation(
     context: RequestContext,
     input: ApplyProposalBatchInput,
@@ -169,11 +183,27 @@ export function createDocumentChangeService(database: DocumentChangeDatabase = d
             return { document, ok: false, reason: "revision_conflict" } as const;
           }
 
+          const projectState = validateProjectDocumentState(projectProfile, {
+            metadataJson: input.draft.metadataJson,
+            readiness: input.draft.readiness,
+          }, {
+            metadataJson: document.metadataJson,
+            readiness: document.readiness,
+          });
+          if (!projectState.ok) {
+            return { ok: false, reason: "invalid_profile", violation: projectState.violation } as const;
+          }
+          const validatedDraft = {
+            ...input.draft,
+            metadataJson: projectState.value.metadataJson,
+            readiness: projectState.value.readiness,
+          };
+
           const ordered = getProposalApplicationOrder(
             requested.map((item) => ({ ...item.proposal, changeItem: item })),
             {},
           );
-          let nextContentJson = input.draft.contentJson;
+          let nextContentJson = validatedDraft.contentJson;
           for (const orderedProposal of ordered) {
             const application = applyProposalToTiptapDraft(
               nextContentJson,
@@ -196,11 +226,11 @@ export function createDocumentChangeService(database: DocumentChangeDatabase = d
           const [updatedDocument] = await transaction
             .update(documents)
             .set({
-              title: input.draft.title,
+              title: validatedDraft.title,
               contentJson: nextContentJson,
-              metadataJson: input.draft.metadataJson,
+              metadataJson: validatedDraft.metadataJson,
               plainText: extractPlainTextFromTiptap(nextContentJson),
-              readiness: input.draft.readiness,
+              readiness: validatedDraft.readiness,
               revision: input.expectedRevision + 1,
               updatedAt: now,
             })
@@ -239,7 +269,7 @@ export function createDocumentChangeService(database: DocumentChangeDatabase = d
               requestId: context.requestId,
               kind: isBatch ? "batch" : "single",
               batchId: isBatch ? nanoid() : null,
-              beforeSnapshotJson: input.draft,
+              beforeSnapshotJson: validatedDraft,
               afterRevision: updatedDocument.revision,
               createdAt: now,
             })
@@ -464,6 +494,16 @@ export function createDocumentChangeService(database: DocumentChangeDatabase = d
             if (!validateDocumentChangeDraft(change.beforeSnapshotJson).ok) {
               return { ok: false, reason: "status_conflict" } as const;
             }
+            const projectState = validateProjectDocumentState(projectProfile, {
+              metadataJson: change.beforeSnapshotJson.metadataJson,
+              readiness: change.beforeSnapshotJson.readiness,
+            }, {
+              metadataJson: document.metadataJson,
+              readiness: document.readiness,
+            });
+            if (!projectState.ok) {
+              return { ok: false, reason: "invalid_profile", violation: projectState.violation } as const;
+            }
 
             const now = new Date();
             const [restoredDocument] = await transaction
@@ -471,9 +511,9 @@ export function createDocumentChangeService(database: DocumentChangeDatabase = d
               .set({
                 title: change.beforeSnapshotJson.title,
                 contentJson: change.beforeSnapshotJson.contentJson,
-                metadataJson: change.beforeSnapshotJson.metadataJson,
+                metadataJson: projectState.value.metadataJson,
                 plainText: extractPlainTextFromTiptap(change.beforeSnapshotJson.contentJson),
-                readiness: change.beforeSnapshotJson.readiness,
+                readiness: projectState.value.readiness,
                 revision: input.expectedRevision + 1,
                 updatedAt: now,
               })
@@ -583,7 +623,7 @@ function isDocumentMetadata(value: unknown): value is DocumentMetadata {
   });
 }
 
-const defaultService = createDocumentChangeService();
+const defaultService = createDocumentChangeService(db, { projectProfile: resolveActiveProjectProfile() });
 
 export const applyProposal = defaultService.applyProposal;
 export const applyProposalBatch = defaultService.applyProposalBatch;

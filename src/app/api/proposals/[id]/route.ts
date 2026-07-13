@@ -13,7 +13,28 @@ type ProposalRouteContext = {
   params: Promise<{ id: string }>;
 };
 
-const optionsHandler = createProtectedOptionsHandler(["PATCH"]);
+const optionsHandler = createProtectedOptionsHandler(["GET", "PATCH"]);
+const getHandler = createProtectedRouteHandler(async (requestContext, _request: Request, context: ProposalRouteContext) => {
+  const { id } = await context.params;
+  const proposal = await getProposalById(requestContext, id);
+  if (!proposal) return NextResponse.json({ error: "Proposal not found" }, { status: 404 });
+  return NextResponse.json({
+    proposal: {
+      appliedMode: proposal.appliedMode,
+      command: proposal.command,
+      defaultApplyMode: proposal.defaultApplyMode,
+      explanation: proposal.explanation,
+      id: proposal.id,
+      occurrenceIndex: proposal.occurrenceIndex,
+      replacementText: proposal.replacementText,
+      source: proposal.source,
+      status: proposal.status,
+      targetFrom: proposal.targetFrom,
+      targetText: proposal.targetText,
+      targetTo: proposal.targetTo,
+    },
+  });
+});
 const patchHandler = createProtectedRouteHandler(async (
   requestContext,
   request: Request,
@@ -55,6 +76,10 @@ const patchHandler = createProtectedRouteHandler(async (
 
 export async function PATCH(request: Request, context: ProposalRouteContext) {
   return patchHandler(request, context);
+}
+
+export async function GET(request: Request, context: ProposalRouteContext) {
+  return getHandler(request, context);
 }
 
 export async function OPTIONS() {

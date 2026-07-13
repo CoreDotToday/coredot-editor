@@ -8,14 +8,14 @@ import {
   aiWorkspaceConversations,
   aiWorkspaceMessages,
   documents,
+  type AiWorkspaceConversationRecord,
   type AiWorkspaceMessageRecord,
 } from "@/db/schema";
 import { retrySqliteContention } from "@/db/sqlite-contention";
 import type { RequestContext } from "@/features/auth/request-context";
+import { decodeCollectionCursor, encodeCollectionCursor } from "@/features/pagination/collection-cursor";
 import {
   CONVERSATION_LIMITS,
-  decodeConversationCursor,
-  encodeConversationCursor,
   isExpectedVersion,
   isValidAppendInput,
   isValidCreateInput,
@@ -25,6 +25,7 @@ import {
   type ConversationMessage,
   type ConversationPage,
   type ConversationResult,
+  type ConversationSummary,
   type ConversationStatus,
   type CreateConversationInput,
 } from "./conversation-domain";
@@ -43,6 +44,7 @@ export {
   type ConversationMessage,
   type ConversationPage,
   type ConversationResult,
+  type ConversationSummary,
   type ConversationStatus,
   type CreateConversationInput,
 } from "./conversation-domain";
@@ -57,16 +59,32 @@ export function createConversationRepository(database: ConversationDatabase = db
       .leftJoin(aiWorkspaceMessages, and(
         eq(aiWorkspaceMessages.workspaceId, aiWorkspaceConversations.workspaceId),
         eq(aiWorkspaceMessages.conversationId, aiWorkspaceConversations.id),
+        or(
+          isNull(aiWorkspaceMessages.retentionExpiresAt),
+          gt(aiWorkspaceMessages.retentionExpiresAt, new Date()),
+        ),
       ))
       .where(and(
         eq(aiWorkspaceConversations.workspaceId, context.workspaceId),
         eq(aiWorkspaceConversations.id, conversationId),
+        or(
+          isNull(aiWorkspaceConversations.retentionExpiresAt),
+          gt(aiWorkspaceConversations.retentionExpiresAt, new Date()),
+        ),
       ))
       .orderBy(asc(aiWorkspaceMessages.ordinal));
     return hydrateConversationRows(rows)[0] ?? null;
   }
 
   return {
+    async get(
+      context: RequestContext,
+      conversationId: string,
+    ): Promise<ConversationResult<Conversation>> {
+      const value = await readConversation(context, conversationId);
+      return value ? { ok: true, value } : { ok: false, reason: "not_found" };
+    },
+
     async list(
       context: RequestContext,
       input: { cursor?: string; documentId: string; includeArchived?: boolean; limit?: number },
@@ -75,8 +93,13 @@ export function createConversationRepository(database: ConversationDatabase = db
       if (!Number.isSafeInteger(limit) || limit < 1 || limit > CONVERSATION_LIMITS.maximumPageSize) {
         return { ok: false, reason: "invalid" };
       }
-      const cursor = input.cursor ? decodeConversationCursor(input.cursor) : null;
-      if (input.cursor && !cursor) return { ok: false, reason: "invalid" };
+      const cursorScope = {
+        collection: "conversations",
+        documentId: input.documentId,
+        includeArchived: input.includeArchived ?? false,
+        workspaceId: context.workspaceId,
+      } as const;
+      const cursor = input.cursor ? decodeCollectionCursor(input.cursor, cursorScope) : null;
 
       const [document] = await database
         .select({ id: documents.id })
@@ -90,8 +113,22 @@ export function createConversationRepository(database: ConversationDatabase = db
       if (!document) return { ok: false, reason: "not_found" };
 
       const now = new Date();
-      const conversationPage = database
-        .select()
+      const conversations = await database
+        .select({
+          archivedAt: aiWorkspaceConversations.archivedAt,
+          command: aiWorkspaceConversations.command,
+          createdAt: aiWorkspaceConversations.createdAt,
+          documentId: aiWorkspaceConversations.documentId,
+          id: aiWorkspaceConversations.id,
+          latestAiRunId: aiWorkspaceConversations.latestAiRunId,
+          latestProposalId: aiWorkspaceConversations.latestProposalId,
+          messageCount: aiWorkspaceConversations.messageCount,
+          retentionExpiresAt: aiWorkspaceConversations.retentionExpiresAt,
+          status: aiWorkspaceConversations.status,
+          title: aiWorkspaceConversations.title,
+          updatedAt: aiWorkspaceConversations.updatedAt,
+          version: aiWorkspaceConversations.version,
+        })
         .from(aiWorkspaceConversations)
         .where(and(
           eq(aiWorkspaceConversations.workspaceId, context.workspaceId),
@@ -103,59 +140,24 @@ export function createConversationRepository(database: ConversationDatabase = db
           ),
           cursor
             ? or(
-                lt(aiWorkspaceConversations.updatedAt, cursor.updatedAt),
+                lt(aiWorkspaceConversations.updatedAt, cursor.timestamp),
                 and(
-                  eq(aiWorkspaceConversations.updatedAt, cursor.updatedAt),
+                  eq(aiWorkspaceConversations.updatedAt, cursor.timestamp),
                   lt(aiWorkspaceConversations.id, cursor.id),
                 ),
               )
             : undefined,
         ))
         .orderBy(desc(aiWorkspaceConversations.updatedAt), desc(aiWorkspaceConversations.id))
-        .limit(limit + 1)
-        .as("conversation_page");
-      const rows = await database
-        .select({
-          conversation: {
-            archivedAt: conversationPage.archivedAt,
-            command: conversationPage.command,
-            createdAt: conversationPage.createdAt,
-            createdByPrincipalId: conversationPage.createdByPrincipalId,
-            creationFingerprint: conversationPage.creationFingerprint,
-            creationKey: conversationPage.creationKey,
-            documentId: conversationPage.documentId,
-            id: conversationPage.id,
-            latestAiRunId: conversationPage.latestAiRunId,
-            latestProposalId: conversationPage.latestProposalId,
-            messageCount: conversationPage.messageCount,
-            retentionExpiresAt: conversationPage.retentionExpiresAt,
-            status: conversationPage.status,
-            title: conversationPage.title,
-            updatedAt: conversationPage.updatedAt,
-            version: conversationPage.version,
-            workspaceId: conversationPage.workspaceId,
-          },
-          message: aiWorkspaceMessages,
-        })
-        .from(conversationPage)
-        .leftJoin(aiWorkspaceMessages, and(
-          eq(aiWorkspaceMessages.workspaceId, conversationPage.workspaceId),
-          eq(aiWorkspaceMessages.conversationId, conversationPage.id),
-        ))
-        .orderBy(
-          desc(conversationPage.updatedAt),
-          desc(conversationPage.id),
-          asc(aiWorkspaceMessages.ordinal),
-        );
-      const conversations = hydrateConversationRows(rows);
-      const items = conversations.slice(0, limit);
+        .limit(limit + 1);
+      const items = conversations.slice(0, limit).map(toConversationSummary);
       const last = items.at(-1);
       return {
         ok: true,
         value: {
           items,
           nextCursor: conversations.length > limit && last
-            ? encodeConversationCursor(last.updatedAt, last.id)
+            ? encodeCollectionCursor({ id: last.id, timestamp: last.updatedAt }, cursorScope)
             : null,
         },
       };
@@ -302,6 +304,10 @@ export function createConversationRepository(database: ConversationDatabase = db
           .where(and(
             eq(aiWorkspaceConversations.workspaceId, context.workspaceId),
             eq(aiWorkspaceConversations.id, conversationId),
+            or(
+              isNull(aiWorkspaceConversations.retentionExpiresAt),
+              gt(aiWorkspaceConversations.retentionExpiresAt, new Date()),
+            ),
           ))
           .limit(1);
         if (!conversation) return { kind: "not_found" as const };
@@ -358,6 +364,10 @@ export function createConversationRepository(database: ConversationDatabase = db
             eq(aiWorkspaceConversations.id, conversationId),
             eq(aiWorkspaceConversations.version, input.expectedVersion),
             lt(aiWorkspaceConversations.messageCount, CONVERSATION_LIMITS.messagesPerConversation),
+            or(
+              isNull(aiWorkspaceConversations.retentionExpiresAt),
+              gt(aiWorkspaceConversations.retentionExpiresAt, new Date()),
+            ),
           ))
           .returning({
             documentId: aiWorkspaceConversations.documentId,
@@ -444,6 +454,20 @@ export function createConversationRepository(database: ConversationDatabase = db
       const fingerprint = fingerprintValue({ conversationId, throughMessageId: input.throughMessageId, title });
       const result = await withSerializedDocumentWrite(context, `conversation-fork:${input.creationKey}`, () =>
         retrySqliteContention(() => database.transaction(async (transaction) => {
+        const [source] = await transaction
+          .select()
+          .from(aiWorkspaceConversations)
+          .where(and(
+            eq(aiWorkspaceConversations.workspaceId, context.workspaceId),
+            eq(aiWorkspaceConversations.id, conversationId),
+            or(
+              isNull(aiWorkspaceConversations.retentionExpiresAt),
+              gt(aiWorkspaceConversations.retentionExpiresAt, new Date()),
+            ),
+          ))
+          .limit(1);
+        if (!source) return { kind: "not_found" as const };
+
         const [existing] = await transaction
           .select()
           .from(aiWorkspaceConversations)
@@ -458,15 +482,6 @@ export function createConversationRepository(database: ConversationDatabase = db
             : { kind: "conflict" as const };
         }
 
-        const [source] = await transaction
-          .select()
-          .from(aiWorkspaceConversations)
-          .where(and(
-            eq(aiWorkspaceConversations.workspaceId, context.workspaceId),
-            eq(aiWorkspaceConversations.id, conversationId),
-          ))
-          .limit(1);
-        if (!source) return { kind: "not_found" as const };
         const [through] = await transaction
           .select()
           .from(aiWorkspaceMessages)
@@ -474,6 +489,10 @@ export function createConversationRepository(database: ConversationDatabase = db
             eq(aiWorkspaceMessages.workspaceId, context.workspaceId),
             eq(aiWorkspaceMessages.conversationId, conversationId),
             eq(aiWorkspaceMessages.id, input.throughMessageId),
+            or(
+              isNull(aiWorkspaceMessages.retentionExpiresAt),
+              gt(aiWorkspaceMessages.retentionExpiresAt, new Date()),
+            ),
           ))
           .limit(1);
         if (!through) return { kind: "not_found" as const };
@@ -500,6 +519,10 @@ export function createConversationRepository(database: ConversationDatabase = db
             eq(aiWorkspaceMessages.workspaceId, context.workspaceId),
             eq(aiWorkspaceMessages.conversationId, conversationId),
             sql`${aiWorkspaceMessages.ordinal} <= ${through.ordinal}`,
+            or(
+              isNull(aiWorkspaceMessages.retentionExpiresAt),
+              gt(aiWorkspaceMessages.retentionExpiresAt, new Date()),
+            ),
           ))
           .orderBy(asc(aiWorkspaceMessages.ordinal));
         const lastLinked = [...prefix].reverse().find((message) => message.aiRunId || message.proposalId);
@@ -586,6 +609,10 @@ export function createConversationRepository(database: ConversationDatabase = db
       .where(and(
         eq(aiWorkspaceConversations.workspaceId, context.workspaceId),
         eq(aiWorkspaceConversations.id, conversationId),
+        or(
+          isNull(aiWorkspaceConversations.retentionExpiresAt),
+          gt(aiWorkspaceConversations.retentionExpiresAt, new Date()),
+        ),
       ))
       .limit(1);
     if (!existing) return { ok: false, reason: "not_found" };
@@ -608,6 +635,10 @@ export function createConversationRepository(database: ConversationDatabase = db
         eq(aiWorkspaceConversations.workspaceId, context.workspaceId),
         eq(aiWorkspaceConversations.id, conversationId),
         eq(aiWorkspaceConversations.version, expectedVersion),
+        or(
+          isNull(aiWorkspaceConversations.retentionExpiresAt),
+          gt(aiWorkspaceConversations.retentionExpiresAt, new Date()),
+        ),
       ))
       .returning({ id: aiWorkspaceConversations.id });
     if (!updated) return { ok: false, reason: "conflict" };
@@ -674,7 +705,7 @@ function hydrateConversationRows(rows: Array<{
     id: record.id,
     latestAiRunId: record.latestAiRunId,
     latestProposalId: record.latestProposalId,
-    messageCount: record.messageCount,
+    messageCount: (messagesByConversation.get(record.id) ?? []).length,
     messages: (messagesByConversation.get(record.id) ?? []).map(toConversationMessage),
     retentionExpiresAt: record.retentionExpiresAt,
     status: record.status,
@@ -682,6 +713,40 @@ function hydrateConversationRows(rows: Array<{
     updatedAt: record.updatedAt,
     version: record.version,
   }));
+}
+
+function toConversationSummary(
+  record: Pick<AiWorkspaceConversationRecord,
+    | "archivedAt"
+    | "command"
+    | "createdAt"
+    | "documentId"
+    | "id"
+    | "latestAiRunId"
+    | "latestProposalId"
+    | "messageCount"
+    | "retentionExpiresAt"
+    | "status"
+    | "title"
+    | "updatedAt"
+    | "version"
+  >,
+): ConversationSummary {
+  return {
+    archived: record.archivedAt !== null,
+    command: record.command,
+    createdAt: record.createdAt,
+    documentId: record.documentId,
+    id: record.id,
+    latestAiRunId: record.latestAiRunId,
+    latestProposalId: record.latestProposalId,
+    messageCount: record.messageCount,
+    retentionExpiresAt: record.retentionExpiresAt,
+    status: record.status,
+    title: record.title,
+    updatedAt: record.updatedAt,
+    version: record.version,
+  };
 }
 
 function toConversationMessage(record: AiWorkspaceMessageRecord): ConversationMessage {
@@ -704,6 +769,7 @@ function fingerprintValue(value: unknown) {
 const defaultConversationRepository = createConversationRepository();
 
 export const listConversations = defaultConversationRepository.list;
+export const getConversationById = defaultConversationRepository.get;
 export const createConversation = defaultConversationRepository.create;
 export const appendConversationMessage = defaultConversationRepository.append;
 export const renameConversation = defaultConversationRepository.rename;

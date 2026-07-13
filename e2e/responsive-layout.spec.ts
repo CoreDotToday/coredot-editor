@@ -63,3 +63,35 @@ test("document editor avoids horizontal overflow on tablet width", async ({ page
 
   expect(metrics.scrollWidth).toBeLessThanOrEqual(metrics.innerWidth + 1);
 });
+
+test("compact modal drawers release focus isolation when resizing to desktop", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/documents");
+  await page.getByRole("button", { name: "새 문서" }).click();
+  await expect(page.getByRole("textbox", { name: "문서 본문" })).toBeVisible({ timeout: 15_000 });
+
+  await page.getByRole("button", { name: "사이드바 열기" }).click();
+  await expect(page.getByRole("dialog", { name: "사이드바 열기" })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => document.body.style.overflow)).toBe("hidden");
+
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await expect(page.getByRole("dialog", { name: "사이드바 열기" })).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => ({
+    inertMain: document.querySelector("main")?.hasAttribute("inert") ?? false,
+    overflow: document.body.style.overflow,
+  }))).toEqual({ inertMain: false, overflow: "" });
+
+  await page.setViewportSize({ width: 1100, height: 900 });
+  await page.getByRole("button", { name: "검토" }).click();
+  await expect(page.getByRole("dialog", { name: "검토" })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => document.body.style.overflow)).toBe("hidden");
+
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await expect(page.getByRole("dialog", { name: "검토" })).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => ({
+    inertMain: document.querySelector("main")?.hasAttribute("inert") ?? false,
+    overflow: document.body.style.overflow,
+  }))).toEqual({ inertMain: false, overflow: "" });
+  await page.getByRole("tab", { name: "Source" }).click();
+  await expect(page.getByRole("region", { name: "문서 Source" })).toBeVisible();
+});

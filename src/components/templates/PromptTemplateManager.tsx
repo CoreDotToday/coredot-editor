@@ -3,12 +3,15 @@
 import { Archive, Plus, Save } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { PromptTemplateRecord } from "@/db/schema";
+import { getProjectProfile } from "@/features/projects/default-project-profiles";
+import type { ProjectProfile } from "@/features/projects/project-profile";
 import {
   promptTemplatePayloadSchema,
   promptTemplateUpdatePayloadSchema,
 } from "@/features/templates/template-validation";
 
 type PromptTemplateManagerProps = {
+  projectProfile?: ProjectProfile;
   templates: PromptTemplateRecord[];
 };
 
@@ -86,9 +89,14 @@ function validationErrorsFromIssues(
   return errors;
 }
 
-export function PromptTemplateManager({ templates }: PromptTemplateManagerProps) {
+export function PromptTemplateManager({
+  projectProfile = getProjectProfile("default"),
+  templates,
+}: PromptTemplateManagerProps) {
   const [managedTemplates, setManagedTemplates] = useState(() => listVisibleTemplates(templates));
-  const [selectedId, setSelectedId] = useState(managedTemplates[0]?.id ?? "");
+  const [selectedId, setSelectedId] = useState(
+    () => getProfileDefaultTemplate(managedTemplates, projectProfile)?.id ?? managedTemplates[0]?.id ?? "",
+  );
   const selectedIdRef = useRef(selectedId);
   const selectionVersionRef = useRef(0);
   const draftVersionRef = useRef(0);
@@ -291,7 +299,7 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
       }
 
       const remainingTemplates = managedTemplates.filter((template) => template.id !== archivedTemplateId);
-      const nextTemplate = remainingTemplates[0] ?? null;
+      const nextTemplate = getProfileDefaultTemplate(remainingTemplates, projectProfile) ?? remainingTemplates[0] ?? null;
       setManagedTemplates(remainingTemplates);
 
       selectionVersionRef.current += 1;
@@ -342,6 +350,9 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
           <ul className="space-y-1">
             {managedTemplates.map((template) => {
               const isSelected = template.id === selectedTemplate?.id;
+              const isProfileDefault = Boolean(
+                template.builtinKey && projectProfile.defaultTemplateIds.includes(template.builtinKey),
+              );
 
               return (
                 <li key={template.id}>
@@ -354,8 +365,15 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
                     type="button"
                   >
                     <span className="block truncate text-sm font-medium">{template.name}</span>
-                    <span className={`mt-1 block truncate text-xs ${isSelected ? "text-zinc-300" : "text-zinc-500"}`}>
-                      {template.category}
+                    <span className={`mt-1 flex items-center gap-2 truncate text-xs ${isSelected ? "text-zinc-300" : "text-zinc-500"}`}>
+                      <span className="truncate">{template.category}</span>
+                      {isProfileDefault ? (
+                        <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
+                          isSelected ? "bg-white/15 text-white" : "bg-zinc-200 text-zinc-700"
+                        }`}>
+                          프로필 기본값
+                        </span>
+                      ) : null}
                     </span>
                   </button>
                 </li>
@@ -508,4 +526,15 @@ export function PromptTemplateManager({ templates }: PromptTemplateManagerProps)
       </section>
     </main>
   );
+}
+
+function getProfileDefaultTemplate(
+  templates: readonly PromptTemplateRecord[],
+  projectProfile: ProjectProfile,
+) {
+  for (const builtinKey of projectProfile.defaultTemplateIds) {
+    const match = templates.find((template) => template.builtinKey === builtinKey);
+    if (match) return match;
+  }
+  return null;
 }

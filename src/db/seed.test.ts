@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { promptTemplates } from "./schema";
 import { defaultPromptTemplates, seedDefaultPromptTemplates } from "./seed";
+import { builtinTemplateKeys } from "@/features/templates/builtin-template-keys";
 
 const originalDatabaseUrl = process.env.DATABASE_URL;
 const tempDirs: string[] = [];
@@ -58,6 +59,7 @@ describe("defaultPromptTemplates", () => {
       "tpl_market_research",
       "tpl_contract_review",
     ]);
+    expect(defaultPromptTemplates.map((template) => template.id)).toEqual(builtinTemplateKeys);
     expect(defaultPromptTemplates.map((template) => template.category)).toEqual([
       "strategy_review",
       "executive_rewrite",

@@ -137,6 +137,26 @@ describe("AiReviewPanel", () => {
     expect(onUpdateProposalStatus).toHaveBeenNthCalledWith(3, "proposal_1", "rejected");
   });
 
+  it("marks truncated previews and lets the user request exact detail before deciding", async () => {
+    const user = userEvent.setup();
+    const onLoadProposalDetail = vi.fn();
+    render(
+      <AiReviewPanel
+        errorMessage=""
+        isReviewing={false}
+        onLoadProposalDetail={onLoadProposalDetail}
+        onReviewDocument={() => undefined}
+        onUpdateProposalStatus={() => undefined}
+        proposals={[{ ...proposals[0]!, isTruncated: true }]}
+        selectedTemplateName="Board review"
+      />,
+    );
+
+    expect(screen.getByText("일부 내용 미리보기")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "전체 제안 보기" }));
+    expect(onLoadProposalDetail).toHaveBeenCalledWith("proposal_1");
+  });
+
   it("requests bulk accept and reject actions for pending proposals", async () => {
     const user = userEvent.setup();
     const onBulkUpdateProposalStatus = vi.fn();
@@ -158,6 +178,27 @@ describe("AiReviewPanel", () => {
 
     expect(onBulkUpdateProposalStatus).toHaveBeenNthCalledWith(1, "accepted");
     expect(onBulkUpdateProposalStatus).toHaveBeenNthCalledWith(2, "rejected");
+  });
+
+  it("withholds all-pending actions while older proposal pages remain", () => {
+    const onBulkUpdateProposalStatus = vi.fn();
+
+    render(
+      <AiReviewPanel
+        errorMessage=""
+        hasMore
+        isReviewing={false}
+        onBulkUpdateProposalStatus={onBulkUpdateProposalStatus}
+        onReviewDocument={() => undefined}
+        onUpdateProposalStatus={() => undefined}
+        proposals={proposals}
+        selectedTemplateName="Board review"
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "대기 중인 모든 제안 수락" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "대기 중인 모든 제안 거절" })).not.toBeInTheDocument();
+    expect(onBulkUpdateProposalStatus).not.toHaveBeenCalled();
   });
 
   it("labels insert-below proposal history differently from replacement edits", () => {

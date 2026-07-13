@@ -71,6 +71,13 @@ const putHandler = createProtectedRouteHandler(async (context, request: Request,
       { status: 409 },
     );
   }
+  if (saveResult.status === "invalid_profile") {
+    return NextResponse.json({
+      error: "Document violates active Project Profile",
+      reason: "invalid_project_profile",
+      violation: saveResult.violation,
+    }, { status: 400 });
+  }
   return NextResponse.json({ document: toPublicDocument(saveResult.document) });
 });
 

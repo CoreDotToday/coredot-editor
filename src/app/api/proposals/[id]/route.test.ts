@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getProposalById, updateProposalStatus } from "@/features/proposals/proposal-repository";
 import { setProtectedRequestContextDependenciesForTests } from "@/features/auth/route-context";
 import { TEST_REQUEST_CONTEXT } from "@/test/auth-context";
-import { PATCH } from "./route";
+import { GET, PATCH } from "./route";
 
 vi.mock("@/features/proposals/proposal-repository", () => ({
   getProposalById: vi.fn(),
@@ -58,6 +58,22 @@ describe("PATCH /api/proposals/[id]", () => {
     expect(updateProposalStatus).toHaveBeenCalledWith(TEST_REQUEST_CONTEXT, "proposal_1", "rejected", undefined, {
       expectedStatus: undefined,
     });
+  });
+
+  it("returns exact scoped proposal detail for lazy hydration", async () => {
+    vi.mocked(getProposalById).mockResolvedValueOnce(createProposalRecord({
+      targetText: "t".repeat(1_000),
+      replacementText: "r".repeat(3_000),
+    }));
+
+    const response = await GET(new Request("http://localhost/api/proposals/proposal_1"), createContext());
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.proposal.targetText).toHaveLength(1_000);
+    expect(body.proposal.replacementText).toHaveLength(3_000);
+    expect(body.proposal).not.toHaveProperty("workspaceId");
+    expect(body.proposal).not.toHaveProperty("aiRunId");
   });
 
   it("rejects accepted status updates", async () => {

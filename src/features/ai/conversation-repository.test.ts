@@ -4,9 +4,11 @@ import { eq, sql } from "drizzle-orm";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import * as schema from "@/db/schema";
 import type { RequestContext } from "@/features/auth/request-context";
+import { createHttpConversationStore } from "./conversation-client";
+import { toPublicConversation } from "./conversation-http";
 import { createConversationRepository } from "./conversation-repository";
 
 const context: RequestContext = {
@@ -168,6 +170,7 @@ async function createConversationDatabase() {
 function interleaveAfterConversationRows<TDatabase extends object>(
   database: TDatabase,
   interleave: () => Promise<void>,
+  triggerAfterSelects = 2,
 ): TDatabase {
   let armed = true;
   let completedSelects = 0;
@@ -179,7 +182,7 @@ function interleaveAfterConversationRows<TDatabase extends object>(
           return (fulfilled?: (value: unknown) => unknown, rejected?: (reason: unknown) => unknown) =>
             Promise.resolve(target).then(async (value) => {
               completedSelects += 1;
-              if (shouldInterleave && armed && completedSelects === 2) {
+              if (shouldInterleave && armed && completedSelects === triggerAfterSelects) {
                 armed = false;
                 await interleave();
               }
@@ -290,7 +293,11 @@ describe("conversation repository", () => {
     expect(failed).toMatchObject({ ok: true, value: { status: "failed", version: 5 } });
 
     const page = await repository.list(context, { documentId: "doc-a", includeArchived: true, limit: 20 });
-    expect(page).toMatchObject({ ok: true, value: { items: [{ messages: { length: 2 } }] } });
+    expect(page).toMatchObject({ ok: true, value: { items: [{ messageCount: 2 }] } });
+    expect(page.ok && page.value.items[0]).not.toHaveProperty("messages");
+
+    const detail = await repository.get(context, created.value.id);
+    expect(detail).toMatchObject({ ok: true, value: { messages: { length: 2 } } });
 
     const forked = await repository.fork(context, created.value.id, {
       creationKey: "fork-conversation-0001",
@@ -365,7 +372,23 @@ describe("conversation repository", () => {
     expect(results.filter((result) => !result.ok)).toEqual([{ ok: false, reason: "conflict" }]);
   });
 
-  it("hydrates conversation rows and messages from one read snapshot during an append", async () => {
+  it("keeps list payloads message-free while returning a scoped transcript detail", async () => {
+    const { database } = await createConversationDatabase();
+    const repository = createConversationRepository(database);
+    const created = await repository.create(context, createInput);
+    if (!created.ok) return;
+
+    const page = await repository.list(context, { documentId: "doc-a", limit: 20 });
+    expect(page).toMatchObject({ ok: true, value: { items: [{ messageCount: 1 }] } });
+    expect(page.ok && page.value.items[0]).not.toHaveProperty("messages");
+
+    const detail = await repository.get(context, created.value.id);
+    expect(detail).toMatchObject({ ok: true, value: { messageCount: 1, messages: { length: 1 } } });
+    expect(await repository.get({ ...context, workspaceId: "workspace-b" }, created.value.id))
+      .toEqual({ ok: false, reason: "not_found" });
+  });
+
+  it("hydrates detail metadata and messages from one read snapshot during an interleaved append", async () => {
     const { client, database, url } = await createConversationDatabase();
     await client.execute("PRAGMA journal_mode=WAL");
     const repository = createConversationRepository(database);
@@ -397,21 +420,19 @@ describe("conversation repository", () => {
           workspaceId: context.workspaceId,
         });
       });
-    });
+    }, 1);
 
-    const page = await createConversationRepository(interleaved).list(context, {
-      documentId: "doc-a",
-      limit: 20,
+    const detail = await createConversationRepository(interleaved).get(context, created.value.id);
+    expect(detail).toMatchObject({
+      ok: true,
+      value: { messageCount: 1, messages: { length: 1 }, version: 1 },
     });
-    expect(page).toMatchObject({ ok: true });
-    if (!page.ok) return;
-    expect(page.value.items[0]?.messageCount).toBe(page.value.items[0]?.messages.length);
-    expect(page.value.items[0]).toMatchObject({ messageCount: 1, messages: { length: 1 }, version: 1 });
+    if (detail.ok) expect(detail.value.messageCount).toBe(detail.value.messages.length);
 
-    const refreshed = await repository.list(context, { documentId: "doc-a", limit: 20 });
+    const refreshed = await repository.get(context, created.value.id);
     expect(refreshed).toMatchObject({
       ok: true,
-      value: { items: [{ messageCount: 2, messages: { length: 2 }, version: 2 }] },
+      value: { messageCount: 2, messages: { length: 2 }, version: 2 },
     });
   });
 
@@ -469,5 +490,245 @@ describe("conversation repository", () => {
       initialMessage: { ...createInput.initialMessage, mutationKey: "quota-message-limited-0001" },
     });
     expect(limited).toEqual({ ok: false, reason: "limit" });
+  });
+
+  it("hides expired conversations and rejects every mutation without changing retained rows", async () => {
+    const { database } = await createConversationDatabase();
+    const repository = createConversationRepository(database);
+    const created = await repository.create(context, createInput);
+    if (!created.ok) return;
+    const messageId = created.value.messages[0]!.id;
+    await database
+      .update(schema.aiWorkspaceConversations)
+      .set({ retentionExpiresAt: new Date(1) })
+      .where(eq(schema.aiWorkspaceConversations.id, created.value.id));
+
+    expect(await repository.get(context, created.value.id)).toEqual({ ok: false, reason: "not_found" });
+    expect(await repository.list(context, { documentId: "doc-a" }))
+      .toMatchObject({ ok: true, value: { items: [] } });
+    expect(await repository.append(context, created.value.id, {
+      content: "Must not be written",
+      expectedVersion: 1,
+      mutationKey: "expired-append-0001",
+      role: "assistant",
+      status: "idle",
+    })).toEqual({ ok: false, reason: "not_found" });
+    expect(await repository.rename(context, created.value.id, {
+      expectedVersion: 1,
+      title: "Must not be renamed",
+    })).toEqual({ ok: false, reason: "not_found" });
+    expect(await repository.archive(context, created.value.id, {
+      archived: true,
+      expectedVersion: 1,
+    })).toEqual({ ok: false, reason: "not_found" });
+    expect(await repository.setStatus(context, created.value.id, {
+      expectedVersion: 1,
+      status: "failed",
+    })).toEqual({ ok: false, reason: "not_found" });
+    expect(await repository.fork(context, created.value.id, {
+      creationKey: "expired-fork-0001",
+      throughMessageId: messageId,
+      title: "Must not be forked",
+    })).toEqual({ ok: false, reason: "not_found" });
+
+    const [row] = await database
+      .select()
+      .from(schema.aiWorkspaceConversations)
+      .where(eq(schema.aiWorkspaceConversations.id, created.value.id));
+    const messages = await database
+      .select()
+      .from(schema.aiWorkspaceMessages)
+      .where(eq(schema.aiWorkspaceMessages.conversationId, created.value.id));
+    const conversations = await database.select().from(schema.aiWorkspaceConversations);
+    expect(row).toMatchObject({
+      archivedAt: null,
+      messageCount: 1,
+      status: "idle",
+      title: "Improve clarity",
+      version: 1,
+    });
+    expect(messages).toHaveLength(1);
+    expect(conversations).toHaveLength(1);
+  });
+
+  it("reports the active visible message count so independently expired-message detail remains client-parseable", async () => {
+    const { database } = await createConversationDatabase();
+    const repository = createConversationRepository(database);
+    const created = await repository.create(context, createInput);
+    if (!created.ok) return;
+    const appended = await repository.append(context, created.value.id, {
+      content: "Still active",
+      expectedVersion: 1,
+      mutationKey: "message-active-0001",
+      role: "assistant",
+      status: "idle",
+    });
+    if (!appended.ok) return;
+    await database
+      .update(schema.aiWorkspaceMessages)
+      .set({ retentionExpiresAt: new Date(1) })
+      .where(eq(schema.aiWorkspaceMessages.id, created.value.messages[0]!.id));
+
+    const detail = await repository.get(context, created.value.id);
+    expect(detail.ok).toBe(true);
+    if (!detail.ok) return;
+    const httpStore = createHttpConversationStore(vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      conversation: toPublicConversation(detail.value),
+    }))));
+
+    expect(await httpStore.get("doc-a", created.value.id)).toMatchObject({
+      ok: true,
+      value: {
+        messageCount: 1,
+        messages: [{ content: "Still active" }],
+      },
+    });
+  });
+
+  it("commits one mutation and returns a client-parseable active count after a message independently expires", async () => {
+    const { database } = await createConversationDatabase();
+    const repository = createConversationRepository(database);
+    const created = await repository.create(context, createInput);
+    if (!created.ok) return;
+    const appended = await repository.append(context, created.value.id, {
+      content: "Still active",
+      expectedVersion: 1,
+      mutationKey: "message-active-mutation-0001",
+      role: "assistant",
+      status: "idle",
+    });
+    if (!appended.ok) return;
+    await database
+      .update(schema.aiWorkspaceMessages)
+      .set({ retentionExpiresAt: new Date(1) })
+      .where(eq(schema.aiWorkspaceMessages.id, created.value.messages[0]!.id));
+
+    const renamed = await repository.rename(context, created.value.id, {
+      expectedVersion: 2,
+      title: "Active transcript",
+    });
+    expect(renamed.ok).toBe(true);
+    if (!renamed.ok) return;
+    const httpStore = createHttpConversationStore(vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      conversation: toPublicConversation(renamed.value),
+      replayed: false,
+    }))));
+    const clientResult = await httpStore.rename("doc-a", created.value.id, {
+      expectedVersion: 2,
+      title: "Active transcript",
+    });
+    const [persisted] = await database
+      .select({ title: schema.aiWorkspaceConversations.title, version: schema.aiWorkspaceConversations.version })
+      .from(schema.aiWorkspaceConversations)
+      .where(eq(schema.aiWorkspaceConversations.id, created.value.id));
+
+    expect(clientResult).toMatchObject({
+      ok: true,
+      value: {
+        messageCount: 1,
+        messages: [{ content: "Still active" }],
+        title: "Active transcript",
+        version: 3,
+      },
+    });
+    expect(persisted).toEqual({ title: "Active transcript", version: 3 });
+  });
+
+  it("forks only active prefix messages and rewrites ordinals and messageCount coherently", async () => {
+    const { database } = await createConversationDatabase();
+    const repository = createConversationRepository(database);
+    const created = await repository.create(context, createInput);
+    if (!created.ok) return;
+    const second = await repository.append(context, created.value.id, {
+      content: "Expired middle",
+      expectedVersion: 1,
+      mutationKey: "message-expired-middle-0001",
+      role: "assistant",
+      status: "idle",
+    });
+    if (!second.ok) return;
+    const third = await repository.append(context, created.value.id, {
+      content: "Active boundary",
+      expectedVersion: 2,
+      mutationKey: "message-active-boundary-0001",
+      role: "user",
+      status: "idle",
+    });
+    if (!third.ok) return;
+    await database
+      .update(schema.aiWorkspaceMessages)
+      .set({ retentionExpiresAt: new Date(1) })
+      .where(eq(schema.aiWorkspaceMessages.id, second.value.messages[1]!.id));
+
+    const forked = await repository.fork(context, created.value.id, {
+      creationKey: "fork-active-prefix-0001",
+      throughMessageId: third.value.messages[2]!.id,
+      title: "Active prefix",
+    });
+    expect(forked).toMatchObject({
+      ok: true,
+      value: {
+        messageCount: 2,
+        messages: [{ content: "Original text" }, { content: "Active boundary" }],
+      },
+    });
+    if (!forked.ok) return;
+    const rows = await database
+      .select({ content: schema.aiWorkspaceMessages.content, ordinal: schema.aiWorkspaceMessages.ordinal })
+      .from(schema.aiWorkspaceMessages)
+      .where(eq(schema.aiWorkspaceMessages.conversationId, forked.value.id))
+      .orderBy(schema.aiWorkspaceMessages.ordinal);
+    expect(rows).toEqual([
+      { content: "Original text", ordinal: 0 },
+      { content: "Active boundary", ordinal: 1 },
+    ]);
+  });
+
+  it("paginates same-timestamp conversations once and rejects cursors outside their exact list scope", async () => {
+    const { database } = await createConversationDatabase();
+    const repository = createConversationRepository(database);
+    const created = await Promise.all(Array.from({ length: 3 }, (_, index) => repository.create(context, {
+      ...createInput,
+      creationKey: `same-time-conversation-${String(index).padStart(4, "0")}`,
+      initialMessage: {
+        ...createInput.initialMessage,
+        mutationKey: `same-time-message-${String(index).padStart(4, "0")}`,
+      },
+      title: `Conversation ${String(index)}`,
+    })));
+    const tiedAt = new Date("2026-01-02T00:00:00.000Z");
+    await database.update(schema.aiWorkspaceConversations).set({ updatedAt: tiedAt });
+
+    const first = await repository.list(context, { documentId: "doc-a", limit: 2 });
+    expect(first.ok).toBe(true);
+    if (!first.ok || !first.value.nextCursor) return;
+    const second = await repository.list(context, {
+      cursor: first.value.nextCursor,
+      documentId: "doc-a",
+      limit: 2,
+    });
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    const ids = [...first.value.items, ...second.value.items].map((item) => item.id);
+    const createdIds = created.flatMap((result) => result.ok ? [result.value.id] : []).sort().reverse();
+    expect(ids).toEqual(createdIds);
+    expect(new Set(ids).size).toBe(3);
+
+    await expect(repository.list(context, {
+      cursor: first.value.nextCursor,
+      documentId: "doc-other",
+      limit: 2,
+    })).rejects.toMatchObject({ name: "InvalidCollectionCursorError" });
+    await expect(repository.list(context, {
+      cursor: first.value.nextCursor,
+      documentId: "doc-a",
+      includeArchived: true,
+      limit: 2,
+    })).rejects.toMatchObject({ name: "InvalidCollectionCursorError" });
+    await expect(repository.list({ ...context, workspaceId: "workspace-b" }, {
+      cursor: first.value.nextCursor,
+      documentId: "doc-a",
+      limit: 2,
+    })).rejects.toMatchObject({ name: "InvalidCollectionCursorError" });
   });
 });

@@ -150,6 +150,31 @@ describe("POST /api/proposals/[id]/apply", () => {
     expect(await response.json()).toMatchObject({ reason: "revision_conflict", document: { revision: 7 } });
   });
 
+  it("maps active Project Profile violations to a stable 400 response", async () => {
+    vi.mocked(applyProposal).mockResolvedValueOnce({
+      ok: false,
+      reason: "invalid_profile",
+      violation: {
+        current: "draft",
+        next: "approved",
+        reason: "invalid_readiness_transition",
+      },
+    } as never);
+
+    const response = await POST(createJsonRequest(createValidPayload()), createContext());
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: "Document violates active Project Profile",
+      reason: "invalid_project_profile",
+      violation: {
+        current: "draft",
+        next: "approved",
+        reason: "invalid_readiness_transition",
+      },
+    });
+  });
+
   it("maps missing, status, and proposal application failures", async () => {
     vi.mocked(applyProposal)
       .mockResolvedValueOnce({ ok: false, reason: "not_found" })

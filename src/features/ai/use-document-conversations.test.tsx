@@ -1,6 +1,10 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import type { ConversationStore, StoredConversationView } from "./conversation-store";
+import type {
+  ConversationStore,
+  StoredConversationSummary,
+  StoredConversationView,
+} from "./conversation-store";
 import { useDocumentConversations } from "./use-document-conversations";
 
 function deferred<T>() {
@@ -60,6 +64,12 @@ function completedConversation(overrides: Partial<StoredConversationView> = {}):
   });
 }
 
+function conversationSummary(overrides: Partial<StoredConversationSummary> = {}): StoredConversationSummary {
+  const { messages: _messages, ...summary } = conversation();
+  void _messages;
+  return { ...summary, ...overrides };
+}
+
 function store(overrides: Partial<ConversationStore> = {}): ConversationStore {
   const unavailable = vi.fn().mockResolvedValue({ ok: false, reason: "unavailable" });
   return {
@@ -67,6 +77,7 @@ function store(overrides: Partial<ConversationStore> = {}): ConversationStore {
     archive: unavailable,
     create: unavailable,
     fork: unavailable,
+    get: unavailable,
     list: vi.fn().mockResolvedValue({ ok: true, value: { items: [], nextCursor: null } }),
     rename: unavailable,
     setStatus: unavailable,
@@ -75,6 +86,359 @@ function store(overrides: Partial<ConversationStore> = {}): ConversationStore {
 }
 
 describe("useDocumentConversations", () => {
+  it("loads the first SSR summary transcript and retries a failed detail", async () => {
+    const get = vi.fn()
+      .mockResolvedValueOnce({ ok: false, reason: "unavailable" })
+      .mockResolvedValueOnce({ ok: true, value: conversation() });
+    const persistence = store({ get });
+    const { result } = renderHook(() => useDocumentConversations({
+      documentId: "doc-a",
+      initialConversations: [conversationSummary()],
+      storageMode: "database",
+      store: persistence,
+      workspaceId: "workspace-a",
+    }));
+
+    await waitFor(() => expect(result.current.sessions[0]?.transcriptState).toBe("failed"));
+    expect(result.current.sessions[0]?.messages).toEqual([]);
+
+    await act(async () => {
+      await result.current.loadConversationDetail("conversation-a", true);
+    });
+    expect(result.current.sessions[0]).toMatchObject({
+      messages: [{ content: "Original" }],
+      transcriptState: "loaded",
+    });
+    expect(get).toHaveBeenCalledTimes(2);
+  });
+
+  it("deduplicates the hook auto-load and active-panel selection while detail is loading", async () => {
+    const detail = deferred<Awaited<ReturnType<ConversationStore["get"]>>>();
+    const get = vi.fn(() => detail.promise);
+    const persistence = store({ get });
+    const { result } = renderHook(() => useDocumentConversations({
+      documentId: "doc-a",
+      initialConversations: [conversationSummary()],
+      storageMode: "database",
+      store: persistence,
+      workspaceId: "workspace-a",
+    }));
+    await waitFor(() => expect(result.current.sessions[0]?.transcriptState).toBe("loading"));
+
+    await act(async () => {
+      void result.current.loadConversationDetail("conversation-a");
+    });
+    expect(get).toHaveBeenCalledTimes(1);
+
+    detail.resolve({ ok: true, value: conversation() });
+    await waitFor(() => expect(result.current.sessions[0]?.transcriptState).toBe("loaded"));
+  });
+
+  it("ignores a stale transcript response after the active conversation changes", async () => {
+    const first = deferred<Awaited<ReturnType<ConversationStore["get"]>>>();
+    const get = vi.fn()
+      .mockImplementationOnce(() => first.promise)
+      .mockResolvedValueOnce({
+        ok: true,
+        value: conversation({ id: "conversation-b", title: "B" }),
+      });
+    const persistence = store({ get });
+    const { result } = renderHook(() => useDocumentConversations({
+      documentId: "doc-a",
+      initialConversations: [
+        conversationSummary({ id: "conversation-a", title: "A" }),
+        conversationSummary({ id: "conversation-b", title: "B" }),
+      ],
+      storageMode: "database",
+      store: persistence,
+      workspaceId: "workspace-a",
+    }));
+    await waitFor(() => expect(get).toHaveBeenCalledWith("doc-a", "conversation-a"));
+
+    await act(async () => {
+      await result.current.loadConversationDetail("conversation-b");
+    });
+    first.resolve({ ok: true, value: conversation({ id: "conversation-a", title: "A stale" }) });
+    await act(async () => { await first.promise; });
+
+    expect(result.current.sessions.find((session) => session.id === "conversation-b"))
+      .toMatchObject({ messages: [{ content: "Original" }], transcriptState: "loaded" });
+    expect(result.current.sessions.find((session) => session.id === "conversation-a"))
+      .toMatchObject({ messages: [], transcriptState: "idle", title: "A" });
+  });
+
+  it("preserves a new optimistic session while loading an older cursor page", async () => {
+    const olderPage = deferred<Awaited<ReturnType<ConversationStore["list"]>>>();
+    const persistence = store({
+      create: vi.fn().mockResolvedValue({ ok: false, reason: "unavailable" }),
+      list: vi.fn(() => olderPage.promise),
+    });
+    const { result } = renderHook(() => useDocumentConversations({
+      documentId: "doc-a",
+      initialConversations: [conversation()],
+      initialNextCursor: "older-cursor",
+      storageMode: "database",
+      store: persistence,
+      workspaceId: "workspace-a",
+    }));
+
+    let loadMore!: Promise<void>;
+    act(() => { loadMore = result.current.loadMore(); });
+    act(() => {
+      result.current.beginConversation({ command: "Summarize", content: "New", title: "New" });
+    });
+    olderPage.resolve({
+      ok: true,
+      value: {
+        items: [conversationSummary({ id: "conversation-older", title: "Older" })],
+        nextCursor: null,
+      },
+    });
+    await act(async () => { await loadMore; });
+
+    expect(result.current.sessions[0]).toMatchObject({ syncStatus: "unsaved", title: "New" });
+    expect(result.current.sessions.map((session) => session.id)).toContain("conversation-older");
+  });
+
+  it("cancels a stale load-more spinner and payload when a reload supersedes it", async () => {
+    const olderPage = deferred<Awaited<ReturnType<ConversationStore["list"]>>>();
+    const list = vi.fn()
+      .mockImplementationOnce(() => olderPage.promise)
+      .mockResolvedValueOnce({
+        ok: true,
+        value: { items: [conversationSummary({ id: "conversation-refreshed" })], nextCursor: null },
+      });
+    const persistence = store({ list });
+    const { result } = renderHook(() => useDocumentConversations({
+      documentId: "doc-a",
+      initialConversations: [conversation()],
+      initialNextCursor: "older-cursor",
+      storageMode: "database",
+      store: persistence,
+      workspaceId: "workspace-a",
+    }));
+
+    let loadingOlder!: Promise<void>;
+    act(() => { loadingOlder = result.current.loadMore(); });
+    expect(result.current.isLoadingMore).toBe(true);
+    await act(async () => { await result.current.reload(); });
+    expect(result.current.isLoadingMore).toBe(false);
+
+    olderPage.resolve({
+      ok: true,
+      value: { items: [conversationSummary({ id: "conversation-stale" })], nextCursor: null },
+    });
+    await act(async () => { await loadingOlder; });
+    expect(result.current.sessions.map((session) => session.id)).toEqual(["conversation-refreshed"]);
+    expect(result.current.isLoadingMore).toBe(false);
+  });
+
+  it("does not let a delayed version-1 reload overwrite a version-2 rename or its loaded transcript", async () => {
+    const staleReload = deferred<Awaited<ReturnType<ConversationStore["list"]>>>();
+    const persistence = store({
+      list: vi.fn(() => staleReload.promise),
+      rename: vi.fn().mockResolvedValue({
+        ok: true,
+        value: conversation({ title: "Renamed", version: 2 }),
+      }),
+    });
+    const { result } = renderHook(() => useDocumentConversations({
+      documentId: "doc-a",
+      initialConversations: [conversation()],
+      storageMode: "database",
+      store: persistence,
+      workspaceId: "workspace-a",
+    }));
+
+    let reload!: Promise<void>;
+    act(() => { reload = result.current.reload(); });
+    await act(async () => {
+      await result.current.renameConversation("conversation-a", "Renamed");
+    });
+    staleReload.resolve({
+      ok: true,
+      value: { items: [conversationSummary()], nextCursor: null },
+    });
+    await act(async () => { await reload; });
+
+    expect(result.current.sessions[0]).toMatchObject({
+      messages: [{ content: "Original" }],
+      title: "Renamed",
+      transcriptState: "loaded",
+      version: 2,
+    });
+  });
+
+  it("does not abandon an in-flight mutation when the same document is reloaded", async () => {
+    const renameResult = deferred<Awaited<ReturnType<ConversationStore["rename"]>>>();
+    const persistence = store({
+      list: vi.fn().mockResolvedValue({
+        ok: true,
+        value: { items: [conversationSummary()], nextCursor: null },
+      }),
+      rename: vi.fn(() => renameResult.promise),
+    });
+    const { result } = renderHook(() => useDocumentConversations({
+      documentId: "doc-a",
+      initialConversations: [conversation()],
+      storageMode: "database",
+      store: persistence,
+      workspaceId: "workspace-a",
+    }));
+
+    let renaming!: Promise<void>;
+    act(() => { renaming = result.current.renameConversation("conversation-a", "Renamed"); });
+    await act(async () => { await result.current.reload(); });
+    expect(result.current.sessions[0]).toMatchObject({ syncStatus: "saving", title: "Renamed" });
+
+    renameResult.resolve({
+      ok: true,
+      value: conversation({ title: "Renamed", version: 2 }),
+    });
+    await act(async () => { await renaming; });
+
+    expect(result.current.sessions[0]).toMatchObject({
+      syncStatus: "saved",
+      title: "Renamed",
+      version: 2,
+    });
+  });
+
+  it("does not let a delayed version-1 list overwrite a version-2 append", async () => {
+    const staleReload = deferred<Awaited<ReturnType<ConversationStore["list"]>>>();
+    const persistence = store({
+      append: vi.fn().mockResolvedValue({ ok: true, value: completedConversation() }),
+      create: vi.fn().mockResolvedValue({ ok: true, value: conversation() }),
+      list: vi.fn(() => staleReload.promise),
+    });
+    const { result } = renderHook(() => useDocumentConversations({
+      documentId: "doc-a",
+      initialConversations: [],
+      storageMode: "database",
+      store: persistence,
+      workspaceId: "workspace-a",
+    }));
+    let attempt!: ReturnType<typeof result.current.beginConversation>;
+    await act(async () => {
+      attempt = result.current.beginConversation({ command: "Rewrite", content: "Original", title: "Rewrite" });
+      await attempt.ready;
+    });
+
+    let reload!: Promise<void>;
+    act(() => { reload = result.current.reload(); });
+    await act(async () => {
+      await result.current.completeConversation(attempt, { content: "Improved" });
+    });
+    staleReload.resolve({
+      ok: true,
+      value: { items: [conversationSummary()], nextCursor: null },
+    });
+    await act(async () => { await reload; });
+
+    expect(result.current.sessions[0]).toMatchObject({
+      messages: { length: 2 },
+      syncStatus: "saved",
+      version: 2,
+    });
+  });
+
+  it("does not let a delayed version-1 detail overwrite a version-2 archive", async () => {
+    const staleDetail = deferred<Awaited<ReturnType<ConversationStore["get"]>>>();
+    const persistence = store({
+      archive: vi.fn().mockResolvedValue({
+        ok: true,
+        value: conversation({ archived: true, version: 2 }),
+      }),
+      get: vi.fn(() => staleDetail.promise),
+    });
+    const { result } = renderHook(() => useDocumentConversations({
+      documentId: "doc-a",
+      initialConversations: [conversationSummary()],
+      storageMode: "database",
+      store: persistence,
+      workspaceId: "workspace-a",
+    }));
+    await waitFor(() => expect(result.current.sessions[0]?.transcriptState).toBe("loading"));
+
+    await act(async () => {
+      await result.current.archiveConversation("conversation-a");
+    });
+    staleDetail.resolve({ ok: true, value: conversation() });
+    await act(async () => { await staleDetail.promise; });
+
+    expect(result.current.sessions[0]).toMatchObject({
+      archived: true,
+      transcriptState: "loaded",
+      version: 2,
+    });
+  });
+
+  it("invalidates a loaded transcript when a newer summary arrives", async () => {
+    const refreshedDetail = deferred<Awaited<ReturnType<ConversationStore["get"]>>>();
+    const persistence = store({
+      get: vi.fn(() => refreshedDetail.promise),
+      list: vi.fn().mockResolvedValue({
+        ok: true,
+        value: {
+          items: [conversationSummary({ messageCount: 2, title: "Server update", version: 2 })],
+          nextCursor: null,
+        },
+      }),
+    });
+    const { result } = renderHook(() => useDocumentConversations({
+      documentId: "doc-a",
+      initialConversations: [conversation()],
+      storageMode: "database",
+      store: persistence,
+      workspaceId: "workspace-a",
+    }));
+
+    await act(async () => { await result.current.reload(); });
+    expect(result.current.sessions[0]).toMatchObject({
+      messages: [],
+      title: "Server update",
+      transcriptState: "loading",
+      version: 2,
+    });
+
+    refreshedDetail.resolve({ ok: true, value: completedConversation({ version: 3 }) });
+    await act(async () => { await refreshedDetail.promise; });
+    expect(result.current.sessions[0]).toMatchObject({
+      messages: { length: 2 },
+      transcriptState: "loaded",
+      version: 3,
+    });
+  });
+
+  it("retries the same conversation cursor after a load-more failure", async () => {
+    const list = vi.fn()
+      .mockResolvedValueOnce({ ok: false, reason: "unavailable" })
+      .mockResolvedValueOnce({
+        ok: true,
+        value: { items: [conversationSummary({ id: "conversation-older" })], nextCursor: null },
+      });
+    const persistence = store({ list });
+    const { result } = renderHook(() => useDocumentConversations({
+      documentId: "doc-a",
+      initialConversations: [conversation()],
+      initialNextCursor: "older-cursor",
+      storageMode: "database",
+      store: persistence,
+      workspaceId: "workspace-a",
+    }));
+
+    await act(async () => { await result.current.loadMore(); });
+    expect(result.current.loadMoreErrorReason).toBe("unavailable");
+    expect(result.current.errorReason).toBe("unavailable");
+
+    await act(async () => { await result.current.loadMore(); });
+    expect(list).toHaveBeenNthCalledWith(1, { cursor: "older-cursor", documentId: "doc-a" });
+    expect(list).toHaveBeenNthCalledWith(2, { cursor: "older-cursor", documentId: "doc-a" });
+    expect(result.current.sessions.map((session) => session.id)).toContain("conversation-older");
+    expect(result.current.loadMoreErrorReason).toBeNull();
+    expect(result.current.errorReason).toBeNull();
+  });
+
   it("keeps execution and persistence state separate while creating and completing a conversation", async () => {
     const createResult = deferred<Awaited<ReturnType<ConversationStore["create"]>>>();
     const appendResult = deferred<Awaited<ReturnType<ConversationStore["append"]>>>();
@@ -207,6 +571,150 @@ describe("useDocumentConversations", () => {
       initialConversations: [conversation({ documentId: "doc-b", id: "conversation-b" })],
     });
     expect(result.current.sessions.map((session) => session.id)).toEqual(["conversation-b"]);
+  });
+
+  it("invalidates an immediately resolved list microtask during a scope rerender", async () => {
+    const listResult = deferred<Awaited<ReturnType<ConversationStore["list"]>>>();
+    const persistence = store({ list: vi.fn(() => listResult.promise) });
+    const { result, rerender } = renderHook(
+      ({ documentId, initialConversations }: {
+        documentId: string;
+        initialConversations?: StoredConversationView[];
+      }) => useDocumentConversations({
+          documentId,
+          initialConversations,
+          storageMode: "database",
+          store: persistence,
+          workspaceId: "workspace-a",
+        }),
+      {
+        initialProps: {
+          documentId: "doc-a",
+          initialConversations: undefined as StoredConversationView[] | undefined,
+        },
+      },
+    );
+    await waitFor(() => expect(persistence.list).toHaveBeenCalledWith({ documentId: "doc-a" }));
+
+    await act(async () => {
+      listResult.resolve({
+        ok: true,
+        value: { items: [conversationSummary({ title: "STALE A" })], nextCursor: null },
+      });
+      rerender({
+        documentId: "doc-b",
+        initialConversations: [conversation({ documentId: "doc-b", id: "conversation-b", title: "B" })],
+      });
+      await Promise.resolve();
+    });
+
+    expect(result.current.sessions).toEqual([
+      expect.objectContaining({ id: "conversation-b", title: "B" }),
+    ]);
+  });
+
+  it("ignores a delayed creation failure after the document scope changes", async () => {
+    const createResult = deferred<Awaited<ReturnType<ConversationStore["create"]>>>();
+    const persistence = store({ create: vi.fn(() => createResult.promise) });
+    const { result, rerender } = renderHook(
+      ({ documentId, initialConversations }: { documentId: string; initialConversations: StoredConversationView[] }) =>
+        useDocumentConversations({
+          documentId,
+          initialConversations,
+          storageMode: "database",
+          store: persistence,
+          workspaceId: "workspace-a",
+        }),
+      { initialProps: { documentId: "doc-a", initialConversations: [] as StoredConversationView[] } },
+    );
+
+    let attempt!: ReturnType<typeof result.current.beginConversation>;
+    act(() => {
+      attempt = result.current.beginConversation({ command: "Rewrite", content: "Original", title: "Rewrite" });
+    });
+    rerender({
+      documentId: "doc-b",
+      initialConversations: [conversation({ documentId: "doc-b", id: "conversation-b", title: "B" })],
+    });
+    createResult.resolve({ ok: false, reason: "unavailable" });
+    await act(async () => { await attempt.ready; });
+
+    expect(result.current.sessions).toEqual([
+      expect.objectContaining({ id: "conversation-b", title: "B" }),
+    ]);
+    expect(result.current.errorReason).toBeNull();
+    expect(result.current.hasPendingRetries).toBe(false);
+  });
+
+  it("ignores a delayed append failure after the document scope changes", async () => {
+    const appendResult = deferred<Awaited<ReturnType<ConversationStore["append"]>>>();
+    const persistence = store({
+      append: vi.fn(() => appendResult.promise),
+      create: vi.fn().mockResolvedValue({ ok: true, value: conversation() }),
+    });
+    const { result, rerender } = renderHook(
+      ({ documentId, initialConversations }: { documentId: string; initialConversations: StoredConversationView[] }) =>
+        useDocumentConversations({
+          documentId,
+          initialConversations,
+          storageMode: "database",
+          store: persistence,
+          workspaceId: "workspace-a",
+        }),
+      { initialProps: { documentId: "doc-a", initialConversations: [] as StoredConversationView[] } },
+    );
+    let attempt!: ReturnType<typeof result.current.beginConversation>;
+    await act(async () => {
+      attempt = result.current.beginConversation({ command: "Rewrite", content: "Original", title: "Rewrite" });
+      await attempt.ready;
+    });
+
+    let completion!: Promise<void>;
+    act(() => { completion = result.current.completeConversation(attempt, { content: "Improved" }); });
+    rerender({
+      documentId: "doc-b",
+      initialConversations: [conversation({ documentId: "doc-b", id: "conversation-b", title: "B" })],
+    });
+    appendResult.resolve({ ok: false, reason: "unavailable" });
+    await act(async () => { await completion; });
+
+    expect(result.current.sessions).toEqual([
+      expect.objectContaining({ id: "conversation-b", title: "B" }),
+    ]);
+    expect(result.current.errorReason).toBeNull();
+    expect(result.current.hasPendingRetries).toBe(false);
+  });
+
+  it("ignores a delayed fork success after the document scope changes", async () => {
+    const forkResult = deferred<Awaited<ReturnType<ConversationStore["fork"]>>>();
+    const persistence = store({ fork: vi.fn(() => forkResult.promise) });
+    const { result, rerender } = renderHook(
+      ({ documentId, initialConversations }: { documentId: string; initialConversations: StoredConversationView[] }) =>
+        useDocumentConversations({
+          documentId,
+          initialConversations,
+          storageMode: "database",
+          store: persistence,
+          workspaceId: "workspace-a",
+        }),
+      { initialProps: { documentId: "doc-a", initialConversations: [conversation()] } },
+    );
+
+    let forking!: Promise<void>;
+    act(() => { forking = result.current.forkConversation("conversation-a", "message-a"); });
+    rerender({
+      documentId: "doc-b",
+      initialConversations: [conversation({ documentId: "doc-b", id: "conversation-b", title: "B" })],
+    });
+    forkResult.resolve({
+      ok: true,
+      value: conversation({ id: "conversation-fork", title: "Rewrite copy" }),
+    });
+    await act(async () => { await forking; });
+
+    expect(result.current.sessions).toEqual([
+      expect.objectContaining({ id: "conversation-b", title: "B" }),
+    ]);
   });
 
   it("keeps a failed execution in saving state until status persistence is confirmed", async () => {

@@ -11,6 +11,7 @@ Use this guide when forking Coredot Editor into a new product or internal tool.
 5. Run `pnpm check`.
 6. Run `pnpm e2e`.
 7. Replace prompt templates and AI provider configuration for your domain.
+8. Select and test one code-defined Project Profile with `PROJECT_PROFILE_ID`.
 
 ## What To Customize First
 
@@ -43,6 +44,12 @@ Prompt templates also need to preserve the AI output contract. Review prompts mu
 The editor renders pending proposals as inline highlights. If your fork changes the editor schema, custom nodes, or collaboration model, keep proposal range metadata (`occurrenceIndex`, `targetFrom`, `targetTo`) aligned with the way your editor maps document positions.
 
 For contract review products, start from the seeded `Contract Review` template rather than writing a generic legal prompt. Replace its playbook variables, clause categories, and risk language with your own review standards, then validate that findings still return exact `targetText` values and redline-ready `replacementText` values.
+
+### Project Profile
+
+Start domain customization in `src/features/projects/default-project-profiles.ts`. A Profile supplies typed metadata fields, readiness states/transitions, localized labels, list filters, and stable built-in template references to the editor host. Select it through server-only `PROJECT_PROFILE_ID`; do not add one-off field branches to `DocumentShell` or trust a browser-selected Profile ID. Unknown IDs fail closed.
+
+When tightening a Profile, validate a copy of existing data first. The host preserves unchanged unknown legacy metadata for safe rollout, but rejects new or modified keys outside the active definition.
 
 ### AI Provider
 
@@ -80,18 +87,9 @@ Good options for downstream projects:
 
 See [ARCHITECTURE.md](ARCHITECTURE.md#sqlite-today-postgres-later).
 
-## Add Authentication Carefully
+## Adapt Authentication Carefully
 
-This starter does not include authentication, users, or workspaces.
-
-When adding auth:
-
-1. Add owner columns to `documents`, `prompt_templates`, `ai_runs`, and `ai_proposals`.
-2. Enforce ownership in repository queries.
-3. Keep route handlers responsible for session extraction and permission checks.
-4. Add tests for cross-user access denial.
-
-Do not rely on client-side filtering for access control.
+The starter uses Clerk request context and workspace-scoped repositories. Preserve the repository-level Workspace predicates and cross-Workspace not-found behavior if you replace Clerk. Do not rely on client-side filtering for access control, and keep production from enabling the deterministic test adapter.
 
 ## Add Collaboration Later
 
@@ -134,6 +132,8 @@ If you change database paths or Playwright config, preserve this isolation. E2E 
 - [ ] Run `pnpm db:setup`.
 - [ ] Replace default prompt templates and run through the checklist in `docs/PROMPTING.md`.
 - [ ] Decide provider mode: `stub`, `coredot`, `anthropic`, `gemini`, `openai`, or custom.
+- [ ] Select `PROJECT_PROFILE_ID` and test metadata/readiness migration against representative data.
+- [ ] Keep `CONVERSATION_STORAGE=database` unless the deployment is intentionally a browser-only demo.
 - [ ] Run `pnpm check`.
 - [ ] Run `pnpm e2e`.
 - [ ] Review `SECURITY.md` and vulnerability reporting path.

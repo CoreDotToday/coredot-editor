@@ -3,6 +3,7 @@ import { z } from "zod";
 import {
   CONVERSATION_LIMITS,
   archiveConversation,
+  getConversationById,
   renameConversation,
   setConversationStatus,
 } from "@/features/ai/conversation-repository";
@@ -10,6 +11,8 @@ import {
   CONVERSATION_REQUEST_BODY_BYTES,
   CONVERSATION_REQUEST_DEADLINE_MS,
   conversationMutationResponse,
+  conversationFailureResponse,
+  toPublicConversation,
 } from "@/features/ai/conversation-http";
 import { createProtectedOptionsHandler, createProtectedRouteHandler } from "@/features/auth/route-context";
 import { enforceRequestBudget } from "@/features/security/request-budget";
@@ -36,7 +39,14 @@ const mutationSchema = z.discriminatedUnion("action", [
 ]);
 type RouteContext = { params: Promise<{ id: string }> };
 
-const optionsHandler = createProtectedOptionsHandler(["PATCH"]);
+const optionsHandler = createProtectedOptionsHandler(["GET", "PATCH"]);
+const getHandler = createProtectedRouteHandler(async (context, _request: Request, routeContext: RouteContext) => {
+  const id = idSchema.safeParse((await routeContext.params).id);
+  if (!id.success) return NextResponse.json({ error: "Invalid conversation request" }, { status: 400 });
+  const result = await getConversationById(context, id.data);
+  if (!result.ok) return conversationFailureResponse(result.reason);
+  return NextResponse.json({ conversation: toPublicConversation(result.value) });
+});
 const patchHandler = createProtectedRouteHandler(async (context, request: Request, routeContext: RouteContext) => {
   const id = idSchema.safeParse((await routeContext.params).id);
   if (!id.success) return NextResponse.json({ error: "Invalid conversation request" }, { status: 400 });
@@ -72,6 +82,10 @@ const patchHandler = createProtectedRouteHandler(async (context, request: Reques
 
 export async function PATCH(request: Request, context: RouteContext) {
   return patchHandler(request, context);
+}
+
+export async function GET(request: Request, context: RouteContext) {
+  return getHandler(request, context);
 }
 
 export async function OPTIONS() {

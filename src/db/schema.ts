@@ -41,7 +41,7 @@ export const documents = sqliteTable(
   },
   (table) => [
     index("documents_readiness_idx").on(table.readiness),
-    index("documents_workspace_status_updated_idx").on(table.workspaceId, table.status, table.updatedAt),
+    index("documents_workspace_status_updated_id_idx").on(table.workspaceId, table.status, table.updatedAt, table.id),
     uniqueIndex("documents_workspace_creation_key_unique").on(table.workspaceId, table.creationKey),
     uniqueIndex("documents_workspace_id_id_unique").on(table.workspaceId, table.id),
     check("documents_status_check", sql`${table.status} in ('draft', 'archived')`),
@@ -99,7 +99,7 @@ export const aiRuns = sqliteTable(
     index("ai_runs_document_id_idx").on(table.documentId),
     index("ai_runs_prompt_template_id_idx").on(table.promptTemplateId),
     index("ai_runs_status_updated_idx").on(table.status, table.updatedAt),
-    index("ai_runs_workspace_document_created_idx").on(table.workspaceId, table.documentId, table.createdAt),
+    index("ai_runs_workspace_document_created_id_idx").on(table.workspaceId, table.documentId, table.createdAt, table.id),
     uniqueIndex("ai_runs_workspace_idempotency_key_unique").on(table.workspaceId, table.idempotencyKey),
     uniqueIndex("ai_runs_workspace_id_id_document_id_unique").on(table.workspaceId, table.id, table.documentId),
     foreignKey({
@@ -137,7 +137,7 @@ export const aiProposals = sqliteTable(
   (table) => [
     index("ai_proposals_ai_run_id_idx").on(table.aiRunId),
     index("ai_proposals_document_id_idx").on(table.documentId),
-    index("ai_proposals_workspace_document_created_idx").on(table.workspaceId, table.documentId, table.createdAt),
+    index("ai_proposals_workspace_document_created_id_idx").on(table.workspaceId, table.documentId, table.createdAt, table.id),
     uniqueIndex("ai_proposals_workspace_run_result_ordinal_unique").on(
       table.workspaceId,
       table.aiRunId,

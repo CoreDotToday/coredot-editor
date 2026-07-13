@@ -1,11 +1,16 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { DocumentImportButton } from "@/components/document/DocumentImportButton";
-import { createDocumentDraft, listDocuments } from "@/features/documents/document-repository";
-import { filterDocumentSummaries } from "@/features/documents/document-filters";
-import { documentReadinessValues, normalizeDocumentReadiness } from "@/features/documents/document-metadata";
+import { createDocumentDraft, listDocumentSummaries } from "@/features/documents/document-repository";
+import {
+  InvalidDocumentSummaryFilterError,
+  parseDocumentSummaryFilters,
+} from "@/features/documents/document-filters";
 import type { DocumentReadiness } from "@/db/schema";
 import { getProtectedPageContext } from "@/features/auth/route-context";
+import { resolveActiveProjectProfile } from "@/features/projects/active-project-profile";
+import { createDocumentFilterDefinitions } from "@/features/projects/project-profile";
+import { InvalidCollectionCursorError } from "@/features/pagination/collection-cursor";
 
 export const dynamic = "force-dynamic";
 
@@ -29,6 +34,7 @@ type DocumentsPageProps = {
   searchParams?: Promise<{
     metadataKey?: string;
     metadataValue?: string;
+    cursor?: string;
     query?: string;
     readiness?: string;
   }>;
@@ -48,12 +54,22 @@ function getListMetadataValue(value: unknown) {
 export default async function DocumentsPage({ searchParams }: DocumentsPageProps) {
   const context = await getProtectedPageContext("/documents");
   const params = (await searchParams) ?? {};
-  const documents = filterDocumentSummaries(await listDocuments(context), {
-    metadataKey: params.metadataKey,
-    metadataValue: params.metadataValue,
-    query: params.query,
-    readiness: params.readiness && params.readiness !== "all" ? normalizeDocumentReadiness(params.readiness) : "all",
-  });
+  const projectProfile = resolveActiveProjectProfile();
+  let filterError: string | null = null;
+  let page;
+  try {
+    const filters = parseDocumentSummaryFilters(projectProfile, params);
+    page = await listDocumentSummaries(context, { ...filters, cursor: params.cursor, limit: 20 });
+  } catch (error) {
+    if (!(error instanceof InvalidDocumentSummaryFilterError) && !(error instanceof InvalidCollectionCursorError)) {
+      throw error;
+    }
+    filterError = "페이지 또는 필터 조건이 올바르지 않습니다. 조건을 다시 선택해 주세요.";
+    page = { items: [], nextCursor: null };
+  }
+  const documents = page.items;
+  const filterDefinitions = createDocumentFilterDefinitions(projectProfile);
+  const selectedFilter = filterDefinitions.find((filter) => filter.id === params.metadataKey);
 
   return (
     <main className="min-h-screen bg-zinc-50 text-zinc-950">
@@ -99,30 +115,46 @@ export default async function DocumentsPage({ searchParams }: DocumentsPageProps
               name="readiness"
             >
               <option value="all">전체</option>
-              {documentReadinessValues.map((readiness) => (
-                <option key={readiness} value={readiness}>
-                  {readinessLabels[readiness]}
+              {projectProfile.readiness.map((readiness) => (
+                <option key={readiness.id} value={readiness.id}>
+                  {readiness.labels.ko}
                 </option>
               ))}
             </select>
           </label>
           <label className="block">
             <span className="text-xs font-medium text-zinc-500">속성 키</span>
-            <input
+            <select
               className="mt-1 h-9 w-full rounded-md border border-zinc-200 px-2 text-sm outline-none focus:border-zinc-500"
               defaultValue={params.metadataKey ?? ""}
               name="metadataKey"
-              placeholder="owner"
-            />
+            >
+              <option value="">선택</option>
+              {filterDefinitions.map((filter) => <option key={filter.id} value={filter.id}>{filter.labels.ko}</option>)}
+            </select>
           </label>
           <label className="block">
             <span className="text-xs font-medium text-zinc-500">속성 값</span>
-            <input
-              className="mt-1 h-9 w-full rounded-md border border-zinc-200 px-2 text-sm outline-none focus:border-zinc-500"
-              defaultValue={params.metadataValue ?? ""}
-              name="metadataValue"
-              placeholder="Legal"
-            />
+            {selectedFilter?.type === "select" || selectedFilter?.type === "boolean" ? (
+              <select
+                className="mt-1 h-9 w-full rounded-md border border-zinc-200 bg-white px-2 text-sm outline-none focus:border-zinc-500"
+                defaultValue={params.metadataValue ?? ""}
+                name="metadataValue"
+              >
+                <option value="">선택</option>
+                {(selectedFilter.type === "boolean" ? ["true", "false"] : selectedFilter.options ?? []).map((option) => (
+                  <option key={option} value={option}>{option}</option>
+                ))}
+              </select>
+            ) : (
+              <input
+                className="mt-1 h-9 w-full rounded-md border border-zinc-200 px-2 text-sm outline-none focus:border-zinc-500"
+                defaultValue={params.metadataValue ?? ""}
+                name="metadataValue"
+                placeholder="값"
+                type={selectedFilter?.type === "date" ? "date" : selectedFilter?.type === "number" ? "number" : "text"}
+              />
+            )}
           </label>
           <div className="flex items-end">
             <button
@@ -134,9 +166,17 @@ export default async function DocumentsPage({ searchParams }: DocumentsPageProps
           </div>
         </form>
 
+        {filterError ? (
+          <p className="border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900" role="alert">
+            {filterError}
+          </p>
+        ) : null}
+
         <section className="overflow-hidden border-y border-zinc-200 bg-white">
           {documents.length === 0 ? (
-            <p className="px-4 py-12 text-center text-sm text-zinc-500">아직 문서가 없습니다.</p>
+            <p className="px-4 py-12 text-center text-sm text-zinc-500">
+              {filterError ? "일치하는 문서를 표시하지 않았습니다." : "아직 문서가 없습니다."}
+            </p>
           ) : (
             <ul className="divide-y divide-zinc-200">
               {documents.map((document) => {
@@ -152,7 +192,7 @@ export default async function DocumentsPage({ searchParams }: DocumentsPageProps
                         <div className="flex min-w-0 flex-wrap items-center gap-2">
                           <h2 className="truncate text-base font-medium text-zinc-950">{document.title}</h2>
                           <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-xs font-medium text-zinc-600">
-                            {readinessLabels[document.readiness]}
+                            {projectProfile.readiness.find((state) => state.id === document.readiness)?.labels.ko ?? readinessLabels[document.readiness]}
                           </span>
                         </div>
                         <p className="mt-1 line-clamp-2 text-sm leading-6 text-zinc-600">{preview}</p>
@@ -178,7 +218,24 @@ export default async function DocumentsPage({ searchParams }: DocumentsPageProps
             </ul>
           )}
         </section>
+        {page.nextCursor ? (
+          <Link
+            className="self-center rounded-md border border-zinc-300 bg-white px-4 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-100"
+            href={`/documents?${createNextPageSearch(params, page.nextCursor)}`}
+          >
+            다음 문서
+          </Link>
+        ) : null}
       </div>
     </main>
   );
+}
+
+function createNextPageSearch(params: Awaited<NonNullable<DocumentsPageProps["searchParams"]>>, cursor: string) {
+  const search = new URLSearchParams();
+  for (const key of ["query", "readiness", "metadataKey", "metadataValue"] as const) {
+    if (params[key]) search.set(key, params[key]!);
+  }
+  search.set("cursor", cursor);
+  return search.toString();
 }

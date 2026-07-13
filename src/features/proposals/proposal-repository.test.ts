@@ -159,6 +159,45 @@ async function createIsolatedProposalDb() {
 }
 
 describe("proposal repository", () => {
+  it("returns stable bounded proposal summary pages", async () => {
+    const db = await createIsolatedProposalDb();
+    const repository = createProposalRepository(db);
+    const created = await Promise.all(Array.from({ length: 3 }, (_, index) => repository.createProposal(workspaceA, {
+      aiRunId: "run_1",
+      documentId: "doc_1",
+      targetText: `target-${String(index)}-${"t".repeat(1_000)}`,
+      replacementText: `replacement-${String(index)}-${"r".repeat(3_000)}`,
+      explanation: "x".repeat(1_000),
+    })));
+    const tiedAt = new Date("2026-01-02T00:00:00.000Z");
+    await db.update(schema.aiProposals).set({ createdAt: tiedAt });
+
+    const first = await repository.listProposalSummariesPage(workspaceA, "doc_1", { limit: 2 });
+    const second = await repository.listProposalSummariesPage(workspaceA, "doc_1", {
+      cursor: first.nextCursor ?? undefined,
+      limit: 2,
+    });
+
+    expect(first.items).toHaveLength(2);
+    expect(second.items).toHaveLength(1);
+    expect(first.items.every((proposal) => proposal.explanation.length <= 500)).toBe(true);
+    expect(first.items.every((proposal) => proposal.targetText.length <= 500)).toBe(true);
+    expect(first.items.every((proposal) => proposal.replacementText.length <= 2_000)).toBe(true);
+    expect(first.items.every((proposal) => proposal.isTruncated)).toBe(true);
+    expect(first.items.every((proposal) => typeof proposal.isTruncated === "boolean")).toBe(true);
+    expect(first.items[0]).not.toHaveProperty("aiRunId");
+    const pagedIds = [...first.items, ...second.items].map(({ id }) => id);
+    expect(pagedIds).toEqual(created.map(({ id }) => id).sort().reverse());
+    expect(new Set(pagedIds).size).toBe(3);
+    await expect(repository.listProposalSummariesPage(workspaceA, "doc_2", {
+      cursor: first.nextCursor ?? undefined,
+      limit: 2,
+    })).rejects.toMatchObject({ name: "InvalidCollectionCursorError" });
+    const full = await repository.getProposalById(workspaceA, first.items[0]!.id);
+    expect(full?.targetText.length).toBeGreaterThan(500);
+    expect(full?.replacementText.length).toBeGreaterThan(2_000);
+  });
+
   it("creates pending proposals for an AI run", async () => {
     const db = await createIsolatedProposalDb();
     const repository = createProposalRepository(db);

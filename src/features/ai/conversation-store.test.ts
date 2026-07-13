@@ -455,6 +455,84 @@ describe("conversation store", () => {
     await expect(store.list({ documentId: "doc-a" })).resolves.toEqual({ ok: false, reason: "unavailable" });
   });
 
+  it("treats expired local records as not found without rewriting serialized storage", async () => {
+    const key = "coredot-ai-workspace-conversations:v2:workspace-a:doc-a";
+    const storage = new MemoryStorage();
+    const store = createLocalConversationStore(storage, "workspace-a");
+    const createInput = {
+      command: "Rewrite",
+      creationKey: "expired-create-key-0001",
+      documentId: "doc-a",
+      initialMessage: { content: "Original", mutationKey: "expired-message-key-0001", role: "user" },
+      title: "Rewrite",
+    } as const;
+    const created = await store.create(createInput);
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const records = JSON.parse(storage.getItem(key) ?? "[]") as Array<Record<string, unknown>>;
+    records[0]!.retentionExpiresAt = "2000-01-01T00:00:00.000Z";
+    const serializedExpiredRecord = JSON.stringify(records);
+    storage.setItem(key, serializedExpiredRecord);
+
+    const operations = [
+      () => store.create(createInput),
+      () => store.get("doc-a", created.value.id),
+      () => store.append("doc-a", created.value.id, {
+        content: "Should not persist",
+        expectedVersion: 1,
+        mutationKey: "expired-append-key-0001",
+        role: "assistant" as const,
+        status: "idle" as const,
+      }),
+      () => store.rename("doc-a", created.value.id, { expectedVersion: 1, title: "Changed" }),
+      () => store.archive("doc-a", created.value.id, { archived: true, expectedVersion: 1 }),
+      () => store.setStatus("doc-a", created.value.id, { expectedVersion: 1, status: "failed" as const }),
+      () => store.fork("doc-a", created.value.id, {
+        creationKey: "expired-fork-key-0001",
+        throughMessageId: created.value.messages[0]!.id,
+        title: "Expired branch",
+      }),
+    ];
+
+    for (const operation of operations) {
+      await expect(operation()).resolves.toEqual({ ok: false, reason: "not_found" });
+      expect(storage.getItem(key)).toBe(serializedExpiredRecord);
+    }
+  });
+
+  it("rejects an expired local fork replay without rewriting serialized storage", async () => {
+    const key = "coredot-ai-workspace-conversations:v2:workspace-a:doc-a";
+    const storage = new MemoryStorage();
+    const store = createLocalConversationStore(storage, "workspace-a");
+    const source = await store.create({
+      command: "Rewrite",
+      creationKey: "fork-source-create-key-0001",
+      documentId: "doc-a",
+      initialMessage: { content: "Original", mutationKey: "fork-source-message-key-0001", role: "user" },
+      title: "Rewrite",
+    });
+    expect(source.ok).toBe(true);
+    if (!source.ok) return;
+    const forkInput = {
+      creationKey: "expired-fork-replay-key-0001",
+      throughMessageId: source.value.messages[0]!.id,
+      title: "Rewrite copy",
+    };
+    const forked = await store.fork("doc-a", source.value.id, forkInput);
+    expect(forked.ok).toBe(true);
+    if (!forked.ok) return;
+    const records = JSON.parse(storage.getItem(key) ?? "[]") as Array<Record<string, unknown>>;
+    const expiredFork = records.find((record) => record.id === forked.value.id);
+    expect(expiredFork).toBeDefined();
+    expiredFork!.retentionExpiresAt = "2000-01-01T00:00:00.000Z";
+    const serializedExpiredFork = JSON.stringify(records);
+    storage.setItem(key, serializedExpiredFork);
+
+    await expect(store.fork("doc-a", source.value.id, forkInput))
+      .resolves.toEqual({ ok: false, reason: "not_found" });
+    expect(storage.getItem(key)).toBe(serializedExpiredFork);
+  });
+
   it("defaults to database mode and rejects unknown configuration", () => {
     expect(resolveConversationStorageMode(undefined)).toBe("database");
     expect(resolveConversationStorageMode("database")).toBe("database");

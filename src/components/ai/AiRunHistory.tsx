@@ -11,8 +11,11 @@ import {
 export type AiRunHistoryItem = Pick<AiRunRecord, "id" | "commandType" | "status" | "createdAt">;
 
 type AiRunHistoryProps = {
+  hasMore?: boolean;
+  isLoadingMore?: boolean;
   language?: EditorLanguage;
   messages?: EditorMessages["history"];
+  onLoadMore?: () => void;
   runs: AiRunHistoryItem[];
 };
 
@@ -30,8 +33,11 @@ function formatRunDate(value: Date | string | number, language: EditorLanguage) 
 }
 
 export function AiRunHistory({
+  hasMore = false,
+  isLoadingMore = false,
   language = DEFAULT_EDITOR_LANGUAGE,
   messages = editorMessages[DEFAULT_EDITOR_LANGUAGE].history,
+  onLoadMore,
   runs,
 }: AiRunHistoryProps) {
   return (
@@ -41,7 +47,7 @@ export function AiRunHistory({
         <p className="mt-3 text-sm leading-6 text-zinc-500">{messages.empty}</p>
       ) : (
         <ul className="mt-3 space-y-3">
-          {runs.slice(0, 5).map((run) => (
+          {runs.map((run) => (
             <li key={run.id} className="text-sm text-zinc-700">
               <div className="font-medium">{formatCommandType(run.commandType, messages)}</div>
               <div className="mt-1 text-xs text-zinc-500">
@@ -51,6 +57,16 @@ export function AiRunHistory({
           ))}
         </ul>
       )}
+      {hasMore && onLoadMore ? (
+        <button
+          className="mt-3 w-full rounded-md border border-zinc-300 px-3 py-2 text-xs font-medium text-zinc-700 hover:bg-zinc-50 disabled:text-zinc-400"
+          disabled={isLoadingMore}
+          onClick={onLoadMore}
+          type="button"
+        >
+          {isLoadingMore ? (language === "ko" ? "불러오는 중..." : "Loading...") : (language === "ko" ? "이전 실행 더 보기" : "Load older runs")}
+        </button>
+      ) : null}
     </section>
   );
 }

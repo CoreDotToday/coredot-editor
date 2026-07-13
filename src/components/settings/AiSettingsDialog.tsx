@@ -1,7 +1,8 @@
 "use client";
 
 import { Settings, X } from "lucide-react";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
+import { ModalSurface } from "@/components/ui/ModalSurface";
 import {
   AI_PROVIDER_CATALOG,
   AI_REASONING_EFFORTS,
@@ -53,6 +54,8 @@ export function AiSettingsDialog({
   const [isTesting, setIsTesting] = useState(false);
   const [statusMessage, setStatusMessage] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const closeRef = useRef<HTMLButtonElement>(null);
   const providerWarning = secrets ? getProviderWarning(form.aiProvider, secrets) : "";
   const pluginContext = useMemo(
     () => ({ language, messages: editorMessages[language] }),
@@ -180,6 +183,7 @@ export function AiSettingsDialog({
         aria-haspopup="dialog"
         className="inline-flex h-8 items-center gap-1.5 whitespace-nowrap rounded-md border border-zinc-200 bg-white px-2.5 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50"
         onClick={handleOpen}
+        ref={triggerRef}
         type="button"
       >
         <Settings aria-hidden="true" className="size-4" />
@@ -187,13 +191,15 @@ export function AiSettingsDialog({
       </button>
 
       {isOpen ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-zinc-950/20 px-4">
-          <section
-            aria-labelledby="ai-settings-title"
-            aria-modal="true"
-            className="w-full max-w-xl rounded-lg border border-zinc-200 bg-white shadow-xl"
-            role="dialog"
-          >
+        <ModalSurface
+          aria-labelledby="ai-settings-title"
+          className="max-h-[calc(100vh-2rem)] w-full max-w-xl overflow-y-auto rounded-lg border border-zinc-200 bg-white p-0 shadow-xl"
+          initialFocusRef={closeRef}
+          onClose={handleClose}
+          overlayClassName="fixed inset-0 flex items-center justify-center bg-zinc-950/20 px-4"
+          returnFocusRef={triggerRef}
+          unstyled
+        >
             <header className="flex items-center justify-between border-b border-zinc-200 px-5 py-4">
               <div>
                 <h2 className="text-base font-semibold text-zinc-950" id="ai-settings-title">
@@ -205,6 +211,7 @@ export function AiSettingsDialog({
                 aria-label="닫기"
                 className="inline-flex size-8 items-center justify-center rounded-md text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-900"
                 onClick={handleClose}
+                ref={closeRef}
                 type="button"
               >
                 <X aria-hidden="true" className="size-4" />
@@ -376,8 +383,7 @@ export function AiSettingsDialog({
                 </button>
               </div>
             </footer>
-          </section>
-        </div>
+        </ModalSurface>
       ) : null}
     </>
   );

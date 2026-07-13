@@ -48,7 +48,8 @@ describe("HTTP conversation store", () => {
 
   it("loads and mutates canonical conversations with idempotency headers", async () => {
     const request = vi.fn()
-      .mockResolvedValueOnce(response({ conversations: [conversation], nextCursor: null }))
+      .mockResolvedValueOnce(response({ conversations: [{ ...conversation, messages: undefined }], nextCursor: null }))
+      .mockResolvedValueOnce(response({ conversation }))
       .mockResolvedValueOnce(response({ conversation, replayed: false }, 201))
       .mockResolvedValueOnce(response({ conversation: { ...conversation, version: 2 }, replayed: false }));
     const store = createHttpConversationStore(request);
@@ -56,6 +57,10 @@ describe("HTTP conversation store", () => {
     await expect(store.list({ documentId: "doc-a" })).resolves.toMatchObject({
       ok: true,
       value: { items: [{ createdAt: expect.any(Date), syncStatus: "saved" }] },
+    });
+    await expect(store.get("doc-a", "conversation-a")).resolves.toMatchObject({
+      ok: true,
+      value: { messages: [{ content: "Original" }], syncStatus: "saved" },
     });
     await store.create({
       command: "Rewrite",
@@ -73,13 +78,13 @@ describe("HTTP conversation store", () => {
       status: "idle",
     });
 
-    expect(request).toHaveBeenNthCalledWith(2, "/api/documents/doc-a/conversations", expect.objectContaining({
+    expect(request).toHaveBeenNthCalledWith(3, "/api/documents/doc-a/conversations", expect.objectContaining({
       headers: expect.objectContaining({ "Idempotency-Key": "create-conversation-key-0001" }),
     }));
-    expect(JSON.parse(String(request.mock.calls[1]?.[1]?.body))).toMatchObject({
+    expect(JSON.parse(String(request.mock.calls[2]?.[1]?.body))).toMatchObject({
       retentionExpiresAt: "2099-01-01T00:00:00.000Z",
     });
-    expect(request).toHaveBeenNthCalledWith(3, "/api/conversations/conversation-a/messages", expect.objectContaining({
+    expect(request).toHaveBeenNthCalledWith(4, "/api/conversations/conversation-a/messages", expect.objectContaining({
       headers: expect.objectContaining({ "Idempotency-Key": "append-message-key-0001" }),
     }));
   });

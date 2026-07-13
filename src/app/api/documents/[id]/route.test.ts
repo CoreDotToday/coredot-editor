@@ -139,6 +139,38 @@ describe("PUT /api/documents/[id]", () => {
     });
   });
 
+  it("returns 400 when the persistence boundary rejects a Project Profile transition", async () => {
+    vi.mocked(saveDocumentDraft).mockResolvedValueOnce({
+      status: "invalid_profile",
+      violation: {
+        current: "draft",
+        next: "approved",
+        reason: "invalid_readiness_transition",
+      },
+    } as never);
+
+    const response = await PUT(
+      createJsonRequest({
+        title: "Skip review",
+        contentJson: { type: "doc", content: [] },
+        readiness: "approved",
+        expectedRevision: 0,
+      }),
+      { params: Promise.resolve({ id: "doc_1" }) },
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: "Document violates active Project Profile",
+      reason: "invalid_project_profile",
+      violation: {
+        current: "draft",
+        next: "approved",
+        reason: "invalid_readiness_transition",
+      },
+    });
+  });
+
   it("returns 404 for direct reads and mutations of another workspace's document", async () => {
     const workspaceBContext = {
       ...TEST_REQUEST_CONTEXT,

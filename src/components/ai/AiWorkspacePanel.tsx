@@ -2,7 +2,7 @@
 
 import { Check, Clock3, GitFork, Loader2, MessageSquareText, Pencil, Puzzle, RotateCcw, ScrollText, X } from "lucide-react";
 import type { ReactNode } from "react";
-import { useCallback, useId, useState, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useId, useState, type KeyboardEvent } from "react";
 import {
   DEFAULT_EDITOR_LANGUAGE,
   editorMessages,
@@ -44,6 +44,7 @@ export type AiWorkspaceChatSession = {
   status?: "failed" | "idle" | "running";
   syncStatus?: "saved" | "saving" | "unsaved";
   title: string;
+  transcriptState?: "failed" | "idle" | "loaded" | "loading";
   updatedAt: Date;
 };
 
@@ -59,7 +60,9 @@ type AiWorkspacePanelProps = {
   errorMessage: string;
   isReviewing: boolean;
   hasMoreChanges?: boolean;
+  hasMoreConversations?: boolean;
   isLoadingChanges?: boolean;
+  isLoadingMoreConversations?: boolean;
   isRunningCommand?: boolean;
   language?: EditorLanguage;
   layout?: "drawer" | "side";
@@ -69,11 +72,18 @@ type AiWorkspacePanelProps = {
   onChangesOpen?: () => void;
   onClose?: () => void;
   onFocusProposal?: (proposalId: string) => void;
+  onLoadMoreProposals?: () => void;
+  onLoadProposalDetail?: (proposalId: string) => void;
+  hasMoreProposals?: boolean;
+  isLoadingMoreProposals?: boolean;
   onForkChatSession?: (sessionId: string, messageId: string) => void;
   onLoadMoreChanges?: () => void;
+  onLoadMoreConversations?: () => void;
   onReviewDocument: () => void;
   onRenameChatSession?: (sessionId: string, title: string) => void;
   onRetryConversation?: () => void;
+  onRetryChatSession?: (sessionId: string) => void;
+  onSelectChatSession?: (sessionId: string) => void;
   onUndoChange: (changeId: string) => void;
   onUpdateProposalStatus: (
     proposalId: string,
@@ -108,8 +118,10 @@ export function AiWorkspacePanel({
   conversationLoadState = "loaded",
   errorMessage,
   hasMoreChanges = false,
+  hasMoreConversations = false,
   isReviewing,
   isLoadingChanges = false,
+  isLoadingMoreConversations = false,
   isRunningCommand = false,
   language = DEFAULT_EDITOR_LANGUAGE,
   layout = "side",
@@ -119,11 +131,18 @@ export function AiWorkspacePanel({
   onChangesOpen,
   onClose,
   onFocusProposal,
+  onLoadMoreProposals,
+  onLoadProposalDetail,
+  hasMoreProposals = false,
+  isLoadingMoreProposals = false,
   onForkChatSession,
   onLoadMoreChanges,
+  onLoadMoreConversations,
   onReviewDocument,
   onRenameChatSession,
   onRetryConversation,
+  onRetryChatSession,
+  onSelectChatSession,
   onUndoChange,
   onUpdateProposalStatus,
   pluginContext,
@@ -149,6 +168,10 @@ export function AiWorkspacePanel({
     visibleChatSessions.find((session) => session.id === activeChatSessionId) ?? visibleChatSessions[0] ?? null;
   const activeChatMessages = activeChatSession ? activeChatSession.messages : chatSessions.length > 0 ? [] : chatMessages;
   const isRenamingActiveChat = activeChatSession?.id === renamingChatSessionId;
+
+  useEffect(() => {
+    if (activeChatSession?.id) onSelectChatSession?.(activeChatSession.id);
+  }, [activeChatSession?.id, onSelectChatSession]);
   const panelClassName =
     layout === "drawer"
       ? "flex h-full w-[min(100vw,24rem)] shrink-0 flex-col border-l border-zinc-200 bg-white shadow-2xl shadow-zinc-950/20"
@@ -240,6 +263,10 @@ export function AiWorkspacePanel({
           messages={reviewMessages}
           onBulkUpdateProposalStatus={onBulkUpdateProposalStatus}
           onFocusProposal={onFocusProposal}
+          onLoadMore={onLoadMoreProposals}
+          onLoadProposalDetail={onLoadProposalDetail}
+          hasMore={hasMoreProposals}
+          isLoadingMore={isLoadingMoreProposals}
           onReviewDocument={onReviewDocument}
           onUpdateProposalStatus={onUpdateProposalStatus}
           proposals={proposals}
@@ -298,6 +325,33 @@ export function AiWorkspacePanel({
                   {session.title}
                 </button>
               ))}
+            </div>
+          ) : null}
+          {hasMoreConversations && onLoadMoreConversations ? (
+            <button
+              className="mt-3 inline-flex h-8 w-full items-center justify-center rounded-md border border-zinc-300 text-xs font-medium text-zinc-700 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:text-zinc-400"
+              disabled={isLoadingMoreConversations}
+              onClick={onLoadMoreConversations}
+              type="button"
+            >
+              {isLoadingMoreConversations ? messages.conversationLoading : messages.conversationLoadMore}
+            </button>
+          ) : null}
+          {activeChatSession?.transcriptState === "loading" ? (
+            <p className="mt-3 text-sm text-zinc-500" role="status">{messages.conversationLoading}</p>
+          ) : null}
+          {activeChatSession?.transcriptState === "failed" ? (
+            <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800" role="alert">
+              <p>{messages.conversationLoadFailed}</p>
+              {onRetryChatSession ? (
+                <button
+                  className="mt-2 font-semibold underline underline-offset-2"
+                  onClick={() => onRetryChatSession(activeChatSession.id)}
+                  type="button"
+                >
+                  {messages.conversationRetry}
+                </button>
+              ) : null}
             </div>
           ) : null}
           {activeChatSession && (onArchiveChatSession || onForkChatSession || onRenameChatSession) ? (
@@ -399,7 +453,7 @@ export function AiWorkspacePanel({
               ) : null}
             </div>
           ) : null}
-          {activeChatMessages.length === 0 ? (
+          {activeChatMessages.length === 0 && activeChatSession?.transcriptState !== "loading" && activeChatSession?.transcriptState !== "failed" ? (
             <p className="mt-3 text-sm leading-6 text-zinc-500">{messages.chatEmpty}</p>
           ) : (
             <ul

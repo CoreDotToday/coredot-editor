@@ -11,15 +11,10 @@ Current plugin contributions:
 - Tiptap extensions for schema, input rules, paste handlers, keyboard shortcuts, and ProseMirror plugins
 - Selection AI commands shown in the floating selection menu
 - Slash menu commands shown when users type `/`
-
-Reserved contribution types:
-
-- Toolbar items
-- Block actions
-- Workspace panels
-- Settings sections
-
-Those reserved types are part of the public interface so downstream projects can experiment, but the core UI does not render them yet.
+- Toolbar items rendered in the editor toolbar
+- Block actions rendered in the block gutter
+- Workspace panels rendered as AI workspace tabs
+- Settings sections rendered inside the shared settings modal
 
 ## File Map
 
@@ -94,6 +89,7 @@ export const defaultEditorPlugins: EditorPlugin[] = [...builtinEditorPlugins, ..
 - Keep plugin ids unique and dependency ids explicit.
 - Keep contribution ids unique across all enabled plugins. The registry rejects duplicate selection command, slash command, toolbar item, block action, workspace panel, and settings section ids.
 - Let command handlers fail locally. The slash menu catches plugin command errors and logs them without crashing the editor shell.
+- Keep modal interaction in the host. Settings sections and workspace panels render content inside the shared surface; plugins must not add competing document-level Escape or focus-trap handlers.
 
 ## Server-Safe Schema Path
 

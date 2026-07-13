@@ -196,6 +196,39 @@ async function createIsolatedAiRunDb() {
 }
 
 describe("AI run repository", () => {
+  it("returns stable bounded AI run summaries without input or output payloads", async () => {
+    const db = await createIsolatedAiRunDb();
+    const repository = createAiRunRepository(db);
+    const created = await Promise.all(Array.from({ length: 3 }, () => repository.createAiRun(workspaceA, {
+      documentId: "doc_1",
+      promptTemplateId: "tpl_1",
+      commandType: "document_review",
+      provider: "stub",
+      model: "stub-editor",
+      inputSummaryJson: { secret: "must-not-leak" },
+    })));
+    const tiedAt = new Date("2026-01-02T00:00:00.000Z");
+    await db.update(schema.aiRuns).set({ createdAt: tiedAt });
+
+    const first = await repository.listAiRunSummariesPage(workspaceA, "doc_1", { limit: 2 });
+    const second = await repository.listAiRunSummariesPage(workspaceA, "doc_1", {
+      cursor: first.nextCursor ?? undefined,
+      limit: 2,
+    });
+
+    expect(first.items).toHaveLength(2);
+    expect(second.items).toHaveLength(1);
+    expect(first.items[0]).not.toHaveProperty("inputSummaryJson");
+    expect(first.items[0]).not.toHaveProperty("outputText");
+    const pagedIds = [...first.items, ...second.items].map(({ id }) => id);
+    expect(pagedIds).toEqual(created.map(({ id }) => id).sort().reverse());
+    expect(new Set(pagedIds).size).toBe(3);
+    await expect(repository.listAiRunSummariesPage(workspaceA, "doc_2", {
+      cursor: first.nextCursor ?? undefined,
+      limit: 2,
+    })).rejects.toMatchObject({ name: "InvalidCollectionCursorError" });
+  });
+
   it("creates pending runs and completes or fails them consistently", async () => {
     const db = await createIsolatedAiRunDb();
     const repository = createAiRunRepository(db);

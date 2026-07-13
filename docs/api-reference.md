@@ -8,7 +8,7 @@ Routes resolve an authenticated request context and scope persistence to its wor
 
 | Route | Method | Purpose |
 | --- | --- | --- |
-| `/api/documents` | `GET` | List active documents. |
+| `/api/documents` | `GET` | List active document summaries with an opaque cursor, bounded limit, and Profile-derived typed filters. |
 | `/api/documents` | `POST` | Create a document. |
 | `/api/documents/:id` | `GET` | Load one document. |
 | `/api/documents/:id` | `PUT` | Save document title, content JSON, plain text, readiness, and metadata. |
@@ -50,10 +50,24 @@ Both routes share preflight through `src/features/ai/ai-command-service.ts` for 
 
 | Route | Method | Purpose |
 | --- | --- | --- |
+| `/api/documents/:id/proposals` | `GET` | List bounded Proposal previews ordered by `(createdAt, id)` with an opaque cursor. |
+| `/api/proposals/:id` | `GET` | Load one exact workspace-scoped Proposal when a preview was truncated. |
 | `/api/proposals/:id/apply` | `POST` | Apply a proposal to the saved server document and mark it accepted in one transaction. |
 | `/api/proposals/:id` | `PATCH` | Reject or reset proposal status with an expected-status precondition. |
 
 The generic proposal `PATCH` route rejects `accepted` status changes. Acceptance must go through `/api/proposals/:id/apply` so document content and proposal status cannot split.
+
+## AI Runs And Conversations
+
+| Route | Method | Purpose |
+| --- | --- | --- |
+| `/api/documents/:id/ai-runs` | `GET` | List bounded AI Run summaries ordered by `(createdAt, id)`; input/output bodies are omitted. |
+| `/api/documents/:id/conversations` | `GET` | List bounded Conversation summaries ordered by `(updatedAt, id)`; message bodies are omitted. |
+| `/api/documents/:id/conversations` | `POST` | Create an idempotent Conversation and initial user message. |
+| `/api/conversations/:id` | `GET` | Load the full workspace-scoped transcript for one selected Conversation. |
+| `/api/conversations/:id` | `PATCH` | Rename, archive, or change persisted Conversation status with a version precondition. |
+
+Collection cursors are opaque and are valid only with the same route scope and filter set. Clients should follow `nextCursor`, append unseen IDs, and restart from the first page when filters change. Malformed cursors or typed filters return `400`; they never silently broaden to an unfiltered collection.
 
 ## Error Shape
 

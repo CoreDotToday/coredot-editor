@@ -1,5 +1,10 @@
 import { NextResponse } from "next/server";
-import type { Conversation, ConversationFailureReason, ConversationResult } from "./conversation-repository";
+import type {
+  Conversation,
+  ConversationFailureReason,
+  ConversationResult,
+  ConversationSummary,
+} from "./conversation-repository";
 
 export const CONVERSATION_REQUEST_BODY_BYTES = 640 * 1024;
 export const CONVERSATION_REQUEST_DEADLINE_MS = 5_000;
@@ -12,6 +17,15 @@ export function toPublicConversation(conversation: Conversation) {
       ...message,
       createdAt: message.createdAt.toISOString(),
     })),
+    retentionExpiresAt: conversation.retentionExpiresAt?.toISOString() ?? null,
+    updatedAt: conversation.updatedAt.toISOString(),
+  };
+}
+
+export function toPublicConversationSummary(conversation: ConversationSummary) {
+  return {
+    ...conversation,
+    createdAt: conversation.createdAt.toISOString(),
     retentionExpiresAt: conversation.retentionExpiresAt?.toISOString() ?? null,
     updatedAt: conversation.updatedAt.toISOString(),
   };

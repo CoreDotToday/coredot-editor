@@ -225,6 +225,7 @@ function readMockTiptapText(node: unknown): string {
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   window.localStorage.clear();
 });
 
@@ -722,6 +723,107 @@ describe("DocumentShell", () => {
 
     expect(titleInput).toHaveValue("Draft v1 + v2");
     expect(screen.getByRole("alert")).toHaveTextContent("다른 곳에서 문서가 변경되었습니다.");
+    expect(screen.getByRole("status", { name: "문서 저장 상태" })).toHaveTextContent("저장 실패");
+  });
+
+  it("shows a required Project Profile field error and clears it on retry and success", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        reason: "invalid_project_profile",
+        violation: { fieldId: "owner", ok: false, reason: "required" },
+      }), { status: 400 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        document: createDocument("doc_1", "Edited title"),
+      })));
+    render(<DocumentShell aiRuns={[]} document={createDocument("doc_1", "Initial")} templates={[]} />);
+    const title = screen.getByRole("textbox", { name: "문서 제목" });
+    await user.clear(title);
+    await user.type(title, "Edited title");
+
+    await user.click(screen.getByRole("button", { name: "저장" }));
+    expect(await screen.findByRole("alert", { name: "프로젝트 프로필 확인 필요" }))
+      .toHaveTextContent("일반 문서 프로필: 소유자 필드는 필수입니다.");
+
+    await user.click(screen.getByRole("button", { name: "저장" }));
+    await waitFor(() => {
+      expect(screen.queryByRole("alert", { name: "프로젝트 프로필 확인 필요" })).not.toBeInTheDocument();
+      expect(screen.getByText("저장됨")).toBeInTheDocument();
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows a Project Profile length cap and clears it when the draft is edited", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response(JSON.stringify({
+      reason: "invalid_project_profile",
+      violation: { fieldId: "owner", ok: false, reason: "invalid_length" },
+    }), { status: 400 }));
+    render(<DocumentShell aiRuns={[]} document={createDocument("doc_1", "Initial")} templates={[]} />);
+    const title = screen.getByRole("textbox", { name: "문서 제목" });
+    await user.clear(title);
+    await user.type(title, "Edited title");
+
+    await user.click(screen.getByRole("button", { name: "저장" }));
+    expect(await screen.findByRole("alert", { name: "프로젝트 프로필 확인 필요" }))
+      .toHaveTextContent("일반 문서 프로필: 소유자 값은 최대 2000자까지 입력할 수 있습니다.");
+
+    await user.type(title, " again");
+    expect(screen.queryByRole("alert", { name: "프로젝트 프로필 확인 필요" })).not.toBeInTheDocument();
+  });
+
+  it("keeps an invalid-profile alert after rejecting an unrelated single proposal", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        reason: "invalid_project_profile",
+        violation: { fieldId: "owner", ok: false, reason: "required" },
+      }), { status: 400 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        proposal: createProposal("proposal_1", "rejected"),
+      })));
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Initial", "growth was good")}
+        proposals={[createProposal("proposal_1")]}
+        templates={[]}
+      />,
+    );
+    await user.type(screen.getByRole("textbox", { name: "문서 제목" }), " edited");
+    await user.click(screen.getByRole("button", { name: "저장" }));
+    const alert = await screen.findByRole("alert", { name: "프로젝트 프로필 확인 필요" });
+
+    await user.click(screen.getByRole("button", { name: "growth was good 제안 거절" }));
+
+    expect(alert).toBeInTheDocument();
+    expect(screen.getByRole("status", { name: "문서 저장 상태" })).toHaveTextContent("저장 실패");
+  });
+
+  it("keeps an invalid-profile alert after rejecting unrelated proposals in bulk", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        reason: "invalid_project_profile",
+        violation: { fieldId: "owner", ok: false, reason: "required" },
+      }), { status: 400 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ proposal: createProposal("proposal_1", "rejected") })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ proposal: createProposal("proposal_2", "rejected", "owner is unclear") })));
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Initial", "growth was good")}
+        proposals={[createProposal("proposal_1"), createProposal("proposal_2", "pending", "owner is unclear")]}
+        templates={[]}
+      />,
+    );
+    await user.type(screen.getByRole("textbox", { name: "문서 제목" }), " edited");
+    await user.click(screen.getByRole("button", { name: "저장" }));
+    const alert = await screen.findByRole("alert", { name: "프로젝트 프로필 확인 필요" });
+
+    await user.click(screen.getByRole("button", { name: "대기 중인 모든 제안 거절" }));
+
+    expect(alert).toBeInTheDocument();
     expect(screen.getByRole("status", { name: "문서 저장 상태" })).toHaveTextContent("저장 실패");
   });
 
@@ -1270,6 +1372,384 @@ describe("DocumentShell", () => {
     );
     expect(screen.getAllByText("First target")).toHaveLength(1);
     expect(screen.queryByRole("button", { name: "더 불러오기" })).not.toBeInTheDocument();
+  });
+
+  it("appends proposal pages without overwriting or moving current proposal state", async () => {
+    const user = userEvent.setup();
+    const current = createProposal("proposal_1", "accepted", "current exact target");
+    const staleDuplicate = createProposal("proposal_1", "pending", "stale duplicate target");
+    const older = createProposal("proposal_2", "pending", "older target");
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response(JSON.stringify({
+      proposals: [staleDuplicate, older].map((proposal) => ({
+        ...proposal,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        isTruncated: false,
+      })),
+      nextCursor: null,
+    })));
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Proposal history", "current exact target")}
+        proposals={[current]}
+        proposalsNextCursor="older"
+        templates={[]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "이전 제안 더 보기" }));
+    expect((await screen.findAllByText("older target")).length).toBeGreaterThan(0);
+
+    expect(fetchMock).toHaveBeenCalledWith("/api/documents/doc_1/proposals?cursor=older&limit=20");
+    expect(screen.getAllByText("current exact target").length).toBeGreaterThan(0);
+    expect(screen.queryByText("stale duplicate target")).not.toBeInTheDocument();
+    expect(screen.getByText("수락됨")).toBeInTheDocument();
+  });
+
+  it("withholds all-pending actions until the final proposal page loads successfully", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response(JSON.stringify({
+      proposals: [{
+        ...createProposal("proposal_older", "pending", "older target"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        isTruncated: false,
+      }],
+      nextCursor: null,
+    })));
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Proposal history", "current target older target")}
+        proposals={[createProposal("proposal_current", "pending", "current target")]}
+        proposalsNextCursor="older"
+        templates={[]}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "대기 중인 모든 제안 수락" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "대기 중인 모든 제안 거절" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "이전 제안 더 보기" }));
+
+    expect(await screen.findByRole("button", { name: "대기 중인 모든 제안 수락" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "대기 중인 모든 제안 거절" })).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the run cursor and current history when a run page has an invalid date", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response(JSON.stringify({
+      runs: [{
+        ...createAiRun("run_invalid"),
+        createdAt: "not-a-date",
+      }],
+      nextCursor: null,
+    })));
+
+    render(
+      <DocumentShell
+        aiRuns={[createAiRun("run_current")]}
+        aiRunsNextCursor="older-runs"
+        document={createDocument("doc_1", "Run history")}
+        templates={[]}
+      />,
+    );
+    const currentRunLabelCount = screen.getAllByText("문서 검토").length;
+
+    await user.click(screen.getByRole("button", { name: "이전 실행 더 보기" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("검토에 실패했습니다. 다시 시도하세요.");
+    expect(screen.getByRole("button", { name: "이전 실행 더 보기" })).toBeInTheDocument();
+    expect(screen.getAllByText("문서 검토")).toHaveLength(currentRunLabelCount);
+  });
+
+  it("keeps the proposal cursor and loaded proposals when a proposal page is malformed", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response(JSON.stringify({
+      proposals: [{
+        ...createProposal("proposal_invalid", "pending", "invalid proposal target"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        status: "unknown",
+      }],
+      nextCursor: null,
+    })));
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Proposal history", "current target")}
+        proposals={[createProposal("proposal_current", "pending", "current target")]}
+        proposalsNextCursor="older-proposals"
+        templates={[]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "이전 제안 더 보기" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("검토에 실패했습니다. 다시 시도하세요.");
+    expect(screen.getByRole("button", { name: "이전 제안 더 보기" })).toBeInTheDocument();
+    expect(screen.queryByText("invalid proposal target")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "대기 중인 모든 제안 수락" })).not.toBeInTheDocument();
+  });
+
+  it("rejects an empty proposal page cursor without appending data or losing the current cursor", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+      proposals: [{
+        ...createProposal("proposal_empty_cursor", "pending", "empty cursor target"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        isTruncated: false,
+      }],
+      nextCursor: "",
+    })));
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Proposal history", "current target")}
+        proposals={[createProposal("proposal_current", "pending", "current target")]}
+        proposalsNextCursor="older-proposals"
+        templates={[]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "이전 제안 더 보기" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("검토에 실패했습니다. 다시 시도하세요.");
+    expect(screen.queryByText("empty cursor target")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "이전 제안 더 보기" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "이전 제안 더 보기" }));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not focus a proposal when lazy detail returns a different proposal id", async () => {
+    const user = userEvent.setup();
+    const preview = {
+      ...createProposal("proposal_preview", "pending", "current target"),
+      isTruncated: true,
+    };
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response(JSON.stringify({
+      proposal: { ...preview, id: "proposal_other", isTruncated: undefined },
+    })));
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Proposal history", "current target")}
+        proposals={[preview]}
+        templates={[]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "전체 제안 보기" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("제안 상태를 업데이트하지 못했습니다.");
+    expect(screen.getByTestId("mock-inline-suggestions")).toHaveTextContent('"active":false');
+    expect(screen.getByTestId("mock-inline-suggestions")).not.toHaveTextContent('"active":true');
+  });
+
+  it("does not apply a truncated proposal when lazy detail returns a different proposal id", async () => {
+    const user = userEvent.setup();
+    const preview = {
+      ...createProposal("proposal_preview", "pending", "current target"),
+      isTruncated: true,
+    };
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response(JSON.stringify({
+      proposal: { ...createProposal("proposal_other", "pending", "current target") },
+    })));
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Proposal history", "current target")}
+        proposals={[preview]}
+        templates={[]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "current target 제안으로 교체" }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    expect(fetchMock).toHaveBeenCalledWith("/api/proposals/proposal_preview");
+    expect(screen.getByTestId("mock-document-body")).toHaveTextContent("current target");
+    expect(await screen.findByRole("alert")).toHaveTextContent("제안 상태를 업데이트하지 못했습니다.");
+  });
+
+  it("isolates delayed review, run page, proposal page, and proposal detail responses after document navigation", async () => {
+    const user = userEvent.setup();
+    const delayedReview = createDeferredResponse();
+    const delayedRuns = createDeferredResponse();
+    const delayedProposals = createDeferredResponse();
+    const delayedDetail = createDeferredResponse();
+    const delayedReviewB = createDeferredResponse();
+    const delayedRunsB = createDeferredResponse();
+    const delayedProposalsB = createDeferredResponse();
+    const delayedDetailB = createDeferredResponse();
+    let reviewCallCount = 0;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+      const url = String(input);
+      if (url === "/api/ai/review") {
+        reviewCallCount += 1;
+        return reviewCallCount === 1 ? delayedReview.promise : delayedReviewB.promise;
+      }
+      if (url.includes("/api/documents/doc_1/ai-runs?")) return delayedRuns.promise;
+      if (url.includes("/api/documents/doc_1/proposals?")) return delayedProposals.promise;
+      if (url === "/api/proposals/proposal_preview") return delayedDetail.promise;
+      if (url.includes("/api/documents/doc_2/ai-runs?")) return delayedRunsB.promise;
+      if (url.includes("/api/documents/doc_2/proposals?")) return delayedProposalsB.promise;
+      if (url === "/api/proposals/proposal_b") return delayedDetailB.promise;
+      return Promise.reject(new Error(`Unexpected request: ${url}`));
+    });
+    const preview = { ...createProposal("proposal_preview", "pending", "A preview target"), isTruncated: true };
+    const { rerender } = render(
+      <DocumentShell
+        aiRuns={[createAiRun("run_a")]}
+        aiRunsNextCursor="older-runs-a"
+        document={createDocumentWithContent("doc_1", "Document A", "A preview target")}
+        proposals={[preview]}
+        proposalsNextCursor="older-proposals-a"
+        templates={[createTemplate("tpl_1", "Board review")]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "이전 실행 더 보기" }));
+    await user.click(screen.getByRole("button", { name: "이전 제안 더 보기" }));
+    await user.click(screen.getByRole("button", { name: "전체 제안 보기" }));
+    await user.click(screen.getByRole("button", { name: "문서 검토" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4));
+
+    rerender(
+      <DocumentShell
+        aiRuns={[createAiRun("run_b")]}
+        aiRunsNextCursor="older-runs-b"
+        document={createDocumentWithContent("doc_2", "Document B", "B current target")}
+        proposals={[{ ...createProposal("proposal_b", "pending", "B current target"), isTruncated: true }]}
+        proposalsNextCursor="older-proposals-b"
+        templates={[createTemplate("tpl_1", "Board review")]}
+      />,
+    );
+    expect(screen.getByRole("textbox", { name: "문서 제목" })).toHaveValue("Document B");
+
+    await user.click(screen.getByRole("button", { name: "이전 실행 더 보기" }));
+    await user.click(screen.getByRole("button", { name: "이전 제안 더 보기" }));
+    await user.click(screen.getByRole("button", { name: "전체 제안 보기" }));
+    await user.click(screen.getByRole("button", { name: "문서 검토" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(8));
+
+    await act(async () => {
+      delayedReview.resolve(new Response(JSON.stringify({
+        proposals: [createProposal("proposal_stale_review", "pending", "STALE REVIEW TARGET")],
+        review: { findings: [], summary: "STALE REVIEW SUMMARY" },
+        run: {
+          id: "run_stale_review",
+          commandType: "stale_review_command",
+          status: "completed",
+          createdAt: "2026-01-01T00:00:00.000Z",
+        },
+      })));
+      await delayedReview.promise;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(screen.queryByText("STALE REVIEW TARGET")).not.toBeInTheDocument();
+    expect(screen.queryByText("STALE REVIEW SUMMARY")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "검토 중..." })).toBeDisabled();
+
+    await act(async () => {
+      delayedReviewB.resolve(new Response(JSON.stringify({
+        proposals: [createProposal("proposal_b", "pending", "B current target")],
+        review: { findings: [], summary: "B done" },
+      })));
+      await delayedReviewB.promise;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(screen.getByText("B done")).toBeInTheDocument();
+
+    await act(async () => {
+      delayedRuns.resolve(new Response(JSON.stringify({
+        nextCursor: null,
+        runs: [{
+          id: "run_stale_page",
+          commandType: "stale_page_command",
+          status: "completed",
+          createdAt: "2026-01-01T00:00:00.000Z",
+        }],
+      })));
+      await delayedRuns.promise;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(screen.queryByText("stale page command")).not.toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "불러오는 중..." })).toHaveLength(2);
+
+    await act(async () => {
+      delayedProposals.resolve(new Response(JSON.stringify({
+        nextCursor: null,
+        proposals: [createProposal("proposal_stale_page", "pending", "STALE PAGE TARGET")],
+      })));
+      await delayedProposals.promise;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(screen.queryByText("STALE PAGE TARGET")).not.toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "불러오는 중..." })).toHaveLength(2);
+
+    await act(async () => {
+      delayedDetail.resolve(new Response(JSON.stringify({ error: "expired" }), { status: 404 }));
+      await delayedDetail.promise;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(screen.queryByText("제안 상태를 업데이트하지 못했습니다.")).not.toBeInTheDocument();
+
+    await act(async () => {
+      delayedRunsB.resolve(new Response(JSON.stringify({ nextCursor: null, runs: [] })));
+      delayedProposalsB.resolve(new Response(JSON.stringify({ nextCursor: null, proposals: [] })));
+      delayedDetailB.resolve(new Response(JSON.stringify({
+        proposal: createProposal("proposal_b", "pending", "B current target"),
+      })));
+      await Promise.all([
+        delayedRunsB.promise,
+        delayedProposalsB.promise,
+        delayedDetailB.promise,
+      ]);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(screen.getAllByText("B current target").length).toBeGreaterThan(0);
+  });
+
+  it("ignores a delayed review continuation after unmount without React lifecycle warnings", async () => {
+    const user = userEvent.setup();
+    const delayedReview = createDeferredResponse();
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+      if (String(input) === "/api/ai/review") return delayedReview.promise;
+      return Promise.reject(new Error(`Unexpected request: ${String(input)}`));
+    });
+    const { unmount } = render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Document A", "A body")}
+        templates={[createTemplate("tpl_1", "Board review")]}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "문서 검토" }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/ai/review", expect.anything()));
+
+    unmount();
+    await act(async () => {
+      delayedReview.resolve(new Response(JSON.stringify({
+        proposals: [createProposal("late_proposal", "pending", "LATE")],
+        review: { findings: [], summary: "LATE" },
+      })));
+      await delayedReview.promise;
+      await Promise.resolve();
+    });
+
+    const lifecycleWarnings = consoleError.mock.calls
+      .flatMap((call) => call.map(String))
+      .filter((message) => /not wrapped in act|unmounted component/i.test(message));
+    expect(lifecycleWarnings).toEqual([]);
   });
 
   it("keeps the change-history cursor available after a load-more error", async () => {
@@ -2624,6 +3104,105 @@ describe("DocumentShell", () => {
     expect(screen.getByRole("search", { name: "mock find bar" })).toBeInTheDocument();
   });
 
+  it("does not dispatch document shortcuts behind an active modal surface", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+      secrets: { coredotConfigured: true, openaiConfigured: false },
+      settings: {
+        aiBaseUrl: null,
+        aiMaxCompletionTokens: null,
+        aiModel: "gpt-5-mini",
+        aiProvider: "coredot",
+        aiReasoningEffort: null,
+        id: "settings-a",
+      },
+    }), { headers: { "Content-Type": "application/json" } }));
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "source body")}
+        templates={[createTemplate("tpl_1", "Rewrite template")]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "LLM 설정" }));
+    expect(await screen.findByRole("dialog", { name: "LLM 설정" })).toBeInTheDocument();
+
+    await user.keyboard("{Meta>}k{/Meta}{Meta>}f{/Meta}");
+
+    expect(screen.queryByRole("dialog", { name: "명령 팔레트" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("search", { name: "mock find bar" })).not.toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "LLM 설정" })).toBeInTheDocument();
+  });
+
+  it("unmounts compact drawer modals and restores the desktop surface across breakpoints", async () => {
+    const user = userEvent.setup();
+    const matches = new Map([
+      ["(max-width: 1023px)", true],
+      ["(max-width: 1279px)", true],
+    ]);
+    const listeners = new Map<string, Set<(event: MediaQueryListEvent) => void>>();
+    vi.stubGlobal("matchMedia", vi.fn((query: string) => {
+      const queryListeners = listeners.get(query) ?? new Set();
+      listeners.set(query, queryListeners);
+      return {
+        addEventListener: (_type: string, listener: EventListenerOrEventListenerObject) =>
+          queryListeners.add(listener as (event: MediaQueryListEvent) => void),
+        addListener: (listener: ((this: MediaQueryList, event: MediaQueryListEvent) => unknown) | null) => {
+          if (listener) queryListeners.add(listener);
+        },
+        dispatchEvent: () => true,
+        matches: matches.get(query) ?? false,
+        media: query,
+        onchange: null,
+        removeEventListener: (_type: string, listener: EventListenerOrEventListenerObject) =>
+          queryListeners.delete(listener as (event: MediaQueryListEvent) => void),
+        removeListener: (listener: ((this: MediaQueryList, event: MediaQueryListEvent) => unknown) | null) => {
+          if (listener) queryListeners.delete(listener);
+        },
+      } as MediaQueryList;
+    }));
+    const resize = (query: string, value: boolean) => {
+      matches.set(query, value);
+      const event = { matches: value, media: query } as MediaQueryListEvent;
+      for (const listener of listeners.get(query) ?? []) listener(event);
+    };
+    const { container } = render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "source body")}
+        templates={[]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "사이드바 열기" }));
+    expect(await screen.findByRole("dialog", { name: "사이드바 열기" })).toBeInTheDocument();
+    expect(document.body.style.overflow).toBe("hidden");
+    expect(container).toHaveAttribute("inert");
+
+    act(() => {
+      resize("(max-width: 1023px)", false);
+      resize("(max-width: 1279px)", false);
+    });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "사이드바 열기" })).not.toBeInTheDocument());
+    expect(document.body.style.overflow).toBe("");
+    expect(container).not.toHaveAttribute("inert");
+
+    act(() => resize("(max-width: 1279px)", true));
+    await user.click(screen.getByRole("button", { name: "검토" }));
+    expect(await screen.findByRole("dialog", { name: "검토" })).toBeInTheDocument();
+    expect(document.body.style.overflow).toBe("hidden");
+
+    act(() => resize("(max-width: 1279px)", false));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "검토" })).not.toBeInTheDocument());
+    expect(document.body.style.overflow).toBe("");
+    expect(container).not.toHaveAttribute("inert");
+
+    await user.click(screen.getByRole("tab", { name: "Source" }));
+    expect(screen.getByRole("region", { name: "문서 Source" })).toHaveTextContent("source body");
+  });
+
   it("keeps AI command conversations in separate sessions", async () => {
     const user = userEvent.setup();
     vi.spyOn(globalThis, "fetch")
@@ -3486,6 +4065,38 @@ describe("DocumentShell", () => {
 
     expect(screen.getByText("대기 중")).toBeInTheDocument();
     expect(screen.getByRole("alert")).toHaveTextContent("제안 상태를 업데이트하지 못했습니다.");
+  });
+
+  it("hydrates truncated proposal detail before client preflight and apply", async () => {
+    const user = userEvent.setup();
+    const fullProposal = createProposal("proposal_1", "pending", "growth was good");
+    const previewProposal = {
+      ...fullProposal,
+      isTruncated: true,
+      targetText: "growth was",
+      replacementText: "revenue",
+    };
+    const updatedDocument = createDocumentWithContent("doc_1", "Market Entry Memo", "revenue grew 8%");
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({ proposal: fullProposal })))
+      .mockResolvedValueOnce(new Response(JSON.stringify(
+        createProposalApplyResponse(fullProposal, updatedDocument),
+      )));
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "growth was good")}
+        proposals={[previewProposal]}
+        templates={[createTemplate("tpl_1", "Board review")]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "growth was 제안으로 교체" }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenNthCalledWith(1, "/api/proposals/proposal_1"));
+    expectProposalApplyFetch(fetchMock, "proposal_1", "replace");
+    expect(screen.getByText("수락됨")).toBeInTheDocument();
   });
 
   it("merges the server proposal when a proposal status update conflicts", async () => {

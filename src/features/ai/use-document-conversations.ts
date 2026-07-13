@@ -1,7 +1,7 @@
 "use client";
 
 import { nanoid } from "nanoid";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createHttpConversationStore } from "./conversation-client";
 import type { ConversationFailureReason } from "./conversation-domain";
 import {
@@ -9,6 +9,7 @@ import {
   type ConversationStorageMode,
   type ConversationStore,
   type StoreResult,
+  type StoredConversationSummary,
   type StoredConversationView,
 } from "./conversation-store";
 
@@ -35,6 +36,7 @@ export type DocumentConversationSession = {
   status: "failed" | "idle" | "running";
   syncStatus: "saved" | "saving" | "unsaved";
   title: string;
+  transcriptState: "failed" | "idle" | "loaded" | "loading";
   updatedAt: Date;
   version: number;
 };
@@ -47,6 +49,7 @@ export type ConversationAttempt = {
     assistant: CompleteConversationInput | null;
     canonical: StoredConversationView | null;
     createInput: Parameters<ConversationStore["create"]>[0];
+    scopeGeneration: number;
     targetStatus: DocumentConversationSession["status"];
   };
 };
@@ -60,7 +63,8 @@ export type CompleteConversationInput = {
 
 type UseDocumentConversationsInput = {
   documentId: string;
-  initialConversations?: StoredConversationView[];
+  initialConversations?: Array<StoredConversationSummary | StoredConversationView>;
+  initialNextCursor?: string | null;
   initialLoadFailed?: boolean;
   storageMode: ConversationStorageMode;
   store?: ConversationStore;
@@ -70,6 +74,7 @@ type UseDocumentConversationsInput = {
 export function useDocumentConversations({
   documentId,
   initialConversations,
+  initialNextCursor = null,
   initialLoadFailed = false,
   storageMode,
   store: providedStore,
@@ -86,6 +91,9 @@ export function useDocumentConversations({
     [initialConversations],
   );
   const [sessions, setSessions] = useState<DocumentConversationSession[]>(initialSessions);
+  const [nextCursor, setNextCursor] = useState(initialNextCursor);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const [loadMoreErrorReason, setLoadMoreErrorReason] = useState<ConversationErrorReason | null>(null);
   const sessionsRef = useRef(sessions);
   const [loadState, setLoadState] = useState<ConversationLoadState>(
     initialLoadFailed ? "failed" : initialConversations ? "loaded" : "loading",
@@ -102,7 +110,11 @@ export function useDocumentConversations({
   const conversationMutationTailsRef = useRef(new Map<string, Promise<void>>());
   const conversationMutationCountsRef = useRef(new Map<string, number>());
   const loadGenerationRef = useRef(0);
+  const detailGenerationRef = useRef(0);
+  const activeDetailIdRef = useRef<string | null>(null);
+  const autoInitialDetailStartedRef = useRef(false);
   const scopeRef = useRef(`${storageMode}:${workspaceId}:${documentId}`);
+  const scopeGenerationRef = useRef(0);
 
   const updateSessions = useCallback((update: (current: DocumentConversationSession[]) => DocumentConversationSession[]) => {
     const next = update(sessionsRef.current);
@@ -143,9 +155,15 @@ export function useDocumentConversations({
   function syncAttemptCanonical(conversation: StoredConversationView) {
     for (const attempt of activeAttemptsRef.current) {
       if (attempt.state.canonical?.id === conversation.id || attempt.localId === conversation.id) {
-        attempt.state.canonical = conversation;
+        if (!attempt.state.canonical || conversation.version >= attempt.state.canonical.version) {
+          attempt.state.canonical = conversation;
+        }
       }
     }
+  }
+
+  function isAttemptActive(attempt: ConversationAttempt) {
+    return attempt.state.scopeGeneration === scopeGenerationRef.current && activeAttemptsRef.current.has(attempt);
   }
 
   function conversationMutationKey(conversationId: string) {
@@ -184,6 +202,7 @@ export function useDocumentConversations({
     executionStatus: DocumentConversationSession["status"],
     mutationKey: string,
   ) {
+    if (conversation.version < current.version) return current;
     const canonical = toDocumentConversationSession(conversation);
     const hasFollowingMutation = (conversationMutationCountsRef.current.get(mutationKey) ?? 0) > 1;
     const hasOptimisticMessages = current.messages.length > canonical.messages.length;
@@ -200,6 +219,8 @@ export function useDocumentConversations({
   const load = useCallback(async () => {
     const generation = loadGenerationRef.current + 1;
     loadGenerationRef.current = generation;
+    setIsLoadingMore(false);
+    setLoadMoreErrorReason(null);
     setLoadState("loading");
     setErrorReason(latestRetryReason());
     const result = await store.list({ documentId });
@@ -210,24 +231,31 @@ export function useDocumentConversations({
       return;
     }
     const persisted = result.value.items.map(toDocumentConversationSession);
+    setNextCursor(result.value.nextCursor);
     updateSessions((current) => {
       const pending = current.filter(sessionHasPendingPersistence);
-      if (pending.length === 0) return persisted;
       const pendingIds = new Set(pending.map((session) => session.id));
+      const currentById = new Map(current.map((session) => [session.id, session]));
       return dedupeConversationSessions([
         ...pending,
-        ...persisted.filter((session) => !pendingIds.has(session.id)),
+        ...persisted
+          .filter((session) => !pendingIds.has(session.id))
+          .map((session) => mergeConversationSummary(currentById.get(session.id), session)),
       ]);
     });
     setLoadState("loaded");
     setErrorReason(latestRetryReason());
   }, [documentId, store, updateSessions]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const scope = `${storageMode}:${workspaceId}:${documentId}`;
     if (scopeRef.current === scope) return;
     scopeRef.current = scope;
+    scopeGenerationRef.current += 1;
     loadGenerationRef.current += 1;
+    detailGenerationRef.current += 1;
+    activeDetailIdRef.current = null;
+    autoInitialDetailStartedRef.current = false;
     conversationMutationTailsRef.current.clear();
     conversationMutationCountsRef.current.clear();
     pendingRetriesRef.current.clear();
@@ -235,8 +263,11 @@ export function useDocumentConversations({
     activeAttemptsRef.current.clear();
     setErrorReason(initialLoadFailed ? "unavailable" : null);
     setLoadState(initialLoadFailed ? "failed" : initialConversations ? "loaded" : "loading");
+    setNextCursor(initialNextCursor);
+    setIsLoadingMore(false);
+    setLoadMoreErrorReason(null);
     updateSessions(() => initialSessions);
-  }, [documentId, initialConversations, initialLoadFailed, initialSessions, storageMode, updateSessions, workspaceId]);
+  }, [documentId, initialConversations, initialLoadFailed, initialNextCursor, initialSessions, storageMode, updateSessions, workspaceId]);
 
   useEffect(() => {
     if (initialConversations || initialLoadFailed) return;
@@ -250,9 +281,75 @@ export function useDocumentConversations({
     };
   }, [initialConversations, initialLoadFailed, load]);
 
+  const loadConversationDetail = useCallback(async (conversationId: string, force = false) => {
+    const current = sessionsRef.current.find((session) => session.id === conversationId);
+    if (!current || current.syncStatus !== "saved") return;
+    const selectionChanged = activeDetailIdRef.current !== conversationId;
+    if (selectionChanged || force) {
+      detailGenerationRef.current += 1;
+      activeDetailIdRef.current = conversationId;
+    }
+    if (!force && (current.transcriptState === "loaded" || (!selectionChanged && current.transcriptState === "loading"))) {
+      return;
+    }
+    const generation = detailGenerationRef.current;
+    updateSessions((sessions) => sessions.map((session) => session.id === conversationId
+      ? { ...session, transcriptState: "loading" }
+      : selectionChanged && session.transcriptState === "loading"
+        ? { ...session, transcriptState: "idle" }
+      : session));
+    const result = await store.get(documentId, conversationId);
+    if (generation !== detailGenerationRef.current) return;
+    if (!result.ok) {
+      updateSessions((sessions) => sessions.map((session) => session.id === conversationId
+        ? { ...session, transcriptState: "failed" }
+        : session));
+      return;
+    }
+    updateSessions((sessions) => sessions.map((session) => {
+      if (session.id !== conversationId || session.syncStatus !== "saved") return session;
+      return result.value.version < session.version
+        ? session
+        : toDocumentConversationSession(result.value);
+    }));
+  }, [documentId, store, updateSessions]);
+
+  useEffect(() => {
+    if (autoInitialDetailStartedRef.current) return;
+    const first = sessions.find((session) => !session.archived);
+    if (first?.transcriptState !== "idle") return;
+    autoInitialDetailStartedRef.current = true;
+    void loadConversationDetail(first.id);
+  }, [loadConversationDetail, sessions]);
+
+  const loadMore = useCallback(async () => {
+    const cursor = nextCursor;
+    if (!cursor || isLoadingMore) return;
+    const generation = loadGenerationRef.current;
+    setIsLoadingMore(true);
+    setLoadMoreErrorReason(null);
+    const result = await store.list({ cursor, documentId });
+    if (generation !== loadGenerationRef.current) return;
+    setIsLoadingMore(false);
+    if (!result.ok) {
+      setLoadMoreErrorReason(result.reason);
+      setErrorReason(result.reason);
+      return;
+    }
+    const incoming = result.value.items.map(toDocumentConversationSession);
+    updateSessions((current) => {
+      const existingIds = new Set(current.map((session) => session.id));
+      return [...current, ...incoming.filter((session) => !existingIds.has(session.id))];
+    });
+    setNextCursor(result.value.nextCursor);
+    setErrorReason(latestRetryReason());
+  }, [documentId, isLoadingMore, nextCursor, store, updateSessions]);
+
   async function persistCreate(attempt: ConversationAttempt): Promise<StoredConversationView | null> {
+    if (!isAttemptActive(attempt)) return null;
     const retryKey = `create:${attempt.localId}`;
     const result = await store.create(attempt.state.createInput);
+    if (!isAttemptActive(attempt)) return null;
     if (!result.ok) {
       updateSessions((current) => current.map((session) =>
         session.id === attempt.localId ? { ...session, syncStatus: "unsaved" } : session
@@ -270,7 +367,9 @@ export function useDocumentConversations({
       });
       return null;
     }
-    attempt.state.canonical = result.value;
+    if (!attempt.state.canonical || result.value.version >= attempt.state.canonical.version) {
+      attempt.state.canonical = result.value;
+    }
     const needsFollowUp = Boolean(attempt.state.assistant) || attempt.state.targetStatus === "failed";
     updateSessions((current) => dedupeConversationSessions(current.map((session) => {
       if (session.id !== attempt.localId && session.id !== result.value.id) return session;
@@ -291,6 +390,7 @@ export function useDocumentConversations({
     canonical: StoredConversationView,
     input: CompleteConversationInput,
   ) {
+    if (!isAttemptActive(attempt)) return;
     const mutationKey = `append_${nanoid(24)}`;
     const retryKey = `append:${attempt.localId}`;
     const append = () => withConversationMutation(attempt.localId, async () => {
@@ -307,22 +407,27 @@ export function useDocumentConversations({
       });
     });
     const result = await append();
+    if (!isAttemptActive(attempt)) return;
     if (!result.ok) {
       updateSessions((current) => current.map((session) =>
         matchesAttempt(session, attempt) ? { ...session, syncStatus: "unsaved" } : session
       ));
       const retryAppend = async () => {
+        if (!isAttemptActive(attempt)) return;
         updateSessions((current) => current.map((session) =>
           matchesAttempt(session, attempt) ? { ...session, syncStatus: "saving" } : session
         ));
         const replay = await append();
+        if (!isAttemptActive(attempt)) return;
         applyPersistedResult(replay, attempt, "idle", retryKey);
         if (!replay.ok) registerRetry(retryKey, replay.reason, retryAppend);
       };
       registerRetry(retryKey, result.reason, retryAppend);
       return;
     }
-    attempt.state.canonical = result.value;
+    if (!attempt.state.canonical || result.value.version >= attempt.state.canonical.version) {
+      attempt.state.canonical = result.value;
+    }
     applyPersistedResult(result, attempt, "idle", retryKey);
   }
 
@@ -332,6 +437,7 @@ export function useDocumentConversations({
     executionStatus: DocumentConversationSession["status"],
     retryKey: string,
   ) {
+    if (!isAttemptActive(attempt)) return;
     if (!result.ok) {
       setErrorReason(result.reason);
       updateSessions((current) => current.map((session) =>
@@ -339,7 +445,9 @@ export function useDocumentConversations({
       ));
       return;
     }
-    attempt.state.canonical = result.value;
+    if (!attempt.state.canonical || result.value.version >= attempt.state.canonical.version) {
+      attempt.state.canonical = result.value;
+    }
     updateSessions((current) => dedupeConversationSessions(current.map((session) =>
       matchesAttempt(session, attempt)
         ? reconcilePersistedSession(result.value, session, executionStatus, attempt.localId)
@@ -372,7 +480,13 @@ export function useDocumentConversations({
     const attempt = {
       localId,
       ready: Promise.resolve(null) as Promise<StoredConversationView | null>,
-      state: { assistant: null, canonical: null, createInput, targetStatus: "running" },
+      state: {
+        assistant: null,
+        canonical: null,
+        createInput,
+        scopeGeneration: scopeGenerationRef.current,
+        targetStatus: "running",
+      },
     } satisfies ConversationAttempt;
     activeAttemptsRef.current.add(attempt);
     updateSessions((current) => [{
@@ -391,6 +505,7 @@ export function useDocumentConversations({
       status: "running",
       syncStatus: "saving",
       title: input.title,
+      transcriptState: "loaded",
       updatedAt: now,
       version: 1,
     }, ...current]);
@@ -399,6 +514,7 @@ export function useDocumentConversations({
   }
 
   async function completeConversation(attempt: ConversationAttempt, input: CompleteConversationInput) {
+    if (!isAttemptActive(attempt)) return;
     const now = new Date();
     attempt.state.assistant = input;
     attempt.state.targetStatus = "idle";
@@ -420,6 +536,7 @@ export function useDocumentConversations({
         }
       : session));
     const canonical = attempt.state.canonical ?? await attempt.ready;
+    if (!isAttemptActive(attempt)) return;
     if (!canonical) {
       updateSessions((current) => current.map((session) =>
         matchesAttempt(session, attempt) ? { ...session, syncStatus: "unsaved" } : session
@@ -430,6 +547,7 @@ export function useDocumentConversations({
   }
 
   async function failConversation(attempt: ConversationAttempt) {
+    if (!isAttemptActive(attempt)) return;
     attempt.state.targetStatus = "failed";
     updateSessions((current) => current.map((session) =>
       matchesAttempt(session, attempt)
@@ -437,6 +555,7 @@ export function useDocumentConversations({
         : session
     ));
     const canonical = attempt.state.canonical ?? await attempt.ready;
+    if (!isAttemptActive(attempt)) return;
     if (!canonical) {
       updateSessions((current) => current.map((session) =>
         matchesAttempt(session, attempt) ? { ...session, syncStatus: "unsaved" } : session
@@ -450,8 +569,10 @@ export function useDocumentConversations({
     attempt: ConversationAttempt,
     status: Extract<DocumentConversationSession["status"], "failed" | "idle">,
   ) {
+    if (!isAttemptActive(attempt)) return;
     const retryKey = `status:${attempt.localId}`;
     const persistStatus = async () => {
+      if (!isAttemptActive(attempt)) return;
       const canonical = attempt.state.canonical;
       if (!canonical) return;
       updateSessions((current) => current.map((session) =>
@@ -464,6 +585,7 @@ export function useDocumentConversations({
           status,
         });
       });
+      if (!isAttemptActive(attempt)) return;
       applyPersistedResult(result, attempt, status, retryKey);
       if (!result.ok) registerRetry(retryKey, result.reason, persistStatus);
     };
@@ -471,6 +593,7 @@ export function useDocumentConversations({
   }
 
   function markConversationIdle(attempt: ConversationAttempt) {
+    if (!isAttemptActive(attempt)) return;
     attempt.state.targetStatus = "idle";
     updateSessions((current) => current.map((session) =>
       matchesAttempt(session, attempt) ? { ...session, status: "idle" } : session
@@ -482,7 +605,7 @@ export function useDocumentConversations({
     const nextTitle = title.trim();
     if (!previous || !nextTitle) return;
     const retryKey = `rename:${conversationId}`;
-    const generation = loadGenerationRef.current;
+    const scopeGeneration = scopeGenerationRef.current;
     const mutationKey = conversationMutationKey(conversationId);
     const waitsForPriorMutation = conversationMutationTailsRef.current.has(mutationKey);
     clearRetry(retryKey);
@@ -490,7 +613,7 @@ export function useDocumentConversations({
       ? { ...session, syncStatus: "saving", title: nextTitle }
       : session));
     await withConversationMutation(mutationKey, async () => {
-      if (generation !== loadGenerationRef.current) return;
+      if (scopeGeneration !== scopeGenerationRef.current) return;
       const latest = sessionsRef.current.find((session) => session.id === conversationId);
       if (!latest) return;
       const base = waitsForPriorMutation ? { ...latest, title: previous.title } : previous;
@@ -501,7 +624,7 @@ export function useDocumentConversations({
         expectedVersion: base.version,
         title: nextTitle,
       });
-      if (generation !== loadGenerationRef.current) return;
+      if (scopeGeneration !== scopeGenerationRef.current) return;
       if (!result.ok) {
         updateSessions((current) => current.map((session) => session.id === conversationId ? base : session));
         registerRetry(retryKey, result.reason, () => renameConversation(conversationId, nextTitle));
@@ -519,7 +642,7 @@ export function useDocumentConversations({
     const previous = sessionsRef.current.find((session) => session.id === conversationId);
     if (!previous) return;
     const retryKey = `archive:${conversationId}`;
-    const generation = loadGenerationRef.current;
+    const scopeGeneration = scopeGenerationRef.current;
     const mutationKey = conversationMutationKey(conversationId);
     const waitsForPriorMutation = conversationMutationTailsRef.current.has(mutationKey);
     clearRetry(retryKey);
@@ -527,7 +650,7 @@ export function useDocumentConversations({
       ? { ...session, archived: true, syncStatus: "saving" }
       : session));
     await withConversationMutation(mutationKey, async () => {
-      if (generation !== loadGenerationRef.current) return;
+      if (scopeGeneration !== scopeGenerationRef.current) return;
       const latest = sessionsRef.current.find((session) => session.id === conversationId);
       if (!latest) return;
       const base = waitsForPriorMutation ? { ...latest, archived: previous.archived } : previous;
@@ -538,7 +661,7 @@ export function useDocumentConversations({
         archived: true,
         expectedVersion: base.version,
       });
-      if (generation !== loadGenerationRef.current) return;
+      if (scopeGeneration !== scopeGenerationRef.current) return;
       if (!result.ok) {
         updateSessions((current) => current.map((session) => session.id === conversationId ? base : session));
         registerRetry(retryKey, result.reason, () => archiveConversation(conversationId));
@@ -559,12 +682,14 @@ export function useDocumentConversations({
     const durableMessages = attempt?.state.canonical?.messages ?? source.messages;
     if (!durableMessages.some((message) => message.id === throughMessageId)) return;
     const creationKey = `fork_${nanoid(24)}`;
+    const scopeGeneration = scopeGenerationRef.current;
     await persistFork(
       conversationId,
       throughMessageId,
       source.title,
       creationKey,
       conversationMutationKey(conversationId),
+      scopeGeneration,
     );
   }
 
@@ -574,9 +699,12 @@ export function useDocumentConversations({
     sourceTitle: string,
     creationKey: string,
     mutationKey: string,
+    scopeGeneration: number,
   ) {
+    if (scopeGeneration !== scopeGenerationRef.current) return;
     const retryKey = `fork:${creationKey}`;
     const result = await withConversationMutation(mutationKey, async () => {
+      if (scopeGeneration !== scopeGenerationRef.current) return null;
       const source = sessionsRef.current.find((session) => session.id === conversationId);
       if (!source || source.syncStatus !== "saved") return null;
       const attempt = Array.from(activeAttemptsRef.current).find((candidate) => matchesAttempt(source, candidate));
@@ -588,6 +716,7 @@ export function useDocumentConversations({
         title: `${sourceTitle} copy`,
       });
     });
+    if (scopeGeneration !== scopeGenerationRef.current) return;
     if (!result) {
       clearRetry(retryKey);
       return;
@@ -596,7 +725,7 @@ export function useDocumentConversations({
       registerRetry(
         retryKey,
         result.reason,
-        () => persistFork(conversationId, throughMessageId, sourceTitle, creationKey, mutationKey),
+        () => persistFork(conversationId, throughMessageId, sourceTitle, creationKey, mutationKey, scopeGeneration),
       );
       return;
     }
@@ -623,6 +752,11 @@ export function useDocumentConversations({
     forkConversation,
     loadState,
     hasPendingRetries: pendingRetryCount > 0,
+    hasMore: nextCursor !== null,
+    isLoadingMore,
+    loadMoreErrorReason,
+    loadConversationDetail,
+    loadMore,
     markConversationIdle,
     reload: load,
     renameConversation,
@@ -631,13 +765,16 @@ export function useDocumentConversations({
   };
 }
 
-function toDocumentConversationSession(conversation: StoredConversationView): DocumentConversationSession {
+function toDocumentConversationSession(
+  conversation: StoredConversationSummary | StoredConversationView,
+): DocumentConversationSession {
+  const hasTranscript = "messages" in conversation;
   return {
     archived: conversation.archived,
     command: conversation.command,
     createdAt: conversation.createdAt,
     id: conversation.id,
-    messages: conversation.messages.map((message) => ({
+    messages: hasTranscript ? conversation.messages.map((message) => ({
       aiRunId: message.aiRunId ?? undefined,
       command: message.command ?? undefined,
       content: message.content,
@@ -646,13 +783,25 @@ function toDocumentConversationSession(conversation: StoredConversationView): Do
       proposalId: message.proposalId ?? undefined,
       role: message.role,
       scopeLabel: message.scopeLabel ?? undefined,
-    })),
+    })) : [],
     status: conversation.status,
     syncStatus: conversation.syncStatus,
     title: conversation.title,
+    transcriptState: hasTranscript ? "loaded" : "idle",
     updatedAt: conversation.updatedAt,
     version: conversation.version,
   };
+}
+
+function mergeConversationSummary(
+  current: DocumentConversationSession | undefined,
+  summary: DocumentConversationSession,
+) {
+  if (!current) return summary;
+  if (current.version > summary.version) return current;
+  return current.version === summary.version && current.transcriptState === "loaded"
+    ? { ...summary, messages: current.messages, transcriptState: "loaded" as const }
+    : summary;
 }
 
 function matchesAttempt(session: DocumentConversationSession, attempt: ConversationAttempt) {
@@ -678,6 +827,7 @@ function createUnavailableStore(): ConversationStore {
     archive: unavailable,
     create: unavailable,
     fork: unavailable,
+    get: unavailable,
     list: unavailable,
     rename: unavailable,
     setStatus: unavailable,

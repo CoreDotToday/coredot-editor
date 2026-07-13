@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createDocumentSessionClient,
   DocumentSessionConflictError,
+  DocumentSessionInvalidProfileError,
+  DocumentSessionRequestError,
   type DocumentSessionDraft,
 } from "./document-session-client";
 
@@ -65,6 +67,110 @@ describe("document session client", () => {
       localDraft: draft,
       serverDocument: latest,
     });
+  });
+
+  it("returns a typed invalid-profile save result with the field violation", async () => {
+    const client = createDocumentSessionClient(vi.fn().mockResolvedValue(jsonResponse({
+      error: "Document violates active Project Profile",
+      reason: "invalid_project_profile",
+      violation: { fieldId: "owner", ok: false, reason: "required" },
+    }, 400)));
+
+    await expect(client.save("doc_1", draft, 3)).resolves.toEqual({
+      kind: "invalid_profile",
+      status: 400,
+      violation: { fieldId: "owner", ok: false, reason: "required" },
+    });
+  });
+
+  it("returns a generic save failure when the profile violation reason cannot be coerced", async () => {
+    const client = createDocumentSessionClient(vi.fn().mockResolvedValue(jsonResponse({
+      reason: "invalid_project_profile",
+      violation: {
+        fieldId: "owner",
+        ok: false,
+        reason: { toString: null, valueOf: null },
+      },
+    }, 400)));
+
+    await expect(client.save("doc_1", draft, 3)).resolves.toEqual({
+      kind: "failed",
+      status: 400,
+    });
+  });
+
+  it("rejects invalid readiness identifiers instead of casting them into a profile violation", async () => {
+    const client = createDocumentSessionClient(vi.fn().mockResolvedValue(jsonResponse({
+      reason: "invalid_project_profile",
+      violation: {
+        current: "draft",
+        next: "not-a-readiness-state",
+        reason: "invalid_readiness_transition",
+      },
+    }, 400)));
+
+    await expect(client.save("doc_1", draft, 3)).resolves.toEqual({
+      kind: "failed",
+      status: 400,
+    });
+  });
+
+  it("treats a successful invalid-profile-shaped body as a malformed success contract", async () => {
+    const client = createDocumentSessionClient(vi.fn().mockResolvedValue(jsonResponse({
+      reason: "invalid_project_profile",
+      violation: { fieldId: "owner", ok: false, reason: "required" },
+    })));
+
+    await expect(client.save("doc_1", draft, 3)).resolves.toEqual({
+      kind: "failed",
+      status: 200,
+    });
+  });
+
+  it.each([
+    ["single apply", (client: ReturnType<typeof createDocumentSessionClient>) => client.applyProposal("proposal_1", {
+      appliedMode: "replace",
+      document: { id: "doc_1", ...draft },
+      expectedRevision: 3,
+    })],
+    ["bulk apply", (client: ReturnType<typeof createDocumentSessionClient>) => client.applyProposalBatch({
+      document: { id: "doc_1", ...draft },
+      expectedRevision: 3,
+      proposals: [{ appliedMode: "replace" as const, id: "proposal_1" }],
+    })],
+    ["undo", (client: ReturnType<typeof createDocumentSessionClient>) => client.undoChange("change_1", 3)],
+  ])("throws a typed invalid-profile request error for %s", async (_name, requestChange) => {
+    const client = createDocumentSessionClient(vi.fn().mockResolvedValue(jsonResponse({
+      reason: "invalid_project_profile",
+      violation: { fieldId: "owner", ok: false, reason: "invalid_length" },
+    }, 400)));
+
+    const result = requestChange(client);
+    await expect(result).rejects.toBeInstanceOf(DocumentSessionInvalidProfileError);
+    await expect(result).rejects.toMatchObject({
+      status: 400,
+      violation: { fieldId: "owner", ok: false, reason: "invalid_length" },
+    });
+  });
+
+  it("throws a generic request error when the profile violation reason cannot be coerced", async () => {
+    const client = createDocumentSessionClient(vi.fn().mockResolvedValue(jsonResponse({
+      reason: "invalid_project_profile",
+      violation: {
+        fieldId: "owner",
+        ok: false,
+        reason: { toString: null, valueOf: null },
+      },
+    }, 400)));
+
+    const result = client.applyProposal("proposal_1", {
+      appliedMode: "replace",
+      document: { id: "doc_1", ...draft },
+      expectedRevision: 3,
+    });
+    await expect(result).rejects.toBeInstanceOf(DocumentSessionRequestError);
+    await expect(result).rejects.not.toBeInstanceOf(TypeError);
+    await expect(result).rejects.toMatchObject({ status: 400 });
   });
 
   it("parses durable change identity for single, bulk, and undo responses", async () => {

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { setProtectedRequestContextDependenciesForTests } from "@/features/auth/route-context";
 import { createConversation, listConversations } from "@/features/ai/conversation-repository";
+import { InvalidCollectionCursorError } from "@/features/pagination/collection-cursor";
 import { TEST_REQUEST_CONTEXT } from "@/test/auth-context";
 import { GET, OPTIONS, POST } from "./route";
 
@@ -56,9 +57,11 @@ describe("document conversation routes", () => {
   });
 
   it("lists a bounded Workspace-scoped page", async () => {
+    const { messages: _messages, ...summary } = conversation;
+    void _messages;
     vi.mocked(listConversations).mockResolvedValueOnce({
       ok: true,
-      value: { items: [conversation], nextCursor: "next" },
+      value: { items: [summary], nextCursor: "next" },
     });
     const response = await GET(
       new Request("http://localhost/api/documents/doc-a/conversations?limit=10&includeArchived=true"),
@@ -66,13 +69,27 @@ describe("document conversation routes", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ conversations: [{ id: "conversation-a" }], nextCursor: "next" });
+    const body = await response.json();
+    expect(body).toMatchObject({ conversations: [{ id: "conversation-a" }], nextCursor: "next" });
+    expect(body.conversations[0]).not.toHaveProperty("messages");
     expect(listConversations).toHaveBeenCalledWith(TEST_REQUEST_CONTEXT, {
       cursor: undefined,
       documentId: "doc-a",
       includeArchived: true,
       limit: 10,
     });
+  });
+
+  it("returns 400 for a cursor replayed outside its original list scope", async () => {
+    vi.mocked(listConversations).mockRejectedValueOnce(new InvalidCollectionCursorError());
+
+    const response = await GET(
+      new Request("http://localhost/api/documents/doc-b/conversations?cursor=wrong-scope"),
+      { params: Promise.resolve({ id: "doc-b" }) },
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({ error: "Invalid collection cursor" });
   });
 
   it("creates a conversation with bounded JSON and a required idempotency key", async () => {

@@ -56,6 +56,13 @@ export function documentChangeResponse(result: DocumentChangeResult, singlePropo
   if (result.reason === "invalid_batch" || result.reason === "invalid_revision") {
     return NextResponse.json({ error: "Invalid request body", reason: result.reason }, { status: 400 });
   }
+  if (result.reason === "invalid_profile") {
+    return NextResponse.json({
+      error: "Document violates active Project Profile",
+      reason: "invalid_project_profile",
+      violation: result.violation,
+    }, { status: 400 });
+  }
   if (result.reason === "not_found") {
     return NextResponse.json({ error: "Document change resource not found" }, { status: 404 });
   }
