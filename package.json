@@ -34,6 +34,7 @@
     "db:seed": "tsx src/db/seed.ts",
     "db:setup": "pnpm db:migrate && pnpm db:seed",
     "db:claim-local-workspace": "tsx scripts/db/claim-local-workspace.ts",
+    "ai:recover-stale-runs": "tsx scripts/ai/recover-stale-runs.ts",
     "docs:serve": "python3 -m mkdocs serve",
     "docs:build": "python3 -m mkdocs build --strict",
     "docker:rag:up": "bash scripts/rag/verify-docker-env.sh up",
@@ -41,6 +42,7 @@
     "docker:rag:verify": "bash scripts/rag/verify-docker-env.sh verify",
     "e2e:prepare": "tsx scripts/e2e/prepare.ts",
     "e2e": "pnpm e2e:prepare && playwright test",
+    "e2e:production": "tsx scripts/e2e/run-production-smoke.ts",
     "security:audit": "pnpm audit --audit-level moderate",
     "security:verify-auth-startup": "pnpm build:docx-worker && node scripts/security/verify-production-auth-startup.mjs",
     "release:check": "pnpm lint && pnpm typecheck && pnpm test && pnpm e2e && pnpm security:verify-auth-startup && pnpm build && pnpm security:audit"

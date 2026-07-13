@@ -1,5 +1,13 @@
 import type { WorkspaceScope } from "@/features/auth/request-context";
 import { isAiProviderName } from "@/features/ai/provider-catalog";
+import {
+  emitAiExecutionTelemetry,
+  normalizeAiExecutionErrorClass,
+  type AiExecutionTelemetryEvent,
+} from "@/features/observability/telemetry";
+
+export { emitAiExecutionTelemetry } from "@/features/observability/telemetry";
+export type { AiExecutionTelemetryEvent } from "@/features/observability/telemetry";
 
 const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 
@@ -61,6 +69,7 @@ export type AiExecutionStepSuccess<T> = { ok: true; value: T };
 export type DurableAiRun = {
   commandType?: "document_review" | "selection_rewrite";
   createdAt?: Date;
+  executionToken?: string | null;
   id: string;
   idempotencyKey?: string | null;
   operationFingerprint?: string | null;
@@ -75,7 +84,7 @@ export type DurableAiOperation = {
 };
 
 export type AiRunClaim =
-  | { kind: "claimed"; run: DurableAiRun }
+  | { kind: "claimed"; run: DurableAiRun & { executionToken: string } }
   | ({ kind: "completed" } & DurableAiOperation)
   | { kind: "conflict" }
   | { kind: "in_progress"; run: DurableAiRun };
@@ -86,16 +95,6 @@ export type ProviderReadiness<TProvider> = {
   provider: TProvider;
   providerName: string;
 } | AiExecutionStepFailure;
-
-export type AiExecutionTelemetryEvent = {
-  duration: number;
-  errorClass?: string;
-  operation: "review" | "rewrite";
-  provider?: string;
-  requestId: string;
-  status: number;
-  type: "ai_execution";
-};
 
 export type AiExecutionAdmission = {
   kind: "ai_execution_admitted";
@@ -108,25 +107,6 @@ export type AiExecutionAdmission = {
 export type AiExecutionAdmissionResult =
   | { admission: AiExecutionAdmission; ok: true }
   | AiExecutionStepFailure;
-
-const SAFE_TELEMETRY_ERROR_CLASSES = new Set([
-  "ai_execution_unavailable",
-  "ai_generation_failed",
-  "ai_operation_in_progress",
-  "idempotency_key_reused",
-  "invalid_durable_result",
-  "operation_timed_out",
-  "preflight_failed",
-  "preflight_rejected",
-  "provider_unavailable",
-  "request_aborted",
-  "request_budget_denied",
-  "unknown_failure",
-]);
-
-export function emitAiExecutionTelemetry(event: AiExecutionTelemetryEvent) {
-  console.info(event);
-}
 
 export async function admitAiOperation(options: {
   admitRequest: () => Promise<Response | null>;
@@ -186,6 +166,7 @@ export type AiExecutionOptions<TContext, TProvider, TOutput, TResult> = {
   completeAiRunWithProposals: (
     scope: WorkspaceScope,
     id: string,
+    executionToken: string,
     outputText: string,
     proposals: unknown[],
   ) => Promise<DurableAiOperation | null>;
@@ -194,6 +175,7 @@ export type AiExecutionOptions<TContext, TProvider, TOutput, TResult> = {
   failAiRun: (
     scope: WorkspaceScope,
     id: string,
+    executionToken: string,
     errorMessage: string,
     options?: { retryNotBeforeAt?: Date | null },
   ) => Promise<unknown>;
@@ -342,7 +324,7 @@ export async function executeAiOperation<TContext, TProvider, TOutput, TResult>(
       if (claimPromise && isLifecycleError(error)) {
         void claimPromise.then((lateClaim) => {
           if (lateClaim.kind === "claimed") {
-            startFailurePersistence(options, lateClaim.run.id, failure);
+            startFailurePersistence(options, lateClaim.run.id, lateClaim.run.executionToken, failure);
           }
         }).catch(() => undefined);
       }
@@ -359,6 +341,7 @@ export async function executeAiOperation<TContext, TProvider, TOutput, TResult>(
       const finalized = await lifecycle.run(() => options.completeAiRunWithProposals(
         options.scope,
         claim.run.id,
+        claim.run.executionToken,
         finalization.outputText,
         finalization.proposals,
       ));
@@ -372,7 +355,7 @@ export async function executeAiOperation<TContext, TProvider, TOutput, TResult>(
       }, providerResult.providerName);
     } catch (error) {
       const failure = classifyExecutionError(error);
-      startFailurePersistence(options, claim.run.id, failure);
+      startFailurePersistence(options, claim.run.id, claim.run.executionToken, failure);
       return finish(failure, providerResult.providerName);
     }
   } finally {
@@ -383,6 +366,7 @@ export async function executeAiOperation<TContext, TProvider, TOutput, TResult>(
 function startFailurePersistence<TContext, TProvider, TOutput, TResult>(
   options: AiExecutionOptions<TContext, TProvider, TOutput, TResult>,
   runId: string,
+  executionToken: string,
   failure: AiExecutionStepFailure,
 ) {
   try {
@@ -390,8 +374,8 @@ function startFailurePersistence<TContext, TProvider, TOutput, TResult>(
       ? new Date(Date.now() + options.deadlineMs)
       : undefined;
     const persisted = retryNotBeforeAt
-      ? options.failAiRun(options.scope, runId, failure.error, { retryNotBeforeAt })
-      : options.failAiRun(options.scope, runId, failure.error);
+      ? options.failAiRun(options.scope, runId, executionToken, failure.error, { retryNotBeforeAt })
+      : options.failAiRun(options.scope, runId, executionToken, failure.error);
     void Promise.resolve(persisted).catch(() => undefined);
   } catch {
     // The primary bounded failure remains authoritative if persistence is unavailable.
@@ -406,11 +390,7 @@ function emitTelemetry(
 ) {
   const safeProvider = isAiProviderName(provider) ? provider : undefined;
   const rawErrorClass = !result.ok ? result.code ?? "unknown_failure" : undefined;
-  const safeErrorClass = rawErrorClass && SAFE_TELEMETRY_ERROR_CLASSES.has(rawErrorClass)
-    ? rawErrorClass
-    : rawErrorClass
-      ? "unknown_failure"
-      : undefined;
+  const safeErrorClass = normalizeAiExecutionErrorClass(rawErrorClass);
   const event: AiExecutionTelemetryEvent = {
     duration: Math.max(0, Date.now() - startedAt),
     ...(safeErrorClass ? { errorClass: safeErrorClass } : {}),

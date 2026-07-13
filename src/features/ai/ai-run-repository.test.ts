@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import * as schema from "@/db/schema";
 import { executeAiOperation } from "./ai-execution";
 import { createAiRunRepository } from "./ai-run-repository";
+import { recoverStaleAiRuns } from "./recover-stale-runs";
 
 const tempDirs: string[] = [];
 const workspaceA = { workspaceId: "workspace_a" };
@@ -73,6 +74,7 @@ async function createIsolatedAiRunDb() {
       idempotency_key text,
       operation_fingerprint text,
       retry_not_before_at integer,
+      execution_token text,
       input_summary_json text NOT NULL,
       output_text text DEFAULT '' NOT NULL,
       status text NOT NULL,
@@ -206,13 +208,19 @@ describe("AI run repository", () => {
       model: "stub-editor",
       inputSummaryJson: { selectedTextLength: 4 },
     });
-    const completedRun = await repository.completeAiRun(workspaceA, run.id, "New text");
-    const duplicateCompletion = await repository.completeAiRun(workspaceA, run.id, "late completion");
-    const failedRun = await repository.failAiRun(workspaceA, run.id, "late failure");
+    if (!run.executionToken) throw new Error("Expected execution token");
+    const completedRun = await repository.completeAiRun(workspaceA, run.id, run.executionToken, "New text");
+    const duplicateCompletion = await repository.completeAiRun(
+      workspaceA,
+      run.id,
+      run.executionToken,
+      "late completion",
+    );
+    const failedRun = await repository.failAiRun(workspaceA, run.id, run.executionToken, "late failure");
     const runs = await repository.listAiRunsForDocument(workspaceA, "doc_1");
 
     expect(run.status).toBe("pending");
-    expect(completedRun?.status).toBe("completed");
+    expect(completedRun).toMatchObject({ executionToken: null, status: "completed" });
     expect(completedRun?.outputText).toBe("New text");
     expect(duplicateCompletion).toBeNull();
     expect(failedRun).toBeNull();
@@ -242,8 +250,14 @@ describe("AI run repository", () => {
     expect([first.kind, second.kind].sort()).toEqual(["claimed", "in_progress"]);
     const claimed = first.kind === "claimed" ? first : second;
     if (claimed.kind !== "claimed") throw new Error("Expected one claimant");
+    if (!claimed.run.executionToken) throw new Error("Expected execution token");
 
-    const finalized = await repository.completeAiRunWithProposals(workspaceA, claimed.run.id, "durable review", [
+    const finalized = await repository.completeAiRunWithProposals(
+      workspaceA,
+      claimed.run.id,
+      claimed.run.executionToken,
+      "durable review",
+      [
       {
         documentId: "doc_1",
         explanation: "First.",
@@ -256,7 +270,8 @@ describe("AI run repository", () => {
         replacementText: "Second replacement",
         targetText: "Second target",
       },
-    ]);
+      ],
+    );
     const replay = await repository.claimAiRun(workspaceA, input);
     const stored = await repository.getAiRunByIdempotencyKey(workspaceA, "shared-key");
 
@@ -332,7 +347,8 @@ describe("AI run repository", () => {
     };
     const initial = await repository.claimAiRun(workspaceA, input);
     if (initial.kind !== "claimed") throw new Error("Expected initial claim");
-    await repository.failAiRun(workspaceA, initial.run.id, "AI generation failed");
+    if (!initial.run.executionToken) throw new Error("Expected execution token");
+    await repository.failAiRun(workspaceA, initial.run.id, initial.run.executionToken, "AI generation failed");
 
     const [firstRetry, secondRetry] = await Promise.all([
       repository.claimAiRun(workspaceA, input),
@@ -340,8 +356,114 @@ describe("AI run repository", () => {
     ]);
 
     expect([firstRetry.kind, secondRetry.kind].sort()).toEqual(["claimed", "in_progress"]);
-    expect(firstRetry.kind === "claimed" ? firstRetry.run.id : secondRetry.kind === "claimed" ? secondRetry.run.id : null)
-      .toBe(initial.run.id);
+    const retried = firstRetry.kind === "claimed" ? firstRetry : secondRetry;
+    expect(retried.kind === "claimed" ? retried.run.id : null).toBe(initial.run.id);
+    expect(retried.kind === "claimed" ? retried.run.executionToken : null).toEqual(expect.any(String));
+    expect(retried.kind === "claimed" ? retried.run.executionToken : null).not.toBe(initial.run.executionToken);
+  });
+
+  it("fences late completion and failure from an older failed attempt", async () => {
+    const db = await createIsolatedAiRunDb();
+    const repository = createAiRunRepository(db);
+    const input = {
+      commandType: "selection_rewrite" as const,
+      documentId: "doc_1",
+      idempotencyKey: "attempt-fence-key",
+      inputSummaryJson: {},
+      model: "stub-editor",
+      operationFingerprint: "attempt-fence-fingerprint",
+      promptTemplateId: "tpl_1",
+      provider: "stub",
+    };
+    const first = await repository.claimAiRun(workspaceA, input);
+    if (first.kind !== "claimed" || !first.run.executionToken) throw new Error("Expected first claim token");
+    await repository.failAiRun(workspaceA, first.run.id, first.run.executionToken, "first failure");
+    const retry = await repository.claimAiRun(workspaceA, input);
+    if (retry.kind !== "claimed" || !retry.run.executionToken) throw new Error("Expected retry claim token");
+
+    await expect(
+      repository.completeAiRun(workspaceA, retry.run.id, first.run.executionToken, "late output"),
+    ).resolves.toBeNull();
+    await expect(
+      repository.failAiRun(workspaceA, retry.run.id, first.run.executionToken, "late failure"),
+    ).resolves.toBeNull();
+    await expect(
+      repository.completeAiRunWithProposals(
+        workspaceA,
+        retry.run.id,
+        first.run.executionToken,
+        "late review",
+        [{
+          documentId: "doc_1",
+          explanation: "Late.",
+          replacementText: "Late replacement",
+          targetText: "Text",
+        }],
+      ),
+    ).resolves.toBeNull();
+
+    const [stored] = await repository.listAiRunsForDocument(workspaceA, "doc_1");
+    expect(stored).toMatchObject({
+      errorMessage: null,
+      executionToken: retry.run.executionToken,
+      outputText: "",
+      status: "pending",
+    });
+    await expect(db.select().from(schema.aiProposals)).resolves.toEqual([]);
+
+    await expect(
+      repository.completeAiRun(workspaceA, retry.run.id, retry.run.executionToken, "current output"),
+    ).resolves.toMatchObject({ executionToken: null, outputText: "current output", status: "completed" });
+  });
+
+  it("fences an old process after recovery reclaims and retries its stale attempt", async () => {
+    const db = await createIsolatedAiRunDb();
+    const repository = createAiRunRepository(db);
+    const input = {
+      commandType: "document_review" as const,
+      documentId: "doc_1",
+      idempotencyKey: "recovery-attempt-fence-key",
+      inputSummaryJson: {},
+      model: "stub-editor",
+      operationFingerprint: "recovery-attempt-fence-fingerprint",
+      promptTemplateId: "tpl_1",
+      provider: "stub",
+    };
+    const staleAttempt = await repository.claimAiRun(workspaceA, input);
+    if (staleAttempt.kind !== "claimed" || !staleAttempt.run.executionToken) {
+      throw new Error("Expected stale attempt token");
+    }
+    const before = new Date("2026-01-02T00:00:00.000Z");
+    await db.update(schema.aiRuns)
+      .set({ updatedAt: new Date(before.getTime() - 1) })
+      .where(sql`${schema.aiRuns.id} = ${staleAttempt.run.id}`);
+
+    await expect(recoverStaleAiRuns(db, {
+      before,
+      now: new Date("2026-01-03T00:00:00.000Z"),
+    })).resolves.toEqual({ recoveredCount: 1 });
+    const retry = await repository.claimAiRun(workspaceA, input);
+    if (retry.kind !== "claimed" || !retry.run.executionToken) throw new Error("Expected retry token");
+    expect(retry.run.executionToken).not.toBe(staleAttempt.run.executionToken);
+
+    await expect(repository.completeAiRun(
+      workspaceA,
+      staleAttempt.run.id,
+      staleAttempt.run.executionToken,
+      "late stale output",
+    )).resolves.toBeNull();
+    await expect(repository.failAiRun(
+      workspaceA,
+      staleAttempt.run.id,
+      staleAttempt.run.executionToken,
+      "late stale failure",
+    )).resolves.toBeNull();
+    await expect(repository.completeAiRun(
+      workspaceA,
+      retry.run.id,
+      retry.run.executionToken,
+      "fresh output",
+    )).resolves.toMatchObject({ executionToken: null, outputText: "fresh output", status: "completed" });
   });
 
   it("keeps timeout or abort failures non-reclaimable until stale-run recovery explicitly releases them", async () => {
@@ -359,8 +481,15 @@ describe("AI run repository", () => {
     };
     const initial = await repository.claimAiRun(workspaceA, input);
     if (initial.kind !== "claimed") throw new Error("Expected initial claim");
+    if (!initial.run.executionToken) throw new Error("Expected execution token");
     const retryNotBeforeAt = new Date(Date.now() + 60_000);
-    await repository.failAiRun(workspaceA, initial.run.id, "Operation timed out", { retryNotBeforeAt });
+    await repository.failAiRun(
+      workspaceA,
+      initial.run.id,
+      initial.run.executionToken,
+      "Operation timed out",
+      { retryNotBeforeAt },
+    );
 
     const retry = await repository.claimAiRun(workspaceA, input);
 
@@ -396,7 +525,8 @@ describe("AI run repository", () => {
     };
     const initial = await repository.claimAiRun(workspaceA, claimInput);
     if (initial.kind !== "claimed") throw new Error("Expected initial claim");
-    await repository.failAiRun(workspaceA, initial.run.id, "AI generation failed");
+    if (!initial.run.executionToken) throw new Error("Expected execution token");
+    await repository.failAiRun(workspaceA, initial.run.id, initial.run.executionToken, "AI generation failed");
 
     let releaseExecution!: () => void;
     let markStarted!: () => void;
@@ -418,12 +548,13 @@ describe("AI run repository", () => {
         startedAt: Date.now(),
       },
       claimAiRun: repository.claimAiRun,
-      completeAiRunWithProposals: (scope, id, outputText, proposals) =>
+      completeAiRunWithProposals: (scope, id, executionToken, outputText, proposals) =>
         repository.completeAiRunWithProposals(
           scope,
           id,
+          executionToken,
           outputText,
-          proposals as Parameters<typeof repository.completeAiRunWithProposals>[3],
+          proposals as Parameters<typeof repository.completeAiRunWithProposals>[4],
         ),
       deadlineMs: 5_000,
       execute,
@@ -467,9 +598,10 @@ describe("AI run repository", () => {
       model: "stub-editor",
       inputSummaryJson: { documentTextLength: 4 },
     });
+    if (!run.executionToken) throw new Error("Expected execution token");
 
     await expect(
-      repository.completeAiRunWithProposals(workspaceA, run.id, "review output", [
+      repository.completeAiRunWithProposals(workspaceA, run.id, run.executionToken, "review output", [
         {
           documentId: "doc_1",
           targetText: "good",
@@ -503,17 +635,51 @@ describe("AI run repository", () => {
       model: "stub-editor",
       inputSummaryJson: { documentTextLength: 4 },
     });
+    if (!run.executionToken) throw new Error("Expected execution token");
 
     await expect(repository.listAiRunsForDocument(workspaceB, "doc_1")).resolves.toEqual([]);
-    await expect(repository.completeAiRun(workspaceB, run.id, "Hijacked")).resolves.toBeNull();
-    await expect(repository.failAiRun(workspaceB, run.id, "Hijacked")).resolves.toBeNull();
+    await expect(repository.completeAiRun(workspaceB, run.id, run.executionToken, "Hijacked")).resolves.toBeNull();
+    await expect(repository.failAiRun(workspaceB, run.id, run.executionToken, "Hijacked")).resolves.toBeNull();
     await expect(
-      repository.completeAiRunWithProposals(workspaceB, run.id, "Hijacked", []),
+      repository.completeAiRunWithProposals(workspaceB, run.id, run.executionToken, "Hijacked", []),
     ).resolves.toBeNull();
 
     await expect(repository.listAiRunsForDocument(workspaceA, "doc_1")).resolves.toEqual([
       expect.objectContaining({ id: run.id, outputText: "", status: "pending", workspaceId: workspaceA.workspaceId }),
     ]);
+  });
+
+  it("does not finalize a migrated legacy row whose execution token is null", async () => {
+    const db = await createIsolatedAiRunDb();
+    const repository = createAiRunRepository(db);
+    const timestamp = new Date("2026-01-01T00:00:00.000Z").getTime();
+    await db.run(sql`
+      INSERT INTO ai_runs (
+        id, workspace_id, document_id, prompt_template_id, command_type, provider, model,
+        idempotency_key, operation_fingerprint, retry_not_before_at, execution_token,
+        input_summary_json, output_text, status, was_applied, error_message, created_at, updated_at
+      ) VALUES (
+        'legacy_null_token', 'workspace_a', 'doc_1', 'tpl_1', 'document_review', 'stub',
+        'stub-editor', 'legacy-null-key', 'legacy-null-fingerprint', NULL, NULL, '{}', '',
+        'pending', false, NULL, ${timestamp}, ${timestamp}
+      )
+    `);
+
+    await expect(repository.completeAiRun(
+      workspaceA,
+      "legacy_null_token",
+      "invented-token",
+      "unsafe output",
+    )).resolves.toBeNull();
+    await expect(repository.failAiRun(
+      workspaceA,
+      "legacy_null_token",
+      "invented-token",
+      "unsafe failure",
+    )).resolves.toBeNull();
+    await expect(repository.listAiRunsForDocument(workspaceA, "doc_1")).resolves.toContainEqual(
+      expect.objectContaining({ executionToken: null, id: "legacy_null_token", status: "pending" }),
+    );
   });
 
   it("rejects AI runs that reference another workspace's document or template", async () => {
@@ -573,7 +739,8 @@ describe("AI run repository", () => {
       model: "stub-editor",
       inputSummaryJson: {},
     });
-    await repository.completeAiRunWithProposals(workspaceA, run.id, "review", [
+    if (!run.executionToken) throw new Error("Expected execution token");
+    await repository.completeAiRunWithProposals(workspaceA, run.id, run.executionToken, "review", [
       {
         documentId: "doc_1",
         targetText: "Text",

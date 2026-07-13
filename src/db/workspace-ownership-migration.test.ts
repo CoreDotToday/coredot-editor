@@ -148,6 +148,14 @@ async function applyAiIdempotencyMigration(client: Awaited<ReturnType<typeof cre
   }
 }
 
+async function applyAiRunAttemptTokenMigration(client: Awaited<ReturnType<typeof createLegacyDatabase>>) {
+  const migration = await readFile(resolve(process.cwd(), "drizzle/0012_ai_run_attempt_token.sql"), "utf8");
+  for (const statement of migration.split("--> statement-breakpoint")) {
+    const sql = statement.trim();
+    if (sql) await client.execute(sql);
+  }
+}
+
 describe("workspace ownership migration", () => {
   it("adds tenant-safe document change relations with valid foreign keys", async () => {
     const client = await createLegacyDatabase();
@@ -230,7 +238,7 @@ describe("workspace ownership migration", () => {
     expect((await client.execute("PRAGMA foreign_key_check")).rows).toEqual([]);
   });
 
-  it("adds nullable AI idempotency identity to existing runs and enforces workspace-scoped uniqueness", async () => {
+  it("adds nullable AI idempotency and execution-attempt identity without disturbing legacy runs", async () => {
     const client = await createLegacyDatabase();
     await applyWorkspaceOwnershipMigration(client);
     await applyRequestBudgetMigration(client);
@@ -238,11 +246,14 @@ describe("workspace ownership migration", () => {
     await applyDocumentChangesMigration(client);
     await applyDocumentCreationKeyMigration(client);
     await applyAiIdempotencyMigration(client);
+    await applyAiRunAttemptTokenMigration(client);
 
     expect((await client.execute(
-      "SELECT output_text, idempotency_key, operation_fingerprint, retry_not_before_at FROM ai_runs WHERE id = 'legacy_run'",
+      `SELECT output_text, idempotency_key, operation_fingerprint, retry_not_before_at, execution_token
+       FROM ai_runs WHERE id = 'legacy_run'`,
     )).rows).toEqual([
       expect.objectContaining({
+        execution_token: null,
         idempotency_key: null,
         operation_fingerprint: null,
         output_text: "Output",
@@ -252,6 +263,9 @@ describe("workspace ownership migration", () => {
     expect((await client.execute(
       "SELECT result_ordinal FROM ai_proposals WHERE id = 'legacy_proposal'",
     )).rows).toEqual([expect.objectContaining({ result_ordinal: null })]);
+    expect((await client.execute(
+      "PRAGMA index_info('ai_runs_status_updated_idx')",
+    )).rows.map((row) => row.name)).toEqual(["status", "updated_at"]);
     await client.execute(`
       UPDATE ai_runs
       SET idempotency_key = 'review-key', operation_fingerprint = 'fingerprint-a'

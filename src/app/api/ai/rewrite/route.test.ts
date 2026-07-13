@@ -30,9 +30,9 @@ vi.mock("@/features/templates/template-repository", () => ({
 vi.mock("@/features/ai/ai-run-repository", () => ({
   claimAiRun: vi.fn(async (_scope, input) => ({
     kind: "claimed",
-    run: { id: "run_1", ...input, status: "pending" },
+    run: { executionToken: "attempt-token-1", id: "run_1", ...input, status: "pending" },
   })),
-  completeAiRunWithProposals: vi.fn(async (_scope, id, outputText, proposals) => ({
+  completeAiRunWithProposals: vi.fn(async (_scope, id, _executionToken, outputText, proposals) => ({
     run: {
       commandType: "selection_rewrite",
       createdAt: new Date("2026-01-01T00:00:00.000Z"),
@@ -51,7 +51,7 @@ vi.mock("@/features/ai/ai-run-repository", () => ({
     })),
   })),
   createAiRun: vi.fn(async (_scope, input) => ({ id: "run_1", ...input, status: "pending" })),
-  failAiRun: vi.fn(async (_scope, id, errorMessage) => ({ id, errorMessage, status: "failed" })),
+  failAiRun: vi.fn(async (_scope, id, _executionToken, errorMessage) => ({ id, errorMessage, status: "failed" })),
   getAiRunByIdempotencyKey: vi.fn(async () => null),
 }));
 
@@ -308,6 +308,7 @@ describe("POST /api/ai/rewrite", () => {
       expect(failAiRun).toHaveBeenCalledWith(
         TEST_REQUEST_CONTEXT,
         "run_1",
+        "attempt-token-1",
         "Operation timed out",
         { retryNotBeforeAt: expect.any(Date) },
       );
@@ -401,6 +402,7 @@ describe("POST /api/ai/rewrite", () => {
     expect(completeAiRunWithProposals).toHaveBeenCalledWith(
       localWorkspace,
       "run_1",
+      "attempt-token-1",
       "Improved text",
       [
         expect.objectContaining({
@@ -622,6 +624,7 @@ describe("POST /api/ai/rewrite", () => {
     expect(completeAiRunWithProposals).toHaveBeenCalledWith(
       localWorkspace,
       "run_1",
+      "attempt-token-1",
       "Old text with objective written evidence requirements.",
       [
         expect.objectContaining({
@@ -661,6 +664,7 @@ describe("POST /api/ai/rewrite", () => {
     expect(completeAiRunWithProposals).toHaveBeenCalledWith(
       localWorkspace,
       "run_1",
+      "attempt-token-1",
       "Old text with clearer ownership.",
       [
         expect.objectContaining({
@@ -704,6 +708,7 @@ describe("POST /api/ai/rewrite", () => {
     expect(completeAiRunWithProposals).toHaveBeenCalledWith(
       localWorkspace,
       "run_1",
+      "attempt-token-1",
       "Old text stated directly.",
       [
         expect.objectContaining({
@@ -724,6 +729,7 @@ describe("POST /api/ai/rewrite", () => {
     expect(completeAiRunWithProposals).toHaveBeenCalledWith(
       localWorkspace,
       "run_1",
+      "attempt-token-1",
       "Improved text",
       [
         expect.objectContaining({
@@ -775,6 +781,7 @@ describe("POST /api/ai/rewrite", () => {
     expect(completeAiRunWithProposals).toHaveBeenCalledWith(
       localWorkspace,
       "run_1",
+      "attempt-token-1",
       "Next paragraph that continues the selected context.",
       [
         expect.objectContaining({
@@ -797,6 +804,7 @@ describe("POST /api/ai/rewrite", () => {
     expect(completeAiRunWithProposals).toHaveBeenCalledWith(
       localWorkspace,
       "run_1",
+      "attempt-token-1",
       "Improved text",
       [
         expect.objectContaining({
@@ -827,6 +835,7 @@ describe("POST /api/ai/rewrite", () => {
     expect(completeAiRunWithProposals).toHaveBeenCalledWith(
       localWorkspace,
       "run_1",
+      "attempt-token-1",
       "Improved text",
       [
         expect.objectContaining({
@@ -864,6 +873,7 @@ describe("POST /api/ai/rewrite", () => {
     expect(completeAiRunWithProposals).toHaveBeenCalledWith(
       localWorkspace,
       "run_1",
+      "attempt-token-1",
       "Improved text",
       [
         expect.objectContaining({
@@ -914,6 +924,7 @@ describe("POST /api/ai/rewrite", () => {
     expect(completeAiRunWithProposals).toHaveBeenCalledWith(
       localWorkspace,
       "run_1",
+      "attempt-token-1",
       "Improved text",
       [
         expect.objectContaining({
@@ -994,10 +1005,16 @@ describe("POST /api/ai/rewrite", () => {
 
     expect(response.status).toBe(500);
     expect(await response.json()).toEqual({ error: "AI generation failed" });
-    expect(failAiRun).toHaveBeenCalledWith(localWorkspace, "run_1", "AI generation failed");
+    expect(failAiRun).toHaveBeenCalledWith(
+      localWorkspace,
+      "run_1",
+      "attempt-token-1",
+      "AI generation failed",
+    );
     expect(completeAiRunWithProposals).toHaveBeenCalledWith(
       localWorkspace,
       "run_1",
+      "attempt-token-1",
       "Improved text",
       [
         expect.objectContaining({
@@ -1031,6 +1048,11 @@ describe("POST /api/ai/rewrite", () => {
 
     expect(response.status).toBe(500);
     expect(await response.json()).toEqual({ error: "AI generation failed" });
-    expect(failAiRun).toHaveBeenCalledWith(localWorkspace, "run_1", "AI generation failed");
+    expect(failAiRun).toHaveBeenCalledWith(
+      localWorkspace,
+      "run_1",
+      "attempt-token-1",
+      "AI generation failed",
+    );
   });
 });

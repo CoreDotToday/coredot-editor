@@ -37,6 +37,7 @@ function createBaseOptions() {
     completeAiRunWithProposals: vi.fn<(
       _scope: typeof scope,
       _id: string,
+      _executionToken: string,
       _outputText: string,
       _proposals: unknown[],
     ) => Promise<DurableAiOperation | null>>(),
@@ -44,7 +45,13 @@ function createBaseOptions() {
     execute: vi.fn<(_context: unknown, _provider: unknown, _signal: AbortSignal) => Promise<string>>(
       async () => "provider output",
     ),
-    failAiRun: vi.fn<(_scope: typeof scope, _id: string, _errorMessage: string) => Promise<unknown>>(),
+    failAiRun: vi.fn<(
+      _scope: typeof scope,
+      _id: string,
+      _executionToken: string,
+      _errorMessage: string,
+      _options?: { retryNotBeforeAt?: Date | null },
+    ) => Promise<unknown>>(),
     getAiRunByIdempotencyKey: vi.fn<
       (_scope: typeof scope, _key: string) => Promise<DurableAiOperation | null>
     >(async () => durable),
@@ -233,7 +240,7 @@ describe("executeAiOperation", () => {
     });
     options.claimAiRun.mockResolvedValueOnce({
       kind: "claimed",
-      run: { id: "run_1", status: "pending" },
+      run: { executionToken: "attempt-token-1", id: "run_1", status: "pending" },
     });
     options.execute.mockImplementationOnce(
       async (_context: unknown, _provider: unknown, signal: AbortSignal) =>
@@ -257,6 +264,7 @@ describe("executeAiOperation", () => {
       expect(options.failAiRun).toHaveBeenCalledWith(
         scope,
         "run_1",
+        "attempt-token-1",
         "Operation timed out",
         { retryNotBeforeAt: expect.any(Date) },
       );
@@ -299,7 +307,10 @@ describe("executeAiOperation", () => {
       provider: { name: "stub" },
       providerName: "stub",
     });
-    options.claimAiRun.mockResolvedValueOnce({ kind: "claimed", run: { id: "run_1", status: "pending" } });
+    options.claimAiRun.mockResolvedValueOnce({
+      kind: "claimed",
+      run: { executionToken: "attempt-token-1", id: "run_1", status: "pending" },
+    });
     options.prepareFinalization.mockReturnValueOnce({ outputText: "output", proposals: [] });
     options.completeAiRunWithProposals.mockImplementationOnce(async () => new Promise(() => undefined));
     options.failAiRun.mockImplementationOnce(async () => new Promise(() => undefined));
@@ -313,6 +324,13 @@ describe("executeAiOperation", () => {
 
       expect(result).toMatchObject({ code: "operation_timed_out", ok: false, status: 504 });
       expect(options.completeAiRunWithProposals).toHaveBeenCalledTimes(1);
+      expect(options.completeAiRunWithProposals).toHaveBeenCalledWith(
+        scope,
+        "run_1",
+        "attempt-token-1",
+        "output",
+        [],
+      );
       expect(options.failAiRun).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
@@ -344,13 +362,17 @@ describe("executeAiOperation", () => {
       await vi.advanceTimersByTimeAsync(100);
       expect(result).toMatchObject({ code: "operation_timed_out", ok: false, status: 504 });
 
-      resolveClaim({ kind: "claimed", run: { id: "run_late", status: "pending" } });
+      resolveClaim({
+        kind: "claimed",
+        run: { executionToken: "late-attempt-token", id: "run_late", status: "pending" },
+      });
       await vi.runAllTimersAsync();
       await Promise.resolve();
 
       expect(options.failAiRun).toHaveBeenCalledWith(
         scope,
         "run_late",
+        "late-attempt-token",
         "Operation timed out",
         { retryNotBeforeAt: expect.any(Date) },
       );
@@ -459,7 +481,10 @@ describe("executeAiOperation", () => {
       provider: { name: "stub" },
       providerName: "stub",
     });
-    options.claimAiRun.mockResolvedValueOnce({ kind: "claimed", run: { id: "run_1", status: "pending" } });
+    options.claimAiRun.mockResolvedValueOnce({
+      kind: "claimed",
+      run: { executionToken: "attempt-token-1", id: "run_1", status: "pending" },
+    });
     options.execute.mockImplementationOnce(async () => {
       markStarted();
       return new Promise<string>((resolve) => {
@@ -484,6 +509,7 @@ describe("executeAiOperation", () => {
     expect(options.failAiRun).toHaveBeenCalledWith(
       scope,
       "run_1",
+      "attempt-token-1",
       "Request aborted",
       { retryNotBeforeAt: expect.any(Date) },
     );
@@ -500,7 +526,10 @@ describe("executeAiOperation", () => {
       provider: { name: "stub" },
       providerName: "stub",
     });
-    options.claimAiRun.mockResolvedValueOnce({ kind: "claimed", run: { id: "run_1", status: "pending" } });
+    options.claimAiRun.mockResolvedValueOnce({
+      kind: "claimed",
+      run: { executionToken: "attempt-token-1", id: "run_1", status: "pending" },
+    });
     options.execute.mockRejectedValueOnce(new Error("provider failed with secret details"));
     options.failAiRun.mockResolvedValueOnce({ id: "run_1", status: "failed" });
 
@@ -510,7 +539,12 @@ describe("executeAiOperation", () => {
       ok: false,
       status: 500,
     });
-    expect(options.failAiRun).toHaveBeenCalledWith(scope, "run_1", "AI generation failed");
+    expect(options.failAiRun).toHaveBeenCalledWith(
+      scope,
+      "run_1",
+      "attempt-token-1",
+      "AI generation failed",
+    );
   });
 
   it("does no durable or provider work for a request that was already aborted", async () => {
@@ -525,7 +559,10 @@ describe("executeAiOperation", () => {
       provider: { name: "stub" },
       providerName: "stub",
     });
-    options.claimAiRun.mockResolvedValueOnce({ kind: "claimed", run: { id: "run_1", status: "pending" } });
+    options.claimAiRun.mockResolvedValueOnce({
+      kind: "claimed",
+      run: { executionToken: "attempt-token-1", id: "run_1", status: "pending" },
+    });
     options.failAiRun.mockResolvedValueOnce({ id: "run_1", status: "failed" });
 
     await expect(executeAiOperation({ ...options, requestSignal: controller.signal })).resolves.toMatchObject({
@@ -602,7 +639,10 @@ describe("executeAiOperation", () => {
       provider: { name: "stub" },
       providerName: "stub",
     });
-    options.claimAiRun.mockResolvedValueOnce({ kind: "claimed", run: { id: "run_1", status: "pending" } });
+    options.claimAiRun.mockResolvedValueOnce({
+      kind: "claimed",
+      run: { executionToken: "attempt-token-1", id: "run_1", status: "pending" },
+    });
     options.execute.mockImplementationOnce(async () => new Promise<string>(() => undefined));
     options.failAiRun.mockRejectedValueOnce(new Error("database credentials secret"));
 
@@ -660,7 +700,10 @@ describe("executeAiOperation", () => {
       provider: { name: "stub" },
       providerName: "stub",
     });
-    success.claimAiRun.mockResolvedValueOnce({ kind: "claimed", run: { id: "run_1", status: "pending" } });
+    success.claimAiRun.mockResolvedValueOnce({
+      kind: "claimed",
+      run: { executionToken: "attempt-token-1", id: "run_1", status: "pending" },
+    });
     success.prepareFinalization.mockReturnValueOnce({ outputText: "secret output", proposals: [] });
     success.completeAiRunWithProposals.mockResolvedValueOnce({
       proposals: [],
@@ -671,6 +714,13 @@ describe("executeAiOperation", () => {
       ...success,
       admission: { ...success.admission, telemetry: successTelemetry },
     });
+    expect(success.completeAiRunWithProposals).toHaveBeenCalledWith(
+      scope,
+      "run_1",
+      "attempt-token-1",
+      "secret output",
+      [],
+    );
     expect(successTelemetry).toHaveBeenCalledWith({
       duration: expect.any(Number),
       operation: "review",
@@ -703,29 +753,36 @@ describe("executeAiOperation", () => {
   it("uses a non-throwing default telemetry emitter with only allowlisted metadata", async () => {
     const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
     const options = createBaseOptions();
+    const requestId = "00000000-0000-4000-8000-000000000004";
     const withoutInjectedTelemetry = {
       ...options,
-      admission: { ...options.admission, telemetry: undefined },
+      admission: { ...options.admission, requestId, telemetry: undefined },
     };
 
     const result = await executeAiOperation(withoutInjectedTelemetry);
 
     expect(result).toMatchObject({ ok: true, replayed: true });
-    expect(info).toHaveBeenCalledWith({
-      duration: expect.any(Number),
+    expect(info).toHaveBeenCalledTimes(1);
+    const output = info.mock.calls[0]![0];
+    expect(typeof output).toBe("string");
+    const record = JSON.parse(output as string);
+    expect(record).toEqual({
+      durationMs: expect.any(Number),
       operation: "review",
-      requestId: "request-1",
+      outcome: "success",
+      requestId,
       status: 200,
       type: "ai_execution",
     });
-    expect(Object.keys(info.mock.calls[0]![0] as object).sort()).toEqual([
-      "duration",
+    expect(Object.keys(record).sort()).toEqual([
+      "durationMs",
       "operation",
+      "outcome",
       "requestId",
       "status",
       "type",
     ]);
-    expect(JSON.stringify(info.mock.calls)).not.toMatch(/workspace_a|operation-1|fingerprint-1|durable output/);
+    expect(output).not.toMatch(/workspace_a|operation-1|fingerprint-1|durable output/);
     info.mockRestore();
   });
 });

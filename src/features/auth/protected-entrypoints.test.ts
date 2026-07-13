@@ -4,6 +4,7 @@ import { pathToFileURL } from "node:url";
 import ts from "typescript";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AuthenticationRequiredError } from "./request-context";
+import { PUBLIC_API_ROUTES, isPublicApiPath } from "./public-api-routes";
 import { setProtectedRequestContextDependenciesForTests } from "./route-context";
 import { TEST_REQUEST_CONTEXT } from "@/test/auth-context";
 
@@ -38,6 +39,12 @@ function getPageRoute(pageFile: string) {
     (segment) => !(segment.startsWith("(") && segment.endsWith(")")) && !segment.startsWith("@"),
   );
   return routeSegments.length === 0 ? "/" : `/${routeSegments.join("/")}`;
+}
+
+function getApiRoute(routeFile: string) {
+  const apiDirectory = join(appDirectory, "api");
+  const relativeSegments = relative(apiDirectory, routeFile).split(sep).slice(0, -1);
+  return `/api/${relativeSegments.join("/")}`;
 }
 
 async function findServerActionFiles(directory: string): Promise<string[]> {
@@ -132,19 +139,32 @@ async function assertRouteMethodsReturnUnauthorized(
 }
 
 describe("protected server entrypoints", () => {
-  it("requires every API route to use the centralized protected route seam", async () => {
+  it("allows only the exact public API inventory and protects every other API route", async () => {
     const routeFiles = await findFiles(join(appDirectory, "api"), "route.ts");
+    const discoveredPublicRoutes = new Set<string>();
 
     expect(routeFiles.length).toBeGreaterThan(0);
+    expect(PUBLIC_API_ROUTES).toEqual(["/api/health", "/api/ready"]);
     for (const routeFile of routeFiles) {
       const source = await readFile(routeFile, "utf8");
       const analysis = analyzeRouteMethodExports(source, routeFile);
-      expect(source, relative(process.cwd(), routeFile)).toContain("createProtectedRouteHandler");
+      const apiRoute = getApiRoute(routeFile);
+      const routeLabel = relative(process.cwd(), routeFile);
+
       expect(source, relative(process.cwd(), routeFile)).not.toMatch(/workspaceId\s*:\s*["']local["']/);
-      expect(analysis.methods.length, relative(process.cwd(), routeFile)).toBeGreaterThan(0);
-      expect(analysis.violations, relative(process.cwd(), routeFile)).toEqual([]);
-      assertExplicitProtectedOptions(relative(process.cwd(), routeFile), analysis.methods);
+      expect(analysis.methods.length, routeLabel).toBeGreaterThan(0);
+      expect(analysis.violations, routeLabel).toEqual([]);
+
+      if (isPublicApiPath(apiRoute)) {
+        discoveredPublicRoutes.add(apiRoute);
+        expect(source, routeLabel).not.toContain("createProtectedRouteHandler");
+        expect(analysis.methods, routeLabel).toEqual(["GET", "HEAD", "OPTIONS"]);
+      } else {
+        expect(source, routeLabel).toContain("createProtectedRouteHandler");
+        assertExplicitProtectedOptions(routeLabel, analysis.methods);
+      }
     }
+    expect([...discoveredPublicRoutes].sort()).toEqual([...PUBLIC_API_ROUTES].sort());
   });
 
   it("rejects variable, typed const, non-async, and re-exported route methods", () => {
@@ -217,7 +237,8 @@ describe("protected server entrypoints", () => {
         throw new AuthenticationRequiredError();
       },
     });
-    const routeFiles = await findFiles(join(appDirectory, "api"), "route.ts");
+    const routeFiles = (await findFiles(join(appDirectory, "api"), "route.ts"))
+      .filter((routeFile) => !isPublicApiPath(getApiRoute(routeFile)));
     const inventory = await Promise.all(routeFiles.map(async (routeFile) => ({
       analysis: analyzeRouteMethodExports(await readFile(routeFile, "utf8"), routeFile),
       routeFile,
@@ -237,7 +258,8 @@ describe("protected server entrypoints", () => {
   });
 
   it("returns authenticated 204 OPTIONS with an Allow header matching each route", async () => {
-    const routeFiles = await findFiles(join(appDirectory, "api"), "route.ts");
+    const routeFiles = (await findFiles(join(appDirectory, "api"), "route.ts"))
+      .filter((routeFile) => !isPublicApiPath(getApiRoute(routeFile)));
 
     for (const routeFile of routeFiles) {
       const routeLabel = relative(process.cwd(), routeFile);

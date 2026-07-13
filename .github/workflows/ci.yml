@@ -25,8 +25,18 @@ jobs:
           node-version: 20
           cache: pnpm
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-docs.txt
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Install documentation dependencies
+        run: python -m pip install -r requirements-docs.txt
 
       - name: Install Playwright browser
         run: pnpm exec playwright install --with-deps chromium
@@ -45,6 +55,12 @@ jobs:
 
       - name: Build
         run: pnpm build
+
+      - name: Production artifact smoke tests
+        run: pnpm e2e:production
+
+      - name: Documentation build
+        run: pnpm docs:build
 
       - name: Security audit
         run: pnpm security:audit

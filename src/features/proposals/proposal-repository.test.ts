@@ -54,6 +54,7 @@ async function createIsolatedProposalDb() {
       idempotency_key text,
       operation_fingerprint text,
       retry_not_before_at integer,
+      execution_token text,
       input_summary_json text NOT NULL,
       output_text text DEFAULT '' NOT NULL,
       status text NOT NULL,

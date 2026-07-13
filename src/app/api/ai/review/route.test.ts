@@ -28,9 +28,9 @@ vi.mock("@/features/templates/template-repository", () => ({
 vi.mock("@/features/ai/ai-run-repository", () => ({
   claimAiRun: vi.fn(async (_scope, input) => ({
     kind: "claimed",
-    run: { id: "run_1", ...input, status: "pending" },
+    run: { executionToken: "attempt-token-1", id: "run_1", ...input, status: "pending" },
   })),
-  completeAiRunWithProposals: vi.fn(async (_scope, id, outputText, proposals) => ({
+  completeAiRunWithProposals: vi.fn(async (_scope, id, _executionToken, outputText, proposals) => ({
     run: {
       commandType: "document_review",
       createdAt: new Date("2026-01-01T00:00:00.000Z"),
@@ -420,6 +420,7 @@ describe("POST /api/ai/review", () => {
       expect(failAiRun).toHaveBeenCalledWith(
         TEST_REQUEST_CONTEXT,
         "run_1",
+        "attempt-token-1",
         "Operation timed out",
         { retryNotBeforeAt: expect.any(Date) },
       );
@@ -486,6 +487,7 @@ describe("POST /api/ai/review", () => {
     expect(completeAiRunWithProposals).toHaveBeenCalledWith(
       localWorkspace,
       "run_1",
+      "attempt-token-1",
       expect.stringContaining("Two findings."),
       expect.arrayContaining([
         expect.objectContaining({ occurrenceIndex: 0, targetText: "growth was good" }),
@@ -675,6 +677,7 @@ describe("POST /api/ai/review", () => {
     expect(completeAiRunWithProposals).toHaveBeenCalledWith(
       localWorkspace,
       "run_1",
+      "attempt-token-1",
       expect.stringContaining("Draft finding."),
       [expect.objectContaining({ targetText: "fresh edited body" })],
     );
@@ -750,6 +753,7 @@ describe("POST /api/ai/review", () => {
     expect(completeAiRunWithProposals).toHaveBeenCalledWith(
       localWorkspace,
       "run_1",
+      "attempt-token-1",
       expect.stringContaining("Findings were ambiguous."),
       [],
     );

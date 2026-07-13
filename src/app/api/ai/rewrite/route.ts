@@ -83,12 +83,13 @@ const postHandler = createProtectedRouteHandler(async (context, request: Request
   const execution = await executeAiOperation({
     admission: admitted.admission,
     claimAiRun,
-    completeAiRunWithProposals: (scope, id, outputText, proposals) =>
+    completeAiRunWithProposals: (scope, id, executionToken, outputText, proposals) =>
       completeAiRunWithProposals(
         scope,
         id,
+        executionToken,
         outputText,
-        proposals as Parameters<typeof completeAiRunWithProposals>[3],
+        proposals as Parameters<typeof completeAiRunWithProposals>[4],
       ),
     deadlineMs: RESOURCE_LIMITS.operationMs,
     execute: async (prepared, provider, signal) => normalizeSelectionRewriteResult(

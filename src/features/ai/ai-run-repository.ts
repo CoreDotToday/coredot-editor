@@ -27,6 +27,11 @@ type FinalizeAiRunProposalInput = Pick<
     >
   >;
 
+function requireExecutionToken<T extends { executionToken: string | null }>(run: T): T & { executionToken: string } {
+  if (!run.executionToken) throw new Error("Claimed AI run is missing its execution token");
+  return run as T & { executionToken: string };
+}
+
 export function createAiRunRepository(database: AiRunDatabase = db) {
   async function getAiRunByIdempotencyKey(scope: WorkspaceScope, idempotencyKey: string) {
     const [run] = await database
@@ -70,6 +75,7 @@ export function createAiRunRepository(database: AiRunDatabase = db) {
   return {
     async claimAiRun(scope: WorkspaceScope, input: ClaimAiRunInput) {
       const now = new Date();
+      const executionToken = crypto.randomUUID();
       const [inserted] = await database
         .insert(aiRuns)
         .values({
@@ -80,12 +86,13 @@ export function createAiRunRepository(database: AiRunDatabase = db) {
           status: "pending",
           wasApplied: false,
           errorMessage: null,
+          executionToken,
           createdAt: now,
           updatedAt: now,
         })
         .onConflictDoNothing({ target: [aiRuns.workspaceId, aiRuns.idempotencyKey] })
         .returning();
-      if (inserted) return { kind: "claimed" as const, run: inserted };
+      if (inserted) return { kind: "claimed" as const, run: requireExecutionToken(inserted) };
 
       const existing = await getAiRunByIdempotencyKey(scope, input.idempotencyKey);
       const classified = classifyClaim(existing, input.operationFingerprint);
@@ -93,12 +100,14 @@ export function createAiRunRepository(database: AiRunDatabase = db) {
       if (!existing) throw new Error("AI run claim could not be observed");
       if (existing.run.status !== "failed") return { kind: "in_progress" as const, run: existing.run };
 
+      const retryExecutionToken = crypto.randomUUID();
       const [retried] = await database
         .update(aiRuns)
         .set({
           commandType: input.commandType,
           documentId: input.documentId,
           errorMessage: null,
+          executionToken: retryExecutionToken,
           inputSummaryJson: input.inputSummaryJson,
           model: input.model,
           outputText: "",
@@ -116,7 +125,7 @@ export function createAiRunRepository(database: AiRunDatabase = db) {
           eq(aiRuns.status, "failed"),
         ))
         .returning();
-      if (retried) return { kind: "claimed" as const, run: retried };
+      if (retried) return { kind: "claimed" as const, run: requireExecutionToken(retried) };
 
       const raced = await getAiRunByIdempotencyKey(scope, input.idempotencyKey);
       return classifyClaim(raced, input.operationFingerprint) ?? {
@@ -137,6 +146,7 @@ export function createAiRunRepository(database: AiRunDatabase = db) {
           status: "pending",
           wasApplied: false,
           errorMessage: null,
+          executionToken: crypto.randomUUID(),
           createdAt: now,
           updatedAt: now,
         })
@@ -145,12 +155,13 @@ export function createAiRunRepository(database: AiRunDatabase = db) {
       return run!;
     },
 
-    async completeAiRun(scope: WorkspaceScope, id: string, outputText: string) {
+    async completeAiRun(scope: WorkspaceScope, id: string, executionToken: string, outputText: string) {
       const [run] = await database
         .update(aiRuns)
         .set({
           outputText,
           retryNotBeforeAt: null,
+          executionToken: null,
           status: "completed",
           errorMessage: null,
           updatedAt: new Date(),
@@ -158,6 +169,7 @@ export function createAiRunRepository(database: AiRunDatabase = db) {
         .where(and(
           eq(aiRuns.workspaceId, scope.workspaceId),
           eq(aiRuns.id, id),
+          eq(aiRuns.executionToken, executionToken),
           inArray(aiRuns.status, ["pending", "streaming"]),
         ))
         .returning();
@@ -168,6 +180,7 @@ export function createAiRunRepository(database: AiRunDatabase = db) {
     async completeAiRunWithProposals(
       scope: WorkspaceScope,
       id: string,
+      executionToken: string,
       outputText: string,
       proposals: FinalizeAiRunProposalInput[],
     ) {
@@ -178,6 +191,7 @@ export function createAiRunRepository(database: AiRunDatabase = db) {
           .set({
             outputText,
             retryNotBeforeAt: null,
+            executionToken: null,
             status: "completed",
             errorMessage: null,
             updatedAt: now,
@@ -185,6 +199,7 @@ export function createAiRunRepository(database: AiRunDatabase = db) {
           .where(and(
             eq(aiRuns.workspaceId, scope.workspaceId),
             eq(aiRuns.id, id),
+            eq(aiRuns.executionToken, executionToken),
             inArray(aiRuns.status, ["pending", "streaming"]),
           ))
           .returning();
@@ -224,6 +239,7 @@ export function createAiRunRepository(database: AiRunDatabase = db) {
     async failAiRun(
       scope: WorkspaceScope,
       id: string,
+      executionToken: string,
       errorMessage: string,
       options?: { retryNotBeforeAt?: Date | null },
     ) {
@@ -232,12 +248,14 @@ export function createAiRunRepository(database: AiRunDatabase = db) {
         .set({
           status: "failed",
           errorMessage,
+          executionToken: null,
           retryNotBeforeAt: options?.retryNotBeforeAt ?? null,
           updatedAt: new Date(),
         })
         .where(and(
           eq(aiRuns.workspaceId, scope.workspaceId),
           eq(aiRuns.id, id),
+          eq(aiRuns.executionToken, executionToken),
           inArray(aiRuns.status, ["pending", "streaming"]),
         ))
         .returning();

@@ -7,6 +7,7 @@ This guide covers the deployment shape for Coredot Editor and the environment de
 ```bash
 pnpm install
 cp .env.example .env.local
+# Set AUTH_MODE=clerk and configure Clerk test keys for a local production check.
 pnpm db:setup
 pnpm build
 pnpm start
@@ -18,7 +19,12 @@ Open [http://localhost:3000](http://localhost:3000).
 
 | Name | Required | Notes |
 | --- | --- | --- |
+| `AUTH_MODE` | Yes | Use `clerk` in production. `test` is rejected when `NODE_ENV=production`. |
+| `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` | Yes | Clerk publishable key for the deployed instance. |
+| `CLERK_SECRET_KEY` | Yes | Clerk server secret. Store it only in the deployment secret manager. |
 | `DATABASE_URL` | Yes in deployed environments | Use a writable SQLite/libSQL URL. Relative `file:` paths are mainly for local development. |
+| `DATABASE_AUTH_TOKEN` | With authenticated hosted libSQL | Canonical database token used by both the runtime client and Drizzle migrations. |
+| `TURSO_AUTH_TOKEN` | Optional compatibility fallback | Used only when `DATABASE_AUTH_TOKEN` is blank; the canonical variable wins. |
 | `AI_PROVIDER` | Recommended | Initial provider seed before `app_settings` exists. Use `stub` for demos/tests, `coredot`, `anthropic`, or `gemini` for Core.Today proxy calls, and `openai` for direct OpenAI calls. |
 | `OPENAI_API_KEY` | Only with `AI_PROVIDER=openai` | Store as a secret, never in source control. |
 | `OPENAI_MODEL` | Optional | Initial OpenAI model seed when omitted from saved settings. |
@@ -30,6 +36,8 @@ Open [http://localhost:3000](http://localhost:3000).
 | `COREDOT_GEMINI_MODEL` | Optional | Initial Core.Today Gemini model seed. Defaults to `gemini-2.5-flash`. |
 | `COREDOT_GEMINI_BASE_URL` | Optional | Initial Core.Today Gemini Base URL seed. Defaults to `https://api.core.today/llm/gemini/v1beta`. |
 | `COREDOT_MAX_COMPLETION_TOKENS` | Optional | Initial Core.Today output token seed. Defaults to `32768`. |
+
+Production startup fails before the server becomes ready if Clerk keys are missing or `AUTH_MODE=test`. Keep test-auth variables such as `TEST_PRINCIPAL_ID` and `TEST_WORKSPACE_ID` out of production. The test-format keys used by `pnpm e2e:production` are isolated smoke credentials, not deployment credentials.
 
 ## Database Setup
 
@@ -48,7 +56,48 @@ pnpm db:seed
 
 Run migrations before starting the app. The seed script is idempotent for default prompt templates.
 
+For hosted libSQL, configure one credential pair for both commands and the running app:
+
+```bash
+DATABASE_URL=libsql://YOUR_DATABASE_HOST
+DATABASE_AUTH_TOKEN=YOUR_SECRET_TOKEN
+pnpm db:migrate
+```
+
+Local `file:` URLs need no auth token. Relative file paths resolve from the application root. Hosted tokens are trimmed, whitespace-only values are ignored, and `TURSO_AUTH_TOKEN` is supported only as a fallback for existing deployments.
+
 Migration `0007_request_budgets` adds the durable request-budget table and expiry index. Before applying it in production, stop writers or use your provider's maintenance window and take a verified database backup. Apply the migration, then confirm `PRAGMA foreign_key_check` is empty. Restoring the pre-migration backup is the rollback path; do not try to hand-edit migration journal state.
+
+## Recovering Interrupted AI Runs
+
+Migration `0012_ai_run_attempt_token` adds the execution-attempt token used to fence late workers and the `(status, updated_at)` recovery index. Apply migrations before enabling recovery. Existing rows receive a null token and cannot be finalized by an invented token; stale active legacy rows are released by the same recovery procedure as current rows.
+
+Run recovery from one or more schedulers every five minutes:
+
+```bash
+pnpm ai:recover-stale-runs
+```
+
+The default command marks only `pending` or `streaming` runs with no update for 15 minutes as `failed` with `operation_interrupted`. It clears retry leases and execution tokens so the idempotent operation can be claimed again with a fresh token. The update is atomic, safe to run concurrently, and idempotent. Output contains only `status` and the aggregate `recoveredCount`; failures emit only a generic failed status.
+
+The stale window must be 1 to 10,080 minutes and the command timeout must be 100 to 60,000 milliseconds:
+
+```bash
+pnpm ai:recover-stale-runs -- --stale-after-minutes=30 --timeout-ms=10000
+```
+
+Choose a stale window longer than the maximum expected AI operation time and scheduler clock skew. Alert on a failed command or a sustained nonzero recovery count. Do not log database URLs, auth tokens, run IDs, payloads, or raw command errors from the scheduler.
+
+## Health And Readiness Probes
+
+The two public operational endpoints intentionally expose only generic state and are never cached:
+
+- `GET /api/health` returns `200 {"status":"ok"}` when the process can serve requests. It does not access the database.
+- `GET /api/ready` returns `200 {"status":"ready"}` only when a bounded database query succeeds and the latest `ai_runs.execution_token` schema marker exists.
+- Database errors, missing migrations, timeouts, and cancelled checks all return `503 {"status":"unavailable"}` without driver errors, URLs, tokens, or SQL details.
+- `HEAD` preserves the corresponding status with an empty body. `OPTIONS` returns `204` and `Allow: GET, HEAD, OPTIONS`.
+
+Run migrations before adding an instance to service. Configure the platform liveness probe to `/api/health` and the traffic/readiness probe to `/api/ready`. A failing readiness probe should remove the instance from traffic; it should not trigger migration or recovery automatically.
 
 ## Claiming Legacy Local Data
 
@@ -99,12 +148,13 @@ The app can be deployed to Vercel as a standard Next.js app.
 
 Before deploying:
 
-1. Configure `DATABASE_URL`.
-2. Configure `AI_PROVIDER` for the initial settings seed.
-3. Configure `OPENAI_API_KEY` if using OpenAI.
-4. Configure `COREDOT_API_KEY` if using any Core.Today provider.
-5. Run migrations against the production database.
-6. Seed default templates, or create product-specific templates through the UI.
+1. Configure `AUTH_MODE=clerk`, `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, and `CLERK_SECRET_KEY`.
+2. Configure `DATABASE_URL` and `DATABASE_AUTH_TOKEN` for hosted libSQL.
+3. Configure `AI_PROVIDER` for the initial settings seed.
+4. Configure `OPENAI_API_KEY` if using OpenAI.
+5. Configure `COREDOT_API_KEY` if using any Core.Today provider.
+6. Run migrations against the production database and confirm `/api/ready` succeeds.
+7. Seed default templates, or create product-specific templates through the UI.
 
 Do not use a relative local SQLite file path for production serverless deployments unless your platform explicitly provides persistent writable storage. Prefer hosted libSQL or a database service with durable storage.
 
@@ -175,17 +225,27 @@ If port `3100` is already used by another local process, run `E2E_PORT=3200 pnpm
 
 Stop any manually running `pnpm dev` process before running `pnpm e2e`. Next.js allows only one dev server for the same project directory, even when the E2E server uses a different port.
 
+`pnpm e2e:production` is the production-artifact gate. It uses `AUTH_MODE=clerk` with non-secret test-format Clerk credentials and a deterministic sign-in route, inherits only a minimal OS/tool environment, creates and migrates an isolated temporary database, builds the app, starts `pnpm start` on a dynamic loopback port, waits for `/api/ready`, and verifies health/readiness methods, the root redirect, the protected-page Clerk redirect, and the unauthenticated protected-API `401` contract. Every phase and response body is bounded; the server process tree, port, database, and SQLite sidecars are independently cleaned on success or failure.
+
+CI runs lint, typecheck, unit/component tests, development E2E, build, production smoke, security audit, and the strict documentation build. To reproduce the documentation gate locally, install `requirements-docs.txt` in a virtual environment and run `pnpm docs:build` with that environment active.
+
 ## Deployment Checklist
 
 - [ ] `pnpm lint` passes.
 - [ ] `pnpm typecheck` passes.
 - [ ] `pnpm test` passes.
 - [ ] `pnpm e2e` passes.
+- [ ] `pnpm e2e:production` passes.
 - [ ] `pnpm build` passes.
+- [ ] `pnpm docs:build` passes in the documentation virtual environment.
 - [ ] `pnpm security:audit` passes.
+- [ ] Production Clerk mode and both Clerk keys are configured; test auth is absent.
 - [ ] Production `DATABASE_URL` is configured.
+- [ ] Hosted `DATABASE_AUTH_TOKEN` is stored in the secret manager and works for both migrations and runtime access.
 - [ ] AI provider secrets are configured.
 - [ ] Migrations have run.
+- [ ] `/api/health` and `/api/ready` probes use their distinct liveness/readiness roles.
+- [ ] Interrupted-AI recovery is scheduled, bounded, and monitored without sensitive output.
 - [ ] A pre-migration backup has been verified and `PRAGMA foreign_key_check` is empty after migration.
 - [ ] Legacy `local` data has been dry-run and claimed when upgrading an existing deployment.
 - [ ] All app instances share the same request-budget database and policy constants.

@@ -7,6 +7,8 @@ Coredot Editor keeps runtime configuration explicit. Server-side secrets live in
 | Name | Default | Purpose |
 | --- | --- | --- |
 | `DATABASE_URL` | `file:./data/coredot.db` | SQLite/libSQL database URL. Relative `file:` paths resolve from the app root. |
+| `DATABASE_AUTH_TOKEN` | empty | Canonical hosted libSQL authentication token used by both the runtime and migrations. |
+| `TURSO_AUTH_TOKEN` | empty | Compatibility fallback when `DATABASE_AUTH_TOKEN` is blank. The canonical variable wins when both are set. |
 | `AI_PROVIDER` | `stub` | Initial provider seed before `app_settings` exists. |
 | `OPENAI_API_KEY` | empty | Required for direct OpenAI calls. |
 | `OPENAI_MODEL` | `gpt-4.1-mini` | Initial direct OpenAI model. |
@@ -38,6 +40,8 @@ Core.Today Base URLs are allowlisted to official provider routes. Browser or dat
 ## Database
 
 The default database is SQLite/libSQL. It is suitable for local development, demos, single-tenant internal tools, and early product forks.
+
+Local `file:` URLs need no authentication token. Hosted libSQL deployments should set `DATABASE_URL` and `DATABASE_AUTH_TOKEN`; the runtime client and Drizzle migrations resolve the same URL/token pair. Tokens are trimmed, whitespace-only values are ignored, and the optional `authToken` property is omitted when no token is configured.
 
 Move to Postgres or a hosted multi-tenant database when you add:
 

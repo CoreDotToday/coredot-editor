@@ -86,6 +86,7 @@ export const aiRuns = sqliteTable(
     idempotencyKey: text("idempotency_key"),
     operationFingerprint: text("operation_fingerprint"),
     retryNotBeforeAt: integer("retry_not_before_at", { mode: "timestamp_ms" }),
+    executionToken: text("execution_token"),
     inputSummaryJson: text("input_summary_json", { mode: "json" }).$type<Record<string, unknown>>().notNull(),
     outputText: text("output_text").notNull().default(""),
     status: text("status", { enum: ["pending", "streaming", "completed", "failed"] }).notNull(),
@@ -97,6 +98,7 @@ export const aiRuns = sqliteTable(
   (table) => [
     index("ai_runs_document_id_idx").on(table.documentId),
     index("ai_runs_prompt_template_id_idx").on(table.promptTemplateId),
+    index("ai_runs_status_updated_idx").on(table.status, table.updatedAt),
     index("ai_runs_workspace_document_created_idx").on(table.workspaceId, table.documentId, table.createdAt),
     uniqueIndex("ai_runs_workspace_idempotency_key_unique").on(table.workspaceId, table.idempotencyKey),
     uniqueIndex("ai_runs_workspace_id_id_document_id_unique").on(table.workspaceId, table.id, table.documentId),

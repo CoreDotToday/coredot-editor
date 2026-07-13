@@ -1,17 +1,21 @@
 import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
 import type { NextMiddleware, NextRequest } from "next/server";
 import { NextResponse } from "next/server";
+import { PUBLIC_API_ROUTES } from "@/features/auth/public-api-routes";
 import { assertProductionAuthConfigured } from "@/features/auth/production-auth-config.mjs";
 
-const isPublicRoute = createRouteMatcher([
+const isPublicPageRoute = createRouteMatcher([
   "/",
   "/sign-in(.*)",
   "/sign-up(.*)",
 ]);
+const isPublicApiRoute = createRouteMatcher([...PUBLIC_API_ROUTES]);
 const isApiRoute = createRouteMatcher(["/api(.*)"]);
 
 export function shouldProtectWithClerk(request: NextRequest) {
-  return !isPublicRoute(request) && !isApiRoute(request);
+  if (isPublicPageRoute(request) || isPublicApiRoute(request)) return false;
+
+  return !isApiRoute(request);
 }
 
 const clerkProxy = clerkMiddleware(async (auth, request) => {
