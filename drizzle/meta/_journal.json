@@ -92,6 +92,13 @@
       "when": 1784260800000,
       "tag": "0012_ai_run_attempt_token",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "6",
+      "when": 1784473200000,
+      "tag": "0013_conversations",
+      "breakpoints": true
     }
   ]
 }

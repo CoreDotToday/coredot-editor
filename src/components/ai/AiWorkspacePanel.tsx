@@ -1,6 +1,6 @@
 "use client";
 
-import { Check, Clock3, Loader2, MessageSquareText, Pencil, Puzzle, RotateCcw, ScrollText, X } from "lucide-react";
+import { Check, Clock3, GitFork, Loader2, MessageSquareText, Pencil, Puzzle, RotateCcw, ScrollText, X } from "lucide-react";
 import type { ReactNode } from "react";
 import { useCallback, useId, useState, type KeyboardEvent } from "react";
 import {
@@ -42,6 +42,7 @@ export type AiWorkspaceChatSession = {
   id: string;
   messages: AiWorkspaceChatMessage[];
   status?: "failed" | "idle" | "running";
+  syncStatus?: "saved" | "saving" | "unsaved";
   title: string;
   updatedAt: Date;
 };
@@ -53,6 +54,8 @@ type AiWorkspacePanelProps = {
   children?: ReactNode;
   chatMessages: AiWorkspaceChatMessage[];
   chatSessions?: AiWorkspaceChatSession[];
+  conversationErrorMessage?: string;
+  conversationLoadState?: "failed" | "loaded" | "loading";
   errorMessage: string;
   isReviewing: boolean;
   hasMoreChanges?: boolean;
@@ -66,9 +69,11 @@ type AiWorkspacePanelProps = {
   onChangesOpen?: () => void;
   onClose?: () => void;
   onFocusProposal?: (proposalId: string) => void;
+  onForkChatSession?: (sessionId: string, messageId: string) => void;
   onLoadMoreChanges?: () => void;
   onReviewDocument: () => void;
   onRenameChatSession?: (sessionId: string, title: string) => void;
+  onRetryConversation?: () => void;
   onUndoChange: (changeId: string) => void;
   onUpdateProposalStatus: (
     proposalId: string,
@@ -99,6 +104,8 @@ export function AiWorkspacePanel({
   children,
   chatMessages,
   chatSessions = [],
+  conversationErrorMessage = "",
+  conversationLoadState = "loaded",
   errorMessage,
   hasMoreChanges = false,
   isReviewing,
@@ -112,9 +119,11 @@ export function AiWorkspacePanel({
   onChangesOpen,
   onClose,
   onFocusProposal,
+  onForkChatSession,
   onLoadMoreChanges,
   onReviewDocument,
   onRenameChatSession,
+  onRetryConversation,
   onUndoChange,
   onUpdateProposalStatus,
   pluginContext,
@@ -247,6 +256,23 @@ export function AiWorkspacePanel({
           role="tabpanel"
         >
           <h2 className="text-sm font-semibold text-zinc-950">{messages.chatTitle}</h2>
+          {conversationLoadState === "loading" ? (
+            <p className="mt-3 text-sm text-zinc-500" role="status">{messages.conversationLoading}</p>
+          ) : null}
+          {conversationLoadState === "failed" || conversationErrorMessage ? (
+            <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800" role="alert">
+              <p>{conversationErrorMessage || messages.conversationLoadFailed}</p>
+              {onRetryConversation ? (
+                <button
+                  className="mt-2 font-semibold underline underline-offset-2"
+                  onClick={onRetryConversation}
+                  type="button"
+                >
+                  {messages.conversationRetry}
+                </button>
+              ) : null}
+            </div>
+          ) : null}
           {visibleChatSessions.length > 0 ? (
             <div
               aria-label={messages.conversationList}
@@ -274,11 +300,21 @@ export function AiWorkspacePanel({
               ))}
             </div>
           ) : null}
-          {activeChatSession && (onArchiveChatSession || onRenameChatSession) ? (
+          {activeChatSession && (onArchiveChatSession || onForkChatSession || onRenameChatSession) ? (
             <div className="mt-3 space-y-2">
               <div className="flex items-center justify-between gap-3">
                 <p className="truncate text-xs text-zinc-500">
-                  {activeChatSession.status === "failed" ? messages.failed : messages.saved}
+                  {activeChatSession.status === "failed"
+                    ? messages.failed
+                    : activeChatSession.status === "running"
+                      ? messages.executionRunning
+                      : messages.executionIdle}
+                  {" · "}
+                  {activeChatSession.syncStatus === "saving"
+                    ? messages.savingConversation
+                    : activeChatSession.syncStatus === "unsaved"
+                      ? messages.unsavedConversation
+                      : messages.saved}
                 </p>
                 <div className="flex shrink-0 items-center gap-1">
                   {onRenameChatSession ? (
@@ -302,6 +338,19 @@ export function AiWorkspacePanel({
                       type="button"
                     >
                       {messages.archiveChat}
+                    </button>
+                  ) : null}
+                  {onForkChatSession &&
+                  activeChatSession.syncStatus === "saved" &&
+                  activeChatSession.messages.at(-1) ? (
+                    <button
+                      aria-label={messages.forkChat}
+                      className="inline-flex h-7 items-center gap-1 rounded-md border border-zinc-200 px-2 text-xs font-medium text-zinc-600 hover:bg-zinc-50 hover:text-zinc-950"
+                      onClick={() => onForkChatSession(activeChatSession.id, activeChatSession.messages.at(-1)!.id)}
+                      type="button"
+                    >
+                      <GitFork aria-hidden="true" className="size-3.5" />
+                      {messages.forkChat}
                     </button>
                   ) : null}
                 </div>

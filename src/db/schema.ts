@@ -164,6 +164,125 @@ export const aiProposals = sqliteTable(
   ],
 );
 
+export type AiWorkspaceConversationStatus = "failed" | "idle";
+
+export const aiWorkspaceConversations = sqliteTable(
+  "ai_workspace_conversations",
+  {
+    id: text("id").primaryKey().$defaultFn(() => nanoid()),
+    workspaceId: text("workspace_id").notNull(),
+    documentId: text("document_id").notNull(),
+    createdByPrincipalId: text("created_by_principal_id").notNull(),
+    creationKey: text("creation_key").notNull(),
+    creationFingerprint: text("creation_fingerprint").notNull(),
+    title: text("title").notNull(),
+    command: text("command").notNull(),
+    status: text("status", { enum: ["idle", "failed"] }).notNull().default("idle"),
+    version: integer("version").notNull().default(1),
+    messageCount: integer("message_count").notNull().default(1),
+    latestAiRunId: text("latest_ai_run_id"),
+    latestProposalId: text("latest_proposal_id"),
+    archivedAt: integer("archived_at", { mode: "timestamp_ms" }),
+    retentionExpiresAt: integer("retention_expires_at", { mode: "timestamp_ms" }),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+    updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+  },
+  (table) => [
+    uniqueIndex("ai_workspace_conversations_workspace_id_document_unique").on(
+      table.workspaceId,
+      table.id,
+      table.documentId,
+    ),
+    uniqueIndex("ai_workspace_conversations_workspace_creation_key_unique").on(
+      table.workspaceId,
+      table.creationKey,
+    ),
+    index("ai_workspace_conversations_workspace_document_updated_idx").on(
+      table.workspaceId,
+      table.documentId,
+      table.archivedAt,
+      table.updatedAt,
+      table.id,
+    ),
+    index("ai_workspace_conversations_retention_expires_idx").on(table.retentionExpiresAt),
+    foreignKey({
+      columns: [table.workspaceId, table.documentId],
+      foreignColumns: [documents.workspaceId, documents.id],
+      name: "ai_workspace_conversations_workspace_document_fk",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.workspaceId, table.latestAiRunId, table.documentId],
+      foreignColumns: [aiRuns.workspaceId, aiRuns.id, aiRuns.documentId],
+      name: "ai_workspace_conversations_latest_run_fk",
+    }),
+    foreignKey({
+      columns: [table.workspaceId, table.latestProposalId, table.documentId],
+      foreignColumns: [aiProposals.workspaceId, aiProposals.id, aiProposals.documentId],
+      name: "ai_workspace_conversations_latest_proposal_fk",
+    }),
+    check("ai_workspace_conversations_status_check", sql`${table.status} in ('idle', 'failed')`),
+    check("ai_workspace_conversations_version_check", sql`${table.version} >= 1`),
+    check("ai_workspace_conversations_message_count_check", sql`${table.messageCount} >= 1`),
+    check(
+      "ai_workspace_conversations_retention_check",
+      sql`${table.retentionExpiresAt} is null or ${table.retentionExpiresAt} > ${table.createdAt}`,
+    ),
+  ],
+);
+
+export const aiWorkspaceMessages = sqliteTable(
+  "ai_workspace_messages",
+  {
+    id: text("id").primaryKey().$defaultFn(() => nanoid()),
+    workspaceId: text("workspace_id").notNull(),
+    conversationId: text("conversation_id").notNull(),
+    documentId: text("document_id").notNull(),
+    mutationKey: text("mutation_key").notNull(),
+    mutationFingerprint: text("mutation_fingerprint").notNull(),
+    ordinal: integer("ordinal").notNull(),
+    role: text("role", { enum: ["assistant", "user"] }).notNull(),
+    content: text("content").notNull(),
+    command: text("command"),
+    scopeLabel: text("scope_label"),
+    aiRunId: text("ai_run_id"),
+    proposalId: text("proposal_id"),
+    retentionExpiresAt: integer("retention_expires_at", { mode: "timestamp_ms" }),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  },
+  (table) => [
+    uniqueIndex("ai_workspace_messages_conversation_ordinal_unique").on(
+      table.workspaceId,
+      table.conversationId,
+      table.ordinal,
+    ),
+    uniqueIndex("ai_workspace_messages_conversation_mutation_key_unique").on(
+      table.workspaceId,
+      table.conversationId,
+      table.mutationKey,
+    ),
+    index("ai_workspace_messages_workspace_run_idx").on(table.workspaceId, table.aiRunId),
+    index("ai_workspace_messages_workspace_proposal_idx").on(table.workspaceId, table.proposalId),
+    index("ai_workspace_messages_retention_expires_idx").on(table.retentionExpiresAt),
+    foreignKey({
+      columns: [table.workspaceId, table.conversationId, table.documentId],
+      foreignColumns: [aiWorkspaceConversations.workspaceId, aiWorkspaceConversations.id, aiWorkspaceConversations.documentId],
+      name: "ai_workspace_messages_conversation_fk",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.workspaceId, table.aiRunId, table.documentId],
+      foreignColumns: [aiRuns.workspaceId, aiRuns.id, aiRuns.documentId],
+      name: "ai_workspace_messages_run_fk",
+    }),
+    foreignKey({
+      columns: [table.workspaceId, table.proposalId, table.documentId],
+      foreignColumns: [aiProposals.workspaceId, aiProposals.id, aiProposals.documentId],
+      name: "ai_workspace_messages_proposal_fk",
+    }),
+    check("ai_workspace_messages_ordinal_check", sql`${table.ordinal} >= 0`),
+    check("ai_workspace_messages_role_check", sql`${table.role} in ('assistant', 'user')`),
+  ],
+);
+
 export const documentChanges = sqliteTable(
   "document_changes",
   {
@@ -308,6 +427,10 @@ export type AiProposalRecord = Omit<AiProposalDatabaseRecord, "resultOrdinal"> &
   resultOrdinal?: number | null;
 };
 export type NewAiProposalRecord = typeof aiProposals.$inferInsert;
+export type AiWorkspaceConversationRecord = typeof aiWorkspaceConversations.$inferSelect;
+export type NewAiWorkspaceConversationRecord = typeof aiWorkspaceConversations.$inferInsert;
+export type AiWorkspaceMessageRecord = typeof aiWorkspaceMessages.$inferSelect;
+export type NewAiWorkspaceMessageRecord = typeof aiWorkspaceMessages.$inferInsert;
 export type DocumentChangeRecord = typeof documentChanges.$inferSelect;
 export type NewDocumentChangeRecord = typeof documentChanges.$inferInsert;
 export type DocumentChangeProposalRecord = typeof documentChangeProposals.$inferSelect;

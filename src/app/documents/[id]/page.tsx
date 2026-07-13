@@ -1,6 +1,8 @@
 import { notFound } from "next/navigation";
 import { DocumentShell } from "@/components/document/DocumentShell";
 import { listAiRunsForDocument } from "@/features/ai/ai-run-repository";
+import { listConversations } from "@/features/ai/conversation-repository";
+import { resolveConversationStorageMode } from "@/features/ai/conversation-store";
 import { getDocumentById, listDocumentReferenceCandidates } from "@/features/documents/document-repository";
 import { listProposalsForDocument } from "@/features/proposals/proposal-repository";
 import { listActivePromptTemplates } from "@/features/templates/template-repository";
@@ -19,11 +21,18 @@ export default async function DocumentPage({ params }: DocumentPageProps) {
     notFound();
   }
 
-  const [templates, aiRuns, proposals, referenceDocuments] = await Promise.all([
+  const conversationStorageMode = resolveConversationStorageMode(process.env.CONVERSATION_STORAGE);
+  const [templates, aiRuns, proposals, referenceDocuments, conversationResult] = await Promise.all([
     listActivePromptTemplates(context),
     listAiRunsForDocument(context, document.id),
     listProposalsForDocument(context, document.id),
     listDocumentReferenceCandidates(context, { excludeDocumentId: document.id, limit: 24 }),
+    conversationStorageMode === "database"
+      ? listConversations(context, { documentId: document.id }).catch(() => ({
+          ok: false as const,
+          reason: "unavailable" as const,
+        }))
+      : Promise.resolve(null),
   ]);
 
   return (
@@ -43,6 +52,12 @@ export default async function DocumentPage({ params }: DocumentPageProps) {
         metadataJson: document.metadataJson,
         readiness: document.readiness,
       }}
+      conversationStorageMode={conversationStorageMode}
+      conversationWorkspaceId={context.workspaceId}
+      initialConversationLoadFailed={conversationResult !== null && !conversationResult.ok}
+      initialConversations={conversationResult?.ok
+        ? conversationResult.value.items.map((conversation) => ({ ...conversation, syncStatus: "saved" as const }))
+        : undefined}
       proposals={proposals.map((proposal) => ({
         appliedMode: proposal.appliedMode,
         command: proposal.command,

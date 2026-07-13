@@ -47,13 +47,9 @@ import type {
 } from "@/db/schema";
 import type { FidelityReport } from "@/features/documents/document-interchange";
 import { fetchDocumentInterchange } from "@/features/documents/document-interchange-fetch";
-import {
-  archiveAiWorkspaceSession,
-  renameAiWorkspaceSession,
-  readAiWorkspaceSessionsForDocument,
-  writeAiWorkspaceSessionsForDocument,
-} from "@/features/ai/ai-workspace-session-store";
 import { buildAiContextSnapshot } from "@/features/ai/ai-context-snapshot";
+import type { ConversationStorageMode, StoredConversationView } from "@/features/ai/conversation-store";
+import { useDocumentConversations } from "@/features/ai/use-document-conversations";
 import {
   postAiOperation,
   type AiIdempotencyKeyCache,
@@ -129,7 +125,11 @@ export type SaveState = "saved" | "dirty" | "saving" | "failed";
 export type EditorSurface = "editor" | "source";
 
 type DocumentShellProps = {
+  conversationStorageMode?: ConversationStorageMode;
+  conversationWorkspaceId?: string;
   document: ShellDocument;
+  initialConversationLoadFailed?: boolean;
+  initialConversations?: StoredConversationView[];
   referenceDocuments?: AiDocumentReferenceCandidate[];
   templates: ShellTemplate[];
   aiRuns: ShellAiRun[];
@@ -330,7 +330,11 @@ function getCompactWorkspaceLayoutServerSnapshot() {
 
 export function DocumentShell({
   aiRuns,
+  conversationStorageMode = "local",
+  conversationWorkspaceId = "local-workspace",
   document,
+  initialConversationLoadFailed = false,
+  initialConversations,
   pluginContributions,
   plugins,
   proposals = [],
@@ -341,7 +345,11 @@ export function DocumentShell({
     <DocumentShellContent
       key={document.id}
       aiRuns={aiRuns}
+      conversationStorageMode={conversationStorageMode}
+      conversationWorkspaceId={conversationWorkspaceId}
       document={document}
+      initialConversationLoadFailed={initialConversationLoadFailed}
+      initialConversations={initialConversations}
       pluginContributions={pluginContributions}
       plugins={plugins}
       proposals={proposals}
@@ -353,7 +361,11 @@ export function DocumentShell({
 
 function DocumentShellContent({
   aiRuns,
+  conversationStorageMode = "local",
+  conversationWorkspaceId = "local-workspace",
   document,
+  initialConversationLoadFailed = false,
+  initialConversations,
   pluginContributions,
   plugins,
   proposals = [],
@@ -410,9 +422,14 @@ function DocumentShellContent({
   const [selectionProposalContexts, setSelectionProposalContexts] = useState<Record<string, SelectionProposalContext>>({});
   const [activeProposalId, setActiveProposalId] = useState<string | null>(null);
   const [aiChatMessages, setAiChatMessages] = useState<AiWorkspaceChatMessage[]>([]);
-  const [aiChatSessions, setAiChatSessions] = useState<AiWorkspaceChatSession[]>(() =>
-    restoreAiWorkspaceChatSessions(document.id),
-  );
+  const conversations = useDocumentConversations({
+    documentId: document.id,
+    initialConversations,
+    initialLoadFailed: initialConversationLoadFailed,
+    storageMode: conversationStorageMode,
+    workspaceId: conversationWorkspaceId,
+  });
+  const aiChatSessions: AiWorkspaceChatSession[] = conversations.sessions;
   const [documentChanges, setDocumentChanges] = useState<DocumentSessionHistoryChange[]>([]);
   const [documentChangesNextCursor, setDocumentChangesNextCursor] = useState<string | null>(null);
   const documentChangesLoadedRef = useRef(false);
@@ -525,10 +542,6 @@ function DocumentShellContent({
     runningSelectionCommandsRef.current = runningSelectionCommands;
   }, [runningSelectionCommands]);
 
-  useEffect(() => {
-    writeAiWorkspaceSessionsForDocument(document.id, aiChatSessions);
-  }, [aiChatSessions, document.id]);
-
   const isWorkspaceOpen = workspaceOpenOverride ?? !isCompactWorkspace;
   const setWorkspaceOpen = useCallback(
     (nextValue: boolean | ((currentValue: boolean) => boolean)) => {
@@ -596,7 +609,6 @@ function DocumentShellContent({
       setSelectionProposalContexts({});
       setActiveProposalId(null);
       setAiChatMessages([]);
-      setAiChatSessions(restoreAiWorkspaceChatSessions(incomingDocument.id));
       setDocumentChanges([]);
       setDocumentChangesNextCursor(null);
       setIsLoadingDocumentChanges(false);
@@ -785,7 +797,6 @@ function DocumentShellContent({
     }
 
     const runningCommandId = createWorkspaceClientId(aiWorkspaceIdRef, "selection_job");
-    const chatSessionId = createWorkspaceClientId(aiWorkspaceIdRef, "chat_session");
     const chatSessionCreatedAt = new Date();
     const chatUserMessage: AiWorkspaceChatMessage = {
       command,
@@ -807,18 +818,12 @@ function DocumentShellContent({
     setTemplateVariableErrors({});
     setUndoChangeError("");
     setAiChatMessages((currentMessages) => [...currentMessages, chatUserMessage]);
-    setAiChatSessions((currentSessions) => [
-      {
-        command,
-        createdAt: chatSessionCreatedAt,
-        id: chatSessionId,
-        messages: [chatUserMessage],
-        status: "running",
-        title: getSelectionCommandLabel(command, language),
-        updatedAt: chatSessionCreatedAt,
-      },
-      ...currentSessions,
-    ]);
+    const conversationAttempt = conversations.beginConversation({
+      command,
+      content: selectedText,
+      scopeLabel: chatUserMessage.scopeLabel,
+      title: getSelectionCommandLabel(command, language),
+    });
 
     try {
       const requestBody = JSON.stringify({
@@ -888,32 +893,19 @@ function DocumentShellContent({
           runId: body.run?.id,
         };
         setAiChatMessages((currentMessages) => [...currentMessages, chatAssistantMessage]);
-        setAiChatSessions((currentSessions) =>
-          currentSessions.map((session) =>
-            session.id === chatSessionId
-              ? {
-                  ...session,
-                  messages: [...session.messages, chatAssistantMessage],
-                  status: "idle",
-                  updatedAt: chatSessionUpdatedAt,
-                }
-              : session,
-          ),
-        );
+        await conversations.completeConversation(conversationAttempt, {
+          aiRunId: body.run?.id,
+          command,
+          content: body.proposal.replacementText,
+          proposalId: body.proposal.id,
+        });
       }
       if (body.run) {
         setReviewRuns((currentRuns) => [body.run!, ...currentRuns]);
       }
-      setAiChatSessions((currentSessions) =>
-        currentSessions.map((session) => (session.id === chatSessionId ? { ...session, status: "idle" } : session)),
-      );
+      if (!body.proposal) conversations.markConversationIdle(conversationAttempt);
     } catch {
-      const failedAt = new Date();
-      setAiChatSessions((currentSessions) =>
-        currentSessions.map((session) =>
-          session.id === chatSessionId ? { ...session, status: "failed", updatedAt: failedAt } : session,
-        ),
-      );
+      await conversations.failConversation(conversationAttempt);
       setReviewError(messages.errors.selectionRewriteFailed);
     } finally {
       updateRunningSelectionCommands((currentCommands) =>
@@ -926,6 +918,7 @@ function DocumentShellContent({
     draft.title,
     language,
     messages,
+    conversations,
     selectedTemplate,
     templateVariables,
     updateRunningSelectionCommands,
@@ -1675,12 +1668,16 @@ function DocumentShellContent({
   ]);
 
   const archiveAiChatSession = useCallback((sessionId: string) => {
-    setAiChatSessions((currentSessions) => archiveAiWorkspaceSession(currentSessions, sessionId));
-  }, []);
+    void conversations.archiveConversation(sessionId);
+  }, [conversations]);
 
   const renameAiChatSession = useCallback((sessionId: string, title: string) => {
-    setAiChatSessions((currentSessions) => renameAiWorkspaceSession(currentSessions, sessionId, title));
-  }, []);
+    void conversations.renameConversation(sessionId, title);
+  }, [conversations]);
+
+  const forkAiChatSession = useCallback((sessionId: string, messageId: string) => {
+    void conversations.forkConversation(sessionId, messageId);
+  }, [conversations]);
 
   const selectedTemplateName = selectedTemplate?.name ?? "";
   const inlineSuggestions = useMemo(
@@ -1934,6 +1931,8 @@ function DocumentShellContent({
       changeLoadErrorMessage={documentChangesError}
       chatMessages={aiChatMessages}
       chatSessions={aiChatSessions}
+      conversationErrorMessage={conversations.errorReason ? messages.aiWorkspace.conversationLoadFailed : ""}
+      conversationLoadState={conversations.loadState}
       errorMessage={reviewError}
       hasMoreChanges={documentChangesNextCursor !== null}
       isLoadingChanges={isLoadingDocumentChanges}
@@ -1947,11 +1946,17 @@ function DocumentShellContent({
       onChangesOpen={loadDocumentChanges}
       onClose={onClose}
       onFocusProposal={setActiveProposalId}
+      onForkChatSession={forkAiChatSession}
       onLoadMoreChanges={documentChangesNextCursor !== null
         ? () => void loadDocumentChanges(documentChangesNextCursor)
         : undefined}
       onReviewDocument={runDocumentReview}
       onRenameChatSession={renameAiChatSession}
+      onRetryConversation={() => void (conversations.hasPendingRetries
+        ? conversations.retryLastMutation()
+        : conversations.loadState === "failed"
+          ? conversations.reload()
+          : conversations.retryLastMutation())}
       onUndoChange={undoAppliedChange}
       onUpdateProposalStatus={updateProposalStatusLocally}
       proposals={reviewProposals}
@@ -2362,14 +2367,6 @@ function localizeTemplateVariableErrors(
 function createWorkspaceClientId(ref: MutableRefObject<number>, prefix: string) {
   ref.current += 1;
   return `${prefix}_${ref.current}_${nanoid(8)}`;
-}
-
-function restoreAiWorkspaceChatSessions(documentId: string): AiWorkspaceChatSession[] {
-  return readAiWorkspaceSessionsForDocument(documentId).map((session) => ({
-    ...session,
-    createdAt: new Date(session.createdAt),
-    updatedAt: new Date(session.updatedAt),
-  }));
 }
 
 function sanitizeDownloadFileName(value: string) {

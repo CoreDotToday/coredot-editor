@@ -7,6 +7,8 @@ export const REQUEST_BUDGET_POLICIES = Object.freeze({
   "ai.connection-test": { limit: 5, windowMs: 60_000 },
   "ai.review": { limit: 20, windowMs: 60_000 },
   "ai.rewrite": { limit: 20, windowMs: 60_000 },
+  "conversations.fork": { limit: 20, windowMs: 60_000 },
+  "conversations.write": { limit: 120, windowMs: 60_000 },
   "documents.create": { limit: 30, windowMs: 60_000 },
   "documents.export-preview": { limit: 20, windowMs: 60_000 },
   "documents.export": { limit: 20, windowMs: 60_000 },

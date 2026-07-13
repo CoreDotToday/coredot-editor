@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { notFound } from "next/navigation";
 import { getProtectedPageContext } from "@/features/auth/route-context";
 import { listAiRunsForDocument } from "@/features/ai/ai-run-repository";
+import { listConversations } from "@/features/ai/conversation-repository";
 import {
   getDocumentById,
   listDocumentReferenceCandidates,
@@ -61,6 +62,10 @@ vi.mock("@/features/ai/ai-run-repository", () => ({
   listAiRunsForDocument: vi.fn(async () => []),
 }));
 
+vi.mock("@/features/ai/conversation-repository", () => ({
+  listConversations: vi.fn(async () => ({ ok: true, value: { items: [], nextCursor: null } })),
+}));
+
 vi.mock("@/features/proposals/proposal-repository", () => ({
   listProposalsForDocument: vi.fn(async () => []),
 }));
@@ -68,6 +73,7 @@ vi.mock("@/features/proposals/proposal-repository", () => ({
 describe("protected server pages", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    delete process.env.CONVERSATION_STORAGE;
   });
 
   it("passes the authenticated workspace to the documents and templates pages", async () => {
@@ -156,6 +162,7 @@ describe("protected server pages", () => {
     expect(getDocumentById).toHaveBeenCalledWith(workspaceBContext, "workspace-b-document");
     expect(listActivePromptTemplates).toHaveBeenCalledWith(workspaceBContext);
     expect(listAiRunsForDocument).toHaveBeenCalledWith(workspaceBContext, "workspace-b-document");
+    expect(listConversations).toHaveBeenCalledWith(workspaceBContext, { documentId: "workspace-b-document" });
     expect(listProposalsForDocument).toHaveBeenCalledWith(workspaceBContext, "workspace-b-document");
     expect(listDocumentReferenceCandidates).toHaveBeenCalledWith(workspaceBContext, {
       excludeDocumentId: "workspace-b-document",
@@ -217,5 +224,24 @@ describe("protected server pages", () => {
     expect(listAiRunsForDocument).not.toHaveBeenCalled();
     expect(listProposalsForDocument).not.toHaveBeenCalled();
     expect(listDocumentReferenceCandidates).not.toHaveBeenCalled();
+  });
+
+  it("uses browser-local conversation storage only when explicitly configured", async () => {
+    process.env.CONVERSATION_STORAGE = "local";
+    const page = await DocumentPage({ params: Promise.resolve({ id: "workspace-b-document" }) });
+
+    expect(listConversations).not.toHaveBeenCalled();
+    expect(page.props.conversationStorageMode).toBe("local");
+    expect(page.props.conversationWorkspaceId).toBe("workspace-b");
+  });
+
+  it("keeps the editor available when database conversation prefetch is unavailable", async () => {
+    vi.mocked(listConversations).mockRejectedValueOnce(new Error("database unavailable"));
+
+    const page = await DocumentPage({ params: Promise.resolve({ id: "workspace-b-document" }) });
+
+    expect(page.props.document.id).toBe("workspace-b-document");
+    expect(page.props.initialConversationLoadFailed).toBe(true);
+    expect(page.props.initialConversations).toBeUndefined();
   });
 });
