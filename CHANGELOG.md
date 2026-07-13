@@ -8,6 +8,14 @@ This project uses a simple human-written changelog. Keep entries concise and gro
 
 ### Added
 
+- Added Clerk-backed personal and organization Workspaces with owner/admin/member roles and repository-level scoping for persisted resources.
+- Added revision-aware document saves, explicit conflict recovery, atomic single and bulk Proposal application, durable Document Change history, and server-side undo.
+- Added bounded, idempotent AI execution with shared deadlines, abort propagation, attempt fencing, structured telemetry, and a safe stale-run recovery command.
+- Added rendered hosts for every public Editor Plugin contribution and a shared server-safe document schema profile for the editor and DOCX conversion.
+- Added two-phase DOCX import and export with structured preserved/approximated/removed fidelity reports and acknowledgement for lossy exports.
+- Added durable database Conversations with cursor-paged summaries, lazy transcript detail, versioned/idempotent mutations, archive and fork operations, and explicit retention metadata.
+- Added server-owned Project Profiles for typed metadata, readiness transitions, filters, localized labels, and default templates.
+- Added health/readiness routes, production-auth startup validation, and an isolated production-artifact smoke suite.
 - Added scope-aware quick action presets to the bottom AI command bar.
 - Added a public roadmap for post-v1 AI editor improvements.
 - Added a MkDocs Material documentation site, GitHub Pages workflow, and public documentation entry pages.
@@ -15,8 +23,17 @@ This project uses a simple human-written changelog. Keep entries concise and gro
 
 ### Changed
 
+- CI production builds now use fixed non-secret test-format Clerk verification values while deployed instances continue to require real Clerk keys.
+- Proposal collection actions that operate on all pending items are available only after every Proposal page has loaded, preventing partial bulk operations.
+- Conversation retention timestamps control policy visibility without automatically deleting persisted records.
 - Selection rewrite prompts now prefer structured `{ replacementText, explanation }` output while preserving plain text fallback behavior.
 - Rewrite proposals now persist model-provided explanations when available.
+
+### Security
+
+- Production now rejects deterministic test authentication and requires nonblank configured Clerk keys before startup.
+- Added Workspace-scoped authorization, durable request budgets, streamed body limits, document complexity limits, and terminable 30-second DOCX/AI operations.
+- The release gate now runs production-auth validation and blocks dependency findings at its configured moderate-or-higher audit threshold.
 
 ## 1.0.0 - 2026-06-07
 

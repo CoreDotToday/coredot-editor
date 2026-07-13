@@ -1,254 +1,148 @@
 # Architecture
 
-Coredot Editor is a Next.js application starter for AI-assisted business document editing. The architecture keeps editor UI, persistence, prompt templates, AI provider calls, and proposal workflows separated so downstream projects can replace one part without rewriting the whole app.
+Coredot Editor is a Next.js application starter for AI-assisted business document editing. Its main seams keep identity, Workspace authorization, document changes, AI execution, Conversations, document interchange, and build-time plugins independently testable.
 
 ## High-Level Flow
 
 ```text
-Browser
-  |
-  | document editing, template selection, review actions
-  v
-Next.js App Router pages and client components
-  |
-  | fetch / server actions
-  v
-Route handlers and repositories
-  |
-  | Drizzle ORM
-  v
-SQLite/libSQL database
+Clerk or deterministic test identity
+  -> RequestContext (Principal, Workspace, role, request ID)
+  -> Next.js pages and protected route handlers
+  -> Workspace-scoped repositories and deep services
+  -> Drizzle + SQLite/libSQL
 
-AI routes
-  |
-  | provider contract
-  v
-Stub provider or model provider
+Browser draft
+  -> revision-aware document-change service
+  -> atomic document + Proposal + Document Change transaction
+
+AI route
+  -> bounded preflight and execution lifecycle
+  -> provider adapter
+  -> AI Run + Proposal finalization
 ```
 
-## Main Boundaries
+## Identity And Workspace Boundary
 
-### App Routes
+`src/features/auth/request-context.ts` exposes the small context used by routes and repositories. An active Clerk organization maps to a shared `clerk:org:<id>` Workspace. A signed-in user without an active organization maps to the personal owner Workspace `clerk:user:<id>`. Clerk roles normalize to `owner`, `admin`, or `member`.
 
-`src/app/` contains pages and API routes.
+Repositories include Workspace ID in lookup and mutation predicates, and cross-Workspace identifiers return not found. Members work with documents, DOCX interchange, AI, Proposals, Document Changes, and Conversations. Owners/admins additionally mutate prompt templates and AI settings or test saved provider credentials.
 
-- `src/app/documents/page.tsx` lists documents and creates drafts.
-- `src/app/documents/[id]/page.tsx` loads one document, templates, AI runs, and proposals.
-- `src/app/templates/page.tsx` loads the template manager.
-- `src/app/api/*` contains JSON route handlers for documents, templates, AI commands, and proposals.
+`AUTH_MODE=test` supplies a deterministic owner and Workspace for local development/tests. Production build/startup validation rejects that mode and blank Clerk keys. This fail-fast boundary must remain intact when identity is adapted.
 
-Route handlers should validate input with Zod, return predictable status codes, and delegate database logic to repositories.
+## App And Editor UI
 
-### Editor UI
+`src/app/` contains public sign-in/sign-up/status routes, protected pages, and JSON route handlers. `src/components/document/DocumentShell.tsx` coordinates the current draft and three-pane Workspace, while narrower modules own behavior:
 
-`src/components/document/` contains the three-pane workspace:
+- `src/features/documents/document-outline.ts`: heading outline.
+- `src/features/documents/document-find.ts`: ProseMirror-position find/replace.
+- `src/features/documents/tiptap-blocks.ts`: pure block transforms.
+- `src/components/document/editor-block-*.ts`: block ranges, drag session, and drop target resolution.
+- `src/components/document/commands/`: typed command manifest and executable registry.
+- `src/components/ui/ModalSurface.tsx`: shared stack-aware focus, inertness, Escape, backdrop, and scroll-lock behavior.
 
-- Left: live document outline, document metadata, prompt templates, template variables, and AI run history
-- Center: Tiptap document editor, selection menu, and bottom AI command bar
-- Right: AI workspace with review, conversation, and change-history tabs
+Selection and command-bar AI operations capture an explicit scope and source snapshot, then create Proposals rather than directly mutating the document.
 
-`DocumentShell` owns transient client state such as the current draft, selected template, template variables, review status, editor language, chat entries, reversible local change records, and proposal status updates.
+## Project Profile
 
-Host-level commands are exposed through a typed command registry rather than hard-coded palette rows. `src/features/commands/document-command-manifest.ts` defines stable command IDs and shortcuts, while `src/components/document/commands/document-command-registry.ts` receives the current shell state and returns grouped commands with labels, keywords, enabled states, and executable handlers. `DocumentCommandPalette` renders those commands with fuzzy search and keyboard navigation, so downstream apps can add host actions without rewriting the shell layout.
+`src/features/projects/` defines code-owned Profiles for typed metadata, readiness states/transitions, list filters, localized labels, and default-template references. `PROJECT_PROFILE_ID` selects one Profile for the deployment. It is never trusted from the browser and is not a per-Workspace setting. An unknown ID fails closed when the active Profile is first resolved.
 
-The manifest is the source of truth for command IDs. Palette actions use `DocumentCommandId`, and `getDocumentCommandRegistryIds()` defines which manifest commands are expected in the executable registry. `open-command-palette` remains a host keyboard shortcut, while the rest are palette actions. This keeps new host commands from drifting between shortcut handling, command palette rows, and downstream tests.
+Document create/update, Proposal application, metadata controls, list filters, readiness UI, and template defaults consume the same active definition. Existing unknown metadata is preserved only when unchanged so a Profile rollout does not silently destroy legacy data.
 
-The live outline is generated by `src/features/documents/document-outline.ts` from the current Tiptap JSON. It only reads heading nodes and stores top-level indexes rather than invented block IDs, because the current Tiptap document schema does not assign stable IDs. `DocumentOutlinePanel` sends one-shot navigation requests back to `DocumentEditor`, which reuses the existing block-range lookup and focus helpers.
+## Editor Plugins And Document Schema
 
-Find/replace is split the same way. `src/features/documents/document-find.ts` operates on the ProseMirror document so match ranges remain editor positions, including across split marked text nodes. `DocumentFindBar` is a controlled compact UI opened through `Cmd/Ctrl+F` or the command palette. Replacement runs through editor transactions so the normal `onUpdate` and autosave path remains the source of truth.
-
-The bottom command bar is intentionally an entry point, not a mutation surface. It resolves the target in this order: selected text, current text block, then whole document. The command then uses the existing selection rewrite route so all AI edits still become proposals with redline previews. `@Document Title` mentions are resolved into document IDs on the client and hydrated again on the server through `reference-hydration.ts`, so provider prompts can include referenced document text without trusting browser-submitted reference bodies.
-
-Reference hydration also filters the active document ID before repository lookup. This prevents self-references from duplicating the current draft in prompt context, keeps run summaries aligned with the actual hydrated references, and leaves a clear hook for future workspace/ownership authorization checks.
-
-Selection AI commands carry behavior metadata in addition to their prompt string. Built-in translation and continue-writing commands declare `defaultApplyMode: "insert_below"`, while ordinary rewrites default to replacement. The shell sends that mode to `/api/ai/rewrite`; the route keeps a string-based fallback only for backward compatibility with direct API callers.
-
-Document readiness and lightweight metadata are separate from the archival lifecycle. `documents.status` still controls active/archived records. A code-defined Project Profile is the single source for readiness states/transitions, typed metadata fields, filter definitions, localized labels, and stable default-template references. The active Profile is resolved from server-only `PROJECT_PROFILE_ID`; unknown IDs fail fast. `DocumentMetadataPanel`, list controls, repository-level filtering, write validation, and template defaults all consume that definition.
-
-Selection AI progress is tied to the captured command context, not the browser's live selection state. When a user runs a command, the editor stores the selected text, Tiptap range, occurrence index, and floating anchor from that moment. The inline progress badge and right workspace status continue to show the active job even if the user clicks elsewhere or selects another block. This matches legal drafting expectations: the source is fixed, the user can keep reviewing, and the result returns as an accept/reject proposal rather than an automatic mutation.
-
-### Block Interaction Layer
-
-Block controls are split into focused modules:
-
-- `editor-block-ranges.ts` maps the current caret, pointer, or selection to a normalized top-level block or list item. It also owns the DOM hit-testing helpers shared by gutter positioning and drop-target calculation.
-- `editor-block-drop-targets.ts` classifies visual drag destinations and rejects descendant or same-slot drops before any document mutation runs.
-- `editor-block-drag-session.ts` captures the source block, text preview, block type, and live editor JSON signature so stale drag operations are canceled instead of applying to the wrong content.
-
-Document mutations stay in pure Tiptap JSON helpers under `src/features/documents/tiptap-blocks.ts`. `DocumentEditor` coordinates the UI state and delegates range lookup, drop classification, and JSON transforms to those narrower modules.
-
-### Editor Plugin Layer
-
-`src/plugins/` contains the static editor plugin layer. Built-in document behavior is declared as plugins, and downstream projects can register app-specific plugins in `src/plugins/app-plugins.ts`.
-
-The currently rendered contribution types are:
+`src/plugins/types.ts` defines seven build-time contribution types:
 
 - Tiptap extensions
-- Selection AI commands
-- Slash menu commands
+- selection AI commands
+- slash commands
+- toolbar items
+- block actions
+- Workspace panels
+- settings sections
 
-`DocumentEditor` resolves these contributions through `useEditorPlugins()`. The compatibility function `createDocumentSchemaExtensions()` is intentionally narrower: it calls only the server-safe core document plugin so DOCX import/export routes do not load React UI plugins or browser-only code.
+`src/plugins/app-plugins.ts` composes built-ins and project plugins through `createAppEditorPlugins()`. Hosts isolate factory, handler, and render failures by contribution ID instead of crashing the editor.
 
-DOCX import/export routes execute a pure conversion core in a dedicated Node worker thread. Development uses the tracked ESM worker directly; production builds a self-contained Node worker bundle and includes it in server/serverless artifacts through Next output-file tracing. The route deadline aborts and terminates that worker, which keeps CPU-heavy ZIP/XML or document generation work off the request event loop and prevents a timed-out import from persisting later. Request streams are byte-counted before multipart or JSON parsing; document trees are then checked with a lazy, iterative node/complete-JSON traversal. Structural nodes and `content` arrays share a node-depth boundary, while attrs, marks, and other non-structural containers use an independent general-depth boundary.
+The browser editor and DOCX worker share `appDocumentSchemaProfileRuntime` as the build-time document schema source. UI-only contributions remain in the app plugin list, while the schema Profile itself is React-free and usable by the worker. Downstream schemas must change this shared Profile rather than maintaining a separate server list that can drift.
 
-See [PLUGINS.md](PLUGINS.md) for the plugin authoring guide and test checklist.
+Read [Editor Plugins](PLUGINS.md) for the current registration pattern.
 
-### Editor Language Pack
+## Revision And Document Change Lifecycle
 
-`src/features/i18n/editor-language.ts` contains the lightweight editor language pack. Korean is the default locale, and the current editor language is stored in `localStorage` under `coredot-editor-language`.
+`src/features/documents/document-change-service.ts` is the consistency boundary for Proposal application and undo. Documents carry an integer revision, and draft saves, single/bulk apply, and undo require `expectedRevision`.
 
-Add new editor UI languages by extending `EditorLanguage`, `editorLanguageOptions`, and `editorMessages`. AI command payloads intentionally stay stable English strings so provider prompts and existing route contracts do not change when the UI language changes.
+The client submits its current draft with Proposal application so unsaved edits are not replaced by an older server snapshot. Single apply validates the Proposal against that draft, then updates the document, accepts the Proposal, and creates a bounded Document Change in one transaction. Bulk apply validates the complete submitted Proposal set in memory and commits all statuses plus one document revision and one Document Change atomically. Any conflict leaves the batch unapplied.
 
-### Template System
+Document Changes persist the before-snapshot, resulting revision, apply kind, linked Proposals, Principal, and timestamps. Server undo checks the current revision, restores the snapshot, resets linked Proposals, and marks the change undone in one transaction. Undo therefore survives reload and is not a local content-signature feature.
 
-`src/features/templates/` contains:
+Stale document revisions return `409` with the latest persisted document. The client preserves the local draft and offers reload server, copy local, or save local as new. All-pending Proposal actions are withheld until Proposal pagination reaches `nextCursor: null`.
 
-- `template-repository.ts`: database access for prompt templates
-- `template-validation.ts`: variable schema and user variable validation
+Generic `/api/proposals/:id` rejection/reset accepts optional `expectedStatus`. The official client sends it so a status race returns `409` with the current Proposal. Accepted state can be created only by the document-change apply routes and reset only by server undo.
 
-Templates store:
+## AI Provider And Execution Lifecycle
 
-- `systemPrompt`
-- `category`
-- `variableSchemaJson`
-- active/default flags
+The side-effect-free provider catalog describes IDs, defaults, capabilities, editable settings, and reasoning options. Server adapters alone read credentials or perform network calls. Supported modes are deterministic `stub`, Core.Today `coredot`/`anthropic`/`gemini`, and direct `openai`.
 
-The variable schema drives both UI input rendering and server-side validation.
+`src/features/ai/ai-execution.ts` owns bounded request preflight, durable request-budget consumption, idempotency fingerprints, AI Run creation/finalization, one 30-second deadline, request abort propagation, error classification, attempt fencing, and body/secret-free telemetry. Exact completed retries replay; in-progress or mismatched key reuse conflicts. Execution tokens prevent a late timed-out attempt from finalizing newer work.
 
-Prompt templates are also part of the proposal contract. Review prompts must produce exact document substrings as `targetText` and direct replacement text as `replacementText`. Rewrite and translation prompts should return structured `{ replacementText, explanation }` output when possible, while the route still accepts plain text for provider compatibility. See [PROMPTING.md](PROMPTING.md) for the template checklist.
+`pnpm ai:recover-stale-runs` safely marks old pending/streaming attempts interrupted and releases their execution token/lease. Deployments own scheduling and monitoring.
 
-### AI Provider Layer
+## Conversations And Collection Paging
 
-`src/features/ai/providers.ts` defines the provider contract:
+The default database Conversation adapter persists Workspace/document-scoped sessions and messages. `CONVERSATION_STORAGE=local` is an explicit single-browser demo adapter. Collection routes return bounded summaries without messages; the exact transcript is loaded through `/api/conversations/:id`.
 
-- `generateText`
-- `streamText`
-- `generateReview`
-- `capabilities`
+Create, append, and fork use idempotency keys. Rename, archive, status, and append use version preconditions. A version conflict returns no current version, so the client reloads detail before retrying.
 
-The saved runtime setting in `app_settings` selects `stub`, `coredot`, `anthropic`, `gemini`, or `openai`. The initial row is seeded from environment variables, but the editor header's `LLM 설정` dialog controls non-secret provider/model settings afterward. API keys remain server-side environment variables and are never persisted in browser storage.
+Archive hides a Conversation from default lists but direct detail remains readable. `includeArchived=true` includes archived summaries. Conversation retention expiry hides both list and detail; expired individual messages are omitted from an otherwise visible transcript. These are non-destructive visibility rules, not automatic deletion.
 
-The `coredot`, `anthropic`, and `gemini` provider modes route calls through Core.Today's LLM proxy with provider-specific request formats. The `openai` provider uses the Vercel AI SDK and `@ai-sdk/openai` directly. `stub` keeps local development and tests deterministic.
+Documents, AI Runs, Proposals, and Conversations use scoped opaque v2 cursors that bind timestamp/ID position to Workspace and route filters. Malformed or wrong-scope values return `400`. Document Change history intentionally uses a raw scoped change ID; a supplied ID that is not found or belongs to another scope returns an empty terminal page, while omitting the cursor requests the first page.
 
-Provider metadata is declared in a side-effect-free capability registry. `getAiProviderCapabilities()` lets UI or route code decide whether a provider supports native streaming, OpenAI-style reasoning effort, Core.Today proxy routing, and structured review output without constructing a provider or requiring credentials. Runtime provider instances attach the same frozen capability object for auditability.
+## DOCX Interchange And Resource Safety
 
-Add new providers behind the same contract. Keep provider-specific configuration out of UI components.
+Import first converts into an unsaved preview with warnings and a fidelity report; an idempotent confirmation creates the document. Export first previews fidelity and requires acknowledgement before output with approximated/removed features. Reports classify features as `preserved`, `approximated`, or `removed`; they do not claim full Word parity.
 
-### AI Runs And Proposals
-
-AI operations create records in two tables:
-
-- `ai_runs`: one record per AI command
-- `ai_proposals`: suggested edits generated by review or rewrite flows
-
-Routes finalize runs and proposals together through repository functions where consistency matters. Failed AI operations should mark a run as failed when a run already exists and should avoid leaving contradictory proposal state.
-
-AI route preflight is centralized in `src/features/ai/ai-command-service.ts`. Review and rewrite routes share document lookup, active template lookup, template variable validation, server-side reference hydration, AI settings loading, provider creation, and unsaved draft text selection. Route handlers should keep only operation-specific validation, prompt shaping, proposal mapping, and response formatting.
-
-Provider messages are bounded before they leave the server. `src/features/ai/context-limits.ts` defines request validation limits and provider-message truncation limits, and `payload-builder.ts` truncates large document/reference bodies with explicit `[truncated ... characters]` markers. Template variables are validated against the active template schema before provider creation, undeclared variables are rejected, select values must match declared options, and serialized variable values are bounded. This keeps the user-visible context model and real provider payload closer together, and gives future RAG/citation code a single place to coordinate prompt budget policy.
-
-The review panel renders pending proposals as an attorney-assist review queue. Each item shows the issue explanation, the exact source text, the proposed replacement, and a redline-style preview that labels inserted and deleted text. Users can accept a replacement, insert the proposal below the source text, reject it, bulk accept/reject pending proposals, or focus the matching source text in the editor.
-
-The right AI workspace separates three user jobs:
-
-- `Review`: proposal queue and document review execution.
-- `Chat`: document-scoped conversation sessions for selection and command-bar requests.
-- `Changes`: accepted AI applications that can be locally undone while the draft still matches the post-apply snapshot.
-
-Chat sessions use one Conversation Store interface with a database adapter by default and an explicit local browser adapter for demo mode. Database lists project bounded conversation summaries without message bodies; a workspace-scoped detail route loads the active transcript lazily. Cursor load-more preserves optimistic and already-loaded sessions. Both adapters enforce conversation/message limits and retain archive and retention metadata without automatic destructive pruning.
-
-Documents, AI Runs, Proposals, and Conversations use opaque cursor pages with stable timestamp-plus-ID ordering and bounded limits. Large fields are omitted or preview-truncated from collection responses. Exact Proposal and Conversation detail routes are scoped separately, so list rendering does not scale with accumulated transcript or replacement text.
-
-`ModalSurface` owns the shared portal stack for settings, command palette, document interchange confirmation, and compact left/right drawers. It isolates the background, locks scroll, traps focus, restores the trigger, closes only the top modal, and prevents document-level shortcuts while a modal is active.
-
-AI context transparency is handled by `src/features/ai/ai-context-snapshot.ts` and `AiContextInspector`. The snapshot records the active document title, readiness, metadata, character counts, selected template, variable names and redacted sensitive variable values, selected text metadata when available, referenced document summaries, and head/tail-truncated document text. The inspector exposes this as a copyable debug payload without storing provider secrets in browser state.
-
-Undo is conservative. The client stores the draft snapshot immediately before a proposal is accepted and the content signature immediately after applying it. If the user edits the document later, the undo button is disabled for that item rather than overwriting newer work.
-
-### Source Inspection
-
-`DocumentSourceView` is a read-only inspection surface for the current unsaved draft. It uses `buildDocumentSourceSnapshot()` to derive plain text, pretty Tiptap JSON, JSON validity, and a stable download filename from the in-memory draft. This keeps Source mode low-risk for v1 while leaving a clear extension point for a future editable raw/Markdown mode with explicit parse and roundtrip tests.
-
-Tolaria-inspired patterns are adopted only where they match this stack: command palette, outline, find/search, source inspection, context snapshots, and conversation metadata. Tauri windows, git/vault operations, and BlockNote-specific schema extensions stay out of this application boundary.
-
-### Proposal Applicability
-
-`src/features/proposals/proposal-apply.ts` contains exact-match text replacement logic. Proposal targets must match the reviewed document text exactly once before they are persisted.
-
-Selection proposals also store `occurrenceIndex`, `targetFrom`, and `targetTo` metadata when the client can capture the active editor range. The editor uses this metadata to highlight pending suggestions in the document and to keep repeated-text selection edits scoped to the captured occurrence.
-
-Current-session selection proposals additionally keep a client-side operation snapshot: command, scope, selected text, selection range, occurrence index, and content signature from the document state at command start. Accept/insert actions preflight that snapshot before mutating the draft. Bulk acceptance checks every snapshot-backed pending proposal against the original draft before applying any proposal in descending document order, so one valid proposal application does not make the next proposal falsely stale.
-
-Proposal status updates are conditional. The client sends the proposal status it observed before applying, rejecting, bulk-updating, or undoing a change. `/api/proposals/[id]` updates only when that `expectedStatus` still matches; if another tab or later request has already changed the proposal, the route returns `409` with the current proposal record instead of silently overwriting it. The client merges that returned proposal into the review queue. Bulk updates run sequentially and apply only successfully accepted proposals to the local draft, so one conflict does not make the UI roll back already persisted proposal statuses to stale values.
-
-This is intentionally conservative. Downstream products that need full Microsoft Word-style tracked changes can evolve the proposal model from exact text plus range metadata into position-based or step-map-based proposal application, or into an Office.js add-in that writes native Word revisions.
-
-Single-proposal acceptance now has a server-side apply endpoint at `/api/proposals/[id]/apply`. The route receives the document id, apply mode, expected proposal status, and the last known server content signature, then applies the proposal to the saved server document, updates the document content/plain text, and marks the proposal accepted in one database transaction. The client still keeps local draft snapshots for in-session undo, but accepted proposals no longer rely on a separate status PATCH followed by a later autosave to make the server state coherent.
-
-The remaining larger hardening step is server undo parity. Bulk accept reuses the same `/apply` endpoint sequentially, so each accepted proposal still persists document content and proposal status together. Local undo remains conservative client-side orchestration with proposal status preconditions, and accepted-status PATCH is blocked so document/proposal persistence cannot split again. Downstream products that need collaborative proposal application should extend the same `/apply` style interface to explicit server-side undo records.
+Request streams are byte-counted before JSON/multipart parsing. Submitted Tiptap JSON is checked iteratively for complete size, node count, and node/container depth. DOCX conversion runs in a terminable Node worker under the shared 30-second operation deadline so timed-out CPU work cannot persist or return late output.
 
 ## Database Model
 
-The schema lives in `src/db/schema.ts`.
+`src/db/schema.ts` defines these Workspace-scoped records:
 
-Core tables:
+- `documents`: body, lifecycle, readiness, typed metadata, revision, optional creation key.
+- `prompt_templates`: Workspace copies of built-in/custom templates.
+- `ai_runs`: provider execution, idempotency fingerprint, retry lease, execution token, and bounded summaries.
+- `ai_proposals`: source/replacement/explanation/range metadata and status.
+- `ai_workspace_conversations` and `ai_workspace_messages`: versioned durable transcripts, links, archive, and retention metadata.
+- `document_changes` and `document_change_proposals`: durable before-snapshots, revisions, apply kind, undo state, and linked Proposals.
+- `app_settings`: non-secret Workspace AI settings.
+- `request_budget_buckets`: durable Workspace/Principal/policy fixed-window counts.
 
-- `documents`
-- `prompt_templates`
-- `ai_runs`
-- `ai_proposals`
-- `app_settings`
-
-The app currently uses SQLite/libSQL through `@libsql/client`. Drizzle keeps the persistence layer explicit enough to migrate later.
-
-`documents` intentionally stores:
-
-- `status`: lifecycle state for active vs archived records.
-- `readiness`: writing workflow state for filtering and review queues.
-- `metadata_json`: lightweight product-specific properties such as owner, due date, category, and tags.
+Composite Workspace foreign keys and unique indexes keep related document, AI, Proposal, Conversation, and change records in the same scope. SQLite/libSQL is the default; a Postgres migration should preserve repository/service interfaces and the same authorization predicates.
 
 ## SQLite Today, Postgres Later
 
-The current implementation is SQLite-first. To migrate to Postgres:
+SQLite/libSQL keeps local setup and early deployments small. Move to Postgres when concurrency, reporting, database-native row-level security, or operating requirements demand it. Replace the Drizzle table/client implementation behind repository interfaces, preserve Workspace predicates and serialized document-change transactions, regenerate migrations, and rerun repository/concurrency tests against the target database.
 
-1. Replace SQLite table builders in `src/db/schema.ts` with Drizzle Postgres table builders.
-2. Replace `src/db/client.ts` with a Postgres client.
-3. Update `drizzle.config.ts` dialect and credentials.
-4. Regenerate migrations.
-5. Re-run repository tests against a Postgres test database.
+## Test And Release Gate
 
-Keep repository function signatures stable while doing this so UI and route code do not need broad changes.
+Repository tests use temporary databases, route tests exercise auth/error contracts, component tests use Testing Library, and Playwright uses an isolated E2E database. Production smoke builds and starts the artifact against a temporary migrated database and verifies health, readiness, redirects, and protected-route behavior.
 
-## Test Strategy
-
-- Repository tests use isolated temporary databases.
-- Route tests mock repositories and providers where appropriate.
-- Component tests use Testing Library.
-- E2E tests use Playwright and an isolated database at `data/e2e/coredot-e2e.db`.
-
-Run:
+Production builds intentionally require Clerk-mode configuration. Use the verification-only test-format environment documented in [Configuration](configuration.md#production-verification), then run:
 
 ```bash
-pnpm lint
-pnpm typecheck
-pnpm test
-pnpm e2e
-pnpm build
+pnpm release:check
+pnpm e2e:production
+.venv-docs/bin/python -m mkdocs build --strict
+git diff --check
 ```
+
+The dependency audit blocks the configured moderate-or-higher threshold; it is not an all-severity zero-finding claim.
 
 ## Extension Points
 
-Common downstream changes:
-
-- Add authentication and user/workspace ownership.
-- Replace SQLite with Postgres or hosted libSQL.
-- Add a new AI provider.
-- Replace seeded prompt templates.
-- Extend contract review playbooks with clause libraries, organization precedents, and benchmark rules.
-- Add richer proposal application with editor ranges.
-- Extend the server-side proposal apply route with explicit server-side undo records.
-- Add app-specific editor plugins through `src/plugins/app-plugins.ts`.
-- Add collaboration with Yjs or another sync layer.
-- Extend the DOCX MVP toward comments, tracked changes, embedded media, and stricter Word layout fidelity.
-
-Keep these additions behind clear route, repository, or provider boundaries.
+- Replace Clerk behind the request-context adapter while preserving fail-closed production validation, roles, and repository Workspace predicates.
+- Replace SQLite/libSQL behind repositories without bypassing serialized/atomic document changes.
+- Add providers through the catalog, server adapter, and contract tests.
+- Customize domain fields and workflow through Project Profiles rather than one-off UI branches.
+- Register build-time UI contributions through `createAppEditorPlugins()` and change document nodes through the shared app schema Profile.
+- Extend prompt templates while keeping variable and structured Proposal contracts.
+- Add real-time collaboration only with an explicit synchronization model that interoperates with revision/document-change semantics.
+- Extend DOCX fidelity with corpus tests and explicit report classifications.

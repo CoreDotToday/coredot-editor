@@ -201,19 +201,85 @@ export function useDocumentConversations({
     current: DocumentConversationSession,
     executionStatus: DocumentConversationSession["status"],
     mutationKey: string,
+    { preserveOptimisticMessages = false }: { preserveOptimisticMessages?: boolean } = {},
   ) {
     if (conversation.version < current.version) return current;
     const canonical = toDocumentConversationSession(conversation);
     const hasFollowingMutation = (conversationMutationCountsRef.current.get(mutationKey) ?? 0) > 1;
-    const hasOptimisticMessages = current.messages.length > canonical.messages.length;
+    const pendingAssistantMessages = preserveOptimisticMessages
+      ? current.messages.filter((message) => message.id.startsWith("pending_assistant_"))
+      : [];
+    const hasOptimisticMessages = current.messages.length > canonical.messages.length
+      || pendingAssistantMessages.length > 0;
+    const canonicalMessageIds = new Set(canonical.messages.map((message) => message.id));
+    const messages = pendingAssistantMessages.length > 0
+      ? [
+          ...canonical.messages,
+          ...pendingAssistantMessages.filter((message) => !canonicalMessageIds.has(message.id)),
+        ]
+      : hasOptimisticMessages ? current.messages : canonical.messages;
     return {
       ...canonical,
       archived: hasFollowingMutation ? current.archived : canonical.archived,
-      messages: hasOptimisticMessages ? current.messages : canonical.messages,
+      messages,
       status: executionStatus,
       syncStatus: hasFollowingMutation || hasOptimisticMessages ? "saving" as const : "saved" as const,
       title: hasFollowingMutation ? current.title : canonical.title,
     };
+  }
+
+  function registerVersionedMutationRetry({
+    conversationId,
+    queueKey,
+    preserveOptimisticMessages = false,
+    reason,
+    retry,
+    retryKey,
+    scopeGeneration,
+  }: {
+    conversationId: string;
+    queueKey: string;
+    preserveOptimisticMessages?: boolean;
+    reason: ConversationErrorReason;
+    retry: () => Promise<void>;
+    retryKey: string;
+    scopeGeneration: number;
+  }) {
+    if (reason !== "conflict") {
+      registerRetry(retryKey, reason, retry);
+      return;
+    }
+    const retryAfterRefresh = async () => {
+      if (scopeGeneration !== scopeGenerationRef.current) return;
+      const refreshed = await store.get(documentId, conversationId);
+      if (scopeGeneration !== scopeGenerationRef.current) return;
+      if (!refreshed.ok) {
+        registerRetry(retryKey, refreshed.reason, retryAfterRefresh);
+        return;
+      }
+      syncAttemptCanonical(refreshed.value);
+      const attempt = Array.from(activeAttemptsRef.current).find((candidate) =>
+        candidate.localId === conversationId
+        || candidate.state.canonical?.id === conversationId
+        || candidate.state.canonical?.id === refreshed.value.id
+      );
+      updateSessions((current) => dedupeConversationSessions(current.map((session) => {
+        const matchesConversation = session.id === conversationId
+          || session.id === refreshed.value.id
+          || Boolean(attempt && matchesAttempt(session, attempt));
+        return matchesConversation
+          ? reconcilePersistedSession(
+              refreshed.value,
+              session,
+              session.status,
+              queueKey,
+              { preserveOptimisticMessages },
+            )
+          : session;
+      })));
+      await retry();
+    };
+    registerRetry(retryKey, reason, retryAfterRefresh);
   }
 
   const load = useCallback(async () => {
@@ -420,9 +486,27 @@ export function useDocumentConversations({
         const replay = await append();
         if (!isAttemptActive(attempt)) return;
         applyPersistedResult(replay, attempt, "idle", retryKey);
-        if (!replay.ok) registerRetry(retryKey, replay.reason, retryAppend);
+        if (!replay.ok) {
+          registerVersionedMutationRetry({
+            conversationId: attempt.state.canonical?.id ?? canonical.id,
+            queueKey: attempt.localId,
+            preserveOptimisticMessages: true,
+            reason: replay.reason,
+            retry: retryAppend,
+            retryKey,
+            scopeGeneration: attempt.state.scopeGeneration,
+          });
+        }
       };
-      registerRetry(retryKey, result.reason, retryAppend);
+      registerVersionedMutationRetry({
+        conversationId: attempt.state.canonical?.id ?? canonical.id,
+        queueKey: attempt.localId,
+        preserveOptimisticMessages: true,
+        reason: result.reason,
+        retry: retryAppend,
+        retryKey,
+        scopeGeneration: attempt.state.scopeGeneration,
+      });
       return;
     }
     if (!attempt.state.canonical || result.value.version >= attempt.state.canonical.version) {
@@ -587,7 +671,16 @@ export function useDocumentConversations({
       });
       if (!isAttemptActive(attempt)) return;
       applyPersistedResult(result, attempt, status, retryKey);
-      if (!result.ok) registerRetry(retryKey, result.reason, persistStatus);
+      if (!result.ok) {
+        registerVersionedMutationRetry({
+          conversationId: attempt.state.canonical?.id ?? canonical.id,
+          queueKey: attempt.localId,
+          reason: result.reason,
+          retry: persistStatus,
+          retryKey,
+          scopeGeneration: attempt.state.scopeGeneration,
+        });
+      }
     };
     await persistStatus();
   }
@@ -627,7 +720,14 @@ export function useDocumentConversations({
       if (scopeGeneration !== scopeGenerationRef.current) return;
       if (!result.ok) {
         updateSessions((current) => current.map((session) => session.id === conversationId ? base : session));
-        registerRetry(retryKey, result.reason, () => renameConversation(conversationId, nextTitle));
+        registerVersionedMutationRetry({
+          conversationId,
+          queueKey: mutationKey,
+          reason: result.reason,
+          retry: () => renameConversation(conversationId, nextTitle),
+          retryKey,
+          scopeGeneration,
+        });
         return;
       }
       syncAttemptCanonical(result.value);
@@ -664,7 +764,14 @@ export function useDocumentConversations({
       if (scopeGeneration !== scopeGenerationRef.current) return;
       if (!result.ok) {
         updateSessions((current) => current.map((session) => session.id === conversationId ? base : session));
-        registerRetry(retryKey, result.reason, () => archiveConversation(conversationId));
+        registerVersionedMutationRetry({
+          conversationId,
+          queueKey: mutationKey,
+          reason: result.reason,
+          retry: () => archiveConversation(conversationId),
+          retryKey,
+          scopeGeneration,
+        });
         return;
       }
       syncAttemptCanonical(result.value);

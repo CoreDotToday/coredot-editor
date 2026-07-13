@@ -62,7 +62,7 @@ nav:
       - Deployment: DEPLOYMENT.md
   - Architecture:
       - System Architecture: ARCHITECTURE.md
-      - Hardening Design: architecture-hardening.md
+      - Architecture Hardening: architecture-hardening.md
       - Architecture Decisions:
           - Clerk Identity And Workspace Context: adr/0001-clerk-for-identity-and-workspace-context.md
       - Extension Points: PLUGINS.md

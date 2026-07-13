@@ -8,7 +8,7 @@ Use this guide when forking Coredot Editor into a new product or internal tool.
 2. Rename the product in `package.json`, README, UI copy, and deployment settings.
 3. Keep `AI_PROVIDER=stub` until the rest of the app is running.
 4. Run `pnpm db:setup`.
-5. Run `pnpm check`.
+5. Load the verification-only Clerk environment shown below, then run `pnpm check`.
 6. Run `pnpm e2e`.
 7. Replace prompt templates and AI provider configuration for your domain.
 8. Select and test one code-defined Project Profile with `PROJECT_PROFILE_ID`.
@@ -47,7 +47,7 @@ For contract review products, start from the seeded `Contract Review` template r
 
 ### Project Profile
 
-Start domain customization in `src/features/projects/default-project-profiles.ts`. A Profile supplies typed metadata fields, readiness states/transitions, localized labels, list filters, and stable built-in template references to the editor host. Select it through server-only `PROJECT_PROFILE_ID`; do not add one-off field branches to `DocumentShell` or trust a browser-selected Profile ID. Unknown IDs fail closed.
+Start domain customization in `src/features/projects/default-project-profiles.ts`. A Profile supplies typed metadata fields, readiness states/transitions, localized labels, list filters, and stable built-in template references to the editor host. Select it through server-only `PROJECT_PROFILE_ID`; do not add one-off field branches to `DocumentShell` or trust a browser-selected Profile ID. Unknown IDs fail closed when the active Profile is first resolved.
 
 When tightening a Profile, validate a copy of existing data first. The host preserves unchanged unknown legacy metadata for safe rollout, but rejects new or modified keys outside the active definition.
 
@@ -87,9 +87,9 @@ Good options for downstream projects:
 
 See [ARCHITECTURE.md](ARCHITECTURE.md#sqlite-today-postgres-later).
 
-## Adapt Authentication Carefully
+## Preserve Or Replace Authentication Carefully
 
-The starter uses Clerk request context and workspace-scoped repositories. Preserve the repository-level Workspace predicates and cross-Workspace not-found behavior if you replace Clerk. Do not rely on client-side filtering for access control, and keep production from enabling the deterministic test adapter.
+The starter already uses Clerk request context, personal/organization Workspaces, and Workspace-scoped repositories. Keep Clerk when it fits the product, or replace only the identity adapter while preserving repository-level Workspace predicates, owner/admin/member authorization, and cross-Workspace not-found behavior. Do not rely on client-side filtering for access control, and keep production from enabling the deterministic test adapter.
 
 ## Add Collaboration Later
 
@@ -110,7 +110,7 @@ This starter implements a web-editor version of the core review loop: playbook-d
 1. Add customer/vendor playbooks and clause libraries as first-class database tables.
 2. Store organization-approved fallback clauses and preferred negotiation positions.
 3. Add benchmark checks backed by your own precedents or licensed market data.
-4. Review the built-in `.docx` import/export MVP against your document corpus, then extend it for comments, tracked changes, or an Office.js Word add-in if lawyers need those workflows directly in Word.
+4. Review the built-in fidelity-aware `.docx` interchange against your document corpus, then extend it for comments, tracked changes, or an Office.js Word add-in if lawyers need those workflows directly in Word.
 5. Add audit logs for accepted edits, rejected edits, provider responses, and user overrides.
 
 ## Keep E2E Tests Isolated
@@ -119,10 +119,25 @@ This starter implements a web-editor version of the core review loop: playbook-d
 
 ```bash
 AI_PROVIDER=stub
+AUTH_MODE=test
 DATABASE_URL=file:./data/e2e/coredot-e2e.db
+TEST_PRINCIPAL_ID=e2e-user
+TEST_WORKSPACE_ID=e2e-workspace
 ```
 
 If you change database paths or Playwright config, preserve this isolation. E2E tests should never mutate production, staging, or a developer's normal local database.
+
+## Verification-Only Clerk Configuration
+
+`pnpm build`, `pnpm check`, and `pnpm release:check` create a production build and intentionally fail closed when Clerk configuration is absent. For local or CI verification only, export these fixed non-secret test-format values before running them:
+
+```bash
+export AUTH_MODE=clerk
+export CLERK_SECRET_KEY=sk_test_ci_build
+export NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_test_Y2xlcmsuZXhhbXBsZS5jb20k
+```
+
+These values do not authenticate users and are not deployment credentials. A real fork must configure real Clerk keys through its deployment secret manager. If the fork replaces Clerk, keep an equivalent production build/startup preflight instead of weakening fail-closed behavior.
 
 ## Fork Checklist
 
@@ -134,7 +149,8 @@ If you change database paths or Playwright config, preserve this isolation. E2E 
 - [ ] Decide provider mode: `stub`, `coredot`, `anthropic`, `gemini`, `openai`, or custom.
 - [ ] Select `PROJECT_PROFILE_ID` and test metadata/readiness migration against representative data.
 - [ ] Keep `CONVERSATION_STORAGE=database` unless the deployment is intentionally a browser-only demo.
+- [ ] Preserve Clerk personal/organization Workspace mapping, or replace the identity adapter without removing repository-level Workspace scoping and role checks.
 - [ ] Run `pnpm check`.
 - [ ] Run `pnpm e2e`.
 - [ ] Review `SECURITY.md` and vulnerability reporting path.
-- [ ] Add auth and ownership before storing sensitive user documents.
+- [ ] Configure real production identity credentials and verify cross-Workspace access fails before storing sensitive user documents.

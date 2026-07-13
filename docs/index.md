@@ -1,6 +1,6 @@
 # Coredot Editor
 
-Coredot Editor is an open-source starter for teams building AI-assisted document products. It combines a Tiptap editor, prompt-template driven AI workflows, proposal review, DOCX import/export, SQLite persistence, and clear extension points for downstream products.
+Coredot Editor is an open-source starter for teams building AI-assisted document products. It combines a Tiptap editor, Clerk-backed personal and organization Workspaces, prompt-template driven AI workflows, revision-safe Proposal review, fidelity-aware DOCX interchange, durable Conversations, SQLite/libSQL persistence, and build-time extension points.
 
 Use these docs when you want to:
 
@@ -27,17 +27,18 @@ Use these docs when you want to:
 
 Coredot Editor is an application starter, not a published npm component package. Clone or fork the repository, keep the boundaries documented here stable, and adapt the product-specific layers for your domain.
 
-The default local AI provider is `stub`, so the editor, proposal workflow, and end-to-end tests work without external credentials. Production deployments should configure real provider credentials server-side and add product-specific authentication, authorization, and workspace ownership.
+The default local AI provider is `stub`, and `.env.example` uses deterministic test authentication, so the editor, Proposal workflow, and end-to-end tests work without external credentials. Production rejects test authentication and requires real Clerk keys. Clerk organizations map to shared Workspaces, signed-in users without an active organization receive personal owner Workspaces, and repositories enforce Workspace scope plus owner/admin/member permissions.
 
 ## Public Boundaries
 
 Treat these as the most important extension boundaries:
 
 - `src/features/ai/providers.ts`: AI provider contract.
-- `src/features/ai/ai-command-service.ts`: shared preflight for AI routes.
+- `src/features/ai/ai-execution.ts`: deadline, idempotency, attempt fencing, finalization, and recovery-aware AI execution.
+- `src/features/documents/document-change-service.ts`: revision-aware single/bulk Proposal application, durable Document Changes, and server undo.
 - `src/features/templates/template-validation.ts`: prompt template variable contract.
-- `src/features/proposals/proposal-application-service.ts`: server-side proposal application transaction.
 - `src/plugins/types.ts`: editor plugin contribution contract.
+- `src/plugins/app-plugins.ts`: app plugin composition and the shared document schema Profile.
 - `src/app/api/*`: JSON route behavior for app integrations.
 
 Read [Architecture](ARCHITECTURE.md) before changing these boundaries.

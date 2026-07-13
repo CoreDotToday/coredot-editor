@@ -7,13 +7,17 @@ This guide covers the deployment shape for Coredot Editor and the environment de
 ```bash
 pnpm install
 cp .env.example .env.local
-# Set AUTH_MODE=clerk and configure Clerk test keys for a local production check.
+export AUTH_MODE=clerk
+export CLERK_SECRET_KEY=sk_test_ci_build
+export NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_test_Y2xlcmsuZXhhbXBsZS5jb20k
 pnpm db:setup
 pnpm build
 pnpm start
 ```
 
 Open [http://localhost:3000](http://localhost:3000).
+
+Those fixed values are non-secret test-format configuration for local build/start verification only; they do not authenticate users. Replace them with real Clerk keys from the deployment secret manager for any deployed instance.
 
 ## Required Environment Variables
 
@@ -25,7 +29,7 @@ Open [http://localhost:3000](http://localhost:3000).
 | `DATABASE_URL` | Yes in deployed environments | Use a writable SQLite/libSQL URL. Relative `file:` paths are mainly for local development. |
 | `DATABASE_AUTH_TOKEN` | With authenticated hosted libSQL | Canonical database token used by both the runtime client and Drizzle migrations. |
 | `TURSO_AUTH_TOKEN` | Optional compatibility fallback | Used only when `DATABASE_AUTH_TOKEN` is blank; the canonical variable wins. |
-| `AI_PROVIDER` | Recommended | Initial provider seed before `app_settings` exists. Use `stub` for demos/tests, `coredot`, `anthropic`, or `gemini` for Core.Today proxy calls, and `openai` for direct OpenAI calls. |
+| `AI_PROVIDER` | Optional but recommended | Initial provider seed before `app_settings` exists. A valid explicit value wins; otherwise `COREDOT_API_KEY` selects `coredot`, then `OPENAI_API_KEY` selects `openai`, and otherwise the seed is `stub`. |
 | `OPENAI_API_KEY` | Only with `AI_PROVIDER=openai` | Store as a secret, never in source control. |
 | `OPENAI_MODEL` | Optional | Initial OpenAI model seed when omitted from saved settings. |
 | `COREDOT_API_KEY` | With Core.Today providers | Required for `coredot`, `anthropic`, and `gemini`. Store as a secret, never in source control. |
@@ -215,7 +219,10 @@ Do not use stub mode for production workflows that users expect to be model-back
 
 ```bash
 AI_PROVIDER=stub
+AUTH_MODE=test
 DATABASE_URL=file:./data/e2e/coredot-e2e.db
+TEST_PRINCIPAL_ID=e2e-user
+TEST_WORKSPACE_ID=e2e-workspace
 pnpm exec next dev -p ${E2E_PORT:-3100}
 ```
 

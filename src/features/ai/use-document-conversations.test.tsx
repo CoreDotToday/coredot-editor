@@ -546,6 +546,351 @@ describe("useDocumentConversations", () => {
     expect(rename).toHaveBeenCalledTimes(2);
   });
 
+  it("refreshes a conflicted rename before retrying with the latest version", async () => {
+    const get = vi.fn().mockResolvedValue({
+      ok: true,
+      value: conversation({ title: "Server title", version: 2 }),
+    });
+    const rename = vi.fn()
+      .mockResolvedValueOnce({ ok: false, reason: "conflict" })
+      .mockResolvedValueOnce({
+        ok: true,
+        value: conversation({ title: "New title", version: 3 }),
+      });
+    const persistence = store({ get, rename });
+    const { result } = renderHook(() => useDocumentConversations({
+      documentId: "doc-a",
+      initialConversations: [conversation()],
+      storageMode: "database",
+      store: persistence,
+      workspaceId: "workspace-a",
+    }));
+
+    await act(async () => { await result.current.renameConversation("conversation-a", "New title"); });
+    expect(rename).toHaveBeenNthCalledWith(1, "doc-a", "conversation-a", {
+      expectedVersion: 1,
+      title: "New title",
+    });
+
+    await act(async () => { await result.current.retryLastMutation(); });
+
+    expect(get).toHaveBeenCalledWith("doc-a", "conversation-a");
+    expect(rename).toHaveBeenNthCalledWith(2, "doc-a", "conversation-a", {
+      expectedVersion: 2,
+      title: "New title",
+    });
+    expect(result.current.sessions[0]).toMatchObject({
+      syncStatus: "saved",
+      title: "New title",
+      version: 3,
+    });
+  });
+
+  it("keeps a conflicted rename retryable when detail refresh fails", async () => {
+    const get = vi.fn()
+      .mockResolvedValueOnce({ ok: false, reason: "unavailable" })
+      .mockResolvedValueOnce({
+        ok: true,
+        value: conversation({ title: "Server title", version: 2 }),
+      });
+    const rename = vi.fn()
+      .mockResolvedValueOnce({ ok: false, reason: "conflict" })
+      .mockResolvedValueOnce({
+        ok: true,
+        value: conversation({ title: "New title", version: 3 }),
+      });
+    const persistence = store({ get, rename });
+    const { result } = renderHook(() => useDocumentConversations({
+      documentId: "doc-a",
+      initialConversations: [conversation()],
+      storageMode: "database",
+      store: persistence,
+      workspaceId: "workspace-a",
+    }));
+
+    await act(async () => { await result.current.renameConversation("conversation-a", "New title"); });
+    await act(async () => { await result.current.retryLastMutation(); });
+
+    expect(get).toHaveBeenCalledTimes(1);
+    expect(rename).toHaveBeenCalledTimes(1);
+    expect(result.current.hasPendingRetries).toBe(true);
+    expect(result.current.errorReason).toBe("unavailable");
+
+    await act(async () => { await result.current.retryLastMutation(); });
+
+    expect(get).toHaveBeenCalledTimes(2);
+    expect(rename).toHaveBeenNthCalledWith(2, "doc-a", "conversation-a", {
+      expectedVersion: 2,
+      title: "New title",
+    });
+    expect(result.current.sessions[0]).toMatchObject({
+      syncStatus: "saved",
+      title: "New title",
+      version: 3,
+    });
+  });
+
+  it("refreshes a conflicted archive before retrying with the latest version", async () => {
+    const get = vi.fn().mockResolvedValue({
+      ok: true,
+      value: conversation({ title: "Server title", version: 2 }),
+    });
+    const archive = vi.fn()
+      .mockResolvedValueOnce({ ok: false, reason: "conflict" })
+      .mockResolvedValueOnce({
+        ok: true,
+        value: conversation({ archived: true, title: "Server title", version: 3 }),
+      });
+    const persistence = store({ archive, get });
+    const { result } = renderHook(() => useDocumentConversations({
+      documentId: "doc-a",
+      initialConversations: [conversation()],
+      storageMode: "database",
+      store: persistence,
+      workspaceId: "workspace-a",
+    }));
+
+    await act(async () => { await result.current.archiveConversation("conversation-a"); });
+    await act(async () => { await result.current.retryLastMutation(); });
+
+    expect(get).toHaveBeenCalledWith("doc-a", "conversation-a");
+    expect(archive).toHaveBeenNthCalledWith(2, "doc-a", "conversation-a", {
+      archived: true,
+      expectedVersion: 2,
+    });
+    expect(result.current.sessions[0]).toMatchObject({
+      archived: true,
+      title: "Server title",
+      version: 3,
+    });
+  });
+
+  it("refreshes a conflicted append while preserving the assistant and mutation key", async () => {
+    const get = vi.fn().mockResolvedValue({
+      ok: true,
+      value: conversation({ title: "Server title", version: 2 }),
+    });
+    const append = vi.fn()
+      .mockResolvedValueOnce({ ok: false, reason: "conflict" })
+      .mockResolvedValueOnce({
+        ok: true,
+        value: completedConversation({ title: "Server title", version: 3 }),
+      });
+    const persistence = store({
+      append,
+      create: vi.fn().mockResolvedValue({ ok: true, value: conversation() }),
+      get,
+    });
+    const { result } = renderHook(() => useDocumentConversations({
+      documentId: "doc-a",
+      initialConversations: [],
+      storageMode: "database",
+      store: persistence,
+      workspaceId: "workspace-a",
+    }));
+    let attempt!: ReturnType<typeof result.current.beginConversation>;
+    await act(async () => {
+      attempt = result.current.beginConversation({ command: "Rewrite", content: "Original", title: "Rewrite" });
+      await attempt.ready;
+      await result.current.completeConversation(attempt, { content: "Improved" });
+    });
+    expect(result.current.sessions[0]).toMatchObject({ messages: { length: 2 }, syncStatus: "unsaved" });
+
+    await act(async () => { await result.current.retryLastMutation(); });
+
+    expect(get).toHaveBeenCalledWith("doc-a", "conversation-a");
+    expect(append.mock.calls[0]?.[2]).toMatchObject({ expectedVersion: 1 });
+    expect(append.mock.calls[1]?.[2]).toMatchObject({ expectedVersion: 2 });
+    expect(append.mock.calls[1]?.[2].mutationKey).toBe(append.mock.calls[0]?.[2].mutationKey);
+    expect(result.current.sessions[0]).toMatchObject({
+      messages: { length: 2 },
+      syncStatus: "saved",
+      title: "Server title",
+      version: 3,
+    });
+  });
+
+  it("merges an equal-length server transcript without dropping the optimistic assistant", async () => {
+    const appendRetry = deferred<Awaited<ReturnType<ConversationStore["append"]>>>();
+    const remoteAssistant = {
+      aiRunId: null,
+      command: "Rewrite",
+      content: "Remote reply",
+      createdAt: new Date("2026-01-01T00:00:01.000Z"),
+      id: "message-remote",
+      proposalId: null,
+      role: "assistant" as const,
+      scopeLabel: null,
+    };
+    const get = vi.fn().mockResolvedValue({
+      ok: true,
+      value: conversation({
+        messageCount: 2,
+        messages: [...conversation().messages, remoteAssistant],
+        title: "Server title",
+        version: 2,
+      }),
+    });
+    const append = vi.fn()
+      .mockResolvedValueOnce({ ok: false, reason: "conflict" })
+      .mockImplementationOnce(() => appendRetry.promise);
+    const persistence = store({
+      append,
+      create: vi.fn().mockResolvedValue({ ok: true, value: conversation() }),
+      get,
+    });
+    const { result } = renderHook(() => useDocumentConversations({
+      documentId: "doc-a",
+      initialConversations: [],
+      storageMode: "database",
+      store: persistence,
+      workspaceId: "workspace-a",
+    }));
+    let attempt!: ReturnType<typeof result.current.beginConversation>;
+    await act(async () => {
+      attempt = result.current.beginConversation({ command: "Rewrite", content: "Original", title: "Rewrite" });
+      await attempt.ready;
+      await result.current.completeConversation(attempt, { content: "Improved" });
+    });
+
+    let retry!: Promise<void>;
+    act(() => { retry = result.current.retryLastMutation(); });
+    await waitFor(() => expect(append).toHaveBeenCalledTimes(2));
+
+    expect(result.current.sessions[0]).toMatchObject({
+      syncStatus: "saving",
+      title: "Server title",
+      version: 2,
+    });
+    expect(result.current.sessions[0]?.messages.map((message) => message.content)).toEqual([
+      "Original",
+      "Remote reply",
+      "Improved",
+    ]);
+
+    appendRetry.resolve({
+      ok: true,
+      value: conversation({
+        messageCount: 3,
+        messages: [
+          ...conversation().messages,
+          remoteAssistant,
+          {
+            ...remoteAssistant,
+            content: "Improved",
+            id: "message-assistant",
+          },
+        ],
+        title: "Server title",
+        version: 3,
+      }),
+    });
+    await act(async () => { await retry; });
+
+    expect(result.current.sessions[0]).toMatchObject({ syncStatus: "saved", version: 3 });
+    expect(result.current.sessions[0]?.messages.map((message) => message.content)).toEqual([
+      "Original",
+      "Remote reply",
+      "Improved",
+    ]);
+  });
+
+  it("refreshes a conflicted status while preserving the optimistic target status", async () => {
+    const statusRetry = deferred<Awaited<ReturnType<ConversationStore["setStatus"]>>>();
+    const get = vi.fn().mockResolvedValue({
+      ok: true,
+      value: conversation({ title: "Server title", version: 2 }),
+    });
+    const setStatus = vi.fn()
+      .mockResolvedValueOnce({ ok: false, reason: "conflict" })
+      .mockImplementationOnce(() => statusRetry.promise);
+    const persistence = store({
+      create: vi.fn().mockResolvedValue({ ok: true, value: conversation() }),
+      get,
+      setStatus,
+    });
+    const { result } = renderHook(() => useDocumentConversations({
+      documentId: "doc-a",
+      initialConversations: [],
+      storageMode: "database",
+      store: persistence,
+      workspaceId: "workspace-a",
+    }));
+    let attempt!: ReturnType<typeof result.current.beginConversation>;
+    await act(async () => {
+      attempt = result.current.beginConversation({ command: "Rewrite", content: "Original", title: "Rewrite" });
+      await attempt.ready;
+      await result.current.failConversation(attempt);
+    });
+
+    let retry!: Promise<void>;
+    act(() => { retry = result.current.retryLastMutation(); });
+    await waitFor(() => expect(setStatus).toHaveBeenCalledTimes(2));
+
+    expect(get).toHaveBeenCalledWith("doc-a", "conversation-a");
+    expect(setStatus).toHaveBeenNthCalledWith(2, "doc-a", "conversation-a", {
+      expectedVersion: 2,
+      status: "failed",
+    });
+    expect(result.current.sessions[0]).toMatchObject({
+      status: "failed",
+      syncStatus: "saving",
+      title: "Server title",
+      version: 2,
+    });
+
+    statusRetry.resolve({
+      ok: true,
+      value: conversation({ status: "failed", title: "Server title", version: 3 }),
+    });
+    await act(async () => { await retry; });
+    expect(result.current.sessions[0]).toMatchObject({ status: "failed", syncStatus: "saved", version: 3 });
+  });
+
+  it("ignores a delayed conflict refresh after the document scope changes", async () => {
+    const refresh = deferred<Awaited<ReturnType<ConversationStore["get"]>>>();
+    const rename = vi.fn()
+      .mockResolvedValueOnce({ ok: false, reason: "conflict" })
+      .mockResolvedValueOnce({
+        ok: true,
+        value: conversation({ title: "New title", version: 3 }),
+      });
+    const persistence = store({ get: vi.fn(() => refresh.promise), rename });
+    const { result, rerender } = renderHook(
+      ({ documentId, initialConversations }: { documentId: string; initialConversations: StoredConversationView[] }) =>
+        useDocumentConversations({
+          documentId,
+          initialConversations,
+          storageMode: "database",
+          store: persistence,
+          workspaceId: "workspace-a",
+        }),
+      { initialProps: { documentId: "doc-a", initialConversations: [conversation()] } },
+    );
+
+    await act(async () => { await result.current.renameConversation("conversation-a", "New title"); });
+    let retry!: Promise<void>;
+    act(() => { retry = result.current.retryLastMutation(); });
+    await waitFor(() => expect(persistence.get).toHaveBeenCalledWith("doc-a", "conversation-a"));
+
+    rerender({
+      documentId: "doc-b",
+      initialConversations: [conversation({ documentId: "doc-b", id: "conversation-b", title: "B" })],
+    });
+    refresh.resolve({
+      ok: true,
+      value: conversation({ title: "Server title", version: 2 }),
+    });
+    await act(async () => { await retry; });
+
+    expect(rename).toHaveBeenCalledTimes(1);
+    expect(result.current.sessions).toEqual([
+      expect.objectContaining({ id: "conversation-b", title: "B" }),
+    ]);
+    expect(result.current.errorReason).toBeNull();
+    expect(result.current.hasPendingRetries).toBe(false);
+  });
+
   it("rehydrates instead of retaining sessions when the document changes", () => {
     const persistence = store();
     const { result, rerender } = renderHook(

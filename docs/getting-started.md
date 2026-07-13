@@ -19,7 +19,7 @@ pnpm dev
 
 Open [http://localhost:3000](http://localhost:3000).
 
-The example environment uses `AI_PROVIDER=stub`, so review and rewrite flows return deterministic local output. You can explore the proposal workflow without an OpenAI or Core.Today key.
+The example environment uses `AI_PROVIDER=stub`, so review and rewrite flows return deterministic local output. It also uses `AUTH_MODE=test`, which supplies one deterministic local owner and Workspace. You can explore the complete workflow without Clerk, OpenAI, or Core.Today credentials, but test authentication is rejected by production builds and startup.
 
 ## First Document Flow
 
@@ -32,9 +32,19 @@ The example environment uses `AI_PROVIDER=stub`, so review and rewrite flows ret
 7. Accept, insert below, reject, or bulk-handle proposals.
 8. Save the document.
 
-Accepted proposals are applied through the server-side proposal apply route, which updates the saved document and proposal status in the same transaction.
+Accepted Proposals are applied through the revision-aware document-change service, which commits the submitted draft, Proposal status, and durable Document Change in one transaction.
 
 ## Verify The Local Checkout
+
+`pnpm build`, `pnpm check`, and `pnpm release:check` create a production build. Production authentication intentionally fails closed, so load these fixed non-secret test-format values for local verification:
+
+```bash
+export AUTH_MODE=clerk
+export CLERK_SECRET_KEY=sk_test_ci_build
+export NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_test_Y2xlcmsuZXhhbXBsZS5jb20k
+```
+
+They satisfy configuration validation only and do not authenticate users. A deployed instance requires real Clerk keys from its secret manager.
 
 Use the fast local gate while developing:
 

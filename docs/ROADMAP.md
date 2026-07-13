@@ -1,67 +1,39 @@
 # Roadmap
 
-Coredot Editor v1 is a working open-source AI document editor starter. The roadmap below prioritizes improvements that make it more useful for repeated professional writing, review, and downstream product adoption.
+Coredot Editor now has the production-oriented foundation needed for downstream products: Clerk-backed Workspaces, revision-safe changes, bounded AI execution, real plugin hosts, fidelity-aware DOCX interchange, durable Conversations, and server-owned Project Profiles. The roadmap focuses on capabilities that are not part of that baseline.
 
-## v1.1: AI Command Usability And Trust
+## AI Workflow And Retrieval
 
-- Maintain scope-aware quick actions in the bottom AI command bar so users can run common edits without inventing prompts.
-- Extend the typed command registry with app-specific host commands, command analytics hooks, and optional AI command mode.
-- Keep the live outline and `Cmd/Ctrl+F` find/replace flow stable across long Korean and mixed-language documents.
-- Persist non-generic rewrite explanations when a provider returns structured `{ replacementText, explanation }` output.
-- Keep plain text provider responses backward compatible.
-- Show command scope and source snippets consistently in the AI workspace.
+- Add richer AI Run metadata, grouping, and user-facing failure diagnostics without exposing prompt bodies or secrets in logs.
+- Add Conversation search across bounded summary metadata.
+- Persist inspectable prompt and context snapshots after storage limits and retention policy are defined.
+- Add opt-in inline autocomplete with independent rate limits and accept/dismiss/regenerate shortcuts.
+- Add document-library retrieval for PDF, DOCX, and plain text, with inspectable source snippets, citation IDs, and citation verification.
 
-## v1.2: AI Work Context And Run Metadata
+## Collaboration, Audit, And Operations
 
-- Show command scope, selected/source snippet, provider, model, status, elapsed time, and failure reason in the AI workspace.
-- Extend the database-backed conversation summaries and lazy transcript detail with search and explicit deployment-owned retention jobs after audit/legal-hold policy is defined.
-- Persist prompt/context snapshots on `ai_runs` after defining storage limits and retention policy.
-- Group active and completed AI work so users can keep editing without losing track of long-running requests.
-- Extend the current AI context inspector with run-specific provider/model data and retrieved source snippets.
+- Add real-time multi-user editing with a defined CRDT or equivalent synchronization model. Revision conflicts remain the current cross-client safety mechanism.
+- Expand the existing Document Change and AI Run records into a granular audit trail for settings changes, exports, authentication events, and administrative actions.
+- Add provider policy controls per Workspace.
+- Provide a concrete Postgres migration guide, concurrency harness, and production observability runbook.
+- Add explicit retention deletion jobs only after policy, audit, legal-hold, backup, and foreign-key requirements are settled; the current release does not delete records automatically.
 
-## v1.3: Inline Autocomplete
+## Plugin Packs And Project Profiles
 
-- Add an opt-in continuation suggestion at the caret.
-- Keep autocomplete separate from review proposals so quick accept/reject does not pollute the proposal queue.
-- Add keyboard affordances for accept, dismiss, and regenerate.
-- Rate-limit autocomplete so it does not compete with explicit AI review or rewrite commands.
+- Package example plugins for legal review, research and citation, and Korean business writing.
+- Define schema migration contracts for downstream plugins that add persistent document nodes.
+- Consider optional per-Workspace Project Profile administration after authorization, migration, and compatibility semantics are designed. The current Profile remains one server-owned selection per deployment.
 
-## v1.4: Retrieval And Citation
+## Full Word Fidelity
 
-- Add document library ingestion for PDF, DOCX, and plain text.
-- Attach source snippets, page metadata, and citation IDs to AI context.
-- Feed retrieved chunks into the AI context snapshot so users can inspect exactly which external sources were sent.
-- Add citation verification before showing generated citations as trusted.
-- Let templates limit which source collections can be used.
-- Use the Docker RAG verification stack to validate pgvector, vector-store health, and future retrieval integration tests.
+- Round-trip Tiptap tables as real DOCX tables, including nested and merged structures.
+- Add explicit support for comments, tracked changes, headers, footers, embedded media, pagination, and layout-sensitive features.
+- Grow the DOCX corpus and diff tooling across Korean and mixed-language business documents.
+- Pursue full Word parity as separate product work; the current structured fidelity report makes preservation, approximation, and removal visible but does not claim parity.
 
-## v1.5: Collaboration, Audit, And Production Controls
+## Explainable Review And Proposal Triage
 
-- Add authentication, organizations, workspaces, and ownership checks.
-- Add audit logs for AI runs, accepted/rejected proposals, settings changes, and document exports.
-- Add provider policy controls per workspace.
-- Provide a concrete Postgres migration guide and test harness.
-- Add health/readiness endpoints and production smoke checks.
-
-## v1.6: Plugin Packs
-
-- Render `toolbarItems` from editor plugins in the main toolbar.
-- Add plugin contribution tests for active, disabled, and error states.
-- Keep server-safe schema plugins separate from UI plugins.
-- Package example plugins for legal review, research/citation workflows, and Korean business writing.
-- Later: wire `blockActions`, `workspacePanels`, and `settingsSections`.
-
-## Later: Document Handoff Fidelity
-
-- Add editable Source/Markdown mode only after parser/serializer roundtrip tests cover headings, lists, tables, marks, and Korean text.
-- Export Tiptap tables as real DOCX tables.
-- Import DOCX tables into editable Tiptap table nodes.
-- Surface DOCX import warnings before redirecting to the imported document.
-- Expand markdown paste beyond pipe tables to common headings, lists, code blocks, links, and quotes.
-
-## Later: Explainable Review And Proposal Triage
-
-- Add proposal severity, category, confidence, and review grouping.
-- Add richer stale-target recovery for repeated clauses and changed document text.
-- Store document content signatures or version metadata with AI runs and proposals.
-- Add “revise this proposal” and “ask why” actions.
+- Add Proposal severity, category, confidence, and review grouping.
+- Add richer stale-target recovery for repeated clauses and substantially changed document text.
+- Store bounded content signatures or version metadata with AI Runs and Proposals where they improve explanation and recovery.
+- Add “revise this Proposal” and “ask why” actions.

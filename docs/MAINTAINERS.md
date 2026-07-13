@@ -6,7 +6,8 @@ This guide is for people maintaining a public fork of Coredot Editor.
 
 1. Update `CHANGELOG.md`.
 2. Confirm `package.json` version.
-3. Run:
+3. Load the fixed non-secret Clerk verification environment from [Configuration](configuration.md#production-verification). `pnpm build` intentionally fails without Clerk-mode configuration.
+4. Run:
 
 ```bash
 pnpm lint
@@ -18,9 +19,9 @@ pnpm security:audit
 git diff --check
 ```
 
-4. Check `git status --short` for generated artifacts.
-5. Check that no real API keys are present outside ignored `.env*` files.
-6. Tag the release if your fork uses tags.
+5. Check `git status --short` for generated artifacts.
+6. Check that no real API keys are present outside ignored `.env*` files.
+7. Tag the release if your fork uses tags.
 
 ## Review Priorities
 

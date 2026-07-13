@@ -4,6 +4,8 @@ This page summarizes the commands and workflow maintainers should use when chang
 
 ## Local Commands
 
+`pnpm build` and `pnpm check` create a production build and therefore require Clerk-mode verification configuration or real deployment keys. Load the fixed non-secret values in [Configuration](configuration.md#production-verification) before using them; production fail-fast behavior is intentional.
+
 ```bash
 pnpm dev
 pnpm lint
@@ -56,7 +58,7 @@ Before opening a pull request:
 1. Keep the change focused.
 2. Update public docs when behavior, route contracts, or extension points change.
 3. Add or update tests for changed behavior.
-4. Run `pnpm lint`, `pnpm typecheck`, `pnpm test`, and `pnpm build`.
+4. Load the documented verification-only Clerk environment, then run `pnpm lint`, `pnpm typecheck`, `pnpm test`, and `pnpm build`.
 5. Run `pnpm e2e` when user flows change.
 6. Run `pnpm docs:build` when documentation changes.
 

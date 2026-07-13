@@ -54,6 +54,10 @@ jobs:
         run: pnpm e2e
 
       - name: Build
+        env:
+          AUTH_MODE: clerk
+          CLERK_SECRET_KEY: sk_test_ci_build
+          NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: pk_test_Y2xlcmsuZXhhbXBsZS5jb20k
         run: pnpm build
 
       - name: Production artifact smoke tests
