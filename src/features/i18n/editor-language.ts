@@ -216,6 +216,57 @@ export const editorMessages = {
       staleSelection: "The selected location changed. Run the AI command again.",
       updateProposalFailed: "Could not update proposal status.",
     },
+    documentInterchange: {
+      cancel: "Cancel",
+      confirmExport: "Export with understood loss",
+      exportFailureTitle: "DOCX export interrupted",
+      exportLossDescription: "Some document formatting will be approximated or removed in DOCX. Review the changes before exporting.",
+      exportLossTitle: "Confirm DOCX format loss",
+      featureLabels: {
+        blockquote: "Block quote",
+        bold: "Bold",
+        "code-block": "Code block",
+        "conversion-warning": "Conversion warning",
+        "docx-formatting": "Other DOCX formatting (review required)",
+        "hard-break": "Line break",
+        footer: "Footer",
+        heading: "Heading",
+        header: "Header",
+        highlight: "Highlight",
+        "horizontal-rule": "Divider",
+        image: "Image",
+        italic: "Italic",
+        "korean-text": "Korean text",
+        link: "Link",
+        list: "List",
+        "multi-block-list-item": "Multi-block list item",
+        "nested-list": "Nested list",
+        "ordered-list-start": "Custom ordered-list start",
+        paragraph: "Paragraph",
+        strike: "Strikethrough",
+        table: "Table",
+        "text-color": "Text color",
+        "task-list": "Task list",
+        underline: "Underline",
+      },
+      fidelityTitle: "Format conversion",
+      importButton: "Import DOCX",
+      importFailed: "Could not import the DOCX file.",
+      retryImport: "Retry DOCX import",
+      importInputLabel: "Choose DOCX file",
+      importing: "Importing...",
+      importReviewDescription: "Review the conversion details before opening the imported document.",
+      importReviewTitle: "Review import result",
+      openImportedDocument: "Open imported document",
+      retryExport: "Retry DOCX export",
+      outcomes: {
+        approximated: "Approximated",
+        preserved: "Preserved",
+        removed: "Removed",
+      },
+      unknownFeature: "Unsupported feature: {feature}",
+      warningsTitle: "Conversion warnings",
+    },
     header: {
       editorView: "Show editor",
       exportDocx: "Export DOCX",
@@ -587,6 +638,57 @@ export const editorMessages = {
       staleSelection: "선택 위치가 변경되어 제안을 적용할 수 없습니다. 다시 실행해 주세요.",
       updateProposalFailed: "제안 상태를 업데이트하지 못했습니다.",
     },
+    documentInterchange: {
+      cancel: "취소",
+      confirmExport: "손실을 이해하고 내보내기",
+      exportFailureTitle: "DOCX 내보내기 중단",
+      exportLossDescription: "일부 문서 형식이 DOCX에서 유사하게 변환되거나 제거됩니다. 내보내기 전에 변경 내용을 확인하세요.",
+      exportLossTitle: "DOCX 형식 손실 확인",
+      featureLabels: {
+        blockquote: "인용문",
+        bold: "굵게",
+        "code-block": "코드 블록",
+        "conversion-warning": "변환 경고",
+        "docx-formatting": "기타 DOCX 서식(검토 필요)",
+        "hard-break": "줄바꿈",
+        footer: "바닥글",
+        heading: "제목",
+        header: "머리글",
+        highlight: "강조 색상",
+        "horizontal-rule": "구분선",
+        image: "이미지",
+        italic: "기울임",
+        "korean-text": "한국어 텍스트",
+        link: "링크",
+        list: "목록",
+        "multi-block-list-item": "여러 블록이 있는 목록 항목",
+        "nested-list": "중첩 목록",
+        "ordered-list-start": "번호 목록 시작 값",
+        paragraph: "문단",
+        strike: "취소선",
+        table: "표",
+        "text-color": "글자 색상",
+        "task-list": "작업 목록",
+        underline: "밑줄",
+      },
+      fidelityTitle: "형식 변환 결과",
+      importButton: "DOCX 가져오기",
+      importFailed: "DOCX를 가져오지 못했습니다.",
+      retryImport: "가져오기 다시 시도",
+      importInputLabel: "DOCX 파일 선택",
+      importing: "가져오는 중...",
+      importReviewDescription: "가져온 문서를 열기 전에 변환 결과를 확인하세요.",
+      importReviewTitle: "가져오기 결과 확인",
+      openImportedDocument: "가져온 문서 열기",
+      retryExport: "DOCX 내보내기 다시 시도",
+      outcomes: {
+        approximated: "유사하게 변환됨",
+        preserved: "유지됨",
+        removed: "제거됨",
+      },
+      unknownFeature: "지원되지 않는 형식: {feature}",
+      warningsTitle: "변환 경고",
+    },
     header: {
       editorView: "편집 보기",
       exportDocx: "DOCX 내보내기",
@@ -757,6 +859,25 @@ export type EditorMessages = (typeof editorMessages)[EditorLanguage];
 
 export function isEditorLanguage(value: string | null): value is EditorLanguage {
   return value === "en" || value === "ko";
+}
+
+export function readStoredEditorLanguage(): EditorLanguage {
+  if (typeof window === "undefined") return DEFAULT_EDITOR_LANGUAGE;
+  const storedLanguage = window.localStorage.getItem(EDITOR_LANGUAGE_STORAGE_KEY);
+  return isEditorLanguage(storedLanguage) ? storedLanguage : DEFAULT_EDITOR_LANGUAGE;
+}
+
+export function getFidelityFeatureLabel(feature: string, language: EditorLanguage) {
+  const messages = editorMessages[language].documentInterchange;
+  const featureLabels = messages.featureLabels as Record<string, string>;
+  return featureLabels[feature] ?? formatEditorMessage(messages.unknownFeature, { feature });
+}
+
+export function getFidelityOutcomeLabel(
+  outcome: "approximated" | "preserved" | "removed",
+  language: EditorLanguage,
+) {
+  return editorMessages[language].documentInterchange.outcomes[outcome];
 }
 
 export function formatEditorMessage(template: string, values: Record<string, string>) {

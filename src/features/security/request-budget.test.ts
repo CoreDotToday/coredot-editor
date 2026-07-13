@@ -49,6 +49,11 @@ describe("durable request budget", () => {
     expect(REQUEST_BUDGET_POLICIES["ai.connection-test"]).toEqual({ limit: 5, windowMs: 60_000 });
   });
 
+  it("defines independent preview and artifact export budgets", () => {
+    expect(REQUEST_BUDGET_POLICIES["documents.export-preview"]).toEqual({ limit: 20, windowMs: 60_000 });
+    expect(REQUEST_BUDGET_POLICIES["documents.export"]).toEqual({ limit: 20, windowMs: 60_000 });
+  });
+
   it("allows exactly the configured number of requests and rejects the next request", async () => {
     const { client } = await createBudgetClient();
     const budget = createRequestBudget({ client, policies: { test: policy } });

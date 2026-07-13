@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DocumentShell } from "./DocumentShell";
 import { SelectionAiMenu } from "./SelectionAiMenu";
+import { DOCUMENT_INTERCHANGE_CLIENT_TIMEOUT_MS } from "@/features/documents/document-interchange-fetch";
 
 vi.mock("./DocumentEditor", () => ({
   DocumentEditor: ({
@@ -1731,13 +1732,18 @@ describe("DocumentShell", () => {
 
   it("exports the current unsaved draft as DOCX", async () => {
     const user = userEvent.setup();
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(new Uint8Array([1, 2, 3]), {
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        fidelity: {
+          items: [{ feature: "paragraph", outcome: "preserved" }],
+          requiresAcknowledgement: false,
+        },
+      }), { headers: { "Content-Type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(new Uint8Array([1, 2, 3]), {
         headers: {
           "Content-Type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         },
-      }),
-    );
+      }));
     const originalCreateObjectUrl = URL.createObjectURL;
     const originalRevokeObjectUrl = URL.revokeObjectURL;
     const createObjectUrl = vi.fn(() => "blob:docx");
@@ -1757,18 +1763,338 @@ describe("DocumentShell", () => {
     await user.click(screen.getByRole("button", { name: "Mock body edit" }));
     await user.click(screen.getByRole("button", { name: "DOCX 내보내기" }));
 
-    expect(fetchMock).toHaveBeenCalledWith(
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "/api/documents/doc_1/export/preview",
+      expect.objectContaining({
+        method: "POST",
+        body: expect.stringContaining("fresh edited body"),
+      }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
       "/api/documents/doc_1/export",
       expect.objectContaining({
         method: "POST",
         body: expect.stringContaining("fresh edited body"),
       }),
     );
+    expect(screen.queryByRole("dialog", { name: "DOCX 형식 손실 확인" })).not.toBeInTheDocument();
     expect(createObjectUrl).toHaveBeenCalled();
     expect(click).toHaveBeenCalled();
     expect(revokeObjectUrl).toHaveBeenCalledWith("blob:docx");
     Object.defineProperty(URL, "createObjectURL", { configurable: true, value: originalCreateObjectUrl });
     Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: originalRevokeObjectUrl });
+  });
+
+  it("previews lossy export and waits for explicit acknowledgement before downloading", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        fidelity: {
+          items: [{ feature: "table", outcome: "approximated" }],
+          requiresAcknowledgement: true,
+        },
+      }), { headers: { "Content-Type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(new Uint8Array([1, 2, 3]), {
+        headers: {
+          "Content-Type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        },
+      }));
+    const originalCreateObjectUrl = URL.createObjectURL;
+    const originalRevokeObjectUrl = URL.revokeObjectURL;
+    const createObjectUrl = vi.fn(() => "blob:lossy-docx");
+    const revokeObjectUrl = vi.fn();
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+    Object.defineProperty(URL, "createObjectURL", { configurable: true, value: createObjectUrl });
+    Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: revokeObjectUrl });
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "saved body")}
+        templates={[]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "DOCX 내보내기" }));
+
+    expect(await screen.findByRole("dialog", { name: "DOCX 형식 손실 확인" })).toBeInTheDocument();
+    expect(screen.getByText(/표.*유사하게 변환됨/)).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(createObjectUrl).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "손실을 이해하고 내보내기" }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "/api/documents/doc_1/export",
+      expect.objectContaining({
+        method: "POST",
+        body: expect.stringContaining('"acknowledgedLoss":true'),
+      }),
+    );
+    expect(createObjectUrl).toHaveBeenCalled();
+    expect(click).toHaveBeenCalled();
+    expect(revokeObjectUrl).toHaveBeenCalledWith("blob:lossy-docx");
+    Object.defineProperty(URL, "createObjectURL", { configurable: true, value: originalCreateObjectUrl });
+    Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: originalRevokeObjectUrl });
+  });
+
+  it("traps export review focus, closes on Escape, and restores the export trigger", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response(JSON.stringify({
+      fidelity: {
+        items: [{ feature: "table", outcome: "approximated" }],
+        requiresAcknowledgement: true,
+      },
+    }), { headers: { "Content-Type": "application/json" } }));
+    const { container } = render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "saved body")}
+        templates={[]}
+      />,
+    );
+    const trigger = screen.getByRole("button", { name: "DOCX 내보내기" });
+
+    await user.click(trigger);
+
+    expect(await screen.findByRole("dialog", { name: "DOCX 형식 손실 확인" })).toBeInTheDocument();
+    const cancel = screen.getByRole("button", { name: "취소" });
+    const confirm = screen.getByRole("button", { name: "손실을 이해하고 내보내기" });
+    await waitFor(() => expect(cancel).toHaveFocus());
+    expect(container).toHaveAttribute("inert");
+    expect(document.body.style.overflow).toBe("hidden");
+
+    const lateBackgroundSibling = document.createElement("aside");
+    document.body.append(lateBackgroundSibling);
+    await waitFor(() => expect(lateBackgroundSibling).toHaveAttribute("inert"));
+
+    await user.keyboard("{Meta>}k{/Meta}");
+    expect(screen.queryByRole("dialog", { name: "명령 팔레트" })).not.toBeInTheDocument();
+    expect(cancel).toHaveFocus();
+    expect(fetch).toHaveBeenCalledTimes(1);
+
+    await user.tab({ shift: true });
+    expect(confirm).toHaveFocus();
+    await user.tab();
+    expect(cancel).toHaveFocus();
+
+    await user.keyboard("{Escape}");
+
+    expect(screen.queryByRole("dialog", { name: "DOCX 형식 손실 확인" })).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+    expect(container).not.toHaveAttribute("inert");
+    expect(lateBackgroundSibling).not.toHaveAttribute("inert");
+    expect(document.body.style.overflow).toBe("");
+    lateBackgroundSibling.remove();
+  });
+
+  it("keeps the export review open while the acknowledged artifact request is in flight", async () => {
+    const user = userEvent.setup();
+    const deferredArtifact = createDeferredResponse();
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        fidelity: {
+          items: [{ feature: "table", outcome: "approximated" }],
+          requiresAcknowledgement: true,
+        },
+      }), { headers: { "Content-Type": "application/json" } }))
+      .mockReturnValueOnce(deferredArtifact.promise);
+    vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:pending-artifact-docx");
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "saved body")}
+        templates={[]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "DOCX 내보내기" }));
+    const dialog = await screen.findByRole("dialog", { name: "DOCX 형식 손실 확인" });
+    await user.click(screen.getByRole("button", { name: "손실을 이해하고 내보내기" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(screen.getByRole("button", { name: "취소" })).toBeDisabled();
+
+    fireEvent.keyDown(dialog, { key: "Escape" });
+
+    expect(screen.getByRole("dialog", { name: "DOCX 형식 손실 확인" })).toBeInTheDocument();
+    deferredArtifact.resolve(new Response(new Uint8Array([1, 2, 3]), {
+      headers: {
+        "Content-Type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      },
+    }));
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "DOCX 형식 손실 확인" })).not.toBeInTheDocument();
+    });
+  });
+
+  it("announces a preview failure outside the closed AI workspace and retries the full export", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(null, { status: 500 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        fidelity: {
+          items: [{ feature: "paragraph", outcome: "preserved" }],
+          requiresAcknowledgement: false,
+        },
+      }), { headers: { "Content-Type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(new Uint8Array([1, 2, 3]), {
+        headers: {
+          "Content-Type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        },
+      }));
+    vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:retried-preview-docx");
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "saved body")}
+        templates={[]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "검토", pressed: true }));
+    expect(screen.getByRole("button", { name: "검토", pressed: false })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "DOCX 내보내기" }));
+
+    const alert = await screen.findByRole("alert", { name: "DOCX 내보내기 중단" });
+    expect(within(alert).getByText("DOCX 내보내기에 실패했습니다. 다시 시도하세요.")).toBeInTheDocument();
+    await user.click(within(alert).getByRole("button", { name: "DOCX 내보내기 다시 시도" }));
+
+    await waitFor(() => expect(screen.queryByRole("alert", { name: "DOCX 내보내기 중단" })).not.toBeInTheDocument());
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "/api/documents/doc_1/export/preview",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      3,
+      "/api/documents/doc_1/export",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(click).toHaveBeenCalled();
+  });
+
+  it("announces an artifact failure outside the closed AI workspace and retries the full export", async () => {
+    const user = userEvent.setup();
+    const preservedPreview = () => new Response(JSON.stringify({
+      fidelity: {
+        items: [{ feature: "paragraph", outcome: "preserved" }],
+        requiresAcknowledgement: false,
+      },
+    }), { headers: { "Content-Type": "application/json" } });
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(preservedPreview())
+      .mockResolvedValueOnce(new Response(null, { status: 500 }))
+      .mockResolvedValueOnce(preservedPreview())
+      .mockResolvedValueOnce(new Response(new Uint8Array([1, 2, 3]), {
+        headers: {
+          "Content-Type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        },
+      }));
+    vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:retried-artifact-docx");
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "saved body")}
+        templates={[]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "검토", pressed: true }));
+    await user.click(screen.getByRole("button", { name: "DOCX 내보내기" }));
+
+    const alert = await screen.findByRole("alert", { name: "DOCX 내보내기 중단" });
+    await user.click(within(alert).getByRole("button", { name: "DOCX 내보내기 다시 시도" }));
+
+    await waitFor(() => expect(screen.queryByRole("alert", { name: "DOCX 내보내기 중단" })).not.toBeInTheDocument());
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(click).toHaveBeenCalled();
+  });
+
+  it("aborts an active DOCX export on unmount and never downloads a late artifact", async () => {
+    const user = userEvent.setup();
+    const deferredArtifact = createDeferredResponse();
+    let artifactSignal: AbortSignal | undefined;
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        fidelity: {
+          items: [{ feature: "paragraph", outcome: "preserved" }],
+          requiresAcknowledgement: false,
+        },
+      })))
+      .mockImplementationOnce((_input, init) => {
+        artifactSignal = init?.signal ?? undefined;
+        return deferredArtifact.promise;
+      });
+    vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:late-artifact-docx");
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+    const { unmount } = render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "saved body")}
+        templates={[]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "DOCX 내보내기" }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+
+    unmount();
+
+    expect(artifactSignal?.aborted).toBe(true);
+    deferredArtifact.resolve(new Response(new Uint8Array([1, 2, 3])));
+    await deferredArtifact.promise;
+    expect(click).not.toHaveBeenCalled();
+  });
+
+  it("times out stalled DOCX artifact body consumption and exposes full-export retry", async () => {
+    vi.useFakeTimers();
+    const stalledResponse = new Response(new Uint8Array([1]));
+    const stalledBlob = vi.spyOn(stalledResponse, "blob").mockImplementation(
+      () => new Promise<Blob>(() => undefined),
+    );
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        fidelity: {
+          items: [{ feature: "paragraph", outcome: "preserved" }],
+          requiresAcknowledgement: false,
+        },
+      })))
+      .mockResolvedValueOnce(stalledResponse);
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Market Entry Memo", "saved body")}
+        templates={[]}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "DOCX 내보내기" }));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(stalledBlob).toHaveBeenCalledTimes(1);
+    await act(async () => vi.advanceTimersByTimeAsync(DOCUMENT_INTERCHANGE_CLIENT_TIMEOUT_MS));
+
+    const alert = screen.getByRole("alert", { name: "DOCX 내보내기 중단" });
+    expect(within(alert).getByRole("button", { name: "DOCX 내보내기 다시 시도" })).toBeEnabled();
+    expect(click).not.toHaveBeenCalled();
   });
 
   it("resets the title textbox when rerendered with a different document", async () => {

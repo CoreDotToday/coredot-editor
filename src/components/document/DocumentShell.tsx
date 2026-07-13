@@ -45,6 +45,8 @@ import type {
   PromptTemplateRecord,
   TiptapJson,
 } from "@/db/schema";
+import type { FidelityReport } from "@/features/documents/document-interchange";
+import { fetchDocumentInterchange } from "@/features/documents/document-interchange-fetch";
 import {
   archiveAiWorkspaceSession,
   renameAiWorkspaceSession,
@@ -69,12 +71,14 @@ import {
 import { extractPlainTextFromTiptap } from "@/features/documents/tiptap-text";
 import {
   EDITOR_LANGUAGE_STORAGE_KEY,
-  DEFAULT_EDITOR_LANGUAGE,
   editorLanguageOptions,
   editorMessages,
   formatEditorMessage,
+  getFidelityFeatureLabel,
+  getFidelityOutcomeLabel,
   getSelectionCommandLabel,
   isEditorLanguage,
+  readStoredEditorLanguage,
   type EditorLanguage,
 } from "@/features/i18n/editor-language";
 import {
@@ -96,6 +100,7 @@ import { DocumentCommandPalette } from "./DocumentCommandPalette";
 import { DocumentMetadataPanel } from "./DocumentMetadataPanel";
 import { DocumentOutlinePanel } from "./DocumentOutlinePanel";
 import { DocumentSourceView } from "./DocumentSourceView";
+import { DocumentInterchangeDialog } from "./DocumentInterchangeDialog";
 import { buildDocumentCommandRegistry } from "./commands/document-command-registry";
 import type { DocumentCommandAction } from "./commands/document-command-types";
 import type { SelectionAiResultPreview } from "./SelectionAiResultPopover";
@@ -139,6 +144,12 @@ type DraftState = {
   contentJson: TiptapJson;
   metadataJson: DocumentMetadata;
   readiness: DocumentReadiness;
+};
+
+type PendingDocxExport = {
+  contentJson: TiptapJson;
+  fidelity: FidelityReport;
+  title: string;
 };
 
 type SelectionCommandPayload = {
@@ -410,6 +421,10 @@ function DocumentShellContent({
   const [documentChangesError, setDocumentChangesError] = useState("");
   const [undoChangeError, setUndoChangeError] = useState("");
   const [isExportingDocx, setIsExportingDocx] = useState(false);
+  const [pendingDocxExport, setPendingDocxExport] = useState<PendingDocxExport | null>(null);
+  const [docxExportError, setDocxExportError] = useState("");
+  const exportTriggerRef = useRef<HTMLButtonElement>(null);
+  const docxExportRequestRef = useRef<AbortController | null>(null);
   const aiWorkspaceIdRef = useRef(0);
   const runningSelectionCommandsRef = useRef<RunningSelectionAiCommand[]>([]);
   const [observedDocument, setObservedDocument] = useState<DocumentSnapshot>(incomingDocument);
@@ -438,6 +453,10 @@ function DocumentShellContent({
   const [outlineFocusRequest, setOutlineFocusRequest] = useState<{ requestId: string; topLevelIndex: number } | null>(
     null,
   );
+  useEffect(() => () => {
+    docxExportRequestRef.current?.abort();
+    docxExportRequestRef.current = null;
+  }, [document.id]);
   const activeTemplateId = templates.some((template) => template.id === selectedTemplateId)
     ? selectedTemplateId
     : templates[0]?.id ?? "";
@@ -527,6 +546,7 @@ function DocumentShellContent({
 
   useEffect(() => {
     const handleDocumentShortcut = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || pendingDocxExport) return;
       const commandId = resolveDocumentShortcut(event);
       if (!commandId) {
         return;
@@ -546,7 +566,7 @@ function DocumentShellContent({
 
     window.addEventListener("keydown", handleDocumentShortcut);
     return () => window.removeEventListener("keydown", handleDocumentShortcut);
-  }, [openFind]);
+  }, [openFind, pendingDocxExport]);
 
   const isDocumentNavigation = observedDocument.id !== incomingDocument.id;
   const shouldIgnoreSameDocumentSnapshot =
@@ -595,6 +615,8 @@ function DocumentShellContent({
       setReviewSummary(null);
       setIsReviewing(false);
       setReviewError("");
+      setPendingDocxExport(null);
+      setDocxExportError("");
       setTemplateVariables(initialTemplateVariables);
       setTemplateVariableErrors({});
       setRunningSelectionCommands([]);
@@ -1074,39 +1096,109 @@ function DocumentShellContent({
     return () => window.removeEventListener("beforeunload", handleBeforeUnload);
   }, [saveState]);
 
+  const downloadDocxSnapshot = useCallback(async (
+    snapshot: Pick<PendingDocxExport, "contentJson" | "title">,
+    acknowledgedLoss: boolean,
+    signal: AbortSignal,
+  ) => {
+    const blob = await fetchDocumentInterchange(`/api/documents/${encodeURIComponent(document.id)}/export`, {
+      method: "POST",
+      signal,
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        acknowledgedLoss,
+        title: snapshot.title,
+        contentJson: snapshot.contentJson,
+      }),
+    }, async (response) => {
+      if (!response.ok) throw new Error("Failed to export DOCX");
+      return response.blob();
+    });
+    if (signal.aborted) throw signal.reason;
+    const url = URL.createObjectURL(blob);
+    const link = window.document.createElement("a");
+    link.href = url;
+    link.download = `${sanitizeDownloadFileName(snapshot.title)}.docx`;
+    link.click();
+    URL.revokeObjectURL(url);
+  }, [document.id]);
+
   const exportDocxDraft = useCallback(async () => {
+    if (isExportingDocx || pendingDocxExport) return;
+    docxExportRequestRef.current?.abort();
+    const requestController = new AbortController();
+    docxExportRequestRef.current = requestController;
+    const snapshot = { contentJson: draft.contentJson, title: draft.title };
     setIsExportingDocx(true);
+    setDocxExportError("");
 
     try {
-      const response = await fetch(`/api/documents/${encodeURIComponent(document.id)}/export`, {
+      const body = await fetchDocumentInterchange(`/api/documents/${encodeURIComponent(document.id)}/export/preview`, {
         method: "POST",
+        signal: requestController.signal,
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          title: draft.title,
-          contentJson: draft.contentJson,
+          contentJson: snapshot.contentJson,
         }),
+      }, async (response) => {
+        if (!response.ok) throw new Error("Failed to preview DOCX export");
+        return response.json() as Promise<{ fidelity?: FidelityReport }>;
       });
-
-      if (!response.ok) {
-        throw new Error("Failed to export DOCX");
+      if (!body.fidelity || !Array.isArray(body.fidelity.items)) {
+        throw new Error("DOCX export fidelity missing");
       }
 
-      const blob = await response.blob();
-      const url = URL.createObjectURL(blob);
-      const link = window.document.createElement("a");
-      link.href = url;
-      link.download = `${sanitizeDownloadFileName(draft.title)}.docx`;
-      link.click();
-      URL.revokeObjectURL(url);
-      setReviewError("");
+      if (body.fidelity.requiresAcknowledgement) {
+        setPendingDocxExport({ ...snapshot, fidelity: body.fidelity });
+      } else {
+        await downloadDocxSnapshot(snapshot, false, requestController.signal);
+      }
     } catch {
-      setReviewError(messages.errors.exportDocxFailed);
+      if (docxExportRequestRef.current === requestController && !requestController.signal.aborted) {
+        setDocxExportError(messages.errors.exportDocxFailed);
+      }
     } finally {
-      setIsExportingDocx(false);
+      if (docxExportRequestRef.current === requestController) {
+        docxExportRequestRef.current = null;
+        setIsExportingDocx(false);
+      }
     }
-  }, [document.id, draft.contentJson, draft.title, messages.errors.exportDocxFailed]);
+  }, [
+    document.id,
+    downloadDocxSnapshot,
+    draft.contentJson,
+    draft.title,
+    isExportingDocx,
+    messages.errors.exportDocxFailed,
+    pendingDocxExport,
+  ]);
+
+  const confirmLossyDocxExport = useCallback(async () => {
+    if (!pendingDocxExport || isExportingDocx) return;
+    docxExportRequestRef.current?.abort();
+    const requestController = new AbortController();
+    docxExportRequestRef.current = requestController;
+    setIsExportingDocx(true);
+    setDocxExportError("");
+    try {
+      await downloadDocxSnapshot(pendingDocxExport, true, requestController.signal);
+      setPendingDocxExport(null);
+    } catch {
+      if (docxExportRequestRef.current === requestController && !requestController.signal.aborted) {
+        setPendingDocxExport(null);
+        setDocxExportError(messages.errors.exportDocxFailed);
+      }
+    } finally {
+      if (docxExportRequestRef.current === requestController) {
+        docxExportRequestRef.current = null;
+        setIsExportingDocx(false);
+      }
+    }
+  }, [downloadDocxSnapshot, isExportingDocx, messages.errors.exportDocxFailed, pendingDocxExport]);
 
   const selectTemplate = useCallback((templateId: string) => {
     const nextTemplate = templates.find((template) => template.id === templateId) ?? null;
@@ -1972,6 +2064,7 @@ function DocumentShellContent({
               className="inline-flex h-8 items-center gap-1.5 rounded-md border border-zinc-200 bg-white px-2.5 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-400"
               disabled={isExportingDocx}
               onClick={exportDocxDraft}
+              ref={exportTriggerRef}
               type="button"
             >
               <Download aria-hidden="true" className="size-4" />
@@ -2036,6 +2129,30 @@ function DocumentShellContent({
             </button>
           </div>
         </header>
+
+        {docxExportError ? (
+          <section
+            aria-labelledby="docx-export-error-title"
+            aria-live="assertive"
+            className="flex shrink-0 items-start justify-between gap-4 border-b border-red-200 bg-red-50 px-4 py-3 text-red-900"
+            role="alert"
+          >
+            <div>
+              <h2 className="text-sm font-semibold" id="docx-export-error-title">
+                {messages.documentInterchange.exportFailureTitle}
+              </h2>
+              <p className="mt-1 text-sm leading-5">{docxExportError}</p>
+            </div>
+            <button
+              className="shrink-0 rounded-md border border-red-300 bg-white px-3 py-2 text-sm font-medium text-red-800 hover:bg-red-100 disabled:opacity-50"
+              disabled={isExportingDocx}
+              onClick={() => void exportDocxDraft()}
+              type="button"
+            >
+              {messages.documentInterchange.retryExport}
+            </button>
+          </section>
+        ) : null}
 
         {saveConflict ? (
           <section
@@ -2136,6 +2253,33 @@ function DocumentShellContent({
           <DocumentSourceView contentJson={draft.contentJson} messages={messages.sourceView} title={draft.title} />
         )}
       </section>
+
+      {pendingDocxExport ? (
+        <DocumentInterchangeDialog
+          actionsDisabled={isExportingDocx}
+          cancelLabel={messages.documentInterchange.cancel}
+          confirmLabel={messages.documentInterchange.confirmExport}
+          description={messages.documentInterchange.exportLossDescription}
+          onClose={() => setPendingDocxExport(null)}
+          onConfirm={() => void confirmLossyDocxExport()}
+          returnFocusRef={exportTriggerRef}
+          title={messages.documentInterchange.exportLossTitle}
+        >
+          <h3 className="mt-4 text-sm font-semibold text-zinc-900">
+            {messages.documentInterchange.fidelityTitle}
+          </h3>
+          <ul className="mt-2 space-y-1 text-sm text-zinc-700">
+            {pendingDocxExport.fidelity.items
+              .filter((item) => item.outcome !== "preserved")
+              .map((item) => (
+                <li key={`${item.feature}:${item.outcome}:${item.message ?? ""}`}>
+                  {getFidelityFeatureLabel(item.feature, language)}: {getFidelityOutcomeLabel(item.outcome, language)}
+                  {item.message ? ` — ${item.message}` : ""}
+                </li>
+              ))}
+          </ul>
+        </DocumentInterchangeDialog>
+      ) : null}
 
       {isWorkspaceOpen ? (
         <>
@@ -2238,15 +2382,6 @@ function getCommandScopeLabel(
 ) {
   const normalizedScope = scope ?? "selection";
   return messages.aiCommandBar.scopeLabels[normalizedScope];
-}
-
-function readStoredEditorLanguage(): EditorLanguage {
-  if (typeof window === "undefined") {
-    return DEFAULT_EDITOR_LANGUAGE;
-  }
-
-  const storedLanguage = window.localStorage.getItem(EDITOR_LANGUAGE_STORAGE_KEY);
-  return isEditorLanguage(storedLanguage) ? storedLanguage : DEFAULT_EDITOR_LANGUAGE;
 }
 
 function mergeMissingTemplateVariableDefaults(template: ShellTemplate | null, values: Record<string, string>) {

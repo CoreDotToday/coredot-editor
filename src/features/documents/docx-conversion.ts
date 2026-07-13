@@ -3,7 +3,12 @@ import { resolve as resolvePath } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { TiptapJson } from "@/db/schema";
 
-type ImportResult = { contentJson: TiptapJson; warnings: string[] };
+export type DocxImportResult = {
+  contentJson: TiptapJson;
+  features: string[];
+  sourceFeatures: string[];
+  warnings: string[];
+};
 type WorkerRequest =
   | { bytes: Uint8Array; operation: "import" }
   | { contentJson: TiptapJson; operation: "export"; title: string }
@@ -12,9 +17,9 @@ type WorkerResponse<T> =
   | { ok: true; protocol: "coredot-docx-worker-v1"; result: T }
   | { error: { message: string; name?: string; stack?: string }; ok: false; protocol: "coredot-docx-worker-v1" };
 
-export function docxBufferToTiptapJson(buffer: Buffer, signal?: AbortSignal): Promise<ImportResult> {
+export function docxBufferToTiptapJson(buffer: Buffer, signal?: AbortSignal): Promise<DocxImportResult> {
   const bytes = Uint8Array.from(buffer);
-  return runDocxWorker<ImportResult>({ bytes, operation: "import" }, signal, [bytes.buffer]);
+  return runDocxWorker<DocxImportResult>({ bytes, operation: "import" }, signal, [bytes.buffer]);
 }
 
 export async function tiptapJsonToDocxBuffer(

@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { getDocumentById } from "@/features/documents/document-repository";
-import { documentInterchange } from "@/features/documents/document-interchange";
 import { createProtectedOptionsHandler, createProtectedRouteHandler } from "@/features/auth/route-context";
+import { documentInterchange } from "@/features/documents/document-interchange";
+import { getDocumentById } from "@/features/documents/document-repository";
 import { enforceRequestBudget } from "@/features/security/request-budget";
 import {
   documentResourceLimitResponse,
@@ -14,12 +14,8 @@ import {
 
 export const runtime = "nodejs";
 
-const DOCX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 const optionsHandler = createProtectedOptionsHandler(["POST"]);
-
-const exportDocumentSchema = z.object({
-  acknowledgedLoss: z.boolean().optional(),
-  title: z.string().trim().min(1).max(500),
+const previewExportSchema = z.object({
   contentJson: z.object({
     type: z.literal("doc"),
     content: z.array(z.unknown()).optional(),
@@ -51,36 +47,15 @@ const postHandler = createProtectedRouteHandler(async (context, request: Request
     if (resourceResponse) return resourceResponse;
     payload = null;
   }
-  const result = exportDocumentSchema.safeParse(payload);
+  const result = previewExportSchema.safeParse(payload);
   if (!result.success) {
     return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
   }
 
-  let exportResult: Awaited<ReturnType<typeof documentInterchange.export>>;
-  try {
-    exportResult = await documentInterchange.export({
-      ...result.data,
-      signal: request.signal,
-      timeoutMs: remainingDeadlineMs(deadline),
-    });
-  } catch (error) {
-    return resourcePolicyErrorResponse(error) ?? NextResponse.json({ error: "DOCX export failed" }, { status: 500 });
-  }
-  if (!exportResult.ok) {
-    if (exportResult.reason === "resource_limit") return documentResourceLimitResponse();
-    return NextResponse.json({
-      code: "fidelity_acknowledgement_required",
-      error: "Export requires loss acknowledgement",
-      fidelity: exportResult.fidelity,
-    }, { status: 409 });
-  }
-  return new Response(new Uint8Array(exportResult.buffer), {
-    headers: {
-      "Content-Disposition": `attachment; filename="${sanitizeFileName(result.data.title)}.docx"`,
-      "Content-Type": DOCX_MIME_TYPE,
-    },
-  });
-}, { beforeWorkspaceBootstrap: (context) => enforceRequestBudget(context, "documents.export") });
+  const preview = await documentInterchange.previewExport(result.data.contentJson);
+  if (!preview.ok) return documentResourceLimitResponse();
+  return NextResponse.json({ fidelity: preview.fidelity });
+}, { beforeWorkspaceBootstrap: (context) => enforceRequestBudget(context, "documents.export-preview") });
 
 export async function POST(request: Request, params: Params) {
   return postHandler(request, params);
@@ -88,10 +63,6 @@ export async function POST(request: Request, params: Params) {
 
 export async function OPTIONS() {
   return optionsHandler();
-}
-
-function sanitizeFileName(value: string) {
-  return value.replace(/[\\/:*?"<>|]/g, "").trim() || "document";
 }
 
 function remainingDeadlineMs(deadline: number) {

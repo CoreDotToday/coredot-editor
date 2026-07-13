@@ -10,6 +10,7 @@ vi.mock("@/features/documents/document-repository", () => ({
 }));
 
 vi.mock("@/features/documents/docx-conversion", () => ({
+  docxBufferToTiptapJson: vi.fn(),
   tiptapJsonToDocxBuffer: vi.fn(),
 }));
 
@@ -22,6 +23,43 @@ function createJsonRequest(body: unknown) {
 
 function createContext(id = "doc_1") {
   return { params: Promise.resolve({ id }) };
+}
+
+function createStalledRequest(signal = new AbortController().signal) {
+  const cancel = vi.fn();
+  const read = vi.fn();
+  const body = new ReadableStream<Uint8Array>({
+    cancel,
+    pull: async () => {
+      read();
+      return new Promise(() => undefined);
+    },
+  });
+  const request = new Request("http://localhost/api/documents/doc_1/export", {
+    body,
+    // @ts-expect-error Node-specific RequestInit extension
+    duplex: "half",
+    method: "POST",
+    signal,
+  });
+  return { cancel, read, request };
+}
+
+function mockDocument() {
+  vi.mocked(getDocumentById).mockResolvedValueOnce({
+    id: "doc_1",
+    workspaceId: "vitest-workspace",
+    creationKey: null,
+    title: "Draft",
+    contentJson: { type: "doc" },
+    metadataJson: {},
+    plainText: "",
+    readiness: "draft",
+    revision: 0,
+    status: "draft",
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  });
 }
 
 describe("POST /api/documents/[id]/export", () => {
@@ -61,6 +99,37 @@ describe("POST /api/documents/[id]/export", () => {
     expect(json).not.toHaveBeenCalled();
     expect(getDocumentById).not.toHaveBeenCalled();
     expect(tiptapJsonToDocxBuffer).not.toHaveBeenCalled();
+  });
+
+  it("returns 504 and cancels a stalled chunked export body", async () => {
+    vi.useFakeTimers();
+    mockDocument();
+    const stalled = createStalledRequest();
+    try {
+      const pending = POST(stalled.request, createContext());
+      await vi.waitFor(() => expect(stalled.read).toHaveBeenCalledTimes(1));
+      await vi.advanceTimersByTimeAsync(RESOURCE_LIMITS.operationMs);
+
+      const response = await pending;
+      expect(response.status).toBe(504);
+      expect(stalled.cancel).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("returns 408 and cancels an aborted chunked export body", async () => {
+    mockDocument();
+    const controller = new AbortController();
+    const stalled = createStalledRequest(controller.signal);
+    const pending = POST(stalled.request, createContext());
+    await vi.waitFor(() => expect(stalled.read).toHaveBeenCalledTimes(1));
+
+    controller.abort();
+
+    const response = await pending;
+    expect(response.status).toBe(408);
+    expect(stalled.cancel).toHaveBeenCalledTimes(1);
   });
 
   it("rejects over-deep content before DOCX conversion", async () => {
@@ -163,6 +232,49 @@ describe("POST /api/documents/[id]/export", () => {
 
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({ error: "Invalid request body" });
+    expect(tiptapJsonToDocxBuffer).not.toHaveBeenCalled();
+  });
+
+  it("requires fidelity acknowledgement before converting a lossy export", async () => {
+    vi.mocked(getDocumentById).mockResolvedValueOnce({
+      id: "doc_1",
+      workspaceId: "vitest-workspace",
+      creationKey: null,
+      title: "Draft",
+      contentJson: { type: "doc" },
+      metadataJson: {},
+      plainText: "",
+      readiness: "draft",
+      revision: 0,
+      status: "draft",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const contentJson = {
+      type: "doc" as const,
+      content: [{
+        type: "table",
+        content: [{
+          type: "tableRow",
+          content: [{
+            type: "tableCell",
+            content: [{ type: "paragraph", content: [{ type: "text", text: "Cell" }] }],
+          }],
+        }],
+      }],
+    };
+
+    const response = await POST(
+      createJsonRequest({ acknowledgedLoss: false, title: "Lossy", contentJson }),
+      createContext(),
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      code: "fidelity_acknowledgement_required",
+      error: "Export requires loss acknowledgement",
+      fidelity: { requiresAcknowledgement: true },
+    });
     expect(tiptapJsonToDocxBuffer).not.toHaveBeenCalled();
   });
 

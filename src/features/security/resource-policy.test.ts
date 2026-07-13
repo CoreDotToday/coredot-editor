@@ -246,6 +246,33 @@ describe("resource policy", () => {
     expect(file.size).toBe(10);
   });
 
+  it("forwards multipart read deadlines and cancels a stalled body", async () => {
+    vi.useFakeTimers();
+    const cancel = vi.fn();
+    const request = {
+      body: {
+        getReader: () => ({
+          cancel,
+          read: vi.fn(async () => new Promise(() => undefined)),
+          releaseLock: vi.fn(),
+        }),
+      },
+      headers: new Headers({ "content-type": "multipart/form-data; boundary=stalled" }),
+      url: "http://localhost/api/documents/import",
+    } as unknown as Request;
+
+    try {
+      const pending = parseBoundedFormData(request, 1_024, { deadlineMs: 25 });
+      const rejected = expect(pending).rejects.toBeInstanceOf(OperationTimeoutError);
+      await vi.advanceTimersByTimeAsync(25);
+
+      await rejected;
+      expect(cancel).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("counts a valid Tiptap tree deterministically", () => {
     expect(
       validateTiptapResource({
@@ -412,5 +439,21 @@ describe("resource policy", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("aborts an operation with a typed request error when the caller disconnects", async () => {
+    const requestController = new AbortController();
+    const operation = vi.fn(
+      (signal: AbortSignal) =>
+        new Promise<void>((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(signal.reason));
+        }),
+    );
+    const pending = withOperationTimeout(operation, 1_000, requestController.signal);
+
+    requestController.abort();
+
+    await expect(pending).rejects.toBeInstanceOf(RequestBodyAbortedError);
+    expect(operation.mock.calls[0]?.[0].aborted).toBe(true);
   });
 });

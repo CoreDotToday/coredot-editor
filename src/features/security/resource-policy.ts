@@ -198,24 +198,33 @@ export function validateTiptapResource(
 export async function withOperationTimeout<T>(
   operation: (signal: AbortSignal) => Promise<T>,
   timeoutMs: number = RESOURCE_LIMITS.operationMs,
+  requestSignal?: AbortSignal,
 ): Promise<T> {
+  if (requestSignal?.aborted) throw new RequestBodyAbortedError();
   const controller = new AbortController();
   const timeoutError = new OperationTimeoutError();
+  const requestAbortError = new RequestBodyAbortedError();
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_resolve, reject) => {
+  let rejectInterruption!: (error: Error) => void;
+  const interrupted = new Promise<never>((_resolve, reject) => {
+    rejectInterruption = reject;
     timer = setTimeout(() => {
       controller.abort(timeoutError);
       reject(timeoutError);
     }, timeoutMs);
   });
+  void interrupted.catch(() => undefined);
+  const abortForRequest = () => {
+    controller.abort(requestAbortError);
+    rejectInterruption(requestAbortError);
+  };
+  requestSignal?.addEventListener("abort", abortForRequest, { once: true });
 
   try {
-    return await Promise.race([operation(controller.signal), timeout]);
-  } catch (error) {
-    if (controller.signal.aborted) throw timeoutError;
-    throw error;
+    return await Promise.race([operation(controller.signal), interrupted]);
   } finally {
     if (timer) clearTimeout(timer);
+    requestSignal?.removeEventListener("abort", abortForRequest);
   }
 }
 
@@ -334,8 +343,12 @@ export async function parseBoundedJson(
   return JSON.parse(new TextDecoder().decode(bytes)) as unknown;
 }
 
-export async function parseBoundedFormData(request: Request, maxBytes: number): Promise<FormData> {
-  const bytes = await readBoundedRequestBytes(request, maxBytes);
+export async function parseBoundedFormData(
+  request: Request,
+  maxBytes: number,
+  options?: { deadlineMs?: number; requestSignal?: AbortSignal },
+): Promise<FormData> {
+  const bytes = await readBoundedRequestBytes(request, maxBytes, options);
   const body = new ArrayBuffer(bytes.byteLength);
   new Uint8Array(body).set(bytes);
   return new Request(request.url || "http://localhost", {

@@ -1,7 +1,7 @@
 // @vitest-environment node
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { createDocumentFromContent } from "@/features/documents/document-repository";
+import { createDocumentFromDraftIdempotently } from "@/features/documents/document-repository";
 import { docxBufferToTiptapJson } from "@/features/documents/docx-conversion";
 import { TEST_REQUEST_CONTEXT } from "@/test/auth-context";
 import { RESOURCE_LIMITS } from "@/features/security/resource-policy";
@@ -9,11 +9,12 @@ import { setRequestBudgetForTests } from "@/features/security/request-budget";
 import { POST } from "./route";
 
 vi.mock("@/features/documents/document-repository", () => ({
-  createDocumentFromContent: vi.fn(),
+  createDocumentFromDraftIdempotently: vi.fn(),
 }));
 
 vi.mock("@/features/documents/docx-conversion", () => ({
   docxBufferToTiptapJson: vi.fn(),
+  tiptapJsonToDocxBuffer: vi.fn(),
 }));
 
 async function createFormRequest(file?: File) {
@@ -40,6 +41,26 @@ async function createFormRequest(file?: File) {
   });
 }
 
+function createStalledRequest(signal = new AbortController().signal) {
+  const cancel = vi.fn();
+  const read = vi.fn();
+  const body = new ReadableStream<Uint8Array>({
+    cancel,
+    pull: async () => {
+      read();
+      return new Promise(() => undefined);
+    },
+  });
+  const request = new Request("http://localhost/api/documents/import", {
+    body,
+    // @ts-expect-error Node-specific RequestInit extension
+    duplex: "half",
+    method: "POST",
+    signal,
+  });
+  return { cancel, read, request };
+}
+
 describe("POST /api/documents/import", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -61,7 +82,7 @@ describe("POST /api/documents/import", () => {
     expect(response.status).toBe(429);
     expect(request.formData).not.toHaveBeenCalled();
     expect(docxBufferToTiptapJson).not.toHaveBeenCalled();
-    expect(createDocumentFromContent).not.toHaveBeenCalled();
+    expect(createDocumentFromDraftIdempotently).not.toHaveBeenCalled();
   });
 
   it("rejects an oversized file before reading its bytes", async () => {
@@ -116,7 +137,36 @@ describe("POST /api/documents/import", () => {
     expect(response.status).toBe(413);
     expect(cancel).toHaveBeenCalledTimes(1);
     expect(docxBufferToTiptapJson).not.toHaveBeenCalled();
-    expect(createDocumentFromContent).not.toHaveBeenCalled();
+    expect(createDocumentFromDraftIdempotently).not.toHaveBeenCalled();
+  });
+
+  it("returns 504 and cancels a stalled chunked multipart body", async () => {
+    vi.useFakeTimers();
+    const stalled = createStalledRequest();
+    try {
+      const pending = POST(stalled.request);
+      await vi.waitFor(() => expect(stalled.read).toHaveBeenCalledTimes(1));
+      await vi.advanceTimersByTimeAsync(RESOURCE_LIMITS.operationMs);
+
+      const response = await pending;
+      expect(response.status).toBe(504);
+      expect(stalled.cancel).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("returns 408 and cancels an aborted chunked multipart body", async () => {
+    const controller = new AbortController();
+    const stalled = createStalledRequest(controller.signal);
+    const pending = POST(stalled.request);
+    await vi.waitFor(() => expect(stalled.read).toHaveBeenCalledTimes(1));
+
+    controller.abort();
+
+    const response = await pending;
+    expect(response.status).toBe(408);
+    expect(stalled.cancel).toHaveBeenCalledTimes(1);
   });
 
   it("rejects converted content that exceeds the depth policy before persistence", async () => {
@@ -126,13 +176,15 @@ describe("POST /api/documents/import", () => {
     }
     vi.mocked(docxBufferToTiptapJson).mockResolvedValueOnce({
       contentJson: { type: "doc", content: [deepNode] },
+      features: [],
+      sourceFeatures: [],
       warnings: [],
     });
 
     const response = await POST(await createFormRequest(new File([new Uint8Array([1])], "deep.docx")));
 
     expect(response.status).toBe(413);
-    expect(createDocumentFromContent).not.toHaveBeenCalled();
+    expect(createDocumentFromDraftIdempotently).not.toHaveBeenCalled();
   });
 
   it("rejects a compressed DOCX whose converted text exceeds the JSON byte budget", async () => {
@@ -141,13 +193,15 @@ describe("POST /api/documents/import", () => {
         type: "doc",
         content: [{ type: "text", text: "x".repeat(RESOURCE_LIMITS.documentJsonBytes + 1) }],
       },
+      features: [],
+      sourceFeatures: [],
       warnings: [],
     });
 
     const response = await POST(await createFormRequest(new File([new Uint8Array([1])], "compressed.docx")));
 
     expect(response.status).toBe(413);
-    expect(createDocumentFromContent).not.toHaveBeenCalled();
+    expect(createDocumentFromDraftIdempotently).not.toHaveBeenCalled();
   });
 
   it("returns 504 on conversion timeout without persisting a document", async () => {
@@ -169,7 +223,7 @@ describe("POST /api/documents/import", () => {
 
       expect(response.status).toBe(504);
       expect(await response.json()).toEqual({ error: "Operation timed out" });
-      expect(createDocumentFromContent).not.toHaveBeenCalled();
+      expect(createDocumentFromDraftIdempotently).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }
@@ -181,35 +235,19 @@ describe("POST /api/documents/import", () => {
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({ error: "DOCX file is required" });
     expect(docxBufferToTiptapJson).not.toHaveBeenCalled();
-    expect(createDocumentFromContent).not.toHaveBeenCalled();
+    expect(createDocumentFromDraftIdempotently).not.toHaveBeenCalled();
   });
 
-  it("imports a DOCX file and creates a document from converted content", async () => {
+  it("previews a DOCX conversion without persisting an orphan document", async () => {
     vi.mocked(docxBufferToTiptapJson).mockResolvedValueOnce({
       contentJson: {
         type: "doc",
         content: [{ type: "paragraph", content: [{ type: "text", text: "Imported body" }] }],
       },
+      features: ["paragraph"],
+      sourceFeatures: [],
       warnings: ["Unsupported image was ignored"],
     });
-    vi.mocked(createDocumentFromContent).mockResolvedValueOnce({
-      id: "doc_imported",
-      workspaceId: "vitest-workspace",
-      creationKey: null,
-      title: "Contract Draft",
-      contentJson: {
-        type: "doc",
-        content: [{ type: "paragraph", content: [{ type: "text", text: "Imported body" }] }],
-      },
-      metadataJson: {},
-      plainText: "Imported body",
-      readiness: "draft",
-      revision: 0,
-      status: "draft",
-      createdAt: new Date("2026-01-01T00:00:00.000Z"),
-      updatedAt: new Date("2026-01-01T00:00:00.000Z"),
-    });
-
     const response = await POST(
       await createFormRequest(
         new File([new Uint8Array([1, 2, 3])], "Contract Draft.docx", {
@@ -218,14 +256,70 @@ describe("POST /api/documents/import", () => {
       ),
     );
 
-    expect(response.status).toBe(201);
-    expect(createDocumentFromContent).toHaveBeenCalledWith(TEST_REQUEST_CONTEXT, "Contract Draft", {
-      type: "doc",
-      content: [{ type: "paragraph", content: [{ type: "text", text: "Imported body" }] }],
-    });
+    expect(response.status).toBe(200);
+    expect(createDocumentFromDraftIdempotently).not.toHaveBeenCalled();
     await expect(response.json()).resolves.toMatchObject({
-      document: { id: "doc_imported", title: "Contract Draft" },
+      preview: {
+        contentJson: {
+          type: "doc",
+          content: [{ type: "paragraph", content: [{ type: "text", text: "Imported body" }] }],
+        },
+        title: "Contract Draft",
+      },
+      fidelity: {
+        items: expect.arrayContaining([
+          { feature: "paragraph", outcome: "preserved" },
+          {
+            feature: "conversion-warning",
+            message: "Unsupported image was ignored",
+            outcome: "removed",
+          },
+        ]),
+        requiresAcknowledgement: true,
+      },
       warnings: ["Unsupported image was ignored"],
     });
+  });
+
+  it("persists a confirmed import idempotently after review", async () => {
+    const contentJson = {
+      type: "doc" as const,
+      content: [{ type: "paragraph", content: [{ type: "text", text: "Imported body" }] }],
+    };
+    vi.mocked(createDocumentFromDraftIdempotently).mockResolvedValueOnce({
+      document: {
+        id: "doc_imported",
+        workspaceId: "vitest-workspace",
+        creationKey: "import_1234567890abcdef",
+        title: "Contract Draft",
+        contentJson,
+        metadataJson: {},
+        plainText: "Imported body",
+        readiness: "draft",
+        revision: 0,
+        status: "draft",
+        createdAt: new Date("2026-01-01T00:00:00.000Z"),
+        updatedAt: new Date("2026-01-01T00:00:00.000Z"),
+      },
+      replayed: false,
+    });
+    const request = new Request("http://localhost/api/documents/import", {
+      body: JSON.stringify({ action: "confirm", contentJson, title: "Contract Draft" }),
+      headers: {
+        "Content-Type": "application/json",
+        "Idempotency-Key": "import_1234567890abcdef",
+      },
+      method: "POST",
+    });
+
+    const response = await POST(request);
+
+    expect(response.status).toBe(201);
+    expect(createDocumentFromDraftIdempotently).toHaveBeenCalledWith(
+      TEST_REQUEST_CONTEXT,
+      { contentJson, metadataJson: {}, readiness: "draft", title: "Contract Draft" },
+      "import_1234567890abcdef",
+    );
+    await expect(response.json()).resolves.toMatchObject({ document: { id: "doc_imported" }, replayed: false });
   });
 });
