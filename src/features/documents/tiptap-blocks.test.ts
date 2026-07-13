@@ -2,12 +2,101 @@ import { describe, expect, it } from "vitest";
 import type { TiptapJson } from "@/db/schema";
 import {
   convertListItemToTopLevelParagraphInTiptapJson,
+  indentListItemInTiptapJson,
   moveListItemInTiptapJson,
   moveListItemToTopLevelInTiptapJson,
   moveTopLevelBlockBetweenListItemsInTiptapJson,
   moveTopLevelBlockInTiptapJson,
   moveTopLevelBlockToListItemInTiptapJson,
 } from "./tiptap-blocks";
+
+describe("indentListItemInTiptapJson", () => {
+  it("appends a task sublist after a terminal bullet sublist and preserves checked state", () => {
+    const contentJson: TiptapJson = {
+      type: "doc",
+      content: [
+        {
+          type: "taskList",
+          content: [
+            {
+              attrs: { checked: false },
+              type: "taskItem",
+              content: [
+                { type: "paragraph", content: [{ type: "text", text: "Previous task" }] },
+                { type: "bulletList", content: createListItems(["Existing bullet child"]) },
+              ],
+            },
+            {
+              attrs: { checked: true },
+              type: "taskItem",
+              content: [{ type: "paragraph", content: [{ type: "text", text: "Checked task" }] }],
+            },
+          ],
+        },
+      ],
+    };
+
+    const result = indentListItemInTiptapJson(contentJson, { listIndex: 0, sourceIndex: 1 });
+
+    expect(result.changed).toBe(true);
+    const previousContent = readFirstListItemContent(result.contentJson);
+    expect(previousContent.map((node) => node.type)).toEqual(["paragraph", "bulletList", "taskList"]);
+    expect(readListTexts(previousContent[1])).toEqual(["Existing bullet child"]);
+    expect(previousContent[2]).toMatchObject({
+      type: "taskList",
+      content: [
+        {
+          attrs: { checked: true },
+          type: "taskItem",
+        },
+      ],
+    });
+  });
+
+  it("appends a source-typed ordered sublist instead of reusing a non-terminal one or a terminal bullet list", () => {
+    const contentJson: TiptapJson = {
+      type: "doc",
+      content: [
+        {
+          attrs: { start: 7 },
+          type: "orderedList",
+          content: [
+            {
+              type: "listItem",
+              content: [
+                { type: "paragraph", content: [{ type: "text", text: "Previous ordered" }] },
+                { attrs: { start: 3 }, type: "orderedList", content: createListItems(["Existing ordered child"]) },
+                { type: "bulletList", content: createListItems(["Terminal bullet child"]) },
+              ],
+            },
+            {
+              type: "listItem",
+              content: [{ type: "paragraph", content: [{ type: "text", text: "Seventh item" }] }],
+            },
+          ],
+        },
+      ],
+    };
+
+    const result = indentListItemInTiptapJson(contentJson, { listIndex: 0, sourceIndex: 1 });
+
+    expect(result.changed).toBe(true);
+    const previousContent = readFirstListItemContent(result.contentJson);
+    expect(previousContent.map((node) => node.type)).toEqual([
+      "paragraph",
+      "orderedList",
+      "bulletList",
+      "orderedList",
+    ]);
+    expect(readListTexts(previousContent[1])).toEqual(["Existing ordered child"]);
+    expect(readListTexts(previousContent[2])).toEqual(["Terminal bullet child"]);
+    expect(previousContent[3]).toMatchObject({
+      attrs: { start: 7 },
+      type: "orderedList",
+    });
+    expect(readListTexts(previousContent[3])).toEqual(["Seventh item"]);
+  });
+});
 
 describe("moveTopLevelBlockInTiptapJson", () => {
   it("moves a top-level block to the requested drop index", () => {
@@ -70,6 +159,40 @@ describe("moveListItemInTiptapJson", () => {
     expect(result.changed).toBe(true);
     expect(readNestedListItems(result.contentJson)).toEqual(["Nested second", "Nested third", "Nested first"]);
     expect(readDocumentListItems(result.contentJson)).toEqual(["Parent"]);
+  });
+
+  it("moves a sole item into a sibling nested list after the source list ordinal collapses", () => {
+    const contentJson: TiptapJson = {
+      type: "doc",
+      content: [
+        {
+          type: "bulletList",
+          content: [
+            {
+              type: "listItem",
+              content: [
+                { type: "paragraph", content: [{ type: "text", text: "Parent" }] },
+                { type: "bulletList", content: createListItems(["Source only"]) },
+                { attrs: { start: 4 }, type: "orderedList", content: createListItems(["Target first"]) },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+
+    const result = moveListItemInTiptapJson(contentJson, {
+      dropIndex: 1,
+      listIndex: 0,
+      sourceIndex: 0,
+      sourceListPath: [0, 0],
+      targetListPath: [0, 1],
+    });
+
+    expect(result.changed).toBe(true);
+    const parentContent = readFirstListItemContent(result.contentJson);
+    expect(parentContent.map((node) => node.type)).toEqual(["paragraph", "orderedList"]);
+    expect(readListTexts(parentContent[1])).toEqual(["Target first", "Source only"]);
   });
 
   it("moves a nested list item into an ancestor list parent", () => {
@@ -366,6 +489,16 @@ function createDocument(paragraphs: string[]): TiptapJson {
       content: [{ type: "text", text }],
     })),
   };
+}
+
+function readFirstListItemContent(contentJson: TiptapJson) {
+  const list = contentJson.content?.[0] as TiptapJson | undefined;
+  const item = list?.content?.[0] as TiptapJson | undefined;
+  return (item?.content ?? []) as TiptapJson[];
+}
+
+function readListTexts(listNode: TiptapJson | undefined) {
+  return (listNode?.content ?? []).map((item) => readFirstParagraphText(item as { content?: unknown[] }));
 }
 
 function createDocumentWithParagraphAndList(paragraph: string, items: string[]): TiptapJson {

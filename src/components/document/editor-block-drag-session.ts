@@ -1,4 +1,5 @@
 import type { TiptapJson } from "@/db/schema";
+import { getDocumentBlockSignature } from "@/features/documents/block-movement";
 import type { BlockActionRange } from "./editor-block-ranges";
 
 export type EditorBlockDragSession = {
@@ -22,5 +23,5 @@ export function isEditorBlockDragSessionStale(session: EditorBlockDragSession, c
 }
 
 export function getEditorBlockDocumentSignature(contentJson: TiptapJson) {
-  return JSON.stringify(contentJson);
+  return getDocumentBlockSignature(contentJson);
 }

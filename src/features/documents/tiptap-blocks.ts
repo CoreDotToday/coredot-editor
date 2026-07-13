@@ -15,8 +15,11 @@ export type MoveListItemInput = {
   dropIndex: number;
   listIndex: number;
   sourceIndex: number;
+  // Alternates parent item index and nested-list ordinal from the top-level list.
+  sourceListPath?: number[];
   sourceParentPath?: number[];
   targetListIndex?: number;
+  targetListPath?: number[];
   targetParentPath?: number[];
 };
 
@@ -24,6 +27,7 @@ export type MoveListItemToTopLevelInput = {
   dropIndex: number;
   listIndex: number;
   sourceIndex: number;
+  sourceListPath?: number[];
   sourceParentPath?: number[];
 };
 
@@ -31,6 +35,7 @@ export type MoveTopLevelBlockToListItemInput = {
   dropIndex: number;
   listIndex: number;
   sourceIndex: number;
+  targetListPath?: number[];
   targetParentPath?: number[];
 };
 
@@ -44,6 +49,74 @@ export type ConvertListItemToTopLevelParagraphInput = {
   listIndex: number;
   sourceIndex: number;
 };
+
+export type IndentListItemInput = {
+  listIndex: number;
+  sourceIndex: number;
+  sourceListPath?: number[];
+  sourceParentPath?: number[];
+};
+
+export type IndentListItemResult =
+  | { changed: false; contentJson: TiptapJson }
+  | {
+      changed: true;
+      contentJson: TiptapJson;
+      destination: { itemIndex: number; nestedListOrdinal: number };
+    };
+
+export function indentListItemInTiptapJson(
+  contentJson: TiptapJson,
+  { listIndex, sourceIndex, sourceListPath, sourceParentPath = [] }: IndentListItemInput,
+): IndentListItemResult {
+  const resolvedSourceListPath = resolveListPath(sourceListPath, sourceParentPath);
+  const content = Array.isArray(contentJson.content) ? contentJson.content : [];
+  const topLevelList = content[listIndex] as TiptapJson | undefined;
+  const sourceList = topLevelList ? readListNodeAtPath(topLevelList, resolvedSourceListPath) : null;
+  const listContent = Array.isArray(sourceList?.content) ? sourceList.content : [];
+  if (!topLevelList || !sourceList || sourceIndex <= 0 || sourceIndex >= listContent.length) {
+    return { changed: false, contentJson };
+  }
+
+  const movedItem = listContent[sourceIndex] as TiptapNodeJson | undefined;
+  const previousItem = listContent[sourceIndex - 1] as TiptapNodeJson | undefined;
+  if (!movedItem || !previousItem || !Array.isArray(previousItem.content)) {
+    return { changed: false, contentJson };
+  }
+
+  const previousContent = [...previousItem.content];
+  const terminalChildIndex = previousContent.length - 1;
+  const terminalChild = previousContent[terminalChildIndex] as TiptapNodeJson | undefined;
+  const canReuseTerminalList = isListNode(terminalChild) && terminalChild.type === sourceList.type;
+  const nestedListOrdinal = previousContent.filter(isListNode).length - (canReuseTerminalList ? 1 : 0);
+  const targetList = canReuseTerminalList
+    ? terminalChild
+    : { ...sourceList, content: [] };
+  const targetContent = Array.isArray(targetList.content) ? targetList.content : [];
+  const nextNestedList = {
+    ...targetList,
+    content: [...targetContent, normalizeListItemForTargetList(movedItem, targetList)],
+  };
+  if (canReuseTerminalList) previousContent[terminalChildIndex] = nextNestedList;
+  else previousContent.push(nextNestedList);
+
+  const nextListContent = listContent
+    .filter((_item, index) => index !== sourceIndex)
+    .map((item, index) => index === sourceIndex - 1
+      ? { ...previousItem, content: previousContent }
+      : item);
+  const nextContent = [...content];
+  nextContent[listIndex] = updateListNodeAtPath(topLevelList, resolvedSourceListPath, (listNode) => ({
+    ...listNode,
+    content: nextListContent,
+  }));
+
+  return {
+    changed: true,
+    contentJson: { ...contentJson, content: nextContent },
+    destination: { itemIndex: targetContent.length, nestedListOrdinal },
+  };
+}
 
 export function moveTopLevelBlockInTiptapJson(
   contentJson: TiptapJson,
@@ -76,8 +149,20 @@ export function moveTopLevelBlockInTiptapJson(
 
 export function moveListItemInTiptapJson(
   contentJson: TiptapJson,
-  { dropIndex, listIndex, sourceIndex, sourceParentPath = [], targetListIndex = listIndex, targetParentPath = [] }: MoveListItemInput,
+  input: MoveListItemInput,
 ): MoveTopLevelBlockResult {
+  const {
+    dropIndex,
+    listIndex,
+    sourceIndex,
+    sourceListPath,
+    sourceParentPath = [],
+    targetListIndex = listIndex,
+    targetListPath,
+    targetParentPath = [],
+  } = input;
+  const resolvedSourceListPath = resolveListPath(sourceListPath, sourceParentPath);
+  const resolvedTargetListPath = resolveListPath(targetListPath, targetParentPath);
   const content = Array.isArray(contentJson.content) ? contentJson.content : [];
   const listNode = content[listIndex] as TiptapJson | undefined;
   if (!listNode) {
@@ -88,34 +173,41 @@ export function moveListItemInTiptapJson(
       dropIndex,
       listIndex,
       sourceIndex,
-      sourceParentPath,
+      sourceListPath: resolvedSourceListPath,
       targetListIndex,
-      targetParentPath,
+      targetListPath: resolvedTargetListPath,
     });
   }
 
-  if (samePath(sourceParentPath, targetParentPath)) {
+  if (samePath(resolvedSourceListPath, resolvedTargetListPath)) {
     return moveListItemInsideSameParent(contentJson, listNode, {
       dropIndex,
       listIndex,
       sourceIndex,
-      sourceParentPath,
-      targetParentPath,
+      sourceListPath: resolvedSourceListPath,
+      targetListPath: resolvedTargetListPath,
     });
   }
 
-  const sourceItemPath = [...sourceParentPath, sourceIndex];
-  if (startsWithPath(targetParentPath, sourceItemPath)) {
+  const sourceItemPath = [...resolvedSourceListPath, sourceIndex];
+  if (startsWithPath(resolvedTargetListPath, sourceItemPath)) {
     return { changed: false, contentJson };
   }
 
-  const removal = removeListItemAtParentPath(listNode, sourceParentPath, sourceIndex);
+  const sourceListNode = readListNodeAtPath(listNode, resolvedSourceListPath);
+  const sourceListWillBeRemoved = Array.isArray(sourceListNode?.content) && sourceListNode.content.length === 1;
+  const removal = removeListItemAtPath(listNode, resolvedSourceListPath, sourceIndex);
   if (!removal) {
     return { changed: false, contentJson };
   }
 
-  const adjustedTargetParentPath = adjustListParentPathAfterRemoval(targetParentPath, sourceParentPath, sourceIndex);
-  const targetListNode = readListNodeAtParentPath(removal.listNode, adjustedTargetParentPath);
+  const adjustedTargetListPath = adjustListPathAfterRemoval(
+    resolvedTargetListPath,
+    resolvedSourceListPath,
+    sourceIndex,
+    sourceListWillBeRemoved,
+  );
+  const targetListNode = readListNodeAtPath(removal.listNode, adjustedTargetListPath);
   const targetListContent = Array.isArray(targetListNode?.content) ? targetListNode.content : [];
   if (!targetListNode) {
     return { changed: false, contentJson };
@@ -125,7 +217,7 @@ export function moveListItemInTiptapJson(
   nextTargetListContent.splice(clamp(dropIndex, 0, targetListContent.length), 0, removal.item);
 
   const nextContent = [...content];
-  nextContent[listIndex] = updateListNodeAtParentPath(removal.listNode, adjustedTargetParentPath, (targetList) => ({
+  nextContent[listIndex] = updateListNodeAtPath(removal.listNode, adjustedTargetListPath, (targetList) => ({
     ...targetList,
     content: nextTargetListContent,
   }));
@@ -141,7 +233,7 @@ export function moveListItemInTiptapJson(
 
 function moveListItemAcrossTopLevelLists(
   contentJson: TiptapJson,
-  { dropIndex, listIndex, sourceIndex, sourceParentPath = [], targetListIndex, targetParentPath = [] }: MoveListItemInput & {
+  { dropIndex, listIndex, sourceIndex, sourceListPath = [], targetListIndex, targetListPath = [] }: MoveListItemInput & {
     targetListIndex: number;
   },
 ): MoveTopLevelBlockResult {
@@ -161,7 +253,7 @@ function moveListItemAcrossTopLevelLists(
     return { changed: false, contentJson };
   }
 
-  const removal = removeListItemAtParentPath(sourceTopListNode, sourceParentPath, sourceIndex);
+  const removal = removeListItemAtPath(sourceTopListNode, sourceListPath, sourceIndex);
   if (!removal) {
     return { changed: false, contentJson };
   }
@@ -181,7 +273,7 @@ function moveListItemAcrossTopLevelLists(
     return { changed: false, contentJson };
   }
 
-  const targetListNode = readListNodeAtParentPath(adjustedTargetTopListNode, targetParentPath);
+  const targetListNode = readListNodeAtPath(adjustedTargetTopListNode, targetListPath);
   const targetListContent = Array.isArray(targetListNode?.content) ? targetListNode.content : [];
   if (!targetListNode) {
     return { changed: false, contentJson };
@@ -193,7 +285,7 @@ function moveListItemAcrossTopLevelLists(
     0,
     normalizeListItemForTargetList(removal.item, targetListNode),
   );
-  nextContent[adjustedTargetListIndex] = updateListNodeAtParentPath(adjustedTargetTopListNode, targetParentPath, (targetList) => ({
+  nextContent[adjustedTargetListIndex] = updateListNodeAtPath(adjustedTargetTopListNode, targetListPath, (targetList) => ({
     ...targetList,
     content: nextTargetListContent,
   }));
@@ -210,10 +302,10 @@ function moveListItemAcrossTopLevelLists(
 function moveListItemInsideSameParent(
   contentJson: TiptapJson,
   listNode: TiptapJson,
-  { dropIndex, listIndex, sourceIndex, sourceParentPath = [] }: MoveListItemInput,
+  { dropIndex, listIndex, sourceIndex, sourceListPath = [] }: MoveListItemInput,
 ): MoveTopLevelBlockResult {
   const content = Array.isArray(contentJson.content) ? contentJson.content : [];
-  const sourceListNode = readListNodeAtParentPath(listNode, sourceParentPath);
+  const sourceListNode = readListNodeAtPath(listNode, sourceListPath);
   const listContent = Array.isArray(sourceListNode?.content) ? sourceListNode.content : [];
   if (!sourceListNode || sourceIndex < 0 || sourceIndex >= listContent.length) {
     return { changed: false, contentJson };
@@ -230,7 +322,7 @@ function moveListItemInsideSameParent(
   nextListContent.splice(adjustedDropIndex, 0, movedItem);
 
   const nextContent = [...content];
-  nextContent[listIndex] = updateListNodeAtParentPath(listNode, sourceParentPath, (targetListNode) => ({
+  nextContent[listIndex] = updateListNodeAtPath(listNode, sourceListPath, (targetListNode) => ({
     ...targetListNode,
     content: nextListContent,
   }));
@@ -246,11 +338,12 @@ function moveListItemInsideSameParent(
 
 export function moveListItemToTopLevelInTiptapJson(
   contentJson: TiptapJson,
-  { dropIndex, listIndex, sourceIndex, sourceParentPath = [] }: MoveListItemToTopLevelInput,
+  { dropIndex, listIndex, sourceIndex, sourceListPath, sourceParentPath = [] }: MoveListItemToTopLevelInput,
 ): MoveTopLevelBlockResult {
+  const resolvedSourceListPath = resolveListPath(sourceListPath, sourceParentPath);
   const content = Array.isArray(contentJson.content) ? contentJson.content : [];
   const listNode = content[listIndex] as TiptapJson | undefined;
-  const sourceListNode = listNode ? readListNodeAtParentPath(listNode, sourceParentPath) : null;
+  const sourceListNode = listNode ? readListNodeAtPath(listNode, resolvedSourceListPath) : null;
   const listContent = Array.isArray(sourceListNode?.content) ? sourceListNode.content : [];
   if (!listNode || !sourceListNode || sourceIndex < 0 || sourceIndex >= listContent.length) {
     return { changed: false, contentJson };
@@ -258,14 +351,14 @@ export function moveListItemToTopLevelInTiptapJson(
 
   const clampedDropIndex = clamp(dropIndex, 0, content.length);
   if (
-    sourceParentPath.length === 0 &&
+    resolvedSourceListPath.length === 0 &&
     listContent.length === 1 &&
     (clampedDropIndex === listIndex || clampedDropIndex === listIndex + 1)
   ) {
     return { changed: false, contentJson };
   }
 
-  const removal = removeListItemAtParentPath(listNode, sourceParentPath, sourceIndex);
+  const removal = removeListItemAtPath(listNode, resolvedSourceListPath, sourceIndex);
   if (!removal) {
     return { changed: false, contentJson };
   }
@@ -297,8 +390,9 @@ export function moveListItemToTopLevelInTiptapJson(
 
 export function moveTopLevelBlockToListItemInTiptapJson(
   contentJson: TiptapJson,
-  { dropIndex, listIndex, sourceIndex, targetParentPath = [] }: MoveTopLevelBlockToListItemInput,
+  { dropIndex, listIndex, sourceIndex, targetListPath, targetParentPath = [] }: MoveTopLevelBlockToListItemInput,
 ): MoveTopLevelBlockResult {
+  const resolvedTargetListPath = resolveListPath(targetListPath, targetParentPath);
   const content = Array.isArray(contentJson.content) ? contentJson.content : [];
   const sourceNode = content[sourceIndex] as TiptapJson | undefined;
   const listNode = content[listIndex] as TiptapJson | undefined;
@@ -322,7 +416,7 @@ export function moveTopLevelBlockToListItemInTiptapJson(
     return { changed: false, contentJson };
   }
 
-  const targetListNode = readListNodeAtParentPath(adjustedListNode, targetParentPath);
+  const targetListNode = readListNodeAtPath(adjustedListNode, resolvedTargetListPath);
   const targetListContent = Array.isArray(targetListNode?.content) ? targetListNode.content : [];
   if (!targetListNode) {
     return { changed: false, contentJson };
@@ -330,7 +424,7 @@ export function moveTopLevelBlockToListItemInTiptapJson(
 
   const nextTargetListContent = [...targetListContent];
   nextTargetListContent.splice(clamp(dropIndex, 0, targetListContent.length), 0, createListItemFromBlock(sourceNode, targetListNode));
-  nextContent[adjustedListIndex] = updateListNodeAtParentPath(adjustedListNode, targetParentPath, (targetList) => ({
+  nextContent[adjustedListIndex] = updateListNodeAtPath(adjustedListNode, resolvedTargetListPath, (targetList) => ({
     ...targetList,
     content: nextTargetListContent,
   }));
@@ -459,13 +553,16 @@ function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
 }
 
-function readListNodeAtParentPath(listNode: TiptapJson, parentPath: number[]): TiptapJson | null {
+function readListNodeAtPath(listNode: TiptapJson, listPath: number[]): TiptapJson | null {
+  if (!isListPath(listPath)) return null;
   let currentList: TiptapJson | null = listNode;
 
-  for (const itemIndex of parentPath) {
+  for (let pathIndex = 0; pathIndex < listPath.length; pathIndex += 2) {
+    const itemIndex = listPath[pathIndex]!;
+    const nestedListOrdinal = listPath[pathIndex + 1]!;
     const listContent = Array.isArray(currentList?.content) ? currentList.content : [];
     const listItem = listContent[itemIndex] as TiptapJson | undefined;
-    currentList = readNestedListNode(listItem);
+    currentList = readNestedListNode(listItem, nestedListOrdinal);
     if (!currentList) {
       return null;
     }
@@ -474,35 +571,29 @@ function readListNodeAtParentPath(listNode: TiptapJson, parentPath: number[]): T
   return currentList;
 }
 
-function updateListNodeAtParentPath(
+function updateListNodeAtPath(
   listNode: TiptapJson,
-  parentPath: number[],
+  listPath: number[],
   updater: (listNode: TiptapJson) => TiptapJson,
 ): TiptapJson {
-  if (parentPath.length === 0) {
+  if (!isListPath(listPath)) return listNode;
+  if (listPath.length === 0) {
     return updater(listNode);
   }
 
-  const [itemIndex, ...remainingPath] = parentPath;
+  const [itemIndex, nestedListOrdinal, ...remainingPath] = listPath;
   const listContent = Array.isArray(listNode.content) ? listNode.content : [];
   const listItem = listContent[itemIndex] as TiptapJson | undefined;
   if (!listItem || !Array.isArray(listItem.content)) {
     return listNode;
   }
 
-  let updatedNestedList = false;
-  const nextItemContent = listItem.content.map((child) => {
-    if (updatedNestedList || !isListNode(child)) {
-      return child;
-    }
-
-    updatedNestedList = true;
-    return updateListNodeAtParentPath(child, remainingPath, updater);
-  });
-
-  if (!updatedNestedList) {
-    return listNode;
-  }
+  const nestedListIndex = findNestedListIndex(listItem.content, nestedListOrdinal);
+  if (nestedListIndex < 0) return listNode;
+  const nestedList = listItem.content[nestedListIndex] as TiptapJson;
+  const nextItemContent = listItem.content.map((child, index) =>
+    index === nestedListIndex ? updateListNodeAtPath(nestedList, remainingPath, updater) : child,
+  );
 
   return {
     ...listNode,
@@ -517,14 +608,15 @@ function updateListNodeAtParentPath(
   };
 }
 
-function removeListItemAtParentPath(
+function removeListItemAtPath(
   listNode: TiptapJson,
-  parentPath: number[],
+  listPath: number[],
   sourceIndex: number,
 ): { item: TiptapJson; listNode: TiptapJson } | null {
+  if (!isListPath(listPath)) return null;
   const listContent = Array.isArray(listNode.content) ? listNode.content : [];
 
-  if (parentPath.length === 0) {
+  if (listPath.length === 0) {
     if (sourceIndex < 0 || sourceIndex >= listContent.length) {
       return null;
     }
@@ -543,20 +635,20 @@ function removeListItemAtParentPath(
     };
   }
 
-  const [itemIndex, ...remainingPath] = parentPath;
+  const [itemIndex, nestedListOrdinal, ...remainingPath] = listPath;
   const listItem = listContent[itemIndex] as TiptapJson | undefined;
   const itemContent = Array.isArray(listItem?.content) ? listItem.content : [];
   if (!listItem || !Array.isArray(listItem.content)) {
     return null;
   }
 
-  const nestedListIndex = itemContent.findIndex((child) => isListNode(child));
+  const nestedListIndex = findNestedListIndex(itemContent, nestedListOrdinal);
   const nestedList = itemContent[nestedListIndex] as TiptapJson | undefined;
   if (!nestedList) {
     return null;
   }
 
-  const removal = removeListItemAtParentPath(nestedList, remainingPath, sourceIndex);
+  const removal = removeListItemAtPath(nestedList, remainingPath, sourceIndex);
   if (!removal) {
     return null;
   }
@@ -583,9 +675,21 @@ function removeListItemAtParentPath(
   };
 }
 
-function readNestedListNode(listItem: TiptapJson | undefined) {
+function readNestedListNode(listItem: TiptapJson | undefined, nestedListOrdinal: number) {
   const content = Array.isArray(listItem?.content) ? listItem.content : [];
-  return (content.find((child) => isListNode(child)) as TiptapJson | undefined) ?? null;
+  const nestedListIndex = findNestedListIndex(content, nestedListOrdinal);
+  return nestedListIndex < 0 ? null : content[nestedListIndex] as TiptapJson;
+}
+
+function findNestedListIndex(content: unknown[], nestedListOrdinal: number) {
+  if (!Number.isSafeInteger(nestedListOrdinal) || nestedListOrdinal < 0) return -1;
+  let currentOrdinal = 0;
+  for (let index = 0; index < content.length; index += 1) {
+    if (!isListNode(content[index])) continue;
+    if (currentOrdinal === nestedListOrdinal) return index;
+    currentOrdinal += 1;
+  }
+  return -1;
 }
 
 function isListNode(node: unknown): node is TiptapJson {
@@ -685,15 +789,43 @@ function startsWithPath(path: number[], prefix: number[]) {
   return path.length >= prefix.length && prefix.every((value, index) => path[index] === value);
 }
 
-function adjustListParentPathAfterRemoval(targetParentPath: number[], sourceParentPath: number[], sourceIndex: number) {
-  if (targetParentPath.length <= sourceParentPath.length || !startsWithPath(targetParentPath, sourceParentPath)) {
-    return targetParentPath;
+function adjustListPathAfterRemoval(
+  targetListPath: number[],
+  sourceListPath: number[],
+  sourceIndex: number,
+  sourceListWillBeRemoved: boolean,
+) {
+  if (sourceListWillBeRemoved && sourceListPath.length >= 2) {
+    const sourceParentItemPath = sourceListPath.slice(0, -1);
+    const sourceListOrdinal = sourceListPath[sourceListPath.length - 1]!;
+    const targetListOrdinalIndex = sourceParentItemPath.length;
+    const targetListOrdinal = targetListPath[targetListOrdinalIndex];
+    if (
+      targetListPath.length > targetListOrdinalIndex &&
+      startsWithPath(targetListPath, sourceParentItemPath) &&
+      typeof targetListOrdinal === "number" &&
+      targetListOrdinal > sourceListOrdinal
+    ) {
+      return targetListPath.map((value, index) => index === targetListOrdinalIndex ? value - 1 : value);
+    }
   }
 
-  const affectedIndex = targetParentPath[sourceParentPath.length]!;
+  if (targetListPath.length <= sourceListPath.length || !startsWithPath(targetListPath, sourceListPath)) {
+    return targetListPath;
+  }
+
+  const affectedIndex = targetListPath[sourceListPath.length]!;
   if (affectedIndex <= sourceIndex) {
-    return targetParentPath;
+    return targetListPath;
   }
 
-  return targetParentPath.map((value, index) => (index === sourceParentPath.length ? value - 1 : value));
+  return targetListPath.map((value, index) => (index === sourceListPath.length ? value - 1 : value));
+}
+
+function resolveListPath(listPath: number[] | undefined, legacyParentPath: number[]) {
+  return listPath ?? legacyParentPath.flatMap((itemIndex) => [itemIndex, 0]);
+}
+
+function isListPath(path: number[]) {
+  return path.length % 2 === 0 && path.every((value) => Number.isSafeInteger(value) && value >= 0);
 }

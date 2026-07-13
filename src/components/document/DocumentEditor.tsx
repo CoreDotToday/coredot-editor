@@ -20,6 +20,12 @@ import {
 } from "lucide-react";
 import type { TiptapJson } from "@/db/schema";
 import {
+  createDocumentBlockLocation,
+  createDocumentBlockMoveTarget,
+  moveDocumentBlock,
+  type DocumentBlockDestination,
+} from "@/features/documents/block-movement";
+import {
   findDocumentMatches,
   nextDocumentFindIndex,
   replaceAllDocumentMatches,
@@ -28,11 +34,6 @@ import {
 } from "@/features/documents/document-find";
 import {
   convertListItemToTopLevelParagraphInTiptapJson,
-  moveListItemInTiptapJson,
-  moveListItemToTopLevelInTiptapJson,
-  moveTopLevelBlockBetweenListItemsInTiptapJson,
-  moveTopLevelBlockInTiptapJson,
-  moveTopLevelBlockToListItemInTiptapJson,
 } from "@/features/documents/tiptap-blocks";
 import {
   DEFAULT_EDITOR_LANGUAGE,
@@ -75,8 +76,6 @@ import {
   getListItemParentPath,
   getTopLevelBlockActionRangeByIndex,
   readBlockGutterPosition,
-  samePath,
-  startsWithPath,
   type BlockActionRange,
   type BlockGutterState,
   type RuntimeEditor,
@@ -88,7 +87,6 @@ import {
 } from "./editor-block-drop-targets";
 import {
   createEditorBlockDragSession,
-  isEditorBlockDragSessionStale,
   type EditorBlockDragSession,
 } from "./editor-block-drag-session";
 import { DocumentFindBar } from "./DocumentFindBar";
@@ -562,94 +560,25 @@ export function DocumentEditor({
       const cachedDropTarget = blockDropTargetRef.current;
       clearBlockDragState();
       if (!editor || !editorFrameRef.current || !session) return;
-      if (isEditorBlockDragSessionStale(session, editor.getJSON() as TiptapJson)) return;
 
       const source = session.source;
       const dropTarget = cachedDropTarget ?? getBlockDropTarget(editor, editorFrameRef.current, source, point);
       if (!dropTarget) return;
 
-      if (dropTarget.kind === "listLevel" && dropTarget.action) {
-        changeListItemLevel(editor, source, dropTarget.action);
-        return;
-      }
-
       const currentContent = editor.getJSON() as TiptapJson;
-      const sourceListItemIndex = getListItemOwnIndex(source);
-      const sourceParentPath = getListItemParentPath(source);
-      const focusTarget =
-        source.kind === "listItem" && typeof sourceListItemIndex === "number"
-          ? dropTarget.kind === "listItem"
-            ? {
-                kind: "listItem" as const,
-                listItemPath: getMovedListItemPath({
-                  dropIndex: dropTarget.dropIndex,
-                  isSameTopLevelList: source.topLevelIndex === dropTarget.topLevelIndex,
-                  sourceIndex: sourceListItemIndex,
-                  sourceParentPath,
-                  targetParentPath: dropTarget.listItemPath ?? [],
-                }),
-                topLevelIndex: getMovedListItemTopLevelIndex(currentContent, source, dropTarget),
-              }
-            : {
-                kind: "topLevel" as const,
-                topLevelIndex: getMovedTopLevelIndex(source.topLevelIndex, dropTarget.dropIndex, currentContent),
-              }
-          : dropTarget.kind === "listItem" && typeof dropTarget.topLevelIndex === "number"
-            ? {
-                kind: "listItem" as const,
-                listItemPath: [...(dropTarget.listItemPath ?? []), dropTarget.dropIndex],
-                topLevelIndex: getTopLevelIndexAfterRemovingSource(dropTarget.topLevelIndex, source.topLevelIndex),
-              }
-          : dropTarget.kind === "betweenListItems" && typeof dropTarget.topLevelIndex === "number"
-            ? {
-                kind: "topLevel" as const,
-                topLevelIndex: getMovedTopLevelIndexInsideSplitList(currentContent, {
-                  dropIndex: dropTarget.dropIndex,
-                  listIndex: dropTarget.topLevelIndex,
-                  sourceIndex: source.topLevelIndex,
-                }),
-              }
-          : {
-              kind: "topLevel" as const,
-              topLevelIndex: getMovedTopLevelIndex(source.topLevelIndex, dropTarget.dropIndex, currentContent),
-            };
-      const result =
-        source.kind === "listItem" && typeof sourceListItemIndex === "number"
-          ? dropTarget.kind === "listItem"
-            ? moveListItemInTiptapJson(currentContent, {
-                dropIndex: dropTarget.dropIndex,
-                listIndex: source.topLevelIndex,
-                sourceIndex: sourceListItemIndex,
-                sourceParentPath,
-                targetListIndex:
-                  typeof dropTarget.topLevelIndex === "number" ? dropTarget.topLevelIndex : source.topLevelIndex,
-                targetParentPath: dropTarget.listItemPath ?? [],
-              })
-            : moveListItemToTopLevelInTiptapJson(currentContent, {
-                dropIndex: dropTarget.dropIndex,
-                listIndex: source.topLevelIndex,
-                sourceIndex: sourceListItemIndex,
-                sourceParentPath,
-              })
-          : dropTarget.kind === "listItem" && typeof dropTarget.topLevelIndex === "number"
-            ? moveTopLevelBlockToListItemInTiptapJson(currentContent, {
-                dropIndex: dropTarget.dropIndex,
-                listIndex: dropTarget.topLevelIndex,
-                sourceIndex: source.topLevelIndex,
-                targetParentPath: dropTarget.listItemPath ?? [],
-              })
-          : dropTarget.kind === "betweenListItems" && typeof dropTarget.topLevelIndex === "number"
-            ? moveTopLevelBlockBetweenListItemsInTiptapJson(currentContent, {
-                dropIndex: dropTarget.dropIndex,
-                listIndex: dropTarget.topLevelIndex,
-                sourceIndex: source.topLevelIndex,
-              })
-          : moveTopLevelBlockInTiptapJson(currentContent, source.topLevelIndex, dropTarget.dropIndex);
+      const sourceLocation = createDocumentBlockLocation(source);
+      const targetIntent = createDocumentBlockMoveTarget(dropTarget);
+      if (!sourceLocation || !targetIntent) return;
+      const result = moveDocumentBlock(currentContent, {
+        documentSignature: session.documentSignature,
+        source: sourceLocation,
+        target: targetIntent,
+      });
       if (!result.changed) return;
 
       preserveEditorFrameScroll(editorFrameRef.current, () => {
         executeEditorCommand(editor, "setContent", result.contentJson as JSONContent);
-        focusMovedBlock(editor, focusTarget);
+        focusMovedBlock(editor, result.destination);
       });
     },
     [clearBlockDragState, editor],
@@ -1135,60 +1064,17 @@ function moveBlock(editor: RuntimeEditor, target: BlockActionRange | null | unde
   if (!range) return;
 
   const currentContent = editor.getJSON() as TiptapJson;
-  const result =
-    range.kind === "listItem"
-      ? moveListItemBlock(currentContent, range, direction)
-      : moveTopLevelBlockInTiptapJson(
-          currentContent,
-          range.topLevelIndex,
-          direction === "up" ? range.topLevelIndex - 1 : range.topLevelIndex + 2,
-        );
+  const source = createDocumentBlockLocation(range);
+  if (!source) return;
+  const result = moveDocumentBlock(currentContent, {
+    source,
+    target: { direction, kind: "relative" },
+  });
 
   if (!result.changed) return;
 
   executeEditorCommand(editor, "setContent", result.contentJson as JSONContent);
-  if (range.kind === "listItem") {
-    const sourceIndex = getListItemOwnIndex(range);
-    const sourceParentPath = getListItemParentPath(range);
-    if (typeof sourceIndex === "number") {
-      focusMovedBlock(editor, {
-        kind: "listItem",
-        listItemPath: getMovedListItemPath({
-          dropIndex: direction === "up" ? sourceIndex - 1 : sourceIndex + 2,
-          sourceIndex,
-          sourceParentPath,
-          targetParentPath: sourceParentPath,
-        }),
-        topLevelIndex: range.topLevelIndex,
-      });
-      return;
-    }
-  }
-
-  focusMovedBlock(editor, {
-    kind: "topLevel",
-    topLevelIndex: getMovedTopLevelIndex(
-      range.topLevelIndex,
-      direction === "up" ? range.topLevelIndex - 1 : range.topLevelIndex + 2,
-      currentContent,
-    ),
-  });
-}
-
-function moveListItemBlock(contentJson: TiptapJson, range: BlockActionRange, direction: "down" | "up") {
-  const sourceIndex = getListItemOwnIndex(range);
-  if (typeof sourceIndex !== "number") {
-    return { changed: false, contentJson };
-  }
-
-  const sourceParentPath = getListItemParentPath(range);
-  return moveListItemInTiptapJson(contentJson, {
-    dropIndex: direction === "up" ? sourceIndex - 1 : sourceIndex + 2,
-    listIndex: range.topLevelIndex,
-    sourceIndex,
-    sourceParentPath,
-    targetParentPath: sourceParentPath,
-  });
+  focusMovedBlock(editor, result.destination);
 }
 
 function changeListItemLevel(
@@ -1230,41 +1116,23 @@ function convertListItemToText(editor: RuntimeEditor, target: BlockActionRange |
   executeEditorCommand(editor, "setContent", result.contentJson as JSONContent);
   focusMovedBlock(editor, {
     kind: "topLevel",
-    topLevelIndex: focusTopLevelIndex,
+    path: [focusTopLevelIndex],
   });
 }
 
 function outdentListItem(editor: RuntimeEditor, range: BlockActionRange) {
-  const sourceIndex = getListItemOwnIndex(range);
-  const sourceParentPath = getListItemParentPath(range);
-  if (typeof sourceIndex !== "number" || sourceParentPath.length === 0) {
-    return false;
-  }
-
-  const parentIndex = sourceParentPath[sourceParentPath.length - 1]!;
-  const targetParentPath = sourceParentPath.slice(0, -1);
-  const result = moveListItemInTiptapJson(editor.getJSON() as TiptapJson, {
-    dropIndex: parentIndex + 1,
-    listIndex: range.topLevelIndex,
-    sourceIndex,
-    sourceParentPath,
-    targetParentPath,
+  const source = createDocumentBlockLocation(range);
+  if (source?.kind !== "listItem") return false;
+  const result = moveDocumentBlock(editor.getJSON() as TiptapJson, {
+    source,
+    target: { direction: "outdent", kind: "relative" },
   });
   if (!result.changed) {
     return false;
   }
 
   executeEditorCommand(editor, "setContent", result.contentJson as JSONContent);
-  focusMovedBlock(editor, {
-    kind: "listItem",
-    listItemPath: getMovedListItemPath({
-      dropIndex: parentIndex + 1,
-      sourceIndex,
-      sourceParentPath,
-      targetParentPath,
-    }),
-    topLevelIndex: range.topLevelIndex,
-  });
+  focusMovedBlock(editor, result.destination);
   return true;
 }
 
@@ -1299,15 +1167,11 @@ function hasActiveEditorTextSelection(editorDom: HTMLElement) {
   );
 }
 
-type MovedBlockFocusTarget =
-  | { kind: "listItem"; listItemPath: number[]; topLevelIndex: number }
-  | { kind: "topLevel"; topLevelIndex: number };
-
-function focusMovedBlock(editor: RuntimeEditor, target: MovedBlockFocusTarget) {
+function focusMovedBlock(editor: RuntimeEditor, target: DocumentBlockDestination) {
   const range =
     target.kind === "listItem"
-      ? getListItemBlockActionRangeByPath(editor, target.topLevelIndex, target.listItemPath)
-      : getTopLevelBlockActionRangeByIndex(editor, target.topLevelIndex);
+      ? getListItemBlockActionRangeByPath(editor, target.path[0] ?? -1, target.path.slice(1))
+      : getTopLevelBlockActionRangeByIndex(editor, target.path[0]);
   if (!range) {
     editor.view.focus();
     return;
@@ -1365,90 +1229,8 @@ function findTextSelectionPositionInRange(editor: RuntimeEditor, from: number, t
   return textSelectionPosition;
 }
 
-function getMovedTopLevelIndex(sourceIndex: number, dropIndex: number, contentJson: TiptapJson) {
-  const contentLength = Array.isArray(contentJson.content) ? contentJson.content.length : 0;
-  const clampedDropIndex = clamp(dropIndex, 0, contentLength);
-  return sourceIndex < clampedDropIndex ? clampedDropIndex - 1 : clampedDropIndex;
-}
-
-function getMovedTopLevelIndexInsideSplitList(
-  contentJson: TiptapJson,
-  { dropIndex, listIndex, sourceIndex }: { dropIndex: number; listIndex: number; sourceIndex: number },
-) {
-  const content = Array.isArray(contentJson.content) ? contentJson.content : [];
-  const listNode = content[listIndex] as { content?: unknown[] } | undefined;
-  const listContentLength = Array.isArray(listNode?.content) ? listNode.content.length : 0;
-  const clampedDropIndex = clamp(dropIndex, 0, listContentLength);
-  const adjustedListIndex = sourceIndex < listIndex ? listIndex - 1 : listIndex;
-  return adjustedListIndex + (clampedDropIndex > 0 ? 1 : 0);
-}
-
 function getConvertedListItemTopLevelIndex(listIndex: number, sourceIndex: number) {
   return listIndex + (sourceIndex > 0 ? 1 : 0);
-}
-
-function getTopLevelIndexAfterRemovingSource(targetIndex: number, sourceIndex: number) {
-  return sourceIndex < targetIndex ? targetIndex - 1 : targetIndex;
-}
-
-function getMovedListItemTopLevelIndex(
-  contentJson: TiptapJson,
-  source: BlockActionRange,
-  target: BlockDropTarget,
-) {
-  if (target.kind !== "listItem" || typeof target.topLevelIndex !== "number" || source.topLevelIndex === target.topLevelIndex) {
-    return source.topLevelIndex;
-  }
-
-  return willRemoveSourceTopLevelList(contentJson, source)
-    ? getTopLevelIndexAfterRemovingSource(target.topLevelIndex, source.topLevelIndex)
-    : target.topLevelIndex;
-}
-
-function willRemoveSourceTopLevelList(contentJson: TiptapJson, source: BlockActionRange) {
-  if (source.kind !== "listItem" || getListItemParentPath(source).length > 0) {
-    return false;
-  }
-
-  const content = Array.isArray(contentJson.content) ? contentJson.content : [];
-  const sourceListNode = content[source.topLevelIndex] as { content?: unknown[] } | undefined;
-  return Array.isArray(sourceListNode?.content) && sourceListNode.content.length === 1;
-}
-
-function getMovedListItemPath({
-  dropIndex,
-  isSameTopLevelList = true,
-  sourceIndex,
-  sourceParentPath,
-  targetParentPath,
-}: {
-  dropIndex: number;
-  isSameTopLevelList?: boolean;
-  sourceIndex: number;
-  sourceParentPath: number[];
-  targetParentPath: number[];
-}) {
-  const adjustedTargetParentPath = isSameTopLevelList
-    ? adjustListParentPathAfterRemoval(targetParentPath, sourceParentPath, sourceIndex)
-    : targetParentPath;
-  const targetIndex =
-    isSameTopLevelList && samePath(sourceParentPath, targetParentPath) && sourceIndex < dropIndex
-      ? dropIndex - 1
-      : dropIndex;
-  return [...adjustedTargetParentPath, Math.max(0, targetIndex)];
-}
-
-function adjustListParentPathAfterRemoval(targetParentPath: number[], sourceParentPath: number[], sourceIndex: number) {
-  if (targetParentPath.length <= sourceParentPath.length || !startsWithPath(targetParentPath, sourceParentPath)) {
-    return targetParentPath;
-  }
-
-  const affectedIndex = targetParentPath[sourceParentPath.length]!;
-  if (affectedIndex <= sourceIndex) {
-    return targetParentPath;
-  }
-
-  return targetParentPath.map((value, index) => (index === sourceParentPath.length ? value - 1 : value));
 }
 
 function executeEditorCommand(editor: RuntimeEditor | null, commandName: string, ...args: unknown[]) {

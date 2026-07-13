@@ -3,6 +3,7 @@ import {
   clamp,
   getDirectListItemElementAtViewportY,
   getDropSlotByY,
+  getListDomElementByPath,
   getListItemDomPath,
   getListItemElementAtViewportY,
   getListItemOwnIndex,
@@ -164,7 +165,7 @@ function getSourceParentListItemDropTarget(
   }
 
   const sourceParentPath = getListItemParentPath(source);
-  const sourceParentList = getListDomElementByParentPath(listElement, sourceParentPath);
+  const sourceParentList = getListDomElementByPath(listElement, sourceParentPath);
   if (!sourceParentList) return null;
 
   const listItems = getDirectListItemElements(sourceParentList);
@@ -309,23 +310,6 @@ function createListItemDropTargetForParentList(
 
 function getDirectListItemElements(listElement: HTMLElement) {
   return Array.from(listElement.children).filter((child): child is HTMLElement => child instanceof HTMLElement);
-}
-
-function getListDomElementByParentPath(topLevelElement: HTMLElement, parentPath: number[]): HTMLElement | null {
-  let currentList: HTMLElement | null = topLevelElement;
-
-  for (const itemIndex of parentPath) {
-    const currentItem: HTMLElement | null = getDirectListItemElements(currentList)[itemIndex] ?? null;
-    if (!currentItem) return null;
-
-    currentList =
-      Array.from(currentItem.children).find(
-        (child): child is HTMLElement => child instanceof HTMLElement && isListDomElement(child),
-      ) ?? null;
-    if (!currentList) return null;
-  }
-
-  return currentList;
 }
 
 function isPointInsideListDropBand(listItems: HTMLElement[], clientY: number) {

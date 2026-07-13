@@ -14,6 +14,7 @@ export type BlockActionRange = {
   from: number;
   kind: "listItem" | "topLevel";
   listItemIndex?: number;
+  // Alternates item index and nested-list ordinal, ending with the selected item index.
   listItemPath?: number[];
   node: ProseMirrorNode;
   to: number;
@@ -108,11 +109,11 @@ export function getListItemBlockActionRangeByPath(
   listItemPath: number[],
 ): BlockActionRange | null {
   const topLevelRange = getTopLevelBlockRangeByIndex(editor, topLevelIndex);
-  if (!topLevelRange || listItemPath.length === 0) return null;
+  if (!topLevelRange || !isListItemPath(listItemPath)) return null;
 
   let listNode = topLevelRange.node;
   let itemOffset = topLevelRange.from + 1;
-  for (let pathIndex = 0; pathIndex < listItemPath.length; pathIndex += 1) {
+  for (let pathIndex = 0; pathIndex < listItemPath.length; pathIndex += 2) {
     const listItemIndex = listItemPath[pathIndex]!;
     if (!isListNodeName(listNode.type.name) || listItemIndex < 0 || listItemIndex >= listNode.childCount) {
       return null;
@@ -139,7 +140,8 @@ export function getListItemBlockActionRangeByPath(
       };
     }
 
-    const nestedList = getNestedListChild(node, itemFrom);
+    const nestedListOrdinal = listItemPath[pathIndex + 1]!;
+    const nestedList = getNestedListChild(node, itemFrom, nestedListOrdinal);
     if (!nestedList) return null;
     listNode = nestedList.node;
     itemOffset = nestedList.from + 1;
@@ -380,9 +382,19 @@ function getListItemPathAtResolvedPosition(
 
   for (let depth = 1; depth <= targetDepth; depth += 1) {
     const node = resolvedPosition.node(depth);
-    if (node.type.name !== "listItem" && node.type.name !== "taskItem") continue;
+    if (node.type.name === "listItem" || node.type.name === "taskItem") {
+      path.push(resolvedPosition.index(depth - 1));
+      continue;
+    }
+    if (depth <= 1 || !isListNodeName(node.type.name)) continue;
 
-    path.push(resolvedPosition.index(depth - 1));
+    const parentItem = resolvedPosition.node(depth - 1);
+    const nestedListChildIndex = resolvedPosition.index(depth - 1);
+    let nestedListOrdinal = 0;
+    for (let childIndex = 0; childIndex < nestedListChildIndex; childIndex += 1) {
+      if (isListNodeName(parentItem.child(childIndex).type.name)) nestedListOrdinal += 1;
+    }
+    path.push(nestedListOrdinal);
   }
 
   return path;
@@ -396,12 +408,14 @@ function getListItemBlockActionRangeByIndex(
   return getListItemBlockActionRangeByPath(editor, topLevelIndex, [listItemIndex]);
 }
 
-function getNestedListChild(node: ProseMirrorNode, nodeFrom: number) {
+function getNestedListChild(node: ProseMirrorNode, nodeFrom: number, nestedListOrdinal: number) {
   let childOffset = nodeFrom + 1;
+  let currentListOrdinal = 0;
   for (let childIndex = 0; childIndex < node.childCount; childIndex += 1) {
     const child = node.child(childIndex);
     if (isListNodeName(child.type.name)) {
-      return { from: childOffset, node: child };
+      if (currentListOrdinal === nestedListOrdinal) return { from: childOffset, node: child };
+      currentListOrdinal += 1;
     }
 
     childOffset += child.nodeSize;
@@ -493,33 +507,65 @@ export function getListItemDomPath(topLevelElement: HTMLElement, listItemElement
       return path;
     }
 
-    currentListItem = parentList.parentElement?.closest("li") ?? null;
+    const parentListItem: HTMLElement | null = parentList.closest<HTMLElement>("li");
+    if (!(parentListItem instanceof HTMLElement)) return null;
+    const nestedListOrdinal = getNestedListElements(parentListItem).indexOf(parentList);
+    if (nestedListOrdinal < 0) return null;
+    path.unshift(nestedListOrdinal);
+    currentListItem = parentListItem;
   }
 
   return null;
 }
 
 function getListItemDomElementByPath(topLevelElement: HTMLElement, listItemPath: number[]) {
+  if (!isListItemPath(listItemPath)) return null;
+  const currentList = getListDomElementByPath(topLevelElement, listItemPath.slice(0, -1));
+  return currentList
+    ? getDirectListItemElements(currentList)[listItemPath[listItemPath.length - 1]!] ?? null
+    : null;
+}
+
+export function getListDomElementByPath(topLevelElement: HTMLElement, listPath: number[]) {
+  if (!isListPath(listPath)) return null;
   let currentList: HTMLElement | null = topLevelElement;
-  let currentItem: HTMLElement | null = null;
-
-  for (const itemIndex of listItemPath) {
-    if (!currentList || !isListDomElement(currentList)) return null;
-
-    currentItem =
-      Array.from(currentList.children).filter((child): child is HTMLElement => child instanceof HTMLElement)[itemIndex] ?? null;
+  for (let pathIndex = 0; pathIndex < listPath.length; pathIndex += 2) {
+    const itemIndex = listPath[pathIndex]!;
+    const nestedListOrdinal = listPath[pathIndex + 1]!;
+    const currentItem: HTMLElement | null = getDirectListItemElements(currentList)[itemIndex] ?? null;
     if (!currentItem) return null;
-
-    currentList = Array.from(currentItem.children).find(
-      (child): child is HTMLElement => child instanceof HTMLElement && isListDomElement(child),
-    ) ?? null;
+    currentList = getNestedListElements(currentItem)[nestedListOrdinal] ?? null;
+    if (!currentList) return null;
   }
-
-  return currentItem;
+  return currentList;
 }
 
 function isListNodeName(nodeName: string) {
   return nodeName === "bulletList" || nodeName === "orderedList" || nodeName === "taskList";
+}
+
+function getDirectListItemElements(listElement: HTMLElement) {
+  return Array.from(listElement.children).filter(
+    (child): child is HTMLElement => child instanceof HTMLElement && child.matches("li"),
+  );
+}
+
+function getNestedListElements(listItem: HTMLElement) {
+  return Array.from(listItem.querySelectorAll<HTMLElement>("ul, ol")).filter(
+    (listElement) => listElement.closest("li") === listItem,
+  );
+}
+
+function isListItemPath(path: number[]) {
+  return path.length % 2 === 1 && path.every(isPathIndex);
+}
+
+function isListPath(path: number[]) {
+  return path.length % 2 === 0 && path.every(isPathIndex);
+}
+
+function isPathIndex(value: number) {
+  return Number.isSafeInteger(value) && value >= 0;
 }
 
 function getListItemIndexAtViewportY(listElement: HTMLElement, clientY: number) {

@@ -6,6 +6,8 @@ import type { TiptapJson } from "@/db/schema";
 import { createDocumentSchemaExtensions } from "@/features/documents/tiptap-extensions";
 import {
   getBlockActionRangeAtPosition,
+  getListItemBlockActionRangeByPath,
+  getListItemDomPath,
   readBlockGutterPosition,
 } from "./editor-block-ranges";
 import { isNoopBlockDropTarget } from "./editor-block-drop-targets";
@@ -373,8 +375,41 @@ describe("DocumentEditor", () => {
 
     expect(blockRange).toMatchObject({
       kind: "listItem",
-      listItemPath: [0, 0, 0],
+      listItemPath: [0, 0, 0, 0, 0],
     });
+  });
+
+  it("resolves caret, explicit range, and DOM paths into the second nested list", () => {
+    const editor = createMultipleNestedListsEditor();
+    const secondListTextRange = findTextRange(editor, "Ordered child");
+
+    const caretRange = getBlockActionRangeAtPosition(editor, secondListTextRange.from);
+    const explicitRange = getListItemBlockActionRangeByPath(editor, 0, [0, 1, 0]);
+
+    expect(caretRange).toMatchObject({
+      kind: "listItem",
+      listItemPath: [0, 1, 0],
+      node: expect.objectContaining({ textContent: "Ordered child" }),
+    });
+    expect(explicitRange).toMatchObject({
+      kind: "listItem",
+      listItemPath: [0, 1, 0],
+      node: expect.objectContaining({ textContent: "Ordered child" }),
+    });
+
+    const topLevelList = document.createElement("ul");
+    const parentItem = createListItem("Parent", { top: 40 });
+    const firstNestedList = document.createElement("ul");
+    const secondNestedList = document.createElement("ol");
+    const firstChild = createListItem("Bullet child", { top: 80 });
+    const secondChild = createListItem("Ordered child", { top: 120 });
+    firstNestedList.append(firstChild);
+    secondNestedList.append(secondChild);
+    parentItem.append(firstNestedList, secondNestedList);
+    topLevelList.append(parentItem);
+
+    expect(getListItemDomPath(topLevelList, firstChild)).toEqual([0, 0, 0]);
+    expect(getListItemDomPath(topLevelList, secondChild)).toEqual([0, 1, 0]);
   });
 
   it("anchors nested list gutter controls from the path target instead of a stale nodeDOM result", () => {
@@ -416,7 +451,7 @@ describe("DocumentEditor", () => {
       from: 10,
       kind: "listItem",
       listItemIndex: 0,
-      listItemPath: [0, 0, 0],
+      listItemPath: [0, 0, 0, 0, 0],
       node: {} as never,
       to: 12,
       topLevelIndex: 0,
@@ -1017,6 +1052,48 @@ function createNestedListEditor() {
                           ],
                         },
                       ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+    extensions: createDocumentSchemaExtensions(),
+  });
+  editors.push(editor);
+  return editor;
+}
+
+function createMultipleNestedListsEditor() {
+  const editor = new Editor({
+    content: {
+      type: "doc",
+      content: [
+        {
+          type: "bulletList",
+          content: [
+            {
+              type: "listItem",
+              content: [
+                { type: "paragraph", content: [{ type: "text", text: "Parent" }] },
+                {
+                  type: "bulletList",
+                  content: [
+                    {
+                      type: "listItem",
+                      content: [{ type: "paragraph", content: [{ type: "text", text: "Bullet child" }] }],
+                    },
+                  ],
+                },
+                {
+                  type: "orderedList",
+                  content: [
+                    {
+                      type: "listItem",
+                      content: [{ type: "paragraph", content: [{ type: "text", text: "Ordered child" }] }],
                     },
                   ],
                 },
