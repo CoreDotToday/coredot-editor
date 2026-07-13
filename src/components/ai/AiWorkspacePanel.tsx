@@ -1,8 +1,8 @@
 "use client";
 
-import { Check, Clock3, Loader2, MessageSquareText, Pencil, RotateCcw, ScrollText, X } from "lucide-react";
+import { Check, Clock3, Loader2, MessageSquareText, Pencil, Puzzle, RotateCcw, ScrollText, X } from "lucide-react";
 import type { ReactNode } from "react";
-import { useId, useState, type KeyboardEvent } from "react";
+import { useCallback, useId, useState, type KeyboardEvent } from "react";
 import {
   DEFAULT_EDITOR_LANGUAGE,
   editorMessages,
@@ -11,6 +11,8 @@ import {
   type EditorLanguage,
   type EditorMessages,
 } from "@/features/i18n/editor-language";
+import { PluginRenderedContribution } from "@/plugins/PluginRenderedContribution";
+import type { EditorWorkspaceHostContext, EditorWorkspacePanel } from "@/plugins/types";
 import { AiReviewPanel, type AiProposalApplyMode, type AiReviewProposal, type AiReviewSummary } from "./AiReviewPanel";
 
 export type AiWorkspaceChatMessage = {
@@ -74,15 +76,17 @@ type AiWorkspacePanelProps = {
     applyMode?: AiProposalApplyMode,
   ) => void;
   proposals: AiReviewProposal[];
+  pluginContext?: EditorWorkspaceHostContext;
+  pluginPanels?: EditorWorkspacePanel[];
   reviewMessages?: EditorMessages["aiReview"];
   reviewSummary?: AiReviewSummary | null;
   selectedTemplateName: string;
   undoErrorMessage?: string;
 };
 
-type WorkspaceTab = "review" | "chat" | "changes";
+type WorkspaceTab = string;
 
-const tabs = [
+const coreTabs = [
   { icon: ScrollText, id: "review" },
   { icon: MessageSquareText, id: "chat" },
   { icon: Clock3, id: "changes" },
@@ -113,17 +117,24 @@ export function AiWorkspacePanel({
   onRenameChatSession,
   onUndoChange,
   onUpdateProposalStatus,
+  pluginContext,
+  pluginPanels = [],
   proposals,
   reviewMessages = editorMessages[DEFAULT_EDITOR_LANGUAGE].aiReview,
   reviewSummary = null,
   selectedTemplateName,
   undoErrorMessage = "",
 }: AiWorkspacePanelProps) {
-  const [activeTab, setActiveTab] = useState<WorkspaceTab>("review");
+  const [selectedTab, setSelectedTab] = useState<WorkspaceTab>("review");
   const [activeChatSessionId, setActiveChatSessionId] = useState<string>("");
   const [renamingChatSessionId, setRenamingChatSessionId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
   const workspaceId = useId();
+  const tabs = [
+    ...coreTabs.map((tab) => ({ ...tab, label: messages.tabs[tab.id] })),
+    ...pluginPanels.map((panel) => ({ icon: Puzzle, id: getPluginWorkspaceTabId(panel.id), label: panel.label })),
+  ];
+  const activeTab = tabs.some((tab) => tab.id === selectedTab) ? selectedTab : "review";
   const visibleChatSessions = chatSessions.filter((session) => !session.archived);
   const activeChatSession =
     visibleChatSessions.find((session) => session.id === activeChatSessionId) ?? visibleChatSessions[0] ?? null;
@@ -135,7 +146,7 @@ export function AiWorkspacePanel({
       : "hidden w-[23rem] shrink-0 flex-col border-l border-zinc-200 bg-white xl:flex";
 
   const activateTab = (nextTab: WorkspaceTab) => {
-    setActiveTab(nextTab);
+    setSelectedTab(nextTab);
     if (nextTab === "changes") onChangesOpen?.();
   };
 
@@ -161,7 +172,7 @@ export function AiWorkspacePanel({
       <div className="flex items-center gap-2 border-b border-zinc-200 px-4 py-3">
         <div
           aria-label={messages.tabList}
-          className="grid min-w-0 flex-1 grid-cols-3 gap-1 rounded-md bg-zinc-100 p-1"
+          className="flex min-w-0 flex-1 gap-1 overflow-x-auto rounded-md bg-zinc-100 p-1"
           role="tablist"
         >
           {tabs.map(({ icon: Icon, id }) => (
@@ -169,7 +180,7 @@ export function AiWorkspacePanel({
               aria-controls={`${workspaceId}-${id}-panel`}
               aria-selected={activeTab === id}
               className={[
-                "inline-flex h-8 items-center justify-center gap-1.5 rounded px-2 text-xs font-medium transition-colors",
+                "inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded px-2 text-xs font-medium transition-colors",
                 activeTab === id ? "bg-white text-zinc-950 shadow-sm" : "text-zinc-600 hover:text-zinc-950",
               ].join(" ")}
               id={`${workspaceId}-${id}-tab`}
@@ -181,7 +192,7 @@ export function AiWorkspacePanel({
               type="button"
             >
               <Icon aria-hidden="true" className="size-3.5" />
-              {messages.tabs[id]}
+              {tabs.find((tab) => tab.id === id)?.label}
             </button>
           ))}
         </div>
@@ -435,9 +446,52 @@ export function AiWorkspacePanel({
         </section>
       ) : null}
 
+      {pluginPanels.map((panel) => {
+        const tabId = getPluginWorkspaceTabId(panel.id);
+        if (activeTab !== tabId || !pluginContext) return null;
+
+        return (
+          <section
+            aria-labelledby={`${workspaceId}-${tabId}-tab`}
+            className="min-h-0 flex-1 overflow-y-auto px-5 py-5"
+            id={`${workspaceId}-${tabId}-panel`}
+            key={panel.id}
+            role="tabpanel"
+          >
+            <PluginWorkspacePanelContribution context={pluginContext} panel={panel} />
+          </section>
+        );
+      })}
+
       {children}
     </aside>
   );
+}
+
+function PluginWorkspacePanelContribution({
+  context,
+  panel,
+}: {
+  context: EditorWorkspaceHostContext;
+  panel: EditorWorkspacePanel;
+}) {
+  const render = useCallback(() => panel.render(context), [context, panel]);
+
+  return (
+    <PluginRenderedContribution
+      contributionId={panel.id}
+      contributionType="workspacePanel"
+      render={render}
+    />
+  );
+}
+
+function getPluginWorkspaceTabId(panelId: string) {
+  const characterCount = Array.from(panelId).length;
+  const encodedId = Array.from(panelId, (character) => {
+    return /^[A-Za-z0-9]$/.test(character) ? character : `_${character.codePointAt(0)?.toString(16)}_`;
+  }).join("");
+  return `plugin-${characterCount}-${encodedId || "empty"}`;
 }
 
 function formatChangeTime(date: Date, language: EditorLanguage) {

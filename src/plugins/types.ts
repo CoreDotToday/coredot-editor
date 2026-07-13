@@ -1,5 +1,7 @@
 import type { AnyExtension } from "@tiptap/core";
 import type { Editor } from "@tiptap/react";
+import type { ReactNode } from "react";
+import type { TiptapJson } from "@/db/schema";
 import type { EditorLanguage, EditorMessages } from "@/features/i18n/editor-language";
 
 export type EditorPluginContext = {
@@ -58,18 +60,60 @@ export type EditorSlashCommand = {
 
 export type EditorToolbarItem = {
   id: string;
+  isEnabled?: (context: EditorHostContext) => boolean;
+  label: string;
+  run: (context: EditorHostContext) => void;
 };
 
 export type EditorBlockAction = {
   id: string;
+  isEnabled?: (context: EditorBlockHostContext) => boolean;
+  label: string;
+  run: (context: EditorBlockHostContext) => void;
 };
 
 export type EditorWorkspacePanel = {
   id: string;
+  label: string;
+  render: (context: EditorWorkspaceHostContext) => ReactNode;
 };
 
 export type EditorSettingsSection = {
   id: string;
+  label: string;
+  render: (context: EditorSettingsHostContext) => ReactNode;
+};
+
+export type EditorHostContext = {
+  editor: Editor;
+  language: EditorLanguage;
+  messages: EditorMessages;
+};
+
+export type EditorBlockHostContext = EditorHostContext & {
+  block: {
+    from: number;
+    kind: "listItem" | "topLevel";
+    listItemPath?: number[];
+    to: number;
+    topLevelIndex: number;
+  };
+};
+
+export type EditorWorkspaceHostContext = {
+  document: {
+    contentJson: TiptapJson;
+    id: string;
+    plainText: string;
+    title: string;
+  };
+  language: EditorLanguage;
+  messages: EditorMessages;
+};
+
+export type EditorSettingsHostContext = {
+  language: EditorLanguage;
+  messages: EditorMessages;
 };
 
 export type EditorPluginContributions = {

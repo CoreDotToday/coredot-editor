@@ -32,6 +32,60 @@ describe("BlockGutterControls", () => {
     expect(handleBlockAction).toHaveBeenCalledWith("duplicate");
   });
 
+  it("renders and runs a plugin block action from the existing block menu", async () => {
+    const user = userEvent.setup();
+    const run = vi.fn();
+
+    render(
+      <BlockGutterControls
+        isVisible
+        left={64}
+        pluginActions={[{ id: "plugin.block", label: "Plugin block action", run }]}
+        pluginContext={{
+          block: { from: 1, kind: "topLevel", to: 3, topLevelIndex: 0 },
+          editor: {} as never,
+          language: "ko",
+          messages: {} as never,
+        }}
+        top={88}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "블록 메뉴 열기" }));
+    await user.click(screen.getByRole("menuitem", { name: "Plugin block action" }));
+
+    expect(run).toHaveBeenCalledWith(expect.objectContaining({ block: expect.objectContaining({ topLevelIndex: 0 }) }));
+  });
+
+  it("skips disabled plugin actions during block menu keyboard navigation", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <BlockGutterControls
+        isVisible
+        left={64}
+        pluginActions={[
+          { id: "plugin.disabled", isEnabled: () => false, label: "Disabled plugin action", run: () => undefined },
+          { id: "plugin.enabled", label: "Enabled plugin action", run: () => undefined },
+        ]}
+        pluginContext={{
+          block: { from: 1, kind: "topLevel", to: 3, topLevelIndex: 0 },
+          editor: {} as never,
+          language: "ko",
+          messages: {} as never,
+        }}
+        top={88}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "블록 메뉴 열기" }));
+    await user.keyboard("{End}");
+    expect(screen.getByRole("menuitem", { name: "Enabled plugin action" })).toHaveFocus();
+
+    await user.keyboard("{ArrowUp}");
+    expect(screen.getByRole("menuitem", { name: "블록 삭제" })).toHaveFocus();
+  });
+
   it("does not add a mobile-only upward translate that detaches controls from the active block", () => {
     render(<BlockGutterControls isVisible left={8} top={128} />);
 

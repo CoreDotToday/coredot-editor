@@ -1,10 +1,6 @@
 import { generateJSON } from "@tiptap/html/server";
-import Link from "@tiptap/extension-link";
-import { TableKit } from "@tiptap/extension-table";
-import TaskItem from "@tiptap/extension-task-item";
-import TaskList from "@tiptap/extension-task-list";
-import Typography from "@tiptap/extension-typography";
-import StarterKit from "@tiptap/starter-kit";
+import { createServerSchemaExtensionsRuntime } from "../../plugins/document-schema-profile-runtime.mjs";
+import { appDocumentSchemaProfileRuntime } from "../../plugins/app-document-schema-profile-runtime.mjs";
 import {
   Document,
   ExternalHyperlink,
@@ -22,7 +18,9 @@ const ORDERED_LIST_REFERENCE = "coredot-ordered-list";
 export async function docxBufferToTiptapJsonCore(buffer) {
   const result = await mammoth.convertToHtml({ buffer: Buffer.from(buffer) });
   const html = result.value.trim() || "<p></p>";
-  const contentJson = normalizeTiptapJson(generateJSON(html, createDocumentSchemaExtensions()));
+  const contentJson = normalizeTiptapJson(
+    generateJSON(html, createServerSchemaExtensionsRuntime(appDocumentSchemaProfileRuntime)),
+  );
   return {
     contentJson,
     warnings: result.messages.map((message) => message.message).filter(Boolean),
@@ -49,17 +47,6 @@ export async function tiptapJsonToDocxBufferCore(contentJson, title = "Document"
     title,
   });
   return Packer.toBuffer(document);
-}
-
-function createDocumentSchemaExtensions() {
-  return [
-    StarterKit.configure({ link: false }),
-    Link.configure({ autolink: true, openOnClick: false }),
-    TaskList,
-    TaskItem.configure({ nested: true }),
-    TableKit.configure({ table: { resizable: true } }),
-    Typography,
-  ];
 }
 
 function normalizeTiptapJson(value) {

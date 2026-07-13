@@ -1,40 +1,27 @@
 import { Extension } from "@tiptap/core";
-import Link from "@tiptap/extension-link";
-import { TableKit } from "@tiptap/extension-table";
-import TaskItem from "@tiptap/extension-task-item";
-import TaskList from "@tiptap/extension-task-list";
-import Typography from "@tiptap/extension-typography";
-import StarterKit from "@tiptap/starter-kit";
 import { MarkdownPaste } from "@/features/documents/markdown-paste";
+import {
+  createEditorSchemaExtensions,
+  defaultDocumentSchemaProfile,
+  type DocumentSchemaProfile,
+} from "../document-schema-profile";
 import type { EditorPlugin } from "../types";
 
-export const coreDocumentPlugin: EditorPlugin = {
-  id: "core.document",
-  name: "Core document schema",
-  tiptapExtensions: createCoreDocumentExtensions,
-  version: "0.1.0",
-};
+export const coreDocumentPlugin = createCoreDocumentPlugin(defaultDocumentSchemaProfile);
 
-export function createCoreDocumentExtensions() {
+export function createCoreDocumentPlugin(profile: DocumentSchemaProfile): EditorPlugin {
+  return {
+    id: "core.document",
+    name: "Core document schema",
+    tiptapExtensions: () => createCoreDocumentExtensions(profile),
+    version: "0.1.0",
+  };
+}
+
+export function createCoreDocumentExtensions(profile: DocumentSchemaProfile = defaultDocumentSchemaProfile) {
   return [
-    StarterKit.configure({
-      link: false,
-    }),
-    Link.configure({
-      autolink: true,
-      openOnClick: false,
-    }),
-    TaskList,
-    TaskItem.configure({
-      nested: true,
-    }),
-    TableKit.configure({
-      table: {
-        resizable: true,
-      },
-    }),
+    ...createEditorSchemaExtensions(profile),
     MarkdownPaste,
-    Typography,
     EmptyListItemExit,
   ];
 }

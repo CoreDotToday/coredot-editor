@@ -1,12 +1,14 @@
 "use client";
 
-import { ArrowDown, ArrowUp, Copy, FilePlus2, GripVertical, IndentDecrease, IndentIncrease, Plus, Trash2, Type } from "lucide-react";
+import { ArrowDown, ArrowUp, Copy, FilePlus2, GripVertical, IndentDecrease, IndentIncrease, Plus, Puzzle, Trash2, Type } from "lucide-react";
 import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent } from "react";
 import {
   DEFAULT_EDITOR_LANGUAGE,
   editorMessages,
   type EditorLanguage,
 } from "@/features/i18n/editor-language";
+import { invokeEditorPluginContribution } from "@/plugins/contribution-safety";
+import type { EditorBlockAction, EditorBlockHostContext } from "@/plugins/types";
 
 export type SelectionBlockAction =
   | "addBelow"
@@ -36,6 +38,8 @@ type BlockGutterControlsProps = {
   onBlockDragStart?: () => void;
   onBlockPointerDragEnd?: (point: SelectionBlockDragPoint) => void;
   onBlockPointerDragMove?: (point: SelectionBlockDragPoint) => void;
+  pluginActions?: EditorBlockAction[];
+  pluginContext?: EditorBlockHostContext;
   top: number;
 };
 
@@ -53,6 +57,8 @@ export function BlockGutterControls({
   onBlockDragStart,
   onBlockPointerDragEnd,
   onBlockPointerDragMove,
+  pluginActions = [],
+  pluginContext,
   top,
 }: BlockGutterControlsProps) {
   const [isBlockMenuOpen, setIsBlockMenuOpen] = useState(false);
@@ -98,7 +104,9 @@ export function BlockGutterControls({
   };
 
   const handleMenuKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    const menuItems = menuItemRefs.current.filter((item): item is HTMLButtonElement => item !== null);
+    const menuItems = menuItemRefs.current.filter(
+      (item): item is HTMLButtonElement => item !== null && !item.disabled,
+    );
     const activeIndex = menuItems.indexOf(document.activeElement as HTMLButtonElement);
 
     if (event.key === "Escape") {
@@ -260,6 +268,37 @@ export function BlockGutterControls({
               {label}
             </button>
           ))}
+          {pluginActions.map((action, index) => {
+            const isEnabled = pluginContext
+              ? invokeEditorPluginContribution(
+                  "blockAction",
+                  action.id,
+                  () => action.isEnabled?.(pluginContext) ?? true,
+                  false,
+                )
+              : false;
+
+            return (
+              <button
+                className="flex h-8 w-full items-center gap-2 rounded px-2 text-left text-sm font-medium text-zinc-700 hover:bg-zinc-100 hover:text-zinc-950 focus:outline-none focus:ring-2 focus:ring-zinc-950 disabled:cursor-not-allowed disabled:text-zinc-300"
+                disabled={!isEnabled}
+                key={action.id}
+                onClick={() => {
+                  closeBlockMenu();
+                  if (!pluginContext) return;
+                  invokeEditorPluginContribution("blockAction", action.id, () => action.run(pluginContext), undefined);
+                }}
+                ref={(element) => {
+                  menuItemRefs.current[blockActions.length + index] = element;
+                }}
+                role="menuitem"
+                type="button"
+              >
+                <Puzzle aria-hidden="true" className="size-3.5 text-zinc-500" />
+                {action.label}
+              </button>
+            );
+          })}
         </div>
       ) : null}
     </div>

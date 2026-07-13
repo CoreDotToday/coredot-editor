@@ -87,7 +87,10 @@ import {
 } from "@/features/proposals/proposal-transaction";
 import type { AiDocumentReferenceCandidate, ResolvedAiDocumentReference } from "@/features/ai/ai-reference-parser";
 import { validateTemplateVariables } from "@/features/templates/template-validation";
-import type { EditorSelectionCommandMetadata } from "@/plugins/types";
+import { defaultEditorPlugins } from "@/plugins/app-plugins";
+import { mergeEditorPluginContributions } from "@/plugins/registry";
+import type { EditorPlugin, EditorPluginContributions, EditorSelectionCommandMetadata } from "@/plugins/types";
+import { useEditorPlugins } from "@/plugins/use-editor-plugins";
 import { DocumentEditor, type RunningSelectionAiCommand, type SelectionAiCommandContext } from "./DocumentEditor";
 import { DocumentCommandPalette } from "./DocumentCommandPalette";
 import { DocumentMetadataPanel } from "./DocumentMetadataPanel";
@@ -126,6 +129,9 @@ type DocumentShellProps = {
   templates: ShellTemplate[];
   aiRuns: ShellAiRun[];
   proposals?: ShellProposal[];
+  pluginContributions?: Partial<EditorPluginContributions>;
+  /** Additional plugins appended to the app defaults. */
+  plugins?: EditorPlugin[];
 };
 
 type DraftState = {
@@ -311,12 +317,22 @@ function getCompactWorkspaceLayoutServerSnapshot() {
   return false;
 }
 
-export function DocumentShell({ aiRuns, document, proposals = [], referenceDocuments = [], templates }: DocumentShellProps) {
+export function DocumentShell({
+  aiRuns,
+  document,
+  pluginContributions,
+  plugins,
+  proposals = [],
+  referenceDocuments = [],
+  templates,
+}: DocumentShellProps) {
   return (
     <DocumentShellContent
       key={document.id}
       aiRuns={aiRuns}
       document={document}
+      pluginContributions={pluginContributions}
+      plugins={plugins}
       proposals={proposals}
       referenceDocuments={referenceDocuments}
       templates={templates}
@@ -324,7 +340,15 @@ export function DocumentShell({ aiRuns, document, proposals = [], referenceDocum
   );
 }
 
-function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocuments = [], templates }: DocumentShellProps) {
+function DocumentShellContent({
+  aiRuns,
+  document,
+  pluginContributions,
+  plugins,
+  proposals = [],
+  referenceDocuments = [],
+  templates,
+}: DocumentShellProps) {
   const initialTemplateVariables = useMemo(
     () => mergeMissingTemplateVariableDefaults(templates[0] ?? null, {}),
     [templates],
@@ -419,6 +443,30 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
     : templates[0]?.id ?? "";
   const selectedTemplate = templates.find((template) => template.id === activeTemplateId) ?? null;
   const messages = editorMessages[language];
+  const shellPlugins = useMemo(
+    () => plugins ? [...defaultEditorPlugins, ...plugins] : defaultEditorPlugins,
+    [plugins],
+  );
+  const defaultPluginContributions = useEditorPlugins(language, { plugins: shellPlugins });
+  const resolvedPluginContributions = useMemo(
+    () => mergeEditorPluginContributions(defaultPluginContributions, pluginContributions),
+    [defaultPluginContributions, pluginContributions],
+  );
+  const pluginWorkspaceContext = useMemo(
+    () => ({
+      document: {
+        contentJson: draft.contentJson,
+        id: document.id,
+        get plainText() {
+          return extractPlainTextFromTiptap(draft.contentJson);
+        },
+        title: draft.title,
+      },
+      language,
+      messages,
+    }),
+    [document.id, draft.contentJson, draft.title, language, messages],
+  );
   const selectionCommandLabel = selectionCommand ? getSelectionCommandLabel(selectionCommand.command, language) : "";
   const isRewritingSelection = runningSelectionCommands.length > 0;
   const isSelectionCommandLimitReached = runningSelectionCommands.length >= MAX_CONCURRENT_SELECTION_COMMANDS;
@@ -1815,6 +1863,8 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
       onUndoChange={undoAppliedChange}
       onUpdateProposalStatus={updateProposalStatusLocally}
       proposals={reviewProposals}
+      pluginContext={pluginWorkspaceContext}
+      pluginPanels={resolvedPluginContributions.workspacePanels}
       reviewMessages={messages.aiReview}
       reviewSummary={reviewSummary}
       selectedTemplateName={selectedTemplateName}
@@ -1929,7 +1979,10 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
                 {isExportingDocx ? messages.header.exportingDocx : messages.header.exportDocx}
               </span>
             </button>
-            <AiSettingsDialog />
+            <AiSettingsDialog
+              language={language}
+              pluginSections={resolvedPluginContributions.settingsSections}
+            />
             <label className="sr-only" htmlFor="editor-language">
               {messages.header.language}
             </label>
@@ -2065,6 +2118,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
             onChange={handleDraftChange}
             onFindOpenChange={setIsFindOpen}
             referenceCandidates={referenceDocuments}
+            resolvedPluginContributions={resolvedPluginContributions}
             onApplySelectionAiResult={(proposalId, applyMode) =>
               updateProposalStatusLocally(proposalId, "accepted", applyMode)
             }

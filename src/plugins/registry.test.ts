@@ -1,9 +1,9 @@
 import { Extension } from "@tiptap/core";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { editorMessages } from "@/features/i18n/editor-language";
 import { coreDocumentPlugin } from "./builtin/core-document-plugin";
-import { createEditorPluginRegistry } from "./registry";
-import type { EditorPlugin } from "./types";
+import { createEditorPluginRegistry, mergeEditorPluginContributions } from "./registry";
+import { createEmptyEditorPluginContributions, type EditorPlugin, type EditorPluginContributions } from "./types";
 
 function plugin(id: string, overrides: Partial<EditorPlugin> = {}): EditorPlugin {
   return {
@@ -122,6 +122,46 @@ describe("createEditorPluginRegistry", () => {
     expect(contributions.selectionCommands.map((item) => item.ariaLabel)).toEqual(["ko:명확하게 개선"]);
   });
 
+  it("resolves every executable and rendered contribution type", () => {
+    const registry = createEditorPluginRegistry([
+      plugin("complete", {
+        blockActions: () => [{ id: "complete.block", label: "Plugin block action", run: () => undefined }],
+        settingsSections: () => [{ id: "complete.settings", label: "Plugin settings", render: () => null }],
+        toolbarItems: () => [{ id: "complete.toolbar", label: "Plugin toolbar action", run: () => undefined }],
+        workspacePanels: () => [{ id: "complete.workspace", label: "Plugin workspace", render: () => null }],
+      }),
+    ]);
+
+    const contributions = registry.resolve(resolveInput);
+
+    expect(contributions.toolbarItems[0]).toMatchObject({ id: "complete.toolbar", label: "Plugin toolbar action" });
+    expect(contributions.blockActions[0]).toMatchObject({ id: "complete.block", label: "Plugin block action" });
+    expect(contributions.workspacePanels[0]).toMatchObject({ id: "complete.workspace", label: "Plugin workspace" });
+    expect(contributions.settingsSections[0]).toMatchObject({ id: "complete.settings", label: "Plugin settings" });
+  });
+
+  it("isolates a failed contribution factory and logs only safe plugin identity", () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const registry = createEditorPluginRegistry([
+      plugin("broken", {
+        toolbarItems: () => {
+          throw new Error("secret document text");
+        },
+      }),
+      plugin("healthy", {
+        toolbarItems: () => [{ id: "healthy.toolbar", label: "Healthy", run: () => undefined }],
+      }),
+    ]);
+
+    expect(registry.resolve(resolveInput).toolbarItems.map((item) => item.id)).toEqual(["healthy.toolbar"]);
+    expect(consoleError).toHaveBeenCalledWith("Editor plugin contribution factory failed.", {
+      contributionType: "toolbarItems",
+      pluginId: "broken",
+    });
+    expect(JSON.stringify(consoleError.mock.calls)).not.toContain("secret document text");
+    consoleError.mockRestore();
+  });
+
   it("throws on duplicate contribution ids", () => {
     const registry = createEditorPluginRegistry([
       plugin("a", {
@@ -156,6 +196,25 @@ describe("createEditorPluginRegistry", () => {
 
     expect(() => registry.resolve(resolveInput)).toThrow(
       /Duplicate editor plugin contribution id in slashCommands: duplicate.command/,
+    );
+  });
+
+  it.each([
+    "selectionCommands",
+    "slashCommands",
+    "toolbarItems",
+    "blockActions",
+    "workspacePanels",
+    "settingsSections",
+  ] as const)("rejects duplicate %s ids when merging pre-resolved contributions", (contributionType) => {
+    const base = createEmptyEditorPluginContributions();
+    (base[contributionType] as unknown as Array<{ id: string }>).push({ id: "duplicate.contribution" });
+    const additional = {
+      [contributionType]: [{ id: "duplicate.contribution" }],
+    } as unknown as Partial<EditorPluginContributions>;
+
+    expect(() => mergeEditorPluginContributions(base, additional)).toThrow(
+      new RegExp(`Duplicate editor plugin contribution id in ${contributionType}: duplicate\\.contribution`),
     );
   });
 

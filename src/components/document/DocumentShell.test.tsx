@@ -17,6 +17,7 @@ vi.mock("./DocumentEditor", () => ({
     onSelectionCommand,
     runningSelectionCommand,
     runningSelectionCommands = [],
+    resolvedPluginContributions,
     selectionAiResult,
     language = "ko",
     messages = { titleLabel: "문서 제목" },
@@ -44,6 +45,10 @@ vi.mock("./DocumentEditor", () => ({
     ) => void;
     runningSelectionCommand?: string;
     runningSelectionCommands?: Array<{ command: string; id: string }>;
+    resolvedPluginContributions?: {
+      tiptapExtensions: Array<{ name: string }>;
+      toolbarItems: Array<{ id: string }>;
+    };
     selectionAiResult?: {
       command: string;
       defaultApplyMode: "replace" | "insert_below";
@@ -62,6 +67,14 @@ vi.mock("./DocumentEditor", () => ({
       <div data-testid="mock-document-body">{readMockTiptapText(contentJson)}</div>
       {isFindOpen ? <div role="search" aria-label="mock find bar">Find bar open</div> : null}
       <output data-testid="mock-inline-suggestions">{JSON.stringify(inlineSuggestions)}</output>
+      {resolvedPluginContributions ? (
+        <output data-testid="mock-resolved-plugin-contributions">
+          {JSON.stringify({
+            extensions: resolvedPluginContributions.tiptapExtensions.map((item) => item.name),
+            toolbarItems: resolvedPluginContributions.toolbarItems.map((item) => item.id),
+          })}
+        </output>
+      ) : null}
       {isSelectionCommandRunning ? (
         <div data-testid="mock-selection-command-running">
           {runningSelectionCommand} {runningSelectionCommands.length}
@@ -474,6 +487,75 @@ function expectLastProposalApplyFetch(
 }
 
 describe("DocumentShell", () => {
+  it("renders plugin workspace tabs and their live document panel", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocument("doc_1", "Market Entry Memo")}
+        pluginContributions={{
+          workspacePanels: [
+            {
+              id: "plugin panel/한글",
+              label: "Plugin workspace",
+              render: ({ document }) => <p>Workspace document: {document.title}</p>,
+            },
+            { id: "", label: "Empty ID workspace", render: () => null },
+            { id: "empty", label: "Literal empty workspace", render: () => null },
+          ],
+        }}
+        templates={[]}
+      />,
+    );
+
+    const pluginTab = screen.getByRole("tab", { name: "Plugin workspace" });
+    expect(pluginTab.getAttribute("aria-controls")).not.toMatch(/[ ./한글]/);
+    const pluginPanelIds = [
+      pluginTab,
+      screen.getByRole("tab", { name: "Empty ID workspace" }),
+      screen.getByRole("tab", { name: "Literal empty workspace" }),
+    ].map((tab) => tab.getAttribute("aria-controls"));
+    expect(new Set(pluginPanelIds).size).toBe(3);
+    await user.click(pluginTab);
+
+    expect(screen.getByRole("tabpanel", { name: "Plugin workspace" })).toHaveTextContent(
+      "Workspace document: Market Entry Memo",
+    );
+  });
+
+  it("resolves plugin factories once in the shell and passes the full result to the editor", () => {
+    const toolbarItems = vi.fn(() => [
+      { id: "plugin.once-toolbar", label: "Once toolbar", run: () => undefined },
+    ]);
+    const workspacePanels = vi.fn(() => [
+      { id: "plugin.once-workspace", label: "Once workspace", render: () => null },
+    ]);
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocument("doc_1", "Factory once")}
+        plugins={[
+          {
+            id: "plugin.once",
+            name: "Factory once plugin",
+            toolbarItems,
+            version: "1.0.0",
+            workspacePanels,
+          },
+        ]}
+        templates={[]}
+      />,
+    );
+
+    expect(toolbarItems).toHaveBeenCalledTimes(1);
+    expect(workspacePanels).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("mock-resolved-plugin-contributions")).toHaveTextContent("plugin.once-toolbar");
+    expect(screen.getByTestId("mock-resolved-plugin-contributions")).toHaveTextContent("starterKit");
+    expect(screen.getByRole("tab", { name: "Once workspace" })).toBeInTheDocument();
+  });
+
   it("renders three workspace regions", () => {
     render(
       <DocumentShell

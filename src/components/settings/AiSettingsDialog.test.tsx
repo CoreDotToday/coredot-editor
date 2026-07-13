@@ -81,6 +81,115 @@ function createDeferredResponse() {
 }
 
 describe("AiSettingsDialog", () => {
+  it("renders every plugin settings section in the existing settings dialog", async () => {
+    const user = userEvent.setup();
+    mockSettingsFetch();
+
+    render(
+      <AiSettingsDialog
+        language="ko"
+        pluginSections={[
+          {
+            id: "plugin.settings",
+            label: "Plugin settings",
+            render: ({ language }) => <p>Settings language: {language}</p>,
+          },
+        ]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "LLM 설정" }));
+
+    expect(await screen.findByText("Settings language: ko")).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Plugin settings" })).toHaveTextContent("Settings language: ko");
+  });
+
+  it("isolates a broken plugin settings renderer and keeps healthy sections visible", async () => {
+    const user = userEvent.setup();
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const reactCaughtErrors: unknown[] = [];
+    mockSettingsFetch();
+
+    render(
+      <AiSettingsDialog
+        pluginSections={[
+          {
+            id: "plugin.broken-settings",
+            label: "Broken settings",
+            render: () => {
+              throw new Error("private settings value");
+            },
+          },
+          {
+            id: "plugin.healthy-settings",
+            label: "Healthy settings",
+            render: () => <p>Healthy settings content</p>,
+          },
+        ]}
+      />,
+      { onCaughtError: (error) => reactCaughtErrors.push(error) },
+    );
+
+    await user.click(screen.getByRole("button", { name: "LLM 설정" }));
+
+    expect(await screen.findByText("Healthy settings content")).toBeInTheDocument();
+    expect(consoleError).toHaveBeenCalledWith("Editor plugin contribution failed.", {
+      contributionId: "plugin.broken-settings",
+      contributionType: "settingsSection",
+    });
+    expect(consoleError).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(consoleError.mock.calls)).not.toContain("private settings value");
+    expect(reactCaughtErrors.map(String).join(" ")).not.toContain("private settings value");
+  });
+
+  it("isolates nested plugin render errors without leaking the original Error", async () => {
+    const user = userEvent.setup();
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const reactCaughtErrors: unknown[] = [];
+    mockSettingsFetch();
+
+    function PrivateThrowingSettings(): never {
+      throw new Error("PRIVATE_RENDER_DATA");
+    }
+
+    render(
+      <AiSettingsDialog
+        pluginSections={[
+          {
+            id: "plugin.nested-broken-settings",
+            label: "Nested broken settings",
+            render: () => <PrivateThrowingSettings />,
+          },
+          {
+            id: "plugin.nested-healthy-settings",
+            label: "Nested healthy settings",
+            render: () => <p>Nested healthy content</p>,
+          },
+        ]}
+      />,
+      { onCaughtError: (error) => reactCaughtErrors.push(error) },
+    );
+
+    await user.click(screen.getByRole("button", { name: "LLM 설정" }));
+
+    expect(await screen.findByText("Nested healthy content")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(consoleError).toHaveBeenCalledWith("Editor plugin contribution failed.", {
+        contributionId: "plugin.nested-broken-settings",
+        contributionType: "settingsSection",
+      });
+    });
+    expect(consoleError).toHaveBeenCalledTimes(1);
+    expect(
+      consoleError.mock.calls.flat().some((value) => {
+        return value instanceof Error
+          ? value.message.includes("PRIVATE_RENDER_DATA")
+          : String(value).includes("PRIVATE_RENDER_DATA");
+      }),
+    ).toBe(false);
+    expect(reactCaughtErrors.map(String).join(" ")).not.toContain("PRIVATE_RENDER_DATA");
+  });
+
   it("opens Korean LLM settings without exposing API key inputs", async () => {
     const user = userEvent.setup();
     mockSettingsFetch();

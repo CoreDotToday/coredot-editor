@@ -1,7 +1,7 @@
 "use client";
 
 import { Settings, X } from "lucide-react";
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import {
   AI_PROVIDER_CATALOG,
   AI_REASONING_EFFORTS,
@@ -10,6 +10,13 @@ import {
   type AiProviderName,
   type AiReasoningEffort,
 } from "@/features/ai/provider-catalog";
+import {
+  DEFAULT_EDITOR_LANGUAGE,
+  editorMessages,
+  type EditorLanguage,
+} from "@/features/i18n/editor-language";
+import { PluginRenderedContribution } from "@/plugins/PluginRenderedContribution";
+import type { EditorSettingsSection } from "@/plugins/types";
 
 type AiSettingsForm = {
   aiBaseUrl: string | null;
@@ -29,7 +36,15 @@ type AiSettingsResponse = {
 
 const defaultCoreDotSettings = createProviderDefaults("coredot");
 
-export function AiSettingsDialog() {
+type AiSettingsDialogProps = {
+  language?: EditorLanguage;
+  pluginSections?: EditorSettingsSection[];
+};
+
+export function AiSettingsDialog({
+  language = DEFAULT_EDITOR_LANGUAGE,
+  pluginSections = [],
+}: AiSettingsDialogProps = {}) {
   const [isOpen, setIsOpen] = useState(false);
   const [form, setForm] = useState<AiSettingsForm>(defaultCoreDotSettings);
   const [secrets, setSecrets] = useState<AiSettingsResponse["secrets"] | null>(null);
@@ -39,6 +54,10 @@ export function AiSettingsDialog() {
   const [statusMessage, setStatusMessage] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
   const providerWarning = secrets ? getProviderWarning(form.aiProvider, secrets) : "";
+  const pluginContext = useMemo(
+    () => ({ language, messages: editorMessages[language] }),
+    [language],
+  );
 
   const loadSettings = useCallback(async () => {
     setIsLoading(true);
@@ -298,6 +317,20 @@ export function AiSettingsDialog() {
                 <p>OpenAI API 키: {formatSecretStatus(secrets?.openaiConfigured)}</p>
               </div>
 
+              {pluginSections.map((section) => (
+                <section
+                  aria-label={section.label}
+                  className="rounded-md border border-zinc-200 px-3 py-3"
+                  key={section.id}
+                  role="group"
+                >
+                  <h3 className="text-sm font-semibold text-zinc-900">{section.label}</h3>
+                  <div className="mt-2 text-sm text-zinc-700">
+                    <PluginSettingsSectionContribution context={pluginContext} section={section} />
+                  </div>
+                </section>
+              ))}
+
               {providerWarning ? (
                 <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800" role="alert">
                   {providerWarning}
@@ -347,6 +380,24 @@ export function AiSettingsDialog() {
         </div>
       ) : null}
     </>
+  );
+}
+
+function PluginSettingsSectionContribution({
+  context,
+  section,
+}: {
+  context: Parameters<EditorSettingsSection["render"]>[0];
+  section: EditorSettingsSection;
+}) {
+  const render = useCallback(() => section.render(context), [context, section]);
+
+  return (
+    <PluginRenderedContribution
+      contributionId={section.id}
+      contributionType="settingsSection"
+      render={render}
+    />
   );
 }
 

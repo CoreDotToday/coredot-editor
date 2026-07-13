@@ -43,10 +43,13 @@ import {
 } from "@/features/i18n/editor-language";
 import type { AiDocumentReferenceCandidate, ResolvedAiDocumentReference } from "@/features/ai/ai-reference-parser";
 import type {
+  EditorHostContext,
   EditorPluginContributions,
   EditorSelectionCommand,
   EditorSelectionCommandMetadata,
 } from "@/plugins/types";
+import { invokeEditorPluginContribution } from "@/plugins/contribution-safety";
+import { mergeEditorPluginContributions } from "@/plugins/registry";
 import { useEditorPlugins } from "@/plugins/use-editor-plugins";
 import { AiSuggestionHighlight, setAiSuggestionHighlights, type AiSuggestionHighlightInput } from "./ai-suggestion-highlight";
 import {
@@ -122,6 +125,7 @@ type DocumentEditorProps = {
   runningSelectionCommands?: RunningSelectionAiCommand[];
   selectionAiResult?: SelectionAiResultPreview | null;
   pluginContributions?: Partial<EditorPluginContributions>;
+  resolvedPluginContributions?: EditorPluginContributions;
 };
 
 type SelectionMenuState = {
@@ -183,6 +187,7 @@ export function DocumentEditor({
   onSelectionCommand,
   outlineFocusRequest = null,
   pluginContributions,
+  resolvedPluginContributions: providedPluginContributions,
   runningSelectionCommand = "",
   runningSelectionCommandLimit = 5,
   runningSelectionCommands = [],
@@ -242,11 +247,11 @@ export function DocumentEditor({
     setEditorFrameElement(element);
   }, []);
 
-  const defaultPluginContributions = useEditorPlugins(language);
+  const defaultPluginContributions = useEditorPlugins(language, { resolve: !providedPluginContributions });
   const blockControlMessages = editorMessages[language].selectionMenu.blockControls;
   const resolvedPluginContributions = useMemo(
-    () => mergeEditorPluginContributions(defaultPluginContributions, pluginContributions),
-    [defaultPluginContributions, pluginContributions],
+    () => providedPluginContributions ?? mergeEditorPluginContributions(defaultPluginContributions, pluginContributions),
+    [defaultPluginContributions, pluginContributions, providedPluginContributions],
   );
 
   const extensions = useMemo(
@@ -704,6 +709,21 @@ export function DocumentEditor({
   const commandTarget = getEditorAiCommandTargetFromTargets(commandTargets, preferredCommandScope);
   const shouldShowSelectionMenu = selectionMenu !== null && !isSelectionCommandLimitReached && !selectionAiResult;
   const shouldShowBlockGutter = blockGutter !== null && selectionMenu === null;
+  const pluginHostContext: EditorHostContext | null = editor
+    ? { editor, language, messages: editorMessages[language] }
+    : null;
+  const pluginBlockHostContext = pluginHostContext && blockGutter
+    ? {
+        ...pluginHostContext,
+        block: {
+          from: blockGutter.target.from,
+          kind: blockGutter.target.kind,
+          listItemPath: blockGutter.target.listItemPath,
+          to: blockGutter.target.to,
+          topLevelIndex: blockGutter.target.topLevelIndex,
+        },
+      }
+    : undefined;
   const visibleRunningCommands =
     runningSelectionCommands.length > 0
       ? runningSelectionCommands
@@ -713,7 +733,12 @@ export function DocumentEditor({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-white">
-      <EditorToolbar editor={editor} messages={messages.toolbar} />
+      <EditorToolbar
+        editor={editor}
+        messages={messages.toolbar}
+        pluginContext={pluginHostContext}
+        pluginItems={resolvedPluginContributions.toolbarItems}
+      />
       {isFindOpen ? (
         <DocumentFindBar
           activeIndex={normalizedFindIndex}
@@ -782,6 +807,8 @@ export function DocumentEditor({
             onBlockDragStart={handleBlockDragStart}
             onBlockPointerDragEnd={moveDraggedBlockAtPoint}
             onBlockPointerDragMove={handleBlockPointerDragMove}
+            pluginActions={resolvedPluginContributions.blockActions}
+            pluginContext={pluginBlockHostContext}
             top={blockGutter?.top ?? 0}
           />
           <BlockDropIndicator indicator={blockDropIndicator} />
@@ -867,9 +894,13 @@ export function DocumentEditor({
 function EditorToolbar({
   editor,
   messages,
+  pluginContext,
+  pluginItems,
 }: {
   editor: RuntimeEditor | null;
   messages: EditorMessages["editor"]["toolbar"];
+  pluginContext: EditorHostContext | null;
+  pluginItems: EditorPluginContributions["toolbarItems"];
 }) {
   const blockStyle = editor ? getActiveBlockStyle(editor) : "paragraph";
 
@@ -956,6 +987,34 @@ function EditorToolbar({
           label={messages.blockquote}
           onClick={() => executeEditorCommand(editor, "toggleBlockquote")}
         />
+        {pluginItems.length > 0 ? <span className="mx-1 h-5 w-px bg-zinc-200" /> : null}
+        {pluginItems.map((item) => {
+          const isEnabled = pluginContext
+            ? invokeEditorPluginContribution(
+                "toolbarItem",
+                item.id,
+                () => item.isEnabled?.(pluginContext) ?? true,
+                false,
+              )
+            : false;
+
+          return (
+            <button
+              aria-label={item.label}
+              className="inline-flex h-8 items-center justify-center rounded px-2 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-100 hover:text-zinc-950 focus:outline-none focus:ring-2 focus:ring-zinc-950 disabled:cursor-not-allowed disabled:text-zinc-300"
+              disabled={!isEnabled}
+              key={item.id}
+              onClick={() => {
+                if (!pluginContext) return;
+                invokeEditorPluginContribution("toolbarItem", item.id, () => item.run(pluginContext), undefined);
+              }}
+              title={item.label}
+              type="button"
+            >
+              {item.label}
+            </button>
+          );
+        })}
       </div>
     </div>
   );
@@ -1560,23 +1619,6 @@ function readCommandBarResultAnchor(frame: HTMLDivElement | null): SelectionAiAn
     left: clamp(frame.clientWidth / 2 - popoverWidth / 2, 16, Math.max(16, frame.clientWidth - popoverWidth - 16)),
     side: "top",
     top: Math.max(16, frame.scrollTop + frame.clientHeight - 320),
-  };
-}
-
-function mergeEditorPluginContributions(
-  base: EditorPluginContributions,
-  additional?: Partial<EditorPluginContributions>,
-): EditorPluginContributions {
-  if (!additional) return base;
-
-  return {
-    blockActions: [...base.blockActions, ...(additional.blockActions ?? [])],
-    selectionCommands: [...base.selectionCommands, ...(additional.selectionCommands ?? [])],
-    settingsSections: [...base.settingsSections, ...(additional.settingsSections ?? [])],
-    slashCommands: [...base.slashCommands, ...(additional.slashCommands ?? [])],
-    tiptapExtensions: [...base.tiptapExtensions, ...(additional.tiptapExtensions ?? [])],
-    toolbarItems: [...base.toolbarItems, ...(additional.toolbarItems ?? [])],
-    workspacePanels: [...base.workspacePanels, ...(additional.workspacePanels ?? [])],
   };
 }
 

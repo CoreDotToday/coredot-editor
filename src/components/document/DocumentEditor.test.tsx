@@ -268,6 +268,68 @@ describe("DocumentEditor", () => {
     );
   });
 
+  it("renders and runs plugin toolbar items with the live editor context", async () => {
+    const user = userEvent.setup();
+    const run = vi.fn();
+
+    render(
+      <DocumentEditor
+        contentJson={{ type: "doc", content: [{ type: "paragraph" }] }}
+        onChange={() => undefined}
+        pluginContributions={{
+          toolbarItems: [{ id: "plugin.toolbar", label: "Plugin toolbar action", run }],
+        }}
+        title="Plugin toolbar test"
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "Plugin toolbar action" }));
+
+    expect(run).toHaveBeenCalledWith(
+      expect.objectContaining({
+        editor: expect.objectContaining({ commands: expect.any(Object) }),
+        language: "ko",
+      }),
+    );
+  });
+
+  it("isolates a failed toolbar contribution without logging its thrown value", async () => {
+    const user = userEvent.setup();
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const healthyRun = vi.fn();
+
+    render(
+      <DocumentEditor
+        contentJson={{ type: "doc", content: [{ type: "paragraph" }] }}
+        onChange={() => undefined}
+        pluginContributions={{
+          toolbarItems: [
+            {
+              id: "plugin.broken-toolbar",
+              label: "Broken toolbar action",
+              run: () => {
+                throw new Error("private document contents");
+              },
+            },
+            { id: "plugin.healthy-toolbar", label: "Healthy toolbar action", run: healthyRun },
+          ],
+        }}
+        title="Plugin toolbar isolation test"
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "Broken toolbar action" }));
+    await user.click(screen.getByRole("button", { name: "Healthy toolbar action" }));
+
+    expect(healthyRun).toHaveBeenCalledTimes(1);
+    expect(consoleError).toHaveBeenCalledWith("Editor plugin contribution failed.", {
+      contributionId: "plugin.broken-toolbar",
+      contributionType: "toolbarItem",
+    });
+    expect(JSON.stringify(consoleError.mock.calls)).not.toContain("private document contents");
+    consoleError.mockRestore();
+  });
+
   it("uses plugin-provided labels in pinned running selection status", async () => {
     render(
       <DocumentEditor

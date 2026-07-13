@@ -1,5 +1,10 @@
 import type { EditorLanguage, EditorMessages } from "@/features/i18n/editor-language";
-import { createEmptyEditorPluginContributions, type EditorPlugin, type EditorPluginContext } from "./types";
+import {
+  createEmptyEditorPluginContributions,
+  type EditorPlugin,
+  type EditorPluginContext,
+  type EditorPluginContributions,
+} from "./types";
 
 type EditorPluginRegistryOptions = {
   disabledPluginIds?: string[];
@@ -31,6 +36,26 @@ export function createEditorPluginRegistry(plugins: EditorPlugin[], options: Edi
   };
 }
 
+export function mergeEditorPluginContributions(
+  base: EditorPluginContributions,
+  additional?: Partial<EditorPluginContributions>,
+): EditorPluginContributions {
+  if (!additional) return base;
+
+  const merged = {
+    blockActions: [...base.blockActions, ...(additional.blockActions ?? [])],
+    selectionCommands: [...base.selectionCommands, ...(additional.selectionCommands ?? [])],
+    settingsSections: [...base.settingsSections, ...(additional.settingsSections ?? [])],
+    slashCommands: [...base.slashCommands, ...(additional.slashCommands ?? [])],
+    tiptapExtensions: [...base.tiptapExtensions, ...(additional.tiptapExtensions ?? [])],
+    toolbarItems: [...base.toolbarItems, ...(additional.toolbarItems ?? [])],
+    workspacePanels: [...base.workspacePanels, ...(additional.workspacePanels ?? [])],
+  };
+
+  assertUniqueEditorContributionIds(merged);
+  return merged;
+}
+
 function resolvePluginContributions(plugins: EditorPlugin[], context: EditorPluginContext) {
   const contributions = createEmptyEditorPluginContributions();
 
@@ -52,12 +77,7 @@ function resolvePluginContributions(plugins: EditorPlugin[], context: EditorPlug
     );
   });
 
-  assertUniqueContributionIds("selectionCommands", contributions.selectionCommands);
-  assertUniqueContributionIds("slashCommands", contributions.slashCommands);
-  assertUniqueContributionIds("toolbarItems", contributions.toolbarItems);
-  assertUniqueContributionIds("blockActions", contributions.blockActions);
-  assertUniqueContributionIds("workspacePanels", contributions.workspacePanels);
-  assertUniqueContributionIds("settingsSections", contributions.settingsSections);
+  assertUniqueEditorContributionIds(contributions);
 
   return contributions;
 }
@@ -74,8 +94,12 @@ function resolvePluginFactory<Result>(
 
   try {
     return factory(context);
-  } catch (error) {
-    throw new Error(`Editor plugin "${plugin.id}" failed while resolving ${String(key)}.`, { cause: error });
+  } catch {
+    console.error("Editor plugin contribution factory failed.", {
+      contributionType: key,
+      pluginId: plugin.id,
+    });
+    return [];
   }
 }
 
@@ -134,4 +158,13 @@ function assertUniqueContributionIds(contributionType: string, contributions: Ar
 
     seenIds.add(contribution.id);
   });
+}
+
+function assertUniqueEditorContributionIds(contributions: EditorPluginContributions) {
+  assertUniqueContributionIds("selectionCommands", contributions.selectionCommands);
+  assertUniqueContributionIds("slashCommands", contributions.slashCommands);
+  assertUniqueContributionIds("toolbarItems", contributions.toolbarItems);
+  assertUniqueContributionIds("blockActions", contributions.blockActions);
+  assertUniqueContributionIds("workspacePanels", contributions.workspacePanels);
+  assertUniqueContributionIds("settingsSections", contributions.settingsSections);
 }
