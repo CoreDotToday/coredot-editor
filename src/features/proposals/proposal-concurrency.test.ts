@@ -8,13 +8,19 @@ import { Worker } from "node:worker_threads";
 import { afterEach, describe, expect, it } from "vitest";
 import * as schema from "@/db/schema";
 import { aiProposals, documents, type TiptapJson } from "@/db/schema";
+import type { RequestContext } from "@/features/auth/request-context";
+import { createDocumentChangeService } from "@/features/documents/document-change-service";
 import { createDocumentRepository } from "@/features/documents/document-repository";
-import { createProposalApplicationService } from "./proposal-application-service";
-import { createProposalContentSignature } from "./proposal-transaction";
 
 const clients: Client[] = [];
 const tempDirs: string[] = [];
-const scope = { workspaceId: "local" };
+const scope: RequestContext = {
+  authMode: "test",
+  principalId: "concurrency_principal",
+  requestId: "concurrency_request",
+  role: "owner",
+  workspaceId: "local",
+};
 const createdAt = new Date("2026-01-01T00:00:00.000Z");
 
 afterEach(async () => {
@@ -27,6 +33,10 @@ function content(text: string): TiptapJson {
     type: "doc",
     content: [{ type: "paragraph", content: [{ type: "text", text }] }],
   };
+}
+
+function draft(text: string) {
+  return { title: "Concurrent draft", contentJson: content(text), metadataJson: {}, readiness: "draft" as const };
 }
 
 async function createConcurrencyDatabase(options: { wal?: boolean } = {}) {
@@ -53,6 +63,7 @@ async function createConcurrencyDatabase(options: { wal?: boolean } = {}) {
       created_at integer NOT NULL,
       updated_at integer NOT NULL
     );
+    CREATE UNIQUE INDEX documents_workspace_id_id_unique ON documents(workspace_id, id);
     CREATE TABLE ai_proposals (
       id text PRIMARY KEY NOT NULL,
       workspace_id text NOT NULL,
@@ -72,6 +83,34 @@ async function createConcurrencyDatabase(options: { wal?: boolean } = {}) {
       created_at integer NOT NULL,
       updated_at integer NOT NULL
     );
+    CREATE UNIQUE INDEX ai_proposals_workspace_id_id_document_id_unique
+      ON ai_proposals(workspace_id, id, document_id);
+    CREATE TABLE document_changes (
+      id text PRIMARY KEY NOT NULL,
+      workspace_id text NOT NULL,
+      document_id text NOT NULL,
+      principal_id text NOT NULL,
+      request_id text NOT NULL,
+      kind text NOT NULL,
+      batch_id text,
+      before_snapshot_json text NOT NULL,
+      after_revision integer NOT NULL,
+      created_at integer NOT NULL,
+      undone_at integer
+    );
+    CREATE UNIQUE INDEX document_changes_workspace_id_document_unique
+      ON document_changes(workspace_id, id, document_id);
+    CREATE TABLE document_change_proposals (
+      workspace_id text NOT NULL,
+      change_id text NOT NULL,
+      document_id text NOT NULL,
+      proposal_id text NOT NULL,
+      applied_mode text NOT NULL,
+      ordinal integer NOT NULL,
+      PRIMARY KEY(workspace_id, change_id, proposal_id)
+    );
+    CREATE UNIQUE INDEX document_change_proposals_workspace_change_ordinal_unique
+      ON document_change_proposals(workspace_id, change_id, ordinal);
   `);
 
   return {
@@ -242,15 +281,15 @@ describe("proposal and document concurrency", () => {
       replacementText: "revenue grew 8%",
       targetText: "growth was good",
     });
-    const service = createProposalApplicationService(await createDb());
+    const service = createDocumentChangeService(await createDb());
 
     const settled = await settleBehindWriteLock(path, [
       () =>
-        service.applyProposalToDocumentDraft(scope, {
-          appliedMode: "replace",
-          draft: { id: "locked_doc" },
-          expectedDocumentContentSignature: createProposalContentSignature(content("growth was good")),
-          expectedStatus: "pending",
+        service.applyProposal(scope, {
+          documentId: "locked_doc",
+          draft: draft("growth was good"),
+          expectedRevision: 0,
+          mode: "replace",
           proposalId: "locked_proposal",
         }),
     ]);
@@ -263,7 +302,7 @@ describe("proposal and document concurrency", () => {
       wal: true,
     });
     const repository = createDocumentRepository(await createDb());
-    const service = createProposalApplicationService(await createDb());
+    const service = createDocumentChangeService(await createDb());
 
     for (let iteration = 0; iteration < 5; iteration += 1) {
       const documentId = `save_doc_${String(iteration)}`;
@@ -281,11 +320,11 @@ describe("proposal and document concurrency", () => {
           contentJson: content("manual edit"),
           expectedRevision: 0,
         }),
-        service.applyProposalToDocumentDraft(scope, {
-          appliedMode: "replace",
-          draft: { id: documentId },
-          expectedDocumentContentSignature: createProposalContentSignature(content("growth was good")),
-          expectedStatus: "pending",
+        service.applyProposal(scope, {
+          documentId,
+          draft: draft("growth was good"),
+          expectedRevision: 0,
+          mode: "replace",
           proposalId,
         }),
       ] as const);
@@ -295,7 +334,7 @@ describe("proposal and document concurrency", () => {
       const saveResult = settled[0].value;
       const proposalResult = settled[1].value;
       expect(
-        (saveResult.status === "success" && !proposalResult.ok && proposalResult.error === "document_changed") ||
+        (saveResult.status === "success" && !proposalResult.ok && proposalResult.reason === "revision_conflict") ||
           (saveResult.status === "revision_conflict" && proposalResult.ok),
       ).toBe(true);
       const [savedDocument] = await setupDb.select().from(documents).where(eq(documents.id, documentId));
@@ -308,8 +347,8 @@ describe("proposal and document concurrency", () => {
     const { createDb, setupDb } = await createConcurrencyDatabase({
       wal: true,
     });
-    const first = createProposalApplicationService(await createDb());
-    const second = createProposalApplicationService(await createDb());
+    const first = createDocumentChangeService(await createDb());
+    const second = createDocumentChangeService(await createDb());
 
     for (let iteration = 0; iteration < 5; iteration += 1) {
       const documentId = `same_doc_${String(iteration)}`;
@@ -322,21 +361,21 @@ describe("proposal and document concurrency", () => {
         targetText: "growth was good",
       });
       const input = {
-        appliedMode: "replace" as const,
-        draft: { id: documentId },
-        expectedDocumentContentSignature: createProposalContentSignature(content("growth was good")),
-        expectedStatus: "pending" as const,
+        documentId,
+        draft: draft("growth was good"),
+        expectedRevision: 0,
+        mode: "replace" as const,
         proposalId,
       };
       const settled = await Promise.allSettled([
-        first.applyProposalToDocumentDraft(scope, input),
-        second.applyProposalToDocumentDraft(scope, input),
+        first.applyProposal(scope, input),
+        second.applyProposal(scope, input),
       ] as const);
 
       expect(settledStatuses(settled)).toEqual(["fulfilled", "fulfilled"]);
       const results = settled.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
       expect(results.filter((result) => result.ok)).toHaveLength(1);
-      expect(results.filter((result) => !result.ok && result.error === "proposal_status_changed")).toHaveLength(1);
+      expect(results.filter((result) => !result.ok && result.reason === "status_conflict")).toHaveLength(1);
     }
   });
 
@@ -344,8 +383,8 @@ describe("proposal and document concurrency", () => {
     const { createDb, setupDb } = await createConcurrencyDatabase({
       wal: true,
     });
-    const first = createProposalApplicationService(await createDb());
-    const second = createProposalApplicationService(await createDb());
+    const first = createDocumentChangeService(await createDb());
+    const second = createDocumentChangeService(await createDb());
 
     for (let iteration = 0; iteration < 5; iteration += 1) {
       const documentId = `different_doc_${String(iteration)}`;
@@ -364,20 +403,19 @@ describe("proposal and document concurrency", () => {
         replacementText: "B",
         targetText: "beta",
       });
-      const signature = createProposalContentSignature(content("alpha beta"));
       const settled = await Promise.allSettled([
-        first.applyProposalToDocumentDraft(scope, {
-          appliedMode: "replace",
-          draft: { id: documentId },
-          expectedDocumentContentSignature: signature,
-          expectedStatus: "pending",
+        first.applyProposal(scope, {
+          documentId,
+          draft: draft("alpha beta"),
+          expectedRevision: 0,
+          mode: "replace",
           proposalId: firstProposalId,
         }),
-        second.applyProposalToDocumentDraft(scope, {
-          appliedMode: "replace",
-          draft: { id: documentId },
-          expectedDocumentContentSignature: signature,
-          expectedStatus: "pending",
+        second.applyProposal(scope, {
+          documentId,
+          draft: draft("alpha beta"),
+          expectedRevision: 0,
+          mode: "replace",
           proposalId: secondProposalId,
         }),
       ] as const);
@@ -385,7 +423,7 @@ describe("proposal and document concurrency", () => {
       expect(settledStatuses(settled)).toEqual(["fulfilled", "fulfilled"]);
       const results = settled.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
       expect(results.filter((result) => result.ok)).toHaveLength(1);
-      expect(results.filter((result) => !result.ok && result.error === "document_changed")).toHaveLength(1);
+      expect(results.filter((result) => !result.ok && result.reason === "revision_conflict")).toHaveLength(1);
       const statuses = await setupDb
         .select({ status: aiProposals.status })
         .from(aiProposals)

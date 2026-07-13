@@ -47,6 +47,7 @@ describe("resource policy", () => {
       documentDepth: 64,
       documentNodes: 100_000,
       operationMs: 30_000,
+      proposalBatchItems: 100,
     });
   });
 

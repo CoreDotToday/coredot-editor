@@ -10,6 +10,12 @@ export type TiptapJson = {
 export type DocumentReadiness = "draft" | "needs_review" | "ready" | "approved";
 export type DocumentMetadataValue = boolean | number | string | string[] | null;
 export type DocumentMetadata = Record<string, DocumentMetadataValue>;
+export type DocumentChangeSnapshot = {
+  title: string;
+  contentJson: TiptapJson;
+  metadataJson: DocumentMetadata;
+  readiness: DocumentReadiness;
+};
 
 export const documents = sqliteTable(
   "documents",
@@ -123,6 +129,7 @@ export const aiProposals = sqliteTable(
     index("ai_proposals_ai_run_id_idx").on(table.aiRunId),
     index("ai_proposals_document_id_idx").on(table.documentId),
     index("ai_proposals_workspace_document_created_idx").on(table.workspaceId, table.documentId, table.createdAt),
+    uniqueIndex("ai_proposals_workspace_id_id_document_id_unique").on(table.workspaceId, table.id, table.documentId),
     foreignKey({
       columns: [table.workspaceId, table.documentId],
       foreignColumns: [documents.workspaceId, documents.id],
@@ -140,6 +147,74 @@ export const aiProposals = sqliteTable(
       sql`${table.appliedMode} is null or ${table.appliedMode} in ('replace', 'insert_below')`,
     ),
     check("ai_proposals_status_check", sql`${table.status} in ('pending', 'accepted', 'rejected')`),
+  ],
+);
+
+export const documentChanges = sqliteTable(
+  "document_changes",
+  {
+    id: text("id").primaryKey().$defaultFn(() => nanoid()),
+    workspaceId: text("workspace_id").notNull(),
+    documentId: text("document_id").notNull(),
+    principalId: text("principal_id").notNull(),
+    requestId: text("request_id").notNull(),
+    kind: text("kind", { enum: ["single", "batch"] }).notNull(),
+    batchId: text("batch_id"),
+    beforeSnapshotJson: text("before_snapshot_json", { mode: "json" }).$type<DocumentChangeSnapshot>().notNull(),
+    afterRevision: integer("after_revision").notNull(),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+    undoneAt: integer("undone_at", { mode: "timestamp_ms" }),
+  },
+  (table) => [
+    index("document_changes_workspace_document_created_idx").on(table.workspaceId, table.documentId, table.createdAt),
+    uniqueIndex("document_changes_workspace_id_document_unique").on(table.workspaceId, table.id, table.documentId),
+    foreignKey({
+      columns: [table.workspaceId, table.documentId],
+      foreignColumns: [documents.workspaceId, documents.id],
+      name: "document_changes_workspace_document_fk",
+    }).onDelete("cascade"),
+    check("document_changes_kind_check", sql`${table.kind} in ('single', 'batch')`),
+    check("document_changes_after_revision_check", sql`${table.afterRevision} > 0`),
+    check(
+      "document_changes_batch_id_check",
+      sql`(${table.kind} = 'single' and ${table.batchId} is null) or (${table.kind} = 'batch' and ${table.batchId} is not null)`,
+    ),
+  ],
+);
+
+export const documentChangeProposals = sqliteTable(
+  "document_change_proposals",
+  {
+    workspaceId: text("workspace_id").notNull(),
+    changeId: text("change_id").notNull(),
+    documentId: text("document_id").notNull(),
+    proposalId: text("proposal_id").notNull(),
+    appliedMode: text("applied_mode", { enum: ["replace", "insert_below"] }).notNull(),
+    ordinal: integer("ordinal").notNull(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.workspaceId, table.changeId, table.proposalId],
+      name: "document_change_proposals_pk",
+    }),
+    uniqueIndex("document_change_proposals_workspace_change_ordinal_unique").on(
+      table.workspaceId,
+      table.changeId,
+      table.ordinal,
+    ),
+    index("document_change_proposals_workspace_proposal_idx").on(table.workspaceId, table.proposalId),
+    foreignKey({
+      columns: [table.workspaceId, table.changeId, table.documentId],
+      foreignColumns: [documentChanges.workspaceId, documentChanges.id, documentChanges.documentId],
+      name: "document_change_proposals_change_fk",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.workspaceId, table.proposalId, table.documentId],
+      foreignColumns: [aiProposals.workspaceId, aiProposals.id, aiProposals.documentId],
+      name: "document_change_proposals_proposal_fk",
+    }).onDelete("cascade"),
+    check("document_change_proposals_mode_check", sql`${table.appliedMode} in ('replace', 'insert_below')`),
+    check("document_change_proposals_ordinal_check", sql`${table.ordinal} >= 0`),
   ],
 );
 
@@ -216,6 +291,9 @@ export type AiRunRecord = typeof aiRuns.$inferSelect;
 export type NewAiRunRecord = typeof aiRuns.$inferInsert;
 export type AiProposalRecord = typeof aiProposals.$inferSelect;
 export type NewAiProposalRecord = typeof aiProposals.$inferInsert;
+export type DocumentChangeRecord = typeof documentChanges.$inferSelect;
+export type NewDocumentChangeRecord = typeof documentChanges.$inferInsert;
+export type DocumentChangeProposalRecord = typeof documentChangeProposals.$inferSelect;
 export type AppSettingsRecord = typeof appSettings.$inferSelect;
 export type NewAppSettingsRecord = typeof appSettings.$inferInsert;
 export type RequestBudgetBucketRecord = typeof requestBudgetBuckets.$inferSelect;

@@ -6,6 +6,7 @@ export const RESOURCE_LIMITS = Object.freeze({
   documentDepth: 64,
   documentNodes: 100_000,
   operationMs: 30_000,
+  proposalBatchItems: 100,
 });
 const DOCUMENT_JSON_ENVELOPE_BYTES = 1024 * 1024;
 export const DOCUMENT_REQUEST_BODY_BYTES = RESOURCE_LIMITS.documentJsonBytes + DOCUMENT_JSON_ENVELOPE_BYTES;

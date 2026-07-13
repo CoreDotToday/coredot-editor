@@ -64,6 +64,13 @@
       "when": 1783915200000,
       "tag": "0008_document_revision",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1784001600000,
+      "tag": "0009_document_changes",
+      "breakpoints": true
     }
   ]
 }

@@ -124,7 +124,60 @@ async function applyDocumentRevisionMigration(client: Awaited<ReturnType<typeof 
   }
 }
 
+async function applyDocumentChangesMigration(client: Awaited<ReturnType<typeof createLegacyDatabase>>) {
+  const migration = await readFile(resolve(process.cwd(), "drizzle/0009_document_changes.sql"), "utf8");
+  for (const statement of migration.split("--> statement-breakpoint")) {
+    const sql = statement.trim();
+    if (sql) await client.execute(sql);
+  }
+}
+
 describe("workspace ownership migration", () => {
+  it("adds tenant-safe document change relations with valid foreign keys", async () => {
+    const client = await createLegacyDatabase();
+    await applyWorkspaceOwnershipMigration(client);
+    await applyRequestBudgetMigration(client);
+    await applyDocumentRevisionMigration(client);
+    await applyDocumentChangesMigration(client);
+
+    expect((await client.execute("PRAGMA foreign_key_check")).rows).toEqual([]);
+    await client.execute(`
+      INSERT INTO document_changes (
+        id, workspace_id, document_id, principal_id, request_id, kind,
+        before_snapshot_json, after_revision, created_at
+      ) VALUES (
+        'change_1', 'local', 'legacy_doc', 'principal', 'request', 'single',
+        '{"title":"Legacy memo","contentJson":{"type":"doc"},"metadataJson":{},"readiness":"ready"}',
+        1, 3000
+      )
+    `);
+    await client.execute(`
+      INSERT INTO document_change_proposals (
+        workspace_id, change_id, document_id, proposal_id, applied_mode, ordinal
+      ) VALUES ('local', 'change_1', 'legacy_doc', 'legacy_proposal', 'replace', 0)
+    `);
+    await client.execute(`
+      INSERT INTO ai_proposals (
+        id, workspace_id, ai_run_id, document_id, target_text, replacement_text, explanation,
+        source, default_apply_mode, status, created_at, updated_at
+      ) VALUES (
+        'second_proposal', 'local', 'legacy_run', 'legacy_doc', 'Legacy', 'Second', 'Audit.',
+        'review', 'replace', 'pending', 3000, 3000
+      )
+    `);
+
+    await expect(client.execute(`
+      INSERT INTO document_change_proposals (
+        workspace_id, change_id, document_id, proposal_id, applied_mode, ordinal
+      ) VALUES ('workspace_b', 'change_1', 'legacy_doc', 'legacy_proposal', 'replace', 1)
+    `)).rejects.toThrow();
+    await expect(client.execute(`
+      INSERT INTO document_change_proposals (
+        workspace_id, change_id, document_id, proposal_id, applied_mode, ordinal
+      ) VALUES ('local', 'change_1', 'legacy_doc', 'second_proposal', 'replace', 0)
+    `)).rejects.toThrow();
+  });
+
   it("adds revision zero to populated documents without disturbing data or foreign keys", async () => {
     const client = await createLegacyDatabase();
     await applyWorkspaceOwnershipMigration(client);

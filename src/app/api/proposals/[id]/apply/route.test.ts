@@ -1,12 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { AiProposalRecord, DocumentRecord } from "@/db/schema";
-import { applyProposalToDocumentDraft } from "@/features/proposals/proposal-application-service";
+import type { AiProposalRecord, DocumentChangeRecord, DocumentRecord } from "@/db/schema";
+import { applyProposal } from "@/features/documents/document-change-service";
+import { DOCUMENT_REQUEST_BODY_BYTES } from "@/features/security/resource-policy";
 import { TEST_REQUEST_CONTEXT } from "@/test/auth-context";
 import { POST } from "./route";
 
-vi.mock("@/features/proposals/proposal-application-service", () => ({
-  applyProposalToDocumentDraft: vi.fn(),
-}));
+vi.mock("@/features/documents/document-change-service", () => ({ applyProposal: vi.fn() }));
+
+const createdAt = new Date("2026-01-01T00:00:00.000Z");
 
 function createProposalRecord(overrides: Partial<AiProposalRecord> = {}): AiProposalRecord {
   return {
@@ -23,10 +24,10 @@ function createProposalRecord(overrides: Partial<AiProposalRecord> = {}): AiProp
     targetFrom: null,
     targetTo: null,
     defaultApplyMode: "replace",
-    appliedMode: null,
-    status: "pending",
-    createdAt: new Date("2026-01-01T00:00:00.000Z"),
-    updatedAt: new Date("2026-01-01T00:00:00.000Z"),
+    appliedMode: "replace",
+    status: "accepted",
+    createdAt,
+    updatedAt: createdAt,
     ...overrides,
   };
 }
@@ -35,23 +36,55 @@ function createDocumentRecord(overrides: Partial<DocumentRecord> = {}): Document
   return {
     id: "doc_1",
     workspaceId: "vitest-workspace",
-    title: "Market Entry Memo",
+    title: "Dirty draft",
     contentJson: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "new" }] }] },
     plainText: "new",
     status: "draft",
-    readiness: "draft",
-    metadataJson: {},
-    revision: 0,
-    createdAt: new Date("2026-01-01T00:00:00.000Z"),
-    updatedAt: new Date("2026-01-01T00:00:00.000Z"),
+    readiness: "needs_review",
+    metadataJson: { owner: "Legal" },
+    revision: 1,
+    createdAt,
+    updatedAt: createdAt,
     ...overrides,
   };
 }
 
-function createJsonRequest(body: unknown) {
+function createChangeRecord(overrides: Partial<DocumentChangeRecord> = {}): DocumentChangeRecord {
+  return {
+    id: "change_1",
+    workspaceId: "vitest-workspace",
+    documentId: "doc_1",
+    principalId: TEST_REQUEST_CONTEXT.principalId,
+    requestId: TEST_REQUEST_CONTEXT.requestId,
+    kind: "single",
+    batchId: null,
+    beforeSnapshotJson: createValidPayload().document,
+    afterRevision: 1,
+    createdAt,
+    undoneAt: null,
+    ...overrides,
+  };
+}
+
+function createValidPayload() {
+  return {
+    appliedMode: "replace",
+    document: {
+      id: "doc_1",
+      title: "Dirty draft",
+      contentJson: { type: "doc" as const, content: [{ type: "paragraph", content: [{ type: "text", text: "old" }] }] },
+      metadataJson: { owner: "Legal" },
+      readiness: "needs_review" as const,
+    },
+    expectedRevision: 0,
+  };
+}
+
+function createJsonRequest(body: unknown, headers?: HeadersInit) {
   return new Request("http://localhost/api/proposals/proposal_1/apply", {
     method: "POST",
     body: JSON.stringify(body),
+    headers,
   });
 }
 
@@ -59,135 +92,92 @@ function createContext(id = "proposal_1") {
   return { params: Promise.resolve({ id }) };
 }
 
-function createValidPayload(overrides: Record<string, unknown> = {}) {
-  return {
-    appliedMode: "replace",
-    document: {
-      id: "doc_1",
-      title: "Market Entry Memo",
-      contentJson: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "old" }] }] },
-      metadataJson: { owner: "Legal" },
-      readiness: "needs_review",
-    },
-    expectedDocumentContentSignature: "{\"type\":\"doc\",\"content\":[]}",
-    expectedStatus: "pending",
-    ...overrides,
-  };
-}
-
 describe("POST /api/proposals/[id]/apply", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
+  beforeEach(() => vi.clearAllMocks());
 
-  it("applies a proposal to the submitted document draft", async () => {
-    vi.mocked(applyProposalToDocumentDraft).mockResolvedValueOnce({
-      document: createDocumentRecord({ title: "Updated Memo" }),
+  it("applies a proposal to the bounded submitted dirty draft and expected revision", async () => {
+    vi.mocked(applyProposal).mockResolvedValueOnce({
+      change: createChangeRecord(),
+      document: createDocumentRecord(),
       ok: true,
-      proposal: createProposalRecord({ appliedMode: "replace", status: "accepted" }),
+      proposals: [createProposalRecord()],
     });
 
     const response = await POST(createJsonRequest(createValidPayload()), createContext());
 
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({
-      document: { id: "doc_1", title: "Updated Memo" },
-      proposal: { id: "proposal_1", appliedMode: "replace", status: "accepted" },
-    });
-    expect(applyProposalToDocumentDraft).toHaveBeenCalledWith(
-      TEST_REQUEST_CONTEXT,
-      {
-        appliedMode: "replace",
-        draft: {
-          id: "doc_1",
-        },
-        expectedDocumentContentSignature: "{\"type\":\"doc\",\"content\":[]}",
-        expectedStatus: "pending",
-        proposalId: "proposal_1",
-      },
-    );
-  });
-
-  it("returns 409 when the proposal status changed", async () => {
-    vi.mocked(applyProposalToDocumentDraft).mockResolvedValueOnce({
-      error: "proposal_status_changed",
-      ok: false,
-      proposal: createProposalRecord({ status: "accepted" }),
-    });
-
-    const response = await POST(createJsonRequest(createValidPayload()), createContext());
-
-    expect(response.status).toBe(409);
-    expect(await response.json()).toMatchObject({
-      error: "Proposal status changed",
+      change: { id: "change_1", principalId: TEST_REQUEST_CONTEXT.principalId },
+      document: { id: "doc_1", revision: 1 },
       proposal: { id: "proposal_1", status: "accepted" },
     });
+    expect(applyProposal).toHaveBeenCalledWith(TEST_REQUEST_CONTEXT, {
+      documentId: "doc_1",
+      draft: {
+        title: "Dirty draft",
+        contentJson: createValidPayload().document.contentJson,
+        metadataJson: { owner: "Legal" },
+        readiness: "needs_review",
+      },
+      expectedRevision: 0,
+      mode: "replace",
+      proposalId: "proposal_1",
+    });
   });
 
-  it("returns 409 when the submitted draft no longer matches the proposal target", async () => {
-    vi.mocked(applyProposalToDocumentDraft).mockResolvedValueOnce({
-      applyFailureReason: "stale_selection",
-      error: "proposal_apply_failed",
+  it("returns the latest document on a revision conflict", async () => {
+    vi.mocked(applyProposal).mockResolvedValueOnce({
+      document: createDocumentRecord({ revision: 7 }),
       ok: false,
-      proposal: createProposalRecord(),
+      reason: "revision_conflict",
     });
 
     const response = await POST(createJsonRequest(createValidPayload()), createContext());
 
     expect(response.status).toBe(409);
-    expect(await response.json()).toMatchObject({
-      error: "Proposal could not be applied to the submitted document",
-      reason: "stale_selection",
-      proposal: { id: "proposal_1", status: "pending" },
-    });
+    expect(await response.json()).toMatchObject({ reason: "revision_conflict", document: { revision: 7 } });
   });
 
-  it("returns 409 when the server document changed before proposal application", async () => {
-    vi.mocked(applyProposalToDocumentDraft).mockResolvedValueOnce({
-      document: createDocumentRecord({ plainText: "newer saved text", revision: 7 }),
-      error: "document_changed",
-      ok: false,
-      proposal: createProposalRecord(),
-    });
+  it("maps missing, status, and proposal application failures", async () => {
+    vi.mocked(applyProposal)
+      .mockResolvedValueOnce({ ok: false, reason: "not_found" })
+      .mockResolvedValueOnce({ ok: false, reason: "status_conflict", proposals: [createProposalRecord()] })
+      .mockResolvedValueOnce({
+        applyFailureReason: "target_not_found",
+        ok: false,
+        reason: "proposal_apply_failed",
+      });
 
-    const response = await POST(createJsonRequest(createValidPayload()), createContext());
-
-    expect(response.status).toBe(409);
-    expect(await response.json()).toMatchObject({
-      document: { id: "doc_1", plainText: "newer saved text", revision: 7 },
-      error: "Document changed before proposal application",
-      proposal: { id: "proposal_1", status: "pending" },
-    });
+    await expect(POST(createJsonRequest(createValidPayload()), createContext())).resolves.toMatchObject({ status: 404 });
+    await expect(POST(createJsonRequest(createValidPayload()), createContext())).resolves.toMatchObject({ status: 409 });
+    const applyFailure = await POST(createJsonRequest(createValidPayload()), createContext());
+    expect(applyFailure.status).toBe(409);
+    expect(await applyFailure.json()).toMatchObject({ reason: "target_not_found" });
   });
 
-  it("returns 404 when the proposal does not exist", async () => {
-    vi.mocked(applyProposalToDocumentDraft).mockResolvedValueOnce({
-      error: "proposal_not_found",
-      ok: false,
-    });
+  it("rejects malformed or structurally invalid dirty drafts", async () => {
+    const invalidPayload = createValidPayload();
+    invalidPayload.document.contentJson.content = [{} as never];
 
-    const response = await POST(createJsonRequest(createValidPayload()), createContext("missing_proposal"));
+    const response = await POST(createJsonRequest(invalidPayload), createContext());
 
-    expect(response.status).toBe(404);
-    expect(await response.json()).toEqual({ error: "Proposal not found" });
+    expect(response.status).toBe(413);
+    expect(applyProposal).not.toHaveBeenCalled();
   });
 
-  it("rejects invalid apply payloads", async () => {
-    const response = await POST(createJsonRequest({ appliedMode: "append" }), createContext());
+  it("rejects declared oversized request bodies before service access", async () => {
+    const response = await POST(createJsonRequest(createValidPayload(), {
+      "Content-Length": String(DOCUMENT_REQUEST_BODY_BYTES + 1),
+    }), createContext());
+
+    expect(response.status).toBe(413);
+    expect(applyProposal).not.toHaveBeenCalled();
+  });
+
+  it("requires the dirty document, mode, and expected revision", async () => {
+    const response = await POST(createJsonRequest({ document: { id: "doc_1" } }), createContext());
 
     expect(response.status).toBe(400);
-    expect(await response.json()).toEqual({ error: "Invalid request body" });
-    expect(applyProposalToDocumentDraft).not.toHaveBeenCalled();
-  });
-
-  it("requires a server content signature precondition", async () => {
-    const payload = createValidPayload();
-    delete (payload as Partial<ReturnType<typeof createValidPayload>>).expectedDocumentContentSignature;
-
-    const response = await POST(createJsonRequest(payload), createContext());
-
-    expect(response.status).toBe(400);
-    expect(await response.json()).toEqual({ error: "Invalid request body" });
-    expect(applyProposalToDocumentDraft).not.toHaveBeenCalled();
+    expect(applyProposal).not.toHaveBeenCalled();
   });
 });
