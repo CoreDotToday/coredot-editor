@@ -177,12 +177,18 @@ const MAX_CONCURRENT_SELECTION_COMMANDS = 5;
 const AUTOSAVE_DEBOUNCE_MS = 1000;
 const COMPACT_WORKSPACE_MEDIA_QUERY = "(max-width: 1279px)";
 
-function advanceServerRevision(revisionRef: MutableRefObject<number>, returnedRevision: number) {
+function updateServerRevision(
+  revisionRef: MutableRefObject<number>,
+  returnedRevision: number,
+  mode: "advance" | "reset" = "advance",
+) {
   if (!Number.isSafeInteger(returnedRevision) || returnedRevision < 0) {
     return;
   }
 
-  revisionRef.current = Math.max(revisionRef.current, returnedRevision);
+  revisionRef.current = mode === "reset"
+    ? returnedRevision
+    : Math.max(revisionRef.current, returnedRevision);
 }
 
 type ProposalStatusPatchPayload = {
@@ -437,17 +443,25 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
     return () => window.removeEventListener("keydown", handleDocumentShortcut);
   }, [openFind]);
 
-  if (
-    observedDocument.id !== incomingDocument.id ||
+  const isDocumentNavigation = observedDocument.id !== incomingDocument.id;
+  const isStaleSameDocumentSnapshot =
+    !isDocumentNavigation && incomingDocument.revision < serverRevisionRef.current;
+  const hasIncomingDocumentChange =
+    isDocumentNavigation ||
     observedDocument.title !== incomingDocument.title ||
     observedDocument.contentJson !== incomingDocument.contentJson ||
     observedDocument.metadataJson !== incomingDocument.metadataJson ||
     observedDocument.readiness !== incomingDocument.readiness ||
-    observedDocument.revision !== incomingDocument.revision
-  ) {
+    observedDocument.revision !== incomingDocument.revision;
+
+  if (hasIncomingDocumentChange && !isStaleSameDocumentSnapshot) {
     setObservedDocument(incomingDocument);
     serverContentSignatureRef.current = createProposalContentSignature(incomingDocument.contentJson);
-    advanceServerRevision(serverRevisionRef, incomingDocument.revision);
+    updateServerRevision(
+      serverRevisionRef,
+      incomingDocument.revision,
+      isDocumentNavigation ? "reset" : "advance",
+    );
 
     if (saveState === "saved") {
       setDraft(initialDraft);
@@ -784,7 +798,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
 
       const body = (await response.json().catch(() => ({}))) as { document?: DocumentSnapshot };
       if (body.document) {
-        advanceServerRevision(serverRevisionRef, body.document.revision);
+        updateServerRevision(serverRevisionRef, body.document.revision);
       }
       if (draftVersionRef.current === savingVersion) {
         serverContentSignatureRef.current = createProposalContentSignature(
@@ -987,7 +1001,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
         updatedProposal ?? { ...previousProposal, appliedMode: status === "accepted" ? applyMode : null, status };
       if (status === "accepted" && appliedServerResponse?.document) {
         serverContentSignatureRef.current = createProposalContentSignature(appliedServerResponse.document.contentJson);
-        advanceServerRevision(serverRevisionRef, appliedServerResponse.document.revision);
+        updateServerRevision(serverRevisionRef, appliedServerResponse.document.revision);
       }
 
       if (status === "accepted") {
@@ -1222,7 +1236,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
 
           const serverDraft = createDraftFromDocumentSnapshot(applyResponse.document);
           nextServerContentSignature = createProposalContentSignature(applyResponse.document.contentJson);
-          advanceServerRevision(serverRevisionRef, applyResponse.document.revision);
+          updateServerRevision(serverRevisionRef, applyResponse.document.revision);
           nextDraft = serverDraft;
           updatedProposalById.set(proposal.id, applyResponse.proposal);
           nextAppliedChanges.push({

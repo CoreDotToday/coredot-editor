@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createProposalContentSignature } from "@/features/proposals/proposal-transaction";
 import { DocumentShell } from "./DocumentShell";
 import { SelectionAiMenu } from "./SelectionAiMenu";
 
@@ -631,29 +632,139 @@ describe("DocumentShell", () => {
     expect(JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body))).toMatchObject({ expectedRevision: 2 });
   });
 
-  it("ignores older incoming revisions while allowing newer incoming revisions to advance", async () => {
+  it("ignores an entire stale same-document snapshot and later accepts the current revision", async () => {
+    const user = userEvent.setup();
+    const currentContent = createDocumentWithContent("doc_1", "Revision two", "Current body").contentJson;
+    const staleContent = createDocumentWithContent("doc_1", "Stale revision", "Stale body").contentJson;
     const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "Rejected for test" }), { status: 500 }))
       .mockResolvedValueOnce(
-        new Response(JSON.stringify({ document: { ...createDocument("doc_1", "After old render"), revision: 3 } })),
+        new Response(JSON.stringify({
+          document: {
+            ...createDocumentWithContent("doc_1", "Saved current snapshot", "Current body"),
+            metadataJson: { owner: "Current owner" },
+            readiness: "ready",
+            revision: 3,
+          },
+        })),
       )
       .mockResolvedValueOnce(
-        new Response(JSON.stringify({ document: { ...createDocument("doc_1", "After new render"), revision: 5 } })),
+        new Response(JSON.stringify({
+          document: {
+            ...createDocumentWithContent("doc_1", "After newer render", "Newer body"),
+            metadataJson: { owner: "Newer owner" },
+            readiness: "approved",
+            revision: 5,
+          },
+        })),
       );
-    const initial = { ...createDocument("doc_1", "Revision two"), revision: 2 };
-    const { rerender } = render(<DocumentShell aiRuns={[]} document={initial} templates={[]} />);
+    const initial = {
+      ...createDocumentWithContent("doc_1", "Revision two", "Current body"),
+      metadataJson: { owner: "Current owner" },
+      readiness: "ready" as const,
+      revision: 2,
+    };
+    const proposals = [createProposal("proposal_1", "pending", "Current body")];
+    const { rerender } = render(
+      <DocumentShell aiRuns={[]} document={initial} proposals={proposals} templates={[]} />,
+    );
 
-    rerender(<DocumentShell aiRuns={[]} document={{ ...initial, title: "Older render", revision: 1 }} templates={[]} />);
-    fireEvent.change(screen.getByRole("textbox", { name: "문서 제목" }), { target: { value: "After old render" } });
-    fireEvent.click(screen.getByRole("button", { name: "저장" }));
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    await user.keyboard("{Meta>}f{/Meta}");
+    expect(screen.getByRole("search", { name: "mock find bar" })).toBeInTheDocument();
 
-    rerender(<DocumentShell aiRuns={[]} document={{ ...initial, title: "Newer render", revision: 4 }} templates={[]} />);
-    fireEvent.change(screen.getByRole("textbox", { name: "문서 제목" }), { target: { value: "After new render" } });
+    rerender(
+      <DocumentShell
+        aiRuns={[]}
+        document={{
+          ...initial,
+          title: "Stale revision",
+          contentJson: staleContent,
+          metadataJson: { owner: "Stale owner" },
+          readiness: "draft",
+          revision: 1,
+        }}
+        proposals={proposals}
+        templates={[]}
+      />,
+    );
+
+    expect(screen.getByRole("textbox", { name: "문서 제목" })).toHaveValue("Revision two");
+    expect(screen.getByTestId("mock-document-body")).toHaveTextContent("Current body");
+    expect(screen.getByTestId("mock-document-body")).not.toHaveTextContent("Stale body");
+    expect(screen.getByRole("search", { name: "mock find bar" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Current body 제안으로 교체" }));
+    const proposalPayload = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    expect(proposalPayload.expectedDocumentContentSignature).toBe(createProposalContentSignature(currentContent));
+
+    fireEvent.change(screen.getByRole("textbox", { name: "문서 제목" }), {
+      target: { value: "Saved current snapshot" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "저장" }));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
 
-    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toMatchObject({ expectedRevision: 2 });
-    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toMatchObject({ expectedRevision: 4 });
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toMatchObject({
+      contentJson: currentContent,
+      expectedRevision: 2,
+      metadataJson: { owner: "Current owner" },
+      readiness: "ready",
+      title: "Saved current snapshot",
+    });
+
+    const acceptedRevision = {
+      ...initial,
+      title: "Accepted revision three",
+      contentJson: createDocumentWithContent("doc_1", "Accepted revision three", "Accepted body").contentJson,
+      metadataJson: { owner: "Accepted owner" },
+      readiness: "approved" as const,
+      revision: 3,
+    };
+    rerender(<DocumentShell aiRuns={[]} document={acceptedRevision} proposals={proposals} templates={[]} />);
+
+    expect(screen.getByRole("textbox", { name: "문서 제목" })).toHaveValue("Accepted revision three");
+    expect(screen.getByTestId("mock-document-body")).toHaveTextContent("Accepted body");
+
+    const newerRevision = {
+      ...acceptedRevision,
+      title: "Newer revision four",
+      contentJson: createDocumentWithContent("doc_1", "Newer revision four", "Newer body").contentJson,
+      metadataJson: { owner: "Newer owner" },
+      revision: 4,
+    };
+    rerender(<DocumentShell aiRuns={[]} document={newerRevision} proposals={proposals} templates={[]} />);
+
+    expect(screen.getByRole("textbox", { name: "문서 제목" })).toHaveValue("Newer revision four");
+    expect(screen.getByTestId("mock-document-body")).toHaveTextContent("Newer body");
+
+    fireEvent.change(screen.getByRole("textbox", { name: "문서 제목" }), { target: { value: "After newer render" } });
+    fireEvent.click(screen.getByRole("button", { name: "저장" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+
+    expect(JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body))).toMatchObject({
+      contentJson: newerRevision.contentJson,
+      expectedRevision: 4,
+      metadataJson: { owner: "Newer owner" },
+      readiness: "approved",
+    });
+  });
+
+  it("resets the revision token when navigating to a different document", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ document: { ...createDocument("doc_new", "New document edit"), revision: 1 } })),
+    );
+    const { rerender } = render(
+      <DocumentShell aiRuns={[]} document={{ ...createDocument("doc_old", "Old document"), revision: 5 }} templates={[]} />,
+    );
+
+    rerender(
+      <DocumentShell aiRuns={[]} document={{ ...createDocument("doc_new", "New document"), revision: 0 }} templates={[]} />,
+    );
+    fireEvent.change(screen.getByRole("textbox", { name: "문서 제목" }), { target: { value: "New document edit" } });
+    fireEvent.click(screen.getByRole("button", { name: "저장" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/documents/doc_new");
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toMatchObject({ expectedRevision: 0 });
   });
 
   it("preserves the local draft and does not retry automatically after a revision conflict", async () => {
