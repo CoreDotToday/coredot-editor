@@ -177,6 +177,14 @@ const MAX_CONCURRENT_SELECTION_COMMANDS = 5;
 const AUTOSAVE_DEBOUNCE_MS = 1000;
 const COMPACT_WORKSPACE_MEDIA_QUERY = "(max-width: 1279px)";
 
+function advanceServerRevision(revisionRef: MutableRefObject<number>, returnedRevision: number) {
+  if (!Number.isSafeInteger(returnedRevision) || returnedRevision < 0) {
+    return;
+  }
+
+  revisionRef.current = Math.max(revisionRef.current, returnedRevision);
+}
+
 type ProposalStatusPatchPayload = {
   appliedMode?: AiProposalApplyMode;
   expectedStatus?: ShellProposal["status"];
@@ -439,7 +447,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
   ) {
     setObservedDocument(incomingDocument);
     serverContentSignatureRef.current = createProposalContentSignature(incomingDocument.contentJson);
-    serverRevisionRef.current = incomingDocument.revision;
+    advanceServerRevision(serverRevisionRef, incomingDocument.revision);
 
     if (saveState === "saved") {
       setDraft(initialDraft);
@@ -776,7 +784,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
 
       const body = (await response.json().catch(() => ({}))) as { document?: DocumentSnapshot };
       if (body.document) {
-        serverRevisionRef.current = body.document.revision;
+        advanceServerRevision(serverRevisionRef, body.document.revision);
       }
       if (draftVersionRef.current === savingVersion) {
         serverContentSignatureRef.current = createProposalContentSignature(
@@ -979,7 +987,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
         updatedProposal ?? { ...previousProposal, appliedMode: status === "accepted" ? applyMode : null, status };
       if (status === "accepted" && appliedServerResponse?.document) {
         serverContentSignatureRef.current = createProposalContentSignature(appliedServerResponse.document.contentJson);
-        serverRevisionRef.current = appliedServerResponse.document.revision;
+        advanceServerRevision(serverRevisionRef, appliedServerResponse.document.revision);
       }
 
       if (status === "accepted") {
@@ -1214,7 +1222,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
 
           const serverDraft = createDraftFromDocumentSnapshot(applyResponse.document);
           nextServerContentSignature = createProposalContentSignature(applyResponse.document.contentJson);
-          serverRevisionRef.current = applyResponse.document.revision;
+          advanceServerRevision(serverRevisionRef, applyResponse.document.revision);
           nextDraft = serverDraft;
           updatedProposalById.set(proposal.id, applyResponse.proposal);
           nextAppliedChanges.push({

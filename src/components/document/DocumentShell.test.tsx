@@ -571,6 +571,91 @@ describe("DocumentShell", () => {
     expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toMatchObject({ expectedRevision: 1 });
   });
 
+  it("does not regress the revision when an older save response arrives after proposal application", async () => {
+    const user = userEvent.setup();
+    const delayedSave = createDeferredResponse();
+    const proposalDocument = {
+      ...createDocumentWithContent("doc_1", "Edited before proposal", "revenue grew 8%"),
+      metadataJson: {},
+      readiness: "draft" as const,
+      revision: 2,
+    };
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockReturnValueOnce(delayedSave.promise)
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({
+          document: proposalDocument,
+          proposal: { ...createProposal("proposal_1"), appliedMode: "replace", status: "accepted" },
+        })),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ document: { ...proposalDocument, title: "Edited after proposal", revision: 3 } })),
+      );
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Initial", "growth was good")}
+        proposals={[createProposal("proposal_1")]}
+        templates={[createTemplate("tpl_1", "Board review")]}
+      />,
+    );
+    const titleInput = screen.getByRole("textbox", { name: "문서 제목" });
+    await user.clear(titleInput);
+    await user.type(titleInput, "Edited before proposal");
+    await user.click(screen.getByRole("button", { name: "저장" }));
+    await user.click(screen.getByRole("button", { name: "growth was good 제안으로 교체" }));
+
+    await waitFor(() => expect(screen.getByTestId("mock-document-body")).toHaveTextContent("revenue grew 8%"));
+
+    await act(async () => {
+      delayedSave.resolve(
+        new Response(JSON.stringify({
+          document: {
+            ...createDocumentWithContent("doc_1", "Stale save response", "growth was good"),
+            revision: 1,
+          },
+        })),
+      );
+      await delayedSave.promise;
+    });
+
+    expect(titleInput).toHaveValue("Edited before proposal");
+    expect(screen.getByTestId("mock-document-body")).toHaveTextContent("revenue grew 8%");
+
+    await user.clear(titleInput);
+    await user.type(titleInput, "Edited after proposal");
+    await user.click(screen.getByRole("button", { name: "저장" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+
+    expect(JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body))).toMatchObject({ expectedRevision: 2 });
+  });
+
+  it("ignores older incoming revisions while allowing newer incoming revisions to advance", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ document: { ...createDocument("doc_1", "After old render"), revision: 3 } })),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ document: { ...createDocument("doc_1", "After new render"), revision: 5 } })),
+      );
+    const initial = { ...createDocument("doc_1", "Revision two"), revision: 2 };
+    const { rerender } = render(<DocumentShell aiRuns={[]} document={initial} templates={[]} />);
+
+    rerender(<DocumentShell aiRuns={[]} document={{ ...initial, title: "Older render", revision: 1 }} templates={[]} />);
+    fireEvent.change(screen.getByRole("textbox", { name: "문서 제목" }), { target: { value: "After old render" } });
+    fireEvent.click(screen.getByRole("button", { name: "저장" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+
+    rerender(<DocumentShell aiRuns={[]} document={{ ...initial, title: "Newer render", revision: 4 }} templates={[]} />);
+    fireEvent.change(screen.getByRole("textbox", { name: "문서 제목" }), { target: { value: "After new render" } });
+    fireEvent.click(screen.getByRole("button", { name: "저장" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toMatchObject({ expectedRevision: 2 });
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toMatchObject({ expectedRevision: 4 });
+  });
+
   it("preserves the local draft and does not retry automatically after a revision conflict", async () => {
     vi.useFakeTimers();
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
@@ -2292,8 +2377,12 @@ describe("DocumentShell", () => {
 
   it("bulk accepts range-backed proposals from the end of the document first", async () => {
     const user = userEvent.setup();
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = String(input);
+      if (url === "/api/documents/doc_1") {
+        const savedDraft = JSON.parse(String(init?.body));
+        return new Response(JSON.stringify({ document: { ...savedDraft, id: "doc_1", revision: 3 } }));
+      }
       const proposalId = url.includes("proposal_alpha") ? "proposal_alpha" : "proposal_beta";
       const text =
         proposalId === "proposal_beta"
@@ -2310,6 +2399,7 @@ describe("DocumentShell", () => {
             },
             metadataJson: {},
             readiness: "draft",
+            revision: proposalId === "proposal_beta" ? 2 : 1,
           },
           proposal: {
             ...createProposal(proposalId),
@@ -2362,6 +2452,12 @@ describe("DocumentShell", () => {
     expect(screen.getByTestId("mock-document-body")).toHaveTextContent("Alpha replacement is much longer.");
     expect(screen.getByTestId("mock-document-body")).toHaveTextContent("Beta replacement.");
     expect(screen.queryByText("선택 위치가 변경되어 제안을 적용할 수 없습니다. 다시 실행해 주세요.")).not.toBeInTheDocument();
+
+    await user.clear(screen.getByRole("textbox", { name: "문서 제목" }));
+    await user.type(screen.getByRole("textbox", { name: "문서 제목" }), "After bulk apply");
+    await user.click(screen.getByRole("button", { name: "저장" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+    expect(JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body))).toMatchObject({ expectedRevision: 2 });
   });
 
   it("keeps bulk accept server successes when a later proposal update conflicts", async () => {
