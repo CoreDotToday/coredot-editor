@@ -767,6 +767,126 @@ describe("DocumentShell", () => {
     expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toMatchObject({ expectedRevision: 0 });
   });
 
+  it("keeps a dirty draft on its base revision when a newer same-document snapshot arrives", async () => {
+    const user = userEvent.setup();
+    const baseDocument = createDocumentWithContent("doc_1", "Base title", "Base body");
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "Rejected for test" }), { status: 500 }))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            error: "Document revision conflict",
+            reason: "revision_conflict",
+            document: {
+              ...createDocumentWithContent("doc_1", "Remote title", "Remote body"),
+              revision: 1,
+            },
+          }),
+          { status: 409 },
+        ),
+      );
+    const proposals = [createProposal("proposal_1", "pending", "fresh edited body")];
+    const { rerender } = render(
+      <DocumentShell aiRuns={[]} document={baseDocument} proposals={proposals} templates={[]} />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Mock body edit" }));
+    rerender(
+      <DocumentShell
+        aiRuns={[]}
+        document={{
+          ...createDocumentWithContent("doc_1", "Remote title", "Remote body"),
+          revision: 1,
+        }}
+        proposals={proposals}
+        templates={[]}
+      />,
+    );
+
+    expect(screen.getByTestId("mock-document-body")).toHaveTextContent("fresh edited body");
+    expect(screen.getByRole("textbox", { name: "문서 제목" })).toHaveValue("Base title");
+
+    await user.click(screen.getByRole("button", { name: "fresh edited body 제안으로 교체" }));
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)).expectedDocumentContentSignature).toBe(
+      createProposalContentSignature(baseDocument.contentJson),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "저장" }));
+    await waitFor(() => expect(screen.getByText("저장 실패")).toBeInTheDocument());
+
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toMatchObject({
+      contentJson: createDocumentWithContent("doc_1", "Base title", "fresh edited body").contentJson,
+      expectedRevision: 0,
+      title: "Base title",
+    });
+    expect(screen.getByTestId("mock-document-body")).toHaveTextContent("fresh edited body");
+  });
+
+  it("does not advance the base revision from an incoming snapshot while saving", async () => {
+    const firstSave = createDeferredResponse();
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockReturnValueOnce(firstSave.promise)
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "Conflict" }), { status: 409 }));
+    const initial = createDocumentWithContent("doc_1", "Base title", "Base body");
+    const { rerender } = render(<DocumentShell aiRuns={[]} document={initial} templates={[]} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Mock body edit" }));
+    fireEvent.click(screen.getByRole("button", { name: "저장" }));
+    rerender(
+      <DocumentShell
+        aiRuns={[]}
+        document={{
+          ...createDocumentWithContent("doc_1", "Remote title", "Remote body"),
+          revision: 1,
+        }}
+        templates={[]}
+      />,
+    );
+
+    expect(screen.getByTestId("mock-document-body")).toHaveTextContent("fresh edited body");
+    await act(async () => {
+      firstSave.resolve(new Response(JSON.stringify({ error: "Conflict" }), { status: 409 }));
+      await firstSave.promise;
+    });
+    expect(screen.getByText("저장 실패")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "저장" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toMatchObject({ expectedRevision: 0 });
+    expect(screen.getByTestId("mock-document-body")).toHaveTextContent("fresh edited body");
+  });
+
+  it("does not advance the base revision from an incoming snapshot after a failed save", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(JSON.stringify({ error: "Conflict" }), { status: 409 }));
+    const initial = createDocumentWithContent("doc_1", "Base title", "Base body");
+    const { rerender } = render(<DocumentShell aiRuns={[]} document={initial} templates={[]} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Mock body edit" }));
+    fireEvent.click(screen.getByRole("button", { name: "저장" }));
+    await waitFor(() => expect(screen.getByText("저장 실패")).toBeInTheDocument());
+
+    rerender(
+      <DocumentShell
+        aiRuns={[]}
+        document={{
+          ...createDocumentWithContent("doc_1", "Remote title", "Remote body"),
+          revision: 1,
+        }}
+        templates={[]}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "저장" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toMatchObject({ expectedRevision: 0 });
+    expect(screen.getByTestId("mock-document-body")).toHaveTextContent("fresh edited body");
+    expect(screen.getByRole("textbox", { name: "문서 제목" })).toHaveValue("Base title");
+  });
+
   it("preserves the local draft and does not retry automatically after a revision conflict", async () => {
     vi.useFakeTimers();
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(

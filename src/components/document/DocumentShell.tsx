@@ -444,8 +444,9 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
   }, [openFind]);
 
   const isDocumentNavigation = observedDocument.id !== incomingDocument.id;
-  const isStaleSameDocumentSnapshot =
-    !isDocumentNavigation && incomingDocument.revision < serverRevisionRef.current;
+  const shouldIgnoreSameDocumentSnapshot =
+    !isDocumentNavigation &&
+    (incomingDocument.revision < serverRevisionRef.current || saveState !== "saved");
   const hasIncomingDocumentChange =
     isDocumentNavigation ||
     observedDocument.title !== incomingDocument.title ||
@@ -454,7 +455,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
     observedDocument.readiness !== incomingDocument.readiness ||
     observedDocument.revision !== incomingDocument.revision;
 
-  if (hasIncomingDocumentChange && !isStaleSameDocumentSnapshot) {
+  if (hasIncomingDocumentChange && !shouldIgnoreSameDocumentSnapshot) {
     setObservedDocument(incomingDocument);
     serverContentSignatureRef.current = createProposalContentSignature(incomingDocument.contentJson);
     updateServerRevision(

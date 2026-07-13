@@ -1,6 +1,8 @@
 import { and, eq } from "drizzle-orm";
 import { db } from "@/db/client";
+import { withSerializedDocumentWrite } from "@/db/document-write-queue";
 import { aiProposals, documents, type AiProposalRecord, type DocumentRecord } from "@/db/schema";
+import { retrySqliteContention } from "@/db/sqlite-contention";
 import type { WorkspaceScope } from "@/features/auth/request-context";
 import { extractPlainTextFromTiptap } from "@/features/documents/tiptap-text";
 import {
@@ -43,13 +45,15 @@ export type ProposalApplicationResult =
       proposal?: AiProposalRecord;
     };
 
-class ProposalApplicationRollback extends Error {
-  result: ProposalApplicationResult;
+class ProposalDocumentCasRollback extends Error {
+  documentId: string;
+  proposal: AiProposalRecord;
 
-  constructor(result: ProposalApplicationResult) {
-    super("Proposal application rolled back");
-    this.name = "ProposalApplicationRollback";
-    this.result = result;
+  constructor(documentId: string, proposal: AiProposalRecord) {
+    super("Proposal document update lost its revision compare-and-swap");
+    this.name = "ProposalDocumentCasRollback";
+    this.documentId = documentId;
+    this.proposal = proposal;
   }
 }
 
@@ -60,7 +64,8 @@ export function createProposalApplicationService(database: ProposalApplicationDa
       input: ProposalApplicationInput,
     ): Promise<ProposalApplicationResult> {
       try {
-        return await database.transaction(async (transaction) => {
+        return await withSerializedDocumentWrite(scope, input.draft.id, () => retrySqliteContention(
+          () => database.transaction(async (transaction) => {
           const [proposal] = await transaction
             .select()
             .from(aiProposals)
@@ -175,7 +180,7 @@ export function createProposalApplicationService(database: ProposalApplicationDa
             .returning();
 
           if (!updatedDocument) {
-            throw new ProposalApplicationRollback({ error: "document_not_found", ok: false, proposal });
+            throw new ProposalDocumentCasRollback(proposal.documentId, proposal);
           }
 
           return {
@@ -183,10 +188,30 @@ export function createProposalApplicationService(database: ProposalApplicationDa
             ok: true,
             proposal: updatedProposal,
           };
-        });
+          }),
+        ));
       } catch (error) {
-        if (error instanceof ProposalApplicationRollback) {
-          return error.result;
+        if (error instanceof ProposalDocumentCasRollback) {
+          const [latestDocument] = await retrySqliteContention(async () => database
+            .select()
+            .from(documents)
+            .where(
+              and(
+                eq(documents.workspaceId, scope.workspaceId),
+                eq(documents.id, error.documentId),
+                eq(documents.status, "draft"),
+              ),
+            )
+            .limit(1));
+
+          return latestDocument
+            ? {
+                document: latestDocument,
+                error: "document_changed",
+                ok: false,
+                proposal: error.proposal,
+              }
+            : { error: "document_not_found", ok: false, proposal: error.proposal };
         }
 
         throw error;

@@ -144,7 +144,7 @@ describe("POST /api/proposals/[id]/apply", () => {
 
   it("returns 409 when the server document changed before proposal application", async () => {
     vi.mocked(applyProposalToDocumentDraft).mockResolvedValueOnce({
-      document: createDocumentRecord({ plainText: "newer saved text" }),
+      document: createDocumentRecord({ plainText: "newer saved text", revision: 7 }),
       error: "document_changed",
       ok: false,
       proposal: createProposalRecord(),
@@ -154,7 +154,7 @@ describe("POST /api/proposals/[id]/apply", () => {
 
     expect(response.status).toBe(409);
     expect(await response.json()).toMatchObject({
-      document: { id: "doc_1", plainText: "newer saved text" },
+      document: { id: "doc_1", plainText: "newer saved text", revision: 7 },
       error: "Document changed before proposal application",
       proposal: { id: "proposal_1", status: "pending" },
     });

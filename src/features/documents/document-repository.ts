@@ -1,6 +1,8 @@
 import { and, desc, eq, inArray } from "drizzle-orm";
 import { db } from "@/db/client";
+import { withSerializedDocumentWrite } from "@/db/document-write-queue";
 import { documents, type DocumentMetadata, type DocumentReadiness, type TiptapJson } from "@/db/schema";
+import { retrySqliteContention } from "@/db/sqlite-contention";
 import type { WorkspaceScope } from "@/features/auth/request-context";
 import { normalizeDocumentMetadata, normalizeDocumentReadiness } from "./document-metadata";
 import { extractPlainTextFromTiptap } from "./tiptap-text";
@@ -140,7 +142,7 @@ export function createDocumentRepository(database: DocumentDatabase = db) {
       },
     ) {
       const now = new Date();
-      const rows = await database
+      const rows = await withSerializedDocumentWrite(scope, id, () => retrySqliteContention(async () => database
         .update(documents)
         .set({
           title: input.title,
@@ -159,7 +161,7 @@ export function createDocumentRepository(database: DocumentDatabase = db) {
             eq(documents.revision, input.expectedRevision),
           ),
         )
-        .returning();
+        .returning()));
 
       const savedDocument = rows[0];
       if (savedDocument) {

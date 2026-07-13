@@ -1,5 +1,6 @@
 import type { Client, InStatement } from "@libsql/client";
 import { NextResponse } from "next/server";
+import { isRetryableSqliteContention, retrySqliteContention } from "@/db/sqlite-contention";
 import type { RequestContext } from "@/features/auth/request-context";
 
 export const REQUEST_BUDGET_POLICIES = Object.freeze({
@@ -203,28 +204,14 @@ async function executeAtomicConsumeWithRetry(
   statement: InStatement,
   retryDelayMs: number,
 ) {
-  let lastError: unknown;
-  for (let attempt = 0; attempt < REQUEST_BUDGET_BUSY_RETRY_ATTEMPTS; attempt += 1) {
-    try {
-      return await client.execute(statement);
-    } catch (error) {
-      lastError = error;
-      if (!isRetryableSqliteContention(error)) throw error;
-      if (attempt + 1 < REQUEST_BUDGET_BUSY_RETRY_ATTEMPTS) {
-        await delay(retryDelayMs * 2 ** attempt);
-      }
-    }
+  try {
+    return await retrySqliteContention(() => client.execute(statement), {
+      attempts: REQUEST_BUDGET_BUSY_RETRY_ATTEMPTS,
+      initialDelayMs: retryDelayMs,
+      maxDelayMs: Math.max(retryDelayMs, retryDelayMs * 2),
+    });
+  } catch (error) {
+    if (!isRetryableSqliteContention(error)) throw error;
+    throw new RequestBudgetUnavailableError(undefined, { cause: error });
   }
-  throw new RequestBudgetUnavailableError(undefined, { cause: lastError });
-}
-
-function isRetryableSqliteContention(error: unknown) {
-  if (!error || typeof error !== "object") return false;
-  const code = "code" in error ? String(error.code).toUpperCase() : "";
-  const message = "message" in error ? String(error.message) : "";
-  return code === "SQLITE_BUSY" || code === "SQLITE_LOCKED" || /database (?:is )?locked/i.test(message);
-}
-
-function delay(milliseconds: number) {
-  return new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
 }

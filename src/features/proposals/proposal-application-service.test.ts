@@ -265,6 +265,41 @@ describe("proposal application service", () => {
     expect(document).toMatchObject({ plainText: "growth was good", title: "Market Entry Memo" });
   });
 
+  it("rolls back proposal acceptance and returns the latest document when the document CAS updates zero rows", async () => {
+    const db = await createIsolatedProposalApplicationDb();
+    await seedDocumentAndProposal(db);
+    await db.run(sql`
+      CREATE TRIGGER ignore_proposal_document_update
+      BEFORE UPDATE OF content_json ON documents
+      BEGIN
+        SELECT RAISE(IGNORE);
+      END
+    `);
+    const service = createProposalApplicationService(db);
+
+    const result = await service.applyProposalToDocumentDraft(localScope, {
+      appliedMode: "replace",
+      draft: { id: "doc_1" },
+      expectedDocumentContentSignature: createProposalContentSignature(createDocumentContent("growth was good")),
+      expectedStatus: "pending",
+      proposalId: "proposal_1",
+    });
+    const [proposal] = await db.select().from(aiProposals).where(eq(aiProposals.id, "proposal_1"));
+    const [document] = await db.select().from(documents).where(eq(documents.id, "doc_1"));
+
+    expect(result).toMatchObject({
+      document: { id: "doc_1", plainText: "growth was good", revision: 0 },
+      error: "document_changed",
+      ok: false,
+      proposal: { id: "proposal_1", status: "pending" },
+    });
+    expect(proposal).toMatchObject({ appliedMode: null, status: "pending" });
+    expect(document).toMatchObject({
+      plainText: "growth was good",
+      revision: 0,
+    });
+  });
+
   it("does not reveal or mutate another workspace's proposal and document", async () => {
     const db = await createIsolatedProposalApplicationDb();
     await seedDocumentAndProposal(db, { workspaceId: workspaceA.workspaceId });
