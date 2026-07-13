@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNull } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { db } from "@/db/client";
 import { withSerializedDocumentWrite } from "@/db/document-write-queue";
@@ -30,6 +30,8 @@ import {
 } from "@/features/proposals/proposal-transaction";
 
 type DocumentChangeDatabase = typeof db;
+const HISTORY_TARGET_PREVIEW_CODE_UNITS = 200;
+const HISTORY_REPLACEMENT_PREVIEW_CODE_UNITS = 500;
 type DraftValidationLimit =
   | "documentDepth"
   | "documentJsonBytes"
@@ -56,6 +58,23 @@ export type ApplyProposalBatchInput = {
   proposals: ProposalChangeInput[];
 };
 export type UndoDocumentChangeInput = { changeId: string; expectedRevision: number };
+export type DocumentChangeHistoryProposal = Pick<
+  AiProposalRecord,
+  "id" | "replacementText" | "targetText"
+> & {
+  appliedMode: ProposalApplyMode;
+  ordinal: number;
+};
+export type DocumentChangeIdentity = Pick<
+  DocumentChangeRecord,
+  "afterRevision" | "batchId" | "createdAt" | "documentId" | "id" | "kind" | "undoneAt"
+>;
+export type DocumentChangeHistoryItem = DocumentChangeIdentity & { proposals: DocumentChangeHistoryProposal[] };
+export type ListDocumentChangesInput = { cursor?: string; documentId: string; limit?: number };
+export type DocumentChangeHistoryPage = {
+  changes: DocumentChangeHistoryItem[];
+  nextCursor: string | null;
+};
 
 export type DocumentChangeResult =
   | {
@@ -263,6 +282,114 @@ export function createDocumentChangeService(database: DocumentChangeDatabase = d
       return applyProposalOperation(context, input, "batch");
     },
 
+    async list(context: RequestContext, input: ListDocumentChangesInput): Promise<DocumentChangeHistoryPage> {
+      const limit = Number.isSafeInteger(input.limit)
+        ? Math.max(1, Math.min(input.limit ?? 20, 50))
+        : 20;
+      const cursor = input.cursor
+        ? (await retrySqliteContention(async () => database
+            .select({
+              id: documentChanges.id,
+              createdAt: documentChanges.createdAt,
+            })
+            .from(documentChanges)
+            .where(and(
+              eq(documentChanges.workspaceId, context.workspaceId),
+              eq(documentChanges.documentId, input.documentId),
+              eq(documentChanges.id, input.cursor!),
+            ))
+            .limit(1)))[0]
+        : null;
+      if (input.cursor && !cursor) return { changes: [], nextCursor: null };
+
+      const cursorCondition = cursor
+        ? or(
+            lt(documentChanges.createdAt, cursor.createdAt),
+            and(
+              eq(documentChanges.createdAt, cursor.createdAt),
+              lt(documentChanges.id, cursor.id),
+            ),
+          )
+        : undefined;
+      const rows = await retrySqliteContention(async () => database
+        .select({
+          id: documentChanges.id,
+          documentId: documentChanges.documentId,
+          kind: documentChanges.kind,
+          batchId: documentChanges.batchId,
+          afterRevision: documentChanges.afterRevision,
+          createdAt: documentChanges.createdAt,
+          undoneAt: documentChanges.undoneAt,
+        })
+        .from(documentChanges)
+        .where(and(
+          eq(documentChanges.workspaceId, context.workspaceId),
+          eq(documentChanges.documentId, input.documentId),
+          cursorCondition,
+        ))
+        .orderBy(desc(documentChanges.createdAt), desc(documentChanges.id))
+        .limit(limit + 1));
+      const hasNextPage = rows.length > limit;
+      const pageRows = rows.slice(0, limit);
+      if (pageRows.length === 0) return { changes: [], nextCursor: null };
+
+      const changeIds = pageRows.map(({ id }) => id);
+      const links = await retrySqliteContention(async () => database
+        .select()
+        .from(documentChangeProposals)
+        .where(and(
+          eq(documentChangeProposals.workspaceId, context.workspaceId),
+          eq(documentChangeProposals.documentId, input.documentId),
+          inArray(documentChangeProposals.changeId, changeIds),
+        ))
+        .orderBy(asc(documentChangeProposals.ordinal)));
+      const proposalIds = Array.from(new Set(links.map(({ proposalId }) => proposalId)));
+      const proposals = proposalIds.length === 0
+        ? []
+        : await retrySqliteContention(async () => database
+            .select({
+              id: aiProposals.id,
+              replacementText: sql<string>`substr(${aiProposals.replacementText}, 1, ${HISTORY_REPLACEMENT_PREVIEW_CODE_UNITS})`,
+              targetText: sql<string>`substr(${aiProposals.targetText}, 1, ${HISTORY_TARGET_PREVIEW_CODE_UNITS})`,
+            })
+            .from(aiProposals)
+            .where(and(
+              eq(aiProposals.workspaceId, context.workspaceId),
+              eq(aiProposals.documentId, input.documentId),
+              inArray(aiProposals.id, proposalIds),
+            )));
+      const proposalById = new Map(proposals.map((proposal) => [proposal.id, proposal]));
+      const linksByChangeId = new Map<string, typeof links>();
+      for (const link of links) {
+        linksByChangeId.set(link.changeId, [...(linksByChangeId.get(link.changeId) ?? []), link]);
+      }
+
+      return {
+        changes: pageRows.map((change) => ({
+          id: change.id,
+          documentId: change.documentId,
+          kind: change.kind,
+          batchId: change.batchId,
+          afterRevision: change.afterRevision,
+          createdAt: change.createdAt,
+          undoneAt: change.undoneAt,
+          proposals: (linksByChangeId.get(change.id) ?? []).flatMap((link) => {
+            const proposal = proposalById.get(link.proposalId);
+            return proposal
+              ? [{
+                  id: proposal.id,
+                  targetText: proposal.targetText.slice(0, HISTORY_TARGET_PREVIEW_CODE_UNITS),
+                  replacementText: proposal.replacementText.slice(0, HISTORY_REPLACEMENT_PREVIEW_CODE_UNITS),
+                  appliedMode: link.appliedMode,
+                  ordinal: link.ordinal,
+                }]
+              : [];
+          }),
+        })),
+        nextCursor: hasNextPage ? pageRows.at(-1)?.id ?? null : null,
+      };
+    },
+
     async undo(context: RequestContext, input: UndoDocumentChangeInput): Promise<DocumentChangeResult> {
       if (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 0) {
         return { ok: false, reason: "invalid_revision" };
@@ -460,4 +587,5 @@ const defaultService = createDocumentChangeService();
 
 export const applyProposal = defaultService.applyProposal;
 export const applyProposalBatch = defaultService.applyProposalBatch;
+export const listDocumentChanges = defaultService.list;
 export const undoDocumentChange = defaultService.undo;

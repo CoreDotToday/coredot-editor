@@ -43,4 +43,28 @@ describe("AiWorkspacePanel", () => {
 
     expect(onRenameChatSession).toHaveBeenCalledWith("session_1", "번역 결과");
   });
+
+  it("requests persisted history when the Changes tab opens", () => {
+    const onChangesOpen = vi.fn();
+
+    render(
+      <AiWorkspacePanel
+        changeItems={[]}
+        chatMessages={[]}
+        errorMessage=""
+        isReviewing={false}
+        messages={editorMessages.ko.aiWorkspace}
+        onChangesOpen={onChangesOpen}
+        onReviewDocument={vi.fn()}
+        onUndoChange={vi.fn()}
+        onUpdateProposalStatus={vi.fn()}
+        proposals={[]}
+        selectedTemplateName=""
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("tab", { name: "변경내역" }));
+
+    expect(onChangesOpen).toHaveBeenCalledTimes(1);
+  });
 });

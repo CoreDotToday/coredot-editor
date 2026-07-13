@@ -58,6 +58,7 @@ type AiWorkspacePanelProps = {
   messages?: EditorMessages["aiWorkspace"];
   onArchiveChatSession?: (sessionId: string) => void;
   onBulkUpdateProposalStatus?: (status: "accepted" | "rejected") => void;
+  onChangesOpen?: () => void;
   onClose?: () => void;
   onFocusProposal?: (proposalId: string) => void;
   onReviewDocument: () => void;
@@ -97,6 +98,7 @@ export function AiWorkspacePanel({
   messages = editorMessages[DEFAULT_EDITOR_LANGUAGE].aiWorkspace,
   onArchiveChatSession,
   onBulkUpdateProposalStatus,
+  onChangesOpen,
   onClose,
   onFocusProposal,
   onReviewDocument,
@@ -124,6 +126,11 @@ export function AiWorkspacePanel({
       ? "flex h-full w-[min(100vw,24rem)] shrink-0 flex-col border-l border-zinc-200 bg-white shadow-2xl shadow-zinc-950/20"
       : "hidden w-[23rem] shrink-0 flex-col border-l border-zinc-200 bg-white xl:flex";
 
+  const activateTab = (nextTab: WorkspaceTab) => {
+    setActiveTab(nextTab);
+    if (nextTab === "changes") onChangesOpen?.();
+  };
+
   const handleTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, tabIndex: number) => {
     if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
 
@@ -135,7 +142,7 @@ export function AiWorkspacePanel({
           ? tabs.length - 1
           : (tabIndex + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
     const nextTab = tabs[nextIndex]?.id ?? "review";
-    setActiveTab(nextTab);
+    activateTab(nextTab);
     window.requestAnimationFrame(() => {
       document.getElementById(`${workspaceId}-${nextTab}-tab`)?.focus();
     });
@@ -159,7 +166,7 @@ export function AiWorkspacePanel({
               ].join(" ")}
               id={`${workspaceId}-${id}-tab`}
               key={id}
-              onClick={() => setActiveTab(id)}
+              onClick={() => activateTab(id)}
               onKeyDown={(event) => handleTabKeyDown(event, tabs.findIndex((tab) => tab.id === id))}
               role="tab"
               tabIndex={activeTab === id ? 0 : -1}

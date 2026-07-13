@@ -248,6 +248,15 @@ export const editorMessages = {
       saved: "Saved",
       saving: "Saving",
     },
+    saveConflict: {
+      copied: "Local content copied.",
+      copyLocal: "Copy local content",
+      description: "Choose which version to keep. Your local draft has not been overwritten.",
+      reloadServer: "Load server version",
+      saveAsNew: "Save as new document",
+      saveAsNewFailed: "Could not save the local draft as a new document.",
+      title: "This document changed somewhere else.",
+    },
     selectionResult: {
       appliedNotice: "Applied to draft. Save to keep this change.",
       applicationStatus: "Selection AI application status",
@@ -604,6 +613,15 @@ export const editorMessages = {
       failed: "저장 실패",
       saved: "저장됨",
       saving: "저장 중",
+    },
+    saveConflict: {
+      copied: "로컬 내용을 복사했습니다.",
+      copyLocal: "로컬 내용 복사",
+      description: "유지할 버전을 선택하세요. 로컬 초안은 덮어쓰지 않았습니다.",
+      reloadServer: "서버 버전 불러오기",
+      saveAsNew: "새 문서로 저장",
+      saveAsNewFailed: "로컬 초안을 새 문서로 저장하지 못했습니다.",
+      title: "다른 곳에서 문서가 변경되었습니다.",
     },
     selectionResult: {
       appliedNotice: "초안에 반영되었습니다. 변경 사항을 유지하려면 저장하세요.",

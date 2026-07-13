@@ -54,6 +54,13 @@ import {
 import { buildAiContextSnapshot } from "@/features/ai/ai-context-snapshot";
 import { resolveDocumentShortcut } from "@/features/commands/document-command-manifest";
 import { buildDocumentOutline, type DocumentOutlineItem } from "@/features/documents/document-outline";
+import {
+  createDocumentSessionClient,
+  DocumentSessionRequestError,
+  type DocumentSessionChange,
+  type DocumentSessionHistoryChange,
+  type DocumentSessionProposal,
+} from "@/features/documents/document-session-client";
 import { extractPlainTextFromTiptap } from "@/features/documents/tiptap-text";
 import {
   EDITOR_LANGUAGE_STORAGE_KEY,
@@ -82,6 +89,7 @@ import { DocumentMetadataPanel } from "./DocumentMetadataPanel";
 import { DocumentOutlinePanel } from "./DocumentOutlinePanel";
 import { DocumentSourceView } from "./DocumentSourceView";
 import { buildDocumentCommandRegistry } from "./commands/document-command-registry";
+import type { DocumentCommandAction } from "./commands/document-command-types";
 import type { SelectionAiResultPreview } from "./SelectionAiResultPopover";
 
 type ShellDocument = Pick<DocumentRecord, "id" | "title" | "contentJson" | "plainText" | "revision"> &
@@ -151,13 +159,6 @@ type AiSnapshot = {
   proposals: ShellProposal[];
 };
 
-type AppliedAiChangeRecord = Omit<AiWorkspaceChangeItem, "canUndo"> & {
-  afterContentSignature: string;
-  beforeDraft: DraftState;
-  proposalId: string;
-  undone: boolean;
-};
-
 type ReviewResponse = {
   review?: {
     findings?: unknown[];
@@ -177,30 +178,24 @@ const MAX_CONCURRENT_SELECTION_COMMANDS = 5;
 const AUTOSAVE_DEBOUNCE_MS = 1000;
 const COMPACT_WORKSPACE_MEDIA_QUERY = "(max-width: 1279px)";
 
-function updateServerRevision(
-  revisionRef: MutableRefObject<number>,
+function resolveServerRevision(
+  currentRevision: number,
   returnedRevision: number,
   mode: "advance" | "reset" = "advance",
 ) {
   if (!Number.isSafeInteger(returnedRevision) || returnedRevision < 0) {
-    return;
+    return currentRevision;
   }
 
-  revisionRef.current = mode === "reset"
+  return mode === "reset"
     ? returnedRevision
-    : Math.max(revisionRef.current, returnedRevision);
+    : Math.max(currentRevision, returnedRevision);
 }
 
 type ProposalStatusPatchPayload = {
   appliedMode?: AiProposalApplyMode;
   expectedStatus?: ShellProposal["status"];
   status: ShellProposal["status"];
-};
-
-type ProposalApplyPayload = {
-  appliedMode: AiProposalApplyMode;
-  document: DraftState & { id: string };
-  expectedRevision: number;
 };
 
 class ProposalStatusConflictError extends Error {
@@ -247,54 +242,30 @@ async function patchProposalStatus(proposalId: string, payload: ProposalStatusPa
   throw new Error("Failed to update proposal status");
 }
 
-type ProposalApplyResponse = {
-  document?: DocumentSnapshot;
-  proposal?: AiReviewProposal;
-};
+const documentSessionClient = createDocumentSessionClient((input, init) => fetch(input, init));
 
-type ProposalBatchApplyPayload = {
-  document: DraftState & { id: string };
-  expectedRevision: number;
-  proposals: Array<{ appliedMode: AiProposalApplyMode; id: string }>;
-};
-
-type ProposalBatchApplyResponse = {
-  document?: DocumentSnapshot;
-  proposals?: AiReviewProposal[];
-};
-
-async function applyProposalOnServer(proposalId: string, payload: ProposalApplyPayload): Promise<ProposalApplyResponse> {
-  const response = await fetch(`/api/proposals/${encodeURIComponent(proposalId)}/apply`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
-  const body = (await response.json().catch(() => ({}))) as ProposalApplyResponse;
-
-  if (response.ok) {
-    return body;
-  }
-
-  if (response.status === 409 && body.proposal) {
-    throw new ProposalStatusConflictError(body.proposal);
-  }
-
-  throw new Error("Failed to apply proposal");
+function createHistoryChange(
+  change: DocumentSessionChange,
+  proposals: DocumentSessionProposal[],
+): DocumentSessionHistoryChange {
+  return {
+    ...change,
+    proposals: proposals.map((proposal, ordinal) => ({
+      id: proposal.id,
+      targetText: proposal.targetText,
+      replacementText: proposal.replacementText,
+      appliedMode: proposal.appliedMode ?? proposal.defaultApplyMode ?? "replace",
+      ordinal,
+    })),
+  };
 }
 
-async function applyProposalBatchOnServer(payload: ProposalBatchApplyPayload): Promise<ProposalBatchApplyResponse> {
-  const response = await fetch("/api/proposals/bulk-apply", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
-  const body = (await response.json().catch(() => ({}))) as ProposalBatchApplyResponse;
-  if (response.ok) return body;
-  throw new Error("Failed to apply proposal batch");
+function getSessionConflictProposal(error: unknown): AiReviewProposal | null {
+  if (!(error instanceof DocumentSessionRequestError)) return null;
+  const proposal = error.body.proposal;
+  return proposal && typeof proposal === "object" && "id" in proposal
+    ? proposal as AiReviewProposal
+    : null;
 }
 
 function subscribeCompactWorkspaceLayout(onStoreChange: () => void) {
@@ -358,9 +329,17 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
   const [draft, setDraft] = useState<DraftState>(initialDraft);
   const draftRef = useRef<DraftState>(initialDraft);
   const draftVersionRef = useRef(0);
+  const intentionalNavigationRef = useRef(false);
   const serverContentSignatureRef = useRef(createProposalContentSignature(incomingDocument.contentJson));
   const serverRevisionRef = useRef(incomingDocument.revision);
+  const [serverRevision, setServerRevision] = useState(incomingDocument.revision);
   const [saveState, setSaveState] = useState<SaveState>("saved");
+  const [saveConflict, setSaveConflict] = useState<{
+    localDraft: DraftState;
+    serverDocument: DocumentSnapshot;
+  } | null>(null);
+  const [saveConflictNotice, setSaveConflictNotice] = useState("");
+  const [isSavingConflictCopy, setIsSavingConflictCopy] = useState(false);
   const [language, setLanguage] = useState<EditorLanguage>(() => readStoredEditorLanguage());
   const [selectionCommand, setSelectionCommand] = useState<SelectionCommandPayload | null>(null);
   const [selectionAiResult, setSelectionAiResult] = useState<SelectionAiResultPreview | null>(null);
@@ -371,7 +350,8 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
   const [aiChatSessions, setAiChatSessions] = useState<AiWorkspaceChatSession[]>(() =>
     restoreAiWorkspaceChatSessions(document.id),
   );
-  const [appliedChanges, setAppliedChanges] = useState<AppliedAiChangeRecord[]>([]);
+  const [documentChanges, setDocumentChanges] = useState<DocumentSessionHistoryChange[]>([]);
+  const [isLoadingDocumentChanges, setIsLoadingDocumentChanges] = useState(false);
   const [undoChangeError, setUndoChangeError] = useState("");
   const [isExportingDocx, setIsExportingDocx] = useState(false);
   const aiWorkspaceIdRef = useRef(0);
@@ -411,6 +391,11 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
   const isRewritingSelection = runningSelectionCommands.length > 0;
   const isSelectionCommandLimitReached = runningSelectionCommands.length >= MAX_CONCURRENT_SELECTION_COMMANDS;
   const isInternalNavigationBlocked = saveState !== "saved";
+  const adoptServerRevision = useCallback((returnedRevision: number, mode: "advance" | "reset" = "advance") => {
+    const nextRevision = resolveServerRevision(serverRevisionRef.current, returnedRevision, mode);
+    serverRevisionRef.current = nextRevision;
+    setServerRevision(nextRevision);
+  }, []);
   const updateRunningSelectionCommands = useCallback(
     (updater: (commands: RunningSelectionAiCommand[]) => RunningSelectionAiCommand[]) => {
       const nextCommands = updater(runningSelectionCommandsRef.current);
@@ -469,7 +454,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
   const isDocumentNavigation = observedDocument.id !== incomingDocument.id;
   const shouldIgnoreSameDocumentSnapshot =
     !isDocumentNavigation &&
-    (incomingDocument.revision < serverRevisionRef.current || saveState !== "saved");
+    (incomingDocument.revision < serverRevision || saveState !== "saved");
   const hasIncomingDocumentChange =
     isDocumentNavigation ||
     observedDocument.title !== incomingDocument.title ||
@@ -480,12 +465,11 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
 
   if (hasIncomingDocumentChange && !shouldIgnoreSameDocumentSnapshot) {
     setObservedDocument(incomingDocument);
-    serverContentSignatureRef.current = createProposalContentSignature(incomingDocument.contentJson);
-    updateServerRevision(
-      serverRevisionRef,
+    setServerRevision((currentRevision) => resolveServerRevision(
+      currentRevision,
       incomingDocument.revision,
       isDocumentNavigation ? "reset" : "advance",
-    );
+    ));
 
     if (saveState === "saved") {
       setDraft(initialDraft);
@@ -496,8 +480,10 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
       setActiveProposalId(null);
       setAiChatMessages([]);
       setAiChatSessions(restoreAiWorkspaceChatSessions(incomingDocument.id));
-      setAppliedChanges([]);
+      setDocumentChanges([]);
       setUndoChangeError("");
+      setSaveConflict(null);
+      setSaveConflictNotice("");
       setEditorSurface("editor");
       setIsCommandPaletteOpen(false);
       setIsFindOpen(false);
@@ -527,6 +513,14 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
     draftRef.current = draft;
   }, [draft]);
 
+  useEffect(() => {
+    serverRevisionRef.current = serverRevision;
+  }, [serverRevision]);
+
+  useEffect(() => {
+    serverContentSignatureRef.current = createProposalContentSignature(observedDocument.contentJson);
+  }, [observedDocument.contentJson]);
+
   const handleDraftChange = useCallback((nextDraft: Pick<DraftState, "contentJson" | "title">) => {
     draftVersionRef.current += 1;
     setDraft((currentDraft) => {
@@ -534,6 +528,10 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
       draftRef.current = updatedDraft;
       return updatedDraft;
     });
+    setSaveConflict((currentConflict) => currentConflict
+      ? { ...currentConflict, localDraft: { ...currentConflict.localDraft, ...nextDraft } }
+      : null);
+    setSaveConflictNotice("");
     setSaveState("dirty");
   }, []);
   const handleMetadataChange = useCallback((change: { metadataJson?: DocumentMetadata; readiness?: DocumentReadiness }) => {
@@ -543,6 +541,10 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
       draftRef.current = updatedDraft;
       return updatedDraft;
     });
+    setSaveConflict((currentConflict) => currentConflict
+      ? { ...currentConflict, localDraft: { ...currentConflict.localDraft, ...change } }
+      : null);
+    setSaveConflictNotice("");
     setSaveState("dirty");
   }, []);
 
@@ -801,42 +803,37 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
   ]);
 
   const saveDraft = useCallback(async () => {
+    if (saveConflict) return;
     const savingVersion = draftVersionRef.current;
     const savingDraft = draft;
     const expectedRevision = serverRevisionRef.current;
 
     setSaveState("saving");
 
-    try {
-      const response = await fetch(`/api/documents/${document.id}`, {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ ...savingDraft, expectedRevision }),
-      });
-
-      if (!response.ok) {
-        throw new Error("Failed to save document");
-      }
-
-      const body = (await response.json().catch(() => ({}))) as { document?: DocumentSnapshot };
-      if (body.document) {
-        updateServerRevision(serverRevisionRef, body.document.revision);
-      }
+    const result = await documentSessionClient.save(document.id, savingDraft, expectedRevision);
+    if (result.kind === "saved") {
+      adoptServerRevision(result.document.revision);
       if (draftVersionRef.current === savingVersion) {
-        serverContentSignatureRef.current = createProposalContentSignature(
-          body.document?.contentJson ?? savingDraft.contentJson,
-        );
+        serverContentSignatureRef.current = createProposalContentSignature(result.document.contentJson);
       }
       setSaveState((currentState) => (draftVersionRef.current === savingVersion ? "saved" : currentState));
-    } catch {
-      setSaveState((currentState) => (draftVersionRef.current === savingVersion ? "failed" : currentState));
+      return;
     }
-  }, [document.id, draft]);
+    if (result.kind === "conflict") {
+      if (result.serverDocument.revision <= serverRevisionRef.current) return;
+      setSaveConflict({
+        localDraft: draftRef.current,
+        serverDocument: result.serverDocument,
+      });
+      setSaveConflictNotice("");
+      setSaveState("failed");
+      return;
+    }
+    setSaveState((currentState) => (draftVersionRef.current === savingVersion ? "failed" : currentState));
+  }, [adoptServerRevision, document.id, draft, saveConflict]);
 
   useEffect(() => {
-    if (saveState !== "dirty") {
+    if (saveState !== "dirty" || saveConflict) {
       return;
     }
 
@@ -845,7 +842,46 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
     }, AUTOSAVE_DEBOUNCE_MS);
 
     return () => window.clearTimeout(timeoutId);
-  }, [saveDraft, saveState]);
+  }, [saveConflict, saveDraft, saveState]);
+
+  const loadServerConflictVersion = useCallback(() => {
+    if (!saveConflict) return;
+    const nextDraft = createDraftFromDocumentSnapshot(saveConflict.serverDocument);
+    draftVersionRef.current += 1;
+    draftRef.current = nextDraft;
+    setDraft(nextDraft);
+    adoptServerRevision(saveConflict.serverDocument.revision, "reset");
+    serverContentSignatureRef.current = createProposalContentSignature(saveConflict.serverDocument.contentJson);
+    setSaveConflict(null);
+    setSaveConflictNotice("");
+    setSaveState("saved");
+  }, [adoptServerRevision, saveConflict]);
+
+  const copyLocalConflictDraft = useCallback(async () => {
+    if (!saveConflict) return;
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(saveConflict.localDraft, null, 2));
+      setSaveConflictNotice(messages.saveConflict.copied);
+    } catch {
+      setSaveConflictNotice("");
+    }
+  }, [messages.saveConflict.copied, saveConflict]);
+
+  const saveLocalConflictAsNew = useCallback(async () => {
+    if (!saveConflict || isSavingConflictCopy) return;
+    setIsSavingConflictCopy(true);
+    setSaveConflictNotice("");
+    try {
+      const createdDocument = await documentSessionClient.createFromDraft(saveConflict.localDraft);
+      intentionalNavigationRef.current = true;
+      window.location.assign(`/documents/${createdDocument.id}`);
+    } catch {
+      intentionalNavigationRef.current = false;
+      setSaveConflictNotice(messages.saveConflict.saveAsNewFailed);
+    } finally {
+      setIsSavingConflictCopy(false);
+    }
+  }, [isSavingConflictCopy, messages.saveConflict.saveAsNewFailed, saveConflict]);
 
   useEffect(() => {
     if (saveState !== "dirty" && saveState !== "failed" && saveState !== "saving") {
@@ -853,6 +889,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
     }
 
     const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (intentionalNavigationRef.current) return;
       event.preventDefault();
       event.returnValue = "";
     };
@@ -1008,14 +1045,14 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
 
     try {
       const appliedServerResponse = status === "accepted"
-        ? await applyProposalOnServer(proposalId, {
+        ? await documentSessionClient.applyProposal(proposalId, {
             appliedMode: applyMode,
             document: { id: document.id, ...draft },
             expectedRevision: serverRevisionRef.current,
           })
         : null;
       const updatedProposal = status === "accepted"
-        ? appliedServerResponse?.proposal ?? null
+        ? appliedServerResponse?.proposals[0] ?? null
         : await patchProposalStatus(proposalId, {
           status,
           expectedStatus: previousProposal.status,
@@ -1024,111 +1061,39 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
         updatedProposal ?? { ...previousProposal, appliedMode: status === "accepted" ? applyMode : null, status };
 
       if (status === "accepted") {
+        if (!appliedServerResponse) throw new Error("Missing proposal apply response");
         const baseDraft = draftVersionRef.current === startingDraftVersion ? draft : draftRef.current;
         const appliedMode = proposalForState.appliedMode ?? applyMode;
-        if (appliedServerResponse?.document) {
-          const serverDraft = createDraftFromDocumentSnapshot(appliedServerResponse.document);
-          const hasNewerLocalDraft = draftVersionRef.current !== startingDraftVersion;
-          let nextDraft = serverDraft;
-          if (hasNewerLocalDraft) {
-            const reconciled = applyProposalToTiptapDraft(
-              baseDraft.contentJson,
-              previousProposal,
-              proposalContext,
-              appliedMode,
-            );
-            if (!reconciled.ok) {
-              setReviewProposals((currentProposals) =>
-                currentProposals.map((proposal) => (proposal.id === proposalId ? proposalForState : proposal)),
-              );
-              setSelectionApplicationNotice("");
-              setReviewError(messages.errors.updateProposalFailed);
-              return;
-            }
-            nextDraft = { ...baseDraft, contentJson: reconciled.contentJson };
-          }
-          serverContentSignatureRef.current = createProposalContentSignature(appliedServerResponse.document.contentJson);
-          updateServerRevision(serverRevisionRef, appliedServerResponse.document.revision);
-          draftVersionRef.current += 1;
-          draftRef.current = nextDraft;
-          setDraft(nextDraft);
-          setSaveState(hasNewerLocalDraft ? "dirty" : "saved");
-          setAppliedChanges((currentChanges) => [
-            {
-              appliedAt: new Date(),
-              appliedMode,
-              afterContentSignature: createProposalContentSignature(nextDraft.contentJson),
-              beforeDraft: baseDraft,
-              id: createWorkspaceClientId(aiWorkspaceIdRef, "change"),
-              proposalId,
-              replacementText: previousProposal.replacementText,
-              targetText: previousProposal.targetText,
-              undone: false,
-            },
-            ...currentChanges,
-          ]);
-          setReviewProposals((currentProposals) =>
-            currentProposals.map((proposal) => (proposal.id === proposalId ? proposalForState : proposal)),
-          );
-          if (isSelectionProposal) {
-            setSelectionApplicationNotice(messages.selectionResult.appliedNotice);
-          }
-          setUndoChangeError("");
-          if (selectionAiResult?.proposalId === proposalId) {
-            setSelectionAiResult(null);
-          }
-          if (activeProposalId === proposalId) {
-            setActiveProposalId(null);
-          }
-          return;
-        }
-
-        const proposalForApply: AiReviewProposal = {
-          ...previousProposal,
-          appliedMode,
-          status: proposalForState.status,
-        };
-        const appliedDraft = applyProposalToTiptapDraft(
-          baseDraft.contentJson,
-          proposalForApply,
-          proposalContext,
-          appliedMode,
-        );
-
-        if (!appliedDraft.ok) {
-          setReviewProposals((currentProposals) =>
-            currentProposals.map((proposal) =>
-              proposal.id === proposalId ? proposalForState : proposal,
-            ),
-          );
-          setSelectionApplicationNotice("");
-          setReviewError(
-            appliedDraft.reason === "stale_selection"
-              ? messages.errors.staleSelection
-              : messages.errors.updateProposalFailed,
-          );
-          return;
-        }
-
-        const updatedDraft = { ...baseDraft, contentJson: appliedDraft.contentJson };
-        draftVersionRef.current += 1;
-        draftRef.current = updatedDraft;
-        setDraft(updatedDraft);
-        setSaveState("dirty");
-        setAppliedChanges((currentChanges) => [
-          {
-            appliedAt: new Date(),
-            appliedMode,
-            afterContentSignature: JSON.stringify(appliedDraft.contentJson),
-            beforeDraft: baseDraft,
-            id: createWorkspaceClientId(aiWorkspaceIdRef, "change"),
-            proposalId,
-            replacementText: previousProposal.replacementText,
-            targetText: previousProposal.targetText,
-            undone: false,
-          },
-          ...currentChanges,
+        setDocumentChanges((currentChanges) => [
+          createHistoryChange(appliedServerResponse.change, appliedServerResponse.proposals),
+          ...currentChanges.filter((change) => change.id !== appliedServerResponse.change.id),
         ]);
+        const serverDraft = createDraftFromDocumentSnapshot(appliedServerResponse.document);
+        const hasNewerLocalDraft = draftVersionRef.current !== startingDraftVersion;
+        let nextDraft = serverDraft;
+        if (hasNewerLocalDraft) {
+          const reconciled = applyProposalToTiptapDraft(
+            baseDraft.contentJson,
+            previousProposal,
+            proposalContext,
+            appliedMode,
+          );
+          if (!reconciled.ok) {
+            setReviewProposals((currentProposals) =>
+              currentProposals.map((proposal) => (proposal.id === proposalId ? proposalForState : proposal)),
+            );
+            setSelectionApplicationNotice("");
+            setReviewError(messages.errors.updateProposalFailed);
+            return;
+          }
+          nextDraft = { ...baseDraft, contentJson: reconciled.contentJson };
+        }
+        serverContentSignatureRef.current = createProposalContentSignature(appliedServerResponse.document.contentJson);
+        adoptServerRevision(appliedServerResponse.document.revision);
+        draftVersionRef.current += 1;
+        draftRef.current = nextDraft;
+        setDraft(nextDraft);
+        setSaveState(hasNewerLocalDraft ? "dirty" : "saved");
       }
 
       setReviewProposals((currentProposals) =>
@@ -1145,12 +1110,13 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
         setActiveProposalId(null);
       }
     } catch (error) {
+      const conflictProposal = isProposalStatusConflictError(error)
+        ? error.proposal
+        : getSessionConflictProposal(error);
       setReviewProposals((currentProposals) =>
         currentProposals.map((proposal) =>
           proposal.id === proposalId
-            ? isProposalStatusConflictError(error)
-              ? error.proposal
-              : proposal
+            ? conflictProposal ?? proposal
             : proposal,
         ),
       );
@@ -1158,6 +1124,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
       setReviewError(messages.errors.updateProposalFailed);
     }
   }, [
+    adoptServerRevision,
     document.id,
     draft,
     messages.errors,
@@ -1185,14 +1152,11 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
     const startingDraftVersion = draftVersionRef.current;
 
     const buildAcceptedDraftState = (baseDraft: DraftState, proposalsToAccept: AiReviewProposal[]) => {
-      const nextAppliedModes = new Map<string, AiProposalApplyMode>();
-      const nextAppliedChanges: AppliedAiChangeRecord[] = [];
       let nextContentJson = baseDraft.contentJson;
       const proposalsToApply = getProposalApplicationOrder(proposalsToAccept, selectionProposalContexts);
 
       for (const proposal of proposalsToApply) {
         const applyMode = proposal.appliedMode ?? proposal.defaultApplyMode ?? "replace";
-        const beforeProposalDraft: DraftState = { ...baseDraft, contentJson: nextContentJson };
         const appliedDraft = applyProposalToTiptapDraft(
           nextContentJson,
           proposal,
@@ -1205,23 +1169,9 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
         }
 
         nextContentJson = appliedDraft.contentJson;
-        nextAppliedModes.set(proposal.id, applyMode);
-        nextAppliedChanges.push({
-          appliedAt: new Date(),
-          appliedMode: applyMode,
-          afterContentSignature: JSON.stringify(appliedDraft.contentJson),
-          beforeDraft: beforeProposalDraft,
-          id: createWorkspaceClientId(aiWorkspaceIdRef, "change"),
-          proposalId: proposal.id,
-          replacementText: proposal.replacementText,
-          targetText: proposal.targetText,
-          undone: false,
-        });
       }
 
       return {
-        appliedModes: nextAppliedModes,
-        nextAppliedChanges,
         nextContentJson,
         ok: true as const,
       };
@@ -1253,7 +1203,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
       const proposalsToApply = getProposalApplicationOrder(pendingProposals, selectionProposalContexts);
       const submittedDraft = draftVersionRef.current === startingDraftVersion ? draft : draftRef.current;
       try {
-        const applyResponse = await applyProposalBatchOnServer({
+        const applyResponse = await documentSessionClient.applyProposalBatch({
           document: { id: document.id, ...submittedDraft },
           expectedRevision: serverRevisionRef.current,
           proposals: proposalsToApply.map((proposal) => ({
@@ -1261,10 +1211,6 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
             id: proposal.id,
           })),
         });
-        if (!applyResponse.document || !applyResponse.proposals) {
-          throw new Error("Incomplete proposal batch response");
-        }
-
         const hasNewerLocalDraft = draftVersionRef.current !== startingDraftVersion;
         const reconciliationBase = hasNewerLocalDraft ? draftRef.current : submittedDraft;
         const reconciled = buildAcceptedDraftState(reconciliationBase, pendingProposals);
@@ -1272,13 +1218,17 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
         setReviewProposals((currentProposals) =>
           currentProposals.map((proposal) => updatedProposalById.get(proposal.id) ?? proposal),
         );
+        setDocumentChanges((currentChanges) => [
+          createHistoryChange(applyResponse.change, applyResponse.proposals),
+          ...currentChanges.filter((change) => change.id !== applyResponse.change.id),
+        ]);
         if (!reconciled.ok) {
           setReviewError(messages.errors.updateProposalFailed);
           return;
         }
 
         serverContentSignatureRef.current = createProposalContentSignature(applyResponse.document.contentJson);
-        updateServerRevision(serverRevisionRef, applyResponse.document.revision);
+        adoptServerRevision(applyResponse.document.revision);
         const serverDraft = createDraftFromDocumentSnapshot(applyResponse.document);
         const nextDraft = hasNewerLocalDraft
           ? { ...reconciliationBase, contentJson: reconciled.nextContentJson }
@@ -1287,10 +1237,6 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
         draftRef.current = nextDraft;
         setDraft(nextDraft);
         setSaveState(hasNewerLocalDraft ? "dirty" : "saved");
-        setAppliedChanges((currentChanges) => [
-          ...[...reconciled.nextAppliedChanges].reverse(),
-          ...currentChanges,
-        ]);
         setUndoChangeError("");
         setActiveProposalId(null);
       } catch {
@@ -1336,6 +1282,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
       setActiveProposalId(null);
     }
   }, [
+    adoptServerRevision,
     document.id,
     draft,
     messages.errors.staleSelection,
@@ -1358,67 +1305,68 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
     );
   }, [handleSelectionCommand, selectionCommand]);
 
-  const undoAppliedChange = useCallback(async (changeId: string) => {
-    const change = appliedChanges.find((item) => item.id === changeId);
-    if (!change || change.undone) {
-      return;
+  const loadDocumentChanges = useCallback(async () => {
+    if (isLoadingDocumentChanges) return;
+    setIsLoadingDocumentChanges(true);
+    setUndoChangeError("");
+    try {
+      const history = await documentSessionClient.listChanges(document.id, { limit: 20 });
+      setDocumentChanges(history.changes);
+    } catch {
+      setUndoChangeError(messages.errors.updateProposalFailed);
+    } finally {
+      setIsLoadingDocumentChanges(false);
     }
+  }, [document.id, isLoadingDocumentChanges, messages.errors.updateProposalFailed]);
 
-    if (JSON.stringify(draft.contentJson) !== change.afterContentSignature) {
+  const undoAppliedChange = useCallback(async (changeId: string) => {
+    const change = documentChanges.find((item) => item.id === changeId);
+    if (
+      !change ||
+      change.undoneAt !== null ||
+      saveState !== "saved" ||
+      change.afterRevision !== serverRevisionRef.current
+    ) {
       setUndoChangeError(messages.aiWorkspace.undoConflict);
       return;
     }
 
     const startingDraftVersion = draftVersionRef.current;
-    const proposalBeforeUndo = reviewProposals.find((proposal) => proposal.id === change.proposalId);
-    const previousProposalStatus =
-      proposalBeforeUndo?.status ?? "accepted";
-
     setUndoChangeError("");
 
     try {
-      const updatedProposal = await patchProposalStatus(change.proposalId, {
-        status: "pending",
-        expectedStatus: previousProposalStatus,
+      const result = await documentSessionClient.undoChange(changeId, serverRevisionRef.current);
+      const updatedProposalById = new Map(result.proposals.map((proposal) => [proposal.id, proposal]));
+      setReviewProposals((currentProposals) => {
+        const currentProposalIds = new Set(currentProposals.map((proposal) => proposal.id));
+        return [
+          ...currentProposals.map((proposal) => updatedProposalById.get(proposal.id) ?? proposal),
+          ...result.proposals.filter((proposal) => !currentProposalIds.has(proposal.id)),
+        ];
       });
-      const baseDraft = draftVersionRef.current === startingDraftVersion ? draft : draftRef.current;
+      setDocumentChanges((currentChanges) =>
+        currentChanges.map((item) => item.id === changeId ? { ...item, ...result.change } : item),
+      );
 
-      if (JSON.stringify(baseDraft.contentJson) !== change.afterContentSignature) {
-        setReviewProposals((currentProposals) =>
-          currentProposals.map((proposal) =>
-            proposal.id === change.proposalId
-              ? updatedProposal ?? { ...proposal, appliedMode: null, status: "pending" }
-              : proposal,
-          ),
-        );
-        setUndoChangeError(messages.aiWorkspace.undoConflict);
+      if (draftVersionRef.current !== startingDraftVersion) {
+        setSaveConflict({ localDraft: draftRef.current, serverDocument: result.document });
+        setSaveConflictNotice("");
+        setSaveState("failed");
         return;
       }
 
-      const nextDraft = { ...baseDraft, contentJson: change.beforeDraft.contentJson };
+      const nextDraft = createDraftFromDocumentSnapshot(result.document);
+      serverContentSignatureRef.current = createProposalContentSignature(result.document.contentJson);
+      adoptServerRevision(result.document.revision);
       draftVersionRef.current += 1;
       draftRef.current = nextDraft;
       setDraft(nextDraft);
-      setSaveState("dirty");
-      setReviewProposals((currentProposals) =>
-        currentProposals.map((proposal) =>
-          proposal.id === change.proposalId
-            ? updatedProposal ?? { ...proposal, appliedMode: null, status: "pending" }
-            : proposal,
-        ),
-      );
-      setAppliedChanges((currentChanges) =>
-        currentChanges.map((item) => (item.id === changeId ? { ...item, undone: true } : item)),
-      );
-    } catch (error) {
-      if (isProposalStatusConflictError(error)) {
-        setReviewProposals((currentProposals) =>
-          currentProposals.map((proposal) => (proposal.id === change.proposalId ? error.proposal : proposal)),
-        );
-      }
-      setUndoChangeError(messages.errors.updateProposalFailed);
+      setSaveConflict(null);
+      setSaveState("saved");
+    } catch {
+      setUndoChangeError(messages.aiWorkspace.undoConflict);
     }
-  }, [appliedChanges, draft, messages.aiWorkspace.undoConflict, messages.errors.updateProposalFailed, reviewProposals]);
+  }, [adoptServerRevision, documentChanges, messages.aiWorkspace.undoConflict, saveState]);
 
   const archiveAiChatSession = useCallback((sessionId: string) => {
     setAiChatSessions((currentSessions) => archiveAiWorkspaceSession(currentSessions, sessionId));
@@ -1446,14 +1394,20 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
         }),
     [activeProposalId, reviewProposals, selectionProposalContexts],
   );
-  const draftContentSignature = useMemo(() => JSON.stringify(draft.contentJson), [draft.contentJson]);
   const changeItems = useMemo(
     () =>
-      appliedChanges.map((change) => ({
-        ...change,
-        canUndo: !change.undone && change.afterContentSignature === draftContentSignature,
+      documentChanges.map((change): AiWorkspaceChangeItem => ({
+        appliedAt: new Date(change.createdAt),
+        appliedMode: change.proposals[0]?.appliedMode ?? "replace",
+        canUndo:
+          change.undoneAt === null &&
+          saveState === "saved" &&
+          change.afterRevision === serverRevision,
+        id: change.id,
+        replacementText: change.proposals.map((proposal) => proposal.replacementText).join(" · "),
+        targetText: change.proposals.map((proposal) => proposal.targetText).join(" · "),
       })),
-    [appliedChanges, draftContentSignature],
+    [documentChanges, saveState, serverRevision],
   );
   const documentOutline = useMemo(
     () => buildDocumentOutline(draft.title || messages.shell.untitledDocument, draft.contentJson),
@@ -1525,30 +1479,49 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
     });
     setIsSidebarOpen(false);
   }, []);
+  const executeDocumentCommand = useCallback((commandId: DocumentCommandAction["id"]) => {
+    switch (commandId) {
+      case "open-workspace":
+        setWorkspaceOpen(true);
+        return;
+      case "review-document":
+        setWorkspaceOpen(true);
+        void runDocumentReview();
+        return;
+      case "find-document":
+        openFind();
+        return;
+      case "show-source":
+        setEditorSurface("source");
+        return;
+      case "show-editor":
+        setEditorSurface("editor");
+        return;
+      case "save-document":
+        void saveDraft();
+        return;
+      case "export-docx":
+        void exportDocxDraft();
+    }
+  }, [exportDocxDraft, openFind, runDocumentReview, saveDraft, setWorkspaceOpen]);
   const commandPaletteActions = useMemo(
-    () =>
-      buildDocumentCommandRegistry({
-        editorSurface,
-        exportDocxDraft,
-        isExportingDocx,
-        messages: messages.commandPalette,
-        openFind,
-        runDocumentReview,
-        saveDraft,
-        saveState,
-        setEditorSurface,
-        setWorkspaceOpen,
-      }),
+    () => buildDocumentCommandRegistry({
+      editorSurface,
+      hasSaveConflict: saveConflict !== null,
+      isExportingDocx,
+      messages: messages.commandPalette,
+      saveState,
+    }).map((definition): DocumentCommandAction => ({
+      ...definition,
+      execute: () => executeDocumentCommand(definition.id),
+    })),
     [
       editorSurface,
-      exportDocxDraft,
+      executeDocumentCommand,
       isExportingDocx,
       messages.commandPalette,
-      openFind,
-      runDocumentReview,
-      saveDraft,
+      saveConflict,
       saveState,
-      setWorkspaceOpen,
     ],
   );
   const sidebarNavigationClassName = [
@@ -1662,6 +1635,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
       messages={messages.aiWorkspace}
       onArchiveChatSession={archiveAiChatSession}
       onBulkUpdateProposalStatus={updatePendingProposalStatuses}
+      onChangesOpen={loadDocumentChanges}
       onClose={onClose}
       onFocusProposal={setActiveProposalId}
       onReviewDocument={runDocumentReview}
@@ -1821,7 +1795,7 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
             </button>
             <button
               className="inline-flex h-8 shrink-0 items-center justify-center rounded-md bg-zinc-950 px-3 text-sm font-medium text-white transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-300"
-              disabled={saveState === "saved" || saveState === "saving"}
+              disabled={saveConflict !== null || saveState === "saved" || saveState === "saving"}
               onClick={saveDraft}
               type="button"
             >
@@ -1837,6 +1811,41 @@ function DocumentShellContent({ aiRuns, document, proposals = [], referenceDocum
             </button>
           </div>
         </header>
+
+        {saveConflict ? (
+          <section
+            className="shrink-0 border-b border-amber-200 bg-amber-50 px-4 py-3 text-amber-950"
+            role="alert"
+          >
+            <p className="text-sm font-semibold">{messages.saveConflict.title}</p>
+            <p className="mt-1 text-sm leading-5 text-amber-800">{messages.saveConflict.description}</p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button
+                className="rounded-md border border-amber-300 bg-white px-3 py-1.5 text-sm font-medium hover:bg-amber-100"
+                onClick={loadServerConflictVersion}
+                type="button"
+              >
+                {messages.saveConflict.reloadServer}
+              </button>
+              <button
+                className="rounded-md border border-amber-300 bg-white px-3 py-1.5 text-sm font-medium hover:bg-amber-100"
+                onClick={() => void copyLocalConflictDraft()}
+                type="button"
+              >
+                {messages.saveConflict.copyLocal}
+              </button>
+              <button
+                className="rounded-md bg-amber-950 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-900 disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={isSavingConflictCopy}
+                onClick={() => void saveLocalConflictAsNew()}
+                type="button"
+              >
+                {messages.saveConflict.saveAsNew}
+              </button>
+            </div>
+            {saveConflictNotice ? <p className="mt-2 text-sm" role="status">{saveConflictNotice}</p> : null}
+          </section>
+        ) : null}
 
         <div className="flex shrink-0 justify-center border-b border-zinc-100 px-4 py-2">
           <div

@@ -5,35 +5,24 @@ import type { DocumentCommandAction } from "./document-command-types";
 
 type DocumentCommandRegistryConfig = {
   editorSurface: EditorSurface;
-  exportDocxDraft: () => void;
+  hasSaveConflict: boolean;
   isExportingDocx: boolean;
   messages: EditorMessages["commandPalette"];
-  openFind: () => void;
-  runDocumentReview: () => void;
-  saveDraft: () => void;
   saveState: SaveState;
-  setEditorSurface: (surface: EditorSurface) => void;
-  setWorkspaceOpen: (isOpen: boolean) => void;
 };
+
+export type DocumentCommandDefinition = Omit<DocumentCommandAction, "execute">;
 
 export function buildDocumentCommandRegistry({
   editorSurface,
-  exportDocxDraft,
+  hasSaveConflict,
   isExportingDocx,
   messages,
-  openFind,
-  runDocumentReview,
-  saveDraft,
   saveState,
-  setEditorSurface,
-  setWorkspaceOpen,
-}: DocumentCommandRegistryConfig): DocumentCommandAction[] {
+}: DocumentCommandRegistryConfig): DocumentCommandDefinition[] {
   return [
     {
       enabled: true,
-      execute: () => {
-        setWorkspaceOpen(true);
-      },
       group: "ai",
       id: "open-workspace",
       keywords: ["ai", "workspace", "chat", "review", "대화", "검토"],
@@ -41,10 +30,6 @@ export function buildDocumentCommandRegistry({
     },
     {
       enabled: true,
-      execute: () => {
-        setWorkspaceOpen(true);
-        runDocumentReview();
-      },
       group: "ai",
       id: "review-document",
       keywords: ["ai", "review", "document", "검토", "리뷰"],
@@ -52,7 +37,6 @@ export function buildDocumentCommandRegistry({
     },
     {
       enabled: true,
-      execute: openFind,
       group: "view",
       id: "find-document",
       keywords: ["find", "search", "replace", "찾기", "검색", "교체"],
@@ -61,7 +45,6 @@ export function buildDocumentCommandRegistry({
     },
     {
       enabled: editorSurface !== "source",
-      execute: () => setEditorSurface("source"),
       group: "view",
       id: "show-source",
       keywords: ["source", "raw", "json", "markdown", "소스"],
@@ -69,15 +52,13 @@ export function buildDocumentCommandRegistry({
     },
     {
       enabled: editorSurface !== "editor",
-      execute: () => setEditorSurface("editor"),
       group: "view",
       id: "show-editor",
       keywords: ["editor", "write", "edit", "편집"],
       label: messages.commands.showEditor,
     },
     {
-      enabled: saveState !== "saved" && saveState !== "saving",
-      execute: saveDraft,
+      enabled: !hasSaveConflict && saveState !== "saved" && saveState !== "saving",
       group: "document",
       id: "save-document",
       keywords: ["save", "저장"],
@@ -85,7 +66,6 @@ export function buildDocumentCommandRegistry({
     },
     {
       enabled: !isExportingDocx,
-      execute: exportDocxDraft,
       group: "export",
       id: "export-docx",
       keywords: ["docx", "export", "download", "내보내기", "다운로드"],

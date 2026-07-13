@@ -355,6 +355,91 @@ describe("document change service", () => {
     ]);
   });
 
+  it("lists tenant-scoped document changes with stable cursor pagination", async () => {
+    const db = await createChangeDatabase();
+    await seedDocument(db);
+    await seedProposal(db, { id: "proposal_1", replacement: "A", target: "alpha" });
+    await seedProposal(db, { id: "proposal_2", replacement: "B", target: "beta" });
+    const changes = createDocumentChangeService(db);
+    const first = await changes.applyProposal(context, {
+      documentId: "doc_1",
+      draft: draft("alpha beta"),
+      expectedRevision: 0,
+      proposalId: "proposal_1",
+      mode: "replace",
+    });
+    const second = await changes.applyProposal(context, {
+      documentId: "doc_1",
+      draft: draft("A beta"),
+      expectedRevision: 1,
+      proposalId: "proposal_2",
+      mode: "replace",
+    });
+    expect(first.ok && second.ok).toBe(true);
+    if (!first.ok || !second.ok) return;
+    await db.update(documentChanges).set({ createdAt: new Date("2026-01-01T00:00:01.000Z") })
+      .where(eq(documentChanges.id, first.change.id));
+    await db.update(documentChanges).set({ createdAt: new Date("2026-01-01T00:00:02.000Z") })
+      .where(eq(documentChanges.id, second.change.id));
+    await db.run(sql`UPDATE document_changes SET before_snapshot_json = 'not-json'`);
+
+    const firstPage = await changes.list(context, { documentId: "doc_1", limit: 1 });
+    const secondPage = await changes.list(context, {
+      documentId: "doc_1",
+      limit: 1,
+      cursor: firstPage.nextCursor ?? undefined,
+    });
+    const otherWorkspace = await changes.list(
+      { ...context, principalId: "principal_b", workspaceId: "workspace_b" },
+      { documentId: "doc_1", limit: 10 },
+    );
+
+    expect(firstPage).toMatchObject({
+      changes: [{ id: second.change.id, proposals: [{ id: "proposal_2", ordinal: 0 }] }],
+      nextCursor: second.change.id,
+    });
+    expect(secondPage).toMatchObject({
+      changes: [{ id: first.change.id, proposals: [{ id: "proposal_1", ordinal: 0 }] }],
+      nextCursor: null,
+    });
+    expect(otherWorkspace).toEqual({ changes: [], nextCursor: null });
+  });
+
+  it("lists one durable history item for a bulk document change", async () => {
+    const db = await createChangeDatabase();
+    await seedDocument(db);
+    await seedProposal(db, { id: "proposal_1", replacement: "A", target: "alpha" });
+    await seedProposal(db, { id: "proposal_2", replacement: "B", target: "beta" });
+    const changes = createDocumentChangeService(db);
+    const applied = await changes.applyProposalBatch(context, {
+      documentId: "doc_1",
+      draft: draft("alpha beta"),
+      expectedRevision: 0,
+      proposals: [
+        { mode: "replace", proposalId: "proposal_1" },
+        { mode: "replace", proposalId: "proposal_2" },
+      ],
+    });
+    expect(applied.ok).toBe(true);
+    await db.update(aiProposals).set({
+      targetText: "😀".repeat(1_000),
+      replacementText: "😀".repeat(2_000),
+    });
+
+    const history = await changes.list(context, { documentId: "doc_1", limit: 10 });
+
+    expect(history.changes).toHaveLength(1);
+    expect(history.changes[0]).toMatchObject({
+      kind: "batch",
+      proposals: [
+        { id: "proposal_1", ordinal: 0 },
+        { id: "proposal_2", ordinal: 1 },
+      ],
+    });
+    expect(history.changes[0]?.proposals.every((proposal) => proposal.targetText.length === 200)).toBe(true);
+    expect(history.changes[0]?.proposals.every((proposal) => proposal.replacementText.length === 500)).toBe(true);
+  });
+
   it("audits an explicitly requested one-item batch as a batch", async () => {
     const db = await createChangeDatabase();
     await seedDocument(db);

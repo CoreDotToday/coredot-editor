@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { documentReadinessValues } from "./document-metadata";
-import type { DocumentChangeResult } from "./document-change-service";
+import type { DocumentChangeIdentity, DocumentChangeResult } from "./document-change-service";
 import {
   documentResourceLimitResponse,
   parseBoundedJson,
@@ -46,7 +46,7 @@ export function validateDocumentChangeDraftResource(contentJson: unknown) {
 export function documentChangeResponse(result: DocumentChangeResult, singleProposal = false) {
   if (result.ok) {
     return NextResponse.json({
-      change: result.change,
+      change: toDocumentChangeIdentity(result.change),
       document: result.document,
       ...(singleProposal ? { proposal: result.proposals[0] } : { proposals: result.proposals }),
     });
@@ -67,4 +67,18 @@ export function documentChangeResponse(result: DocumentChangeResult, singlePropo
     },
     { status: 409 },
   );
+}
+
+function toDocumentChangeIdentity(
+  change: Extract<DocumentChangeResult, { ok: true }>["change"],
+): DocumentChangeIdentity {
+  return {
+    afterRevision: change.afterRevision,
+    batchId: change.batchId,
+    createdAt: change.createdAt,
+    documentId: change.documentId,
+    id: change.id,
+    kind: change.kind,
+    undoneAt: change.undoneAt,
+  };
 }

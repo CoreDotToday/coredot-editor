@@ -106,10 +106,20 @@ describe("POST /api/proposals/[id]/apply", () => {
     const response = await POST(createJsonRequest(createValidPayload()), createContext());
 
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({
-      change: { id: "change_1", principalId: TEST_REQUEST_CONTEXT.principalId },
+    const body = await response.json();
+    expect(body).toMatchObject({
+      change: { id: "change_1" },
       document: { id: "doc_1", revision: 1 },
       proposal: { id: "proposal_1", status: "accepted" },
+    });
+    expect(body.change).toEqual({
+      afterRevision: 1,
+      batchId: null,
+      createdAt: createdAt.toISOString(),
+      documentId: "doc_1",
+      id: "change_1",
+      kind: "single",
+      undoneAt: null,
     });
     expect(applyProposal).toHaveBeenCalledWith(TEST_REQUEST_CONTEXT, {
       documentId: "doc_1",

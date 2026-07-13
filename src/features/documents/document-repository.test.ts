@@ -87,6 +87,30 @@ describe("document repository", () => {
     expect(document.revision).toBe(0);
   });
 
+  it("creates a complete draft atomically with metadata and readiness", async () => {
+    const db = await createIsolatedDocumentDb();
+    const { createDocumentFromDraft } = createDocumentRepository(db);
+
+    const document = await createDocumentFromDraft(workspaceA, {
+      title: "Recovered local draft",
+      contentJson: {
+        type: "doc",
+        content: [{ type: "paragraph", content: [{ type: "text", text: "Unsaved local work" }] }],
+      },
+      metadataJson: { owner: "Legal", tags: ["recovered"] },
+      readiness: "needs_review",
+    });
+
+    expect(document).toMatchObject({
+      title: "Recovered local draft",
+      plainText: "Unsaved local work",
+      metadataJson: { owner: "Legal", tags: ["recovered"] },
+      readiness: "needs_review",
+      revision: 0,
+      status: "draft",
+    });
+  });
+
   it("archives an existing document and removes it from draft listings", async () => {
     const db = await createIsolatedDocumentDb();
     const { archiveDocument, createDocumentDraft, getDocumentById, listDocuments } = createDocumentRepository(db);

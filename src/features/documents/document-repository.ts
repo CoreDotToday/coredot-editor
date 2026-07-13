@@ -56,6 +56,34 @@ export function createDocumentRepository(database: DocumentDatabase = db) {
       return rows[0]!;
     },
 
+    async createDocumentFromDraft(
+      scope: WorkspaceScope,
+      input: {
+        title: string;
+        contentJson: TiptapJson;
+        metadataJson: DocumentMetadata;
+        readiness: DocumentReadiness;
+      },
+    ) {
+      const now = new Date();
+      const rows = await database
+        .insert(documents)
+        .values({
+          workspaceId: scope.workspaceId,
+          title: input.title,
+          contentJson: input.contentJson,
+          metadataJson: normalizeDocumentMetadata(input.metadataJson),
+          plainText: extractPlainTextFromTiptap(input.contentJson),
+          readiness: normalizeDocumentReadiness(input.readiness),
+          status: "draft",
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning();
+
+      return rows[0]!;
+    },
+
     async listDocuments(scope: WorkspaceScope) {
       return database
         .select()
@@ -208,6 +236,7 @@ const defaultRepository = createDocumentRepository();
 
 export const createDocumentDraft = defaultRepository.createDocumentDraft;
 export const createDocumentFromContent = defaultRepository.createDocumentFromContent;
+export const createDocumentFromDraft = defaultRepository.createDocumentFromDraft;
 export const listDocuments = defaultRepository.listDocuments;
 export const getDocumentById = defaultRepository.getDocumentById;
 export const getDocumentsByIds = defaultRepository.getDocumentsByIds;
