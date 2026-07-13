@@ -29,9 +29,22 @@ export default async function DocumentPage({ params }: DocumentPageProps) {
   return (
     <DocumentShell
       aiRuns={aiRuns}
-      document={document}
+      document={{
+        id: document.id,
+        title: document.title,
+        contentJson: document.contentJson,
+        plainText: document.plainText,
+        revision: document.revision,
+        metadataJson: document.metadataJson,
+        readiness: document.readiness,
+      }}
       proposals={proposals}
-      referenceDocuments={referenceDocuments}
+      referenceDocuments={referenceDocuments.map((referenceDocument) => ({
+        id: referenceDocument.id,
+        title: referenceDocument.title,
+        plainText: referenceDocument.plainText,
+        updatedAt: referenceDocument.updatedAt,
+      }))}
       templates={templates}
     />
   );

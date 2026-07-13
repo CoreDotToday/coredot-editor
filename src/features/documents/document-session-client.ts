@@ -93,6 +93,17 @@ export class DocumentSessionRequestError extends Error {
   }
 }
 
+export class DocumentSessionConflictError extends DocumentSessionRequestError {
+  constructor(
+    status: number,
+    body: Record<string, unknown>,
+    readonly serverDocument: DocumentSessionDocument,
+  ) {
+    super(status, body);
+    this.name = "DocumentSessionConflictError";
+  }
+}
+
 export function createDocumentSessionClient(request: RequestFunction = fetch) {
   async function readBody(response: Response): Promise<Record<string, unknown>> {
     const body = await response.json().catch(() => ({}));
@@ -106,6 +117,13 @@ export function createDocumentSessionClient(request: RequestFunction = fetch) {
   ): Promise<DocumentSessionChangeResponse> {
     const response = await requestJson(request, url, "POST", payload);
     const body = await readBody(response);
+    if (
+      response.status === 409 &&
+      body.reason === "revision_conflict" &&
+      isDocumentSessionDocument(body.document)
+    ) {
+      throw new DocumentSessionConflictError(response.status, body, body.document);
+    }
     if (!response.ok) throw new DocumentSessionRequestError(response.status, body);
 
     const document = body.document;
@@ -201,13 +219,27 @@ export function createDocumentSessionClient(request: RequestFunction = fetch) {
       };
     },
 
-    async createFromDraft(draft: DocumentSessionDraft): Promise<DocumentSessionDocument> {
-      const response = await requestJson(request, "/api/documents", "POST", draft);
+    async createFromDraft(
+      draft: DocumentSessionDraft,
+      creationKey: string,
+    ): Promise<{ document: DocumentSessionDocument; replayed: boolean }> {
+      const response = await request("/api/documents", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": creationKey,
+        },
+        body: JSON.stringify(draft),
+      });
       const body = await readBody(response);
-      if (!response.ok || !isDocumentSessionDocument(body.document)) {
+      if (
+        !response.ok ||
+        !isDocumentSessionDocument(body.document) ||
+        typeof body.replayed !== "boolean"
+      ) {
         throw new DocumentSessionRequestError(response.status, body);
       }
-      return body.document;
+      return { document: body.document, replayed: body.replayed };
     },
   };
 }

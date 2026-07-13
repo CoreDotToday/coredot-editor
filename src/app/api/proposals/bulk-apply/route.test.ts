@@ -56,6 +56,7 @@ function successResult() {
     document: {
       ...dirtyDocument,
       workspaceId: "vitest-workspace",
+      creationKey: null,
       plainText: "ALPHA BETA",
       status: "draft" as const,
       revision: 1,

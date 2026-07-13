@@ -22,6 +22,7 @@ export const documents = sqliteTable(
   {
     id: text("id").primaryKey().$defaultFn(() => nanoid()),
     workspaceId: text("workspace_id").notNull(),
+    creationKey: text("creation_key"),
     title: text("title").notNull(),
     contentJson: text("content_json", { mode: "json" }).$type<TiptapJson>().notNull(),
     plainText: text("plain_text").notNull().default(""),
@@ -41,6 +42,7 @@ export const documents = sqliteTable(
   (table) => [
     index("documents_readiness_idx").on(table.readiness),
     index("documents_workspace_status_updated_idx").on(table.workspaceId, table.status, table.updatedAt),
+    uniqueIndex("documents_workspace_creation_key_unique").on(table.workspaceId, table.creationKey),
     uniqueIndex("documents_workspace_id_id_unique").on(table.workspaceId, table.id),
     check("documents_status_check", sql`${table.status} in ('draft', 'archived')`),
     check("documents_readiness_check", sql`${table.readiness} in ('draft', 'needs_review', 'ready', 'approved')`),

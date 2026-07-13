@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { createDocumentFromContent } from "@/features/documents/document-repository";
+import { toPublicDocument } from "@/features/documents/document-public";
 import { docxBufferToTiptapJson } from "@/features/documents/docx-conversion";
 import { createProtectedOptionsHandler, createProtectedRouteHandler } from "@/features/auth/route-context";
 import { enforceRequestBudget } from "@/features/security/request-budget";
@@ -55,7 +56,7 @@ const postHandler = createProtectedRouteHandler(async (context, request: Request
     conversion.contentJson,
   );
 
-  return NextResponse.json({ document, warnings: conversion.warnings }, { status: 201 });
+  return NextResponse.json({ document: toPublicDocument(document), warnings: conversion.warnings }, { status: 201 });
 }, { beforeWorkspaceBootstrap: (context) => enforceRequestBudget(context, "documents.import") });
 
 export async function POST(request: Request) {

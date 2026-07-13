@@ -596,6 +596,52 @@ describe("DocumentShell", () => {
     expect(screen.getByText("저장되지 않음")).toBeInTheDocument();
   });
 
+  it("lets the newest overlapping save own an equal-revision conflict", async () => {
+    const user = userEvent.setup();
+    const firstSave = createDeferredResponse();
+    const secondSave = createDeferredResponse();
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockReturnValueOnce(firstSave.promise)
+      .mockReturnValueOnce(secondSave.promise);
+
+    render(<DocumentShell aiRuns={[]} document={createDocument("doc_1", "Initial")} templates={[]} />);
+    const titleInput = screen.getByRole("textbox", { name: "문서 제목" });
+
+    await user.clear(titleInput);
+    await user.type(titleInput, "Draft v1");
+    await user.click(screen.getByRole("button", { name: "저장" }));
+    await user.type(titleInput, " + v2");
+    await user.click(screen.getByRole("button", { name: "저장" }));
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toMatchObject({
+      expectedRevision: 0,
+      title: "Draft v1",
+    });
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toMatchObject({
+      expectedRevision: 0,
+      title: "Draft v1 + v2",
+    });
+
+    await act(async () => {
+      firstSave.resolve(new Response(JSON.stringify({
+        document: { ...createDocument("doc_1", "Draft v1"), revision: 1 },
+      })));
+      await firstSave.promise;
+    });
+    await act(async () => {
+      secondSave.resolve(new Response(JSON.stringify({
+        reason: "revision_conflict",
+        document: { ...createDocument("doc_1", "Draft v1"), revision: 1 },
+      }), { status: 409 }));
+      await secondSave.promise;
+    });
+
+    expect(titleInput).toHaveValue("Draft v1 + v2");
+    expect(screen.getByRole("alert")).toHaveTextContent("다른 곳에서 문서가 변경되었습니다.");
+    expect(screen.getByRole("status", { name: "문서 저장 상태" })).toHaveTextContent("저장 실패");
+  });
+
   it("autosaves dirty drafts after a short debounce", async () => {
     vi.useFakeTimers();
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
@@ -1095,6 +1141,128 @@ describe("DocumentShell", () => {
     expect(screen.getByText("대기 중")).toBeInTheDocument();
   });
 
+  it("merges paginated change history without duplicates and stops at the end", async () => {
+    const user = userEvent.setup();
+    const first = {
+      ...createChangeIdentity("change_1", 2),
+      proposals: [{
+        id: "proposal_1",
+        targetText: "First target",
+        replacementText: "First replacement",
+        appliedMode: "replace",
+        ordinal: 0,
+      }],
+    };
+    const second = {
+      ...createChangeIdentity("change_2", 1),
+      proposals: [{
+        id: "proposal_2",
+        targetText: "Second target",
+        replacementText: "Second replacement",
+        appliedMode: "replace",
+        ordinal: 0,
+      }],
+    };
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({ changes: [first], nextCursor: "older" })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ changes: [first, second], nextCursor: null })));
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={{ ...createDocument("doc_1", "History"), revision: 2 }}
+        templates={[]}
+      />,
+    );
+
+    await user.click(screen.getByRole("tab", { name: "변경내역" }));
+    await screen.findByText("First target");
+    await user.click(screen.getByRole("button", { name: "더 불러오기" }));
+    await screen.findByText("Second target");
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "/api/document-changes?documentId=doc_1&limit=20&cursor=older",
+      { method: "GET" },
+    );
+    expect(screen.getAllByText("First target")).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "더 불러오기" })).not.toBeInTheDocument();
+  });
+
+  it("keeps the change-history cursor available after a load-more error", async () => {
+    const user = userEvent.setup();
+    const first = {
+      ...createChangeIdentity("change_1", 2),
+      proposals: [{
+        id: "proposal_1",
+        targetText: "First target",
+        replacementText: "First replacement",
+        appliedMode: "replace",
+        ordinal: 0,
+      }],
+    };
+    const second = {
+      ...createChangeIdentity("change_2", 1),
+      proposals: [{
+        id: "proposal_2",
+        targetText: "Second target",
+        replacementText: "Second replacement",
+        appliedMode: "replace",
+        ordinal: 0,
+      }],
+    };
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({ changes: [first], nextCursor: "older" })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "temporary" }), { status: 500 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ changes: [second], nextCursor: null })));
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={{ ...createDocument("doc_1", "History"), revision: 2 }}
+        templates={[]}
+      />,
+    );
+
+    await user.click(screen.getByRole("tab", { name: "변경내역" }));
+    await user.click(await screen.findByRole("button", { name: "더 불러오기" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("변경내역을 불러오지 못했습니다. 다시 시도해 주세요.");
+    expect(screen.getByText("First target")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "더 불러오기" }));
+    await screen.findByText("Second target");
+    expect(fetchMock.mock.calls[1]?.[0]).toBe("/api/document-changes?documentId=doc_1&limit=20&cursor=older");
+    expect(fetchMock.mock.calls[2]?.[0]).toBe("/api/document-changes?documentId=doc_1&limit=20&cursor=older");
+  });
+
+  it("routes an undo revision conflict into draft recovery without overwriting local content", async () => {
+    const user = userEvent.setup();
+    const change = {
+      ...createChangeIdentity("change_1", 0),
+      proposals: [{
+        id: "proposal_1",
+        targetText: "Original target",
+        replacementText: "Replacement",
+        appliedMode: "replace",
+        ordinal: 0,
+      }],
+    };
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({ changes: [change], nextCursor: null })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        reason: "revision_conflict",
+        document: { ...createDocumentWithContent("doc_1", "Server title", "Server body"), revision: 1 },
+      }), { status: 409 }));
+
+    render(<DocumentShell aiRuns={[]} document={createDocumentWithContent("doc_1", "Local title", "Local body")} templates={[]} />);
+    await user.click(screen.getByRole("tab", { name: "변경내역" }));
+    await user.click(await screen.findByRole("button", { name: "Original target 변경 되돌리기" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("다른 곳에서 문서가 변경되었습니다.");
+    expect(screen.getByRole("textbox", { name: "문서 제목" })).toHaveValue("Local title");
+    expect(screen.getByTestId("mock-document-body")).toHaveTextContent("Local body");
+  });
+
   it("offers English copy and atomic save-as-new actions without overwriting a conflicted draft", async () => {
     const user = userEvent.setup();
     window.localStorage.setItem("coredot-editor-language", "en");
@@ -1154,6 +1322,7 @@ describe("DocumentShell", () => {
           readiness: "draft",
           revision: 0,
         },
+        replayed: false,
       }), { status: 201 }));
 
     render(<DocumentShell aiRuns={[]} document={createDocument("doc_1", "Initial")} templates={[]} />);
@@ -1167,6 +1336,275 @@ describe("DocumentShell", () => {
     const event = new Event("beforeunload", { cancelable: true });
     window.dispatchEvent(event);
     expect(event.defaultPrevented).toBe(false);
+  });
+
+  it("keeps edits made during save-as-new and retries them into the created copy", async () => {
+    const user = userEvent.setup();
+    window.localStorage.setItem("coredot-editor-language", "en");
+    const createCopy = createDeferredResponse();
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        reason: "revision_conflict",
+        document: {
+          ...createDocumentWithContent("doc_1", "Server version", "Server body"),
+          revision: 1,
+        },
+      }), { status: 409 }))
+      .mockReturnValueOnce(createCopy.promise)
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        document: {
+          ...createDocumentWithContent("doc_copy", "Latest local copy", "Local body"),
+          revision: 1,
+        },
+      })));
+
+    render(<DocumentShell aiRuns={[]} document={createDocument("doc_1", "Initial")} templates={[]} />);
+    const titleInput = screen.getByRole("textbox", { name: "Document title" });
+    await user.clear(titleInput);
+    await user.type(titleInput, "Local copy");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await screen.findByRole("alert");
+
+    await user.click(screen.getByRole("button", { name: "Save as new document" }));
+    await user.clear(titleInput);
+    await user.type(titleInput, "Latest local copy");
+    await act(async () => {
+      createCopy.resolve(new Response(JSON.stringify({
+        document: {
+          ...createDocumentWithContent("doc_copy", "Local copy", "Local body"),
+          revision: 0,
+        },
+        replayed: false,
+      }), { status: 201 }));
+      await createCopy.promise;
+    });
+
+    expect(screen.getByText(
+      "The local draft changed while the copy was being saved. Review it, then save again.",
+    )).toHaveAttribute("role", "status");
+    const beforeRetry = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(beforeRetry);
+    expect(beforeRetry.defaultPrevented).toBe(true);
+
+    await user.click(screen.getByRole("button", { name: "Save as new document" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+    expect(fetchMock.mock.calls[2]?.[0]).toBe("/api/documents/doc_copy");
+    expect(fetchMock.mock.calls[2]?.[1]).toMatchObject({ method: "PUT" });
+    expect(JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body))).toMatchObject({
+      expectedRevision: 0,
+      title: "Latest local copy",
+    });
+    const afterRetry = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(afterRetry);
+    expect(afterRetry.defaultPrevented).toBe(false);
+  });
+
+  it("replays a lost recovery-create response with the same key before saving the latest draft", async () => {
+    const user = userEvent.setup();
+    window.localStorage.setItem("coredot-editor-language", "en");
+    const originalCopy = {
+      ...createDocumentWithContent("doc_copy", "Local copy", "Local body"),
+      revision: 0,
+    };
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        reason: "revision_conflict",
+        document: {
+          ...createDocumentWithContent("doc_1", "Server version", "Server body"),
+          revision: 1,
+        },
+      }), { status: 409 }))
+      .mockRejectedValueOnce(new Error("response lost after commit"))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ document: originalCopy, replayed: true })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        document: { ...originalCopy, title: "Latest local copy", revision: 1 },
+      })));
+
+    render(<DocumentShell aiRuns={[]} document={createDocument("doc_1", "Initial")} templates={[]} />);
+    const titleInput = screen.getByRole("textbox", { name: "Document title" });
+    await user.clear(titleInput);
+    await user.type(titleInput, "Local copy");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await screen.findByRole("alert");
+
+    await user.click(screen.getByRole("button", { name: "Save as new document" }));
+    expect(await screen.findByText("Could not save the local draft as a new document.")).toBeInTheDocument();
+    await user.clear(titleInput);
+    await user.type(titleInput, "Latest local copy");
+    await user.click(screen.getByRole("button", { name: "Save as new document" }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4));
+    const firstCreationHeaders = fetchMock.mock.calls[1]?.[1]?.headers as Record<string, string>;
+    const replayHeaders = fetchMock.mock.calls[2]?.[1]?.headers as Record<string, string>;
+    expect(firstCreationHeaders["Idempotency-Key"]).toMatch(/^[A-Za-z0-9_-]{16,128}$/);
+    expect(replayHeaders["Idempotency-Key"]).toBe(firstCreationHeaders["Idempotency-Key"]);
+    expect(fetchMock.mock.calls[3]?.[0]).toBe("/api/documents/doc_copy");
+    expect(JSON.parse(String(fetchMock.mock.calls[3]?.[1]?.body))).toMatchObject({
+      expectedRevision: 0,
+      title: "Latest local copy",
+    });
+    const afterRecovery = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(afterRecovery);
+    expect(afterRecovery.defaultPrevented).toBe(false);
+  });
+
+  it("does not overwrite a recovery copy after its own revision conflict", async () => {
+    const user = userEvent.setup();
+    window.localStorage.setItem("coredot-editor-language", "en");
+    const createCopy = createDeferredResponse();
+    const originalCopy = {
+      ...createDocumentWithContent("doc_copy", "Local copy", "Local body"),
+      revision: 0,
+    };
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        reason: "revision_conflict",
+        document: {
+          ...createDocumentWithContent("doc_1", "Server version", "Server body"),
+          revision: 1,
+        },
+      }), { status: 409 }))
+      .mockReturnValueOnce(createCopy.promise)
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        reason: "revision_conflict",
+        document: { ...originalCopy, title: "Other writer copy", revision: 1 },
+      }), { status: 409 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        document: { ...originalCopy, id: "doc_fresh", title: "Latest local copy" },
+        replayed: false,
+      }), { status: 201 }));
+
+    render(<DocumentShell aiRuns={[]} document={createDocument("doc_1", "Initial")} templates={[]} />);
+    const titleInput = screen.getByRole("textbox", { name: "Document title" });
+    await user.clear(titleInput);
+    await user.type(titleInput, "Local copy");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await screen.findByRole("alert");
+
+    await user.click(screen.getByRole("button", { name: "Save as new document" }));
+    await user.clear(titleInput);
+    await user.type(titleInput, "Latest local copy");
+    await act(async () => {
+      createCopy.resolve(new Response(JSON.stringify({ document: originalCopy, replayed: false }), { status: 201 }));
+      await createCopy.promise;
+    });
+    const initialCreationHeaders = fetchMock.mock.calls[1]?.[1]?.headers as Record<string, string>;
+
+    await user.click(screen.getByRole("button", { name: "Save as new document" }));
+    expect(await screen.findByText(
+      "The recovery copy changed somewhere else. Nothing was overwritten. Try again to create a separate copy.",
+    )).toHaveAttribute("role", "status");
+    expect(titleInput).toHaveValue("Latest local copy");
+    const afterCopyConflict = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(afterCopyConflict);
+    expect(afterCopyConflict.defaultPrevented).toBe(true);
+
+    await user.click(screen.getByRole("button", { name: "Save as new document" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4));
+    expect(fetchMock.mock.calls[3]?.[0]).toBe("/api/documents");
+    const freshCreationHeaders = fetchMock.mock.calls[3]?.[1]?.headers as Record<string, string>;
+    expect(freshCreationHeaders["Idempotency-Key"]).not.toBe(initialCreationHeaders["Idempotency-Key"]);
+    expect(JSON.parse(String(fetchMock.mock.calls[3]?.[1]?.body))).toMatchObject({ title: "Latest local copy" });
+  });
+
+  it("abandons a missing recovery copy and creates a fresh copy on the next retry", async () => {
+    const user = userEvent.setup();
+    window.localStorage.setItem("coredot-editor-language", "en");
+    const createCopy = createDeferredResponse();
+    const originalCopy = {
+      ...createDocumentWithContent("doc_copy", "Local copy", "Local body"),
+      revision: 0,
+    };
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        reason: "revision_conflict",
+        document: {
+          ...createDocumentWithContent("doc_1", "Server version", "Server body"),
+          revision: 1,
+        },
+      }), { status: 409 }))
+      .mockReturnValueOnce(createCopy.promise)
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "Document not found" }), { status: 404 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        document: { ...originalCopy, id: "doc_fresh", title: "Latest local copy" },
+        replayed: false,
+      }), { status: 201 }));
+
+    render(<DocumentShell aiRuns={[]} document={createDocument("doc_1", "Initial")} templates={[]} />);
+    const titleInput = screen.getByRole("textbox", { name: "Document title" });
+    await user.clear(titleInput);
+    await user.type(titleInput, "Local copy");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await screen.findByRole("alert");
+
+    await user.click(screen.getByRole("button", { name: "Save as new document" }));
+    await user.clear(titleInput);
+    await user.type(titleInput, "Latest local copy");
+    await act(async () => {
+      createCopy.resolve(new Response(JSON.stringify({ document: originalCopy, replayed: false }), { status: 201 }));
+      await createCopy.promise;
+    });
+    const initialCreationHeaders = fetchMock.mock.calls[1]?.[1]?.headers as Record<string, string>;
+
+    await user.click(screen.getByRole("button", { name: "Save as new document" }));
+    expect(await screen.findByText(
+      "The recovery copy changed somewhere else. Nothing was overwritten. Try again to create a separate copy.",
+    )).toHaveAttribute("role", "status");
+    expect(titleInput).toHaveValue("Latest local copy");
+    const afterMissingCopy = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(afterMissingCopy);
+    expect(afterMissingCopy.defaultPrevented).toBe(true);
+
+    await user.click(screen.getByRole("button", { name: "Save as new document" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4));
+    expect(fetchMock.mock.calls[3]?.[0]).toBe("/api/documents");
+    const freshCreationHeaders = fetchMock.mock.calls[3]?.[1]?.headers as Record<string, string>;
+    expect(freshCreationHeaders["Idempotency-Key"]).not.toBe(initialCreationHeaders["Idempotency-Key"]);
+  });
+
+  it("keeps an ambiguous missing response targeted at the same recovery copy", async () => {
+    const user = userEvent.setup();
+    window.localStorage.setItem("coredot-editor-language", "en");
+    const createCopy = createDeferredResponse();
+    const originalCopy = {
+      ...createDocumentWithContent("doc_copy", "Local copy", "Local body"),
+      revision: 0,
+    };
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        reason: "revision_conflict",
+        document: {
+          ...createDocumentWithContent("doc_1", "Server version", "Server body"),
+          revision: 1,
+        },
+      }), { status: 409 }))
+      .mockReturnValueOnce(createCopy.promise)
+      .mockRejectedValueOnce(new Error("recovery PUT response lost"))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        document: { ...originalCopy, title: "Latest local copy", revision: 1 },
+      })));
+
+    render(<DocumentShell aiRuns={[]} document={createDocument("doc_1", "Initial")} templates={[]} />);
+    const titleInput = screen.getByRole("textbox", { name: "Document title" });
+    await user.clear(titleInput);
+    await user.type(titleInput, "Local copy");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await screen.findByRole("alert");
+
+    await user.click(screen.getByRole("button", { name: "Save as new document" }));
+    await user.clear(titleInput);
+    await user.type(titleInput, "Latest local copy");
+    await act(async () => {
+      createCopy.resolve(new Response(JSON.stringify({ document: originalCopy, replayed: false }), { status: 201 }));
+      await createCopy.promise;
+    });
+
+    await user.click(screen.getByRole("button", { name: "Save as new document" }));
+    expect(await screen.findByText("Could not save the local draft as a new document.")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Save as new document" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4));
+    expect(fetchMock.mock.calls[2]?.[0]).toBe("/api/documents/doc_copy");
+    expect(fetchMock.mock.calls[3]?.[0]).toBe("/api/documents/doc_copy");
   });
 
   it("blocks internal sidebar navigation while local edits are unsaved", () => {
@@ -2470,6 +2908,32 @@ describe("DocumentShell", () => {
     expect(screen.getByText("저장됨")).toBeInTheDocument();
   });
 
+  it("routes a single proposal revision conflict into draft recovery", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response(JSON.stringify({
+      reason: "revision_conflict",
+      document: {
+        ...createDocumentWithContent("doc_1", "Server title", "Server body"),
+        revision: 1,
+      },
+    }), { status: 409 }));
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Local title", "growth was good")}
+        proposals={[createProposal("proposal_1")]}
+        templates={[createTemplate("tpl_1", "Board review")]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "growth was good 제안으로 교체" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("다른 곳에서 문서가 변경되었습니다.");
+    expect(screen.getByRole("textbox", { name: "문서 제목" })).toHaveValue("Local title");
+    expect(screen.getByTestId("mock-document-body")).toHaveTextContent("growth was good");
+  });
+
   it("uses the revision returned by proposal application for the next draft save", async () => {
     const user = userEvent.setup();
     const appliedDocument = {
@@ -2924,6 +3388,35 @@ describe("DocumentShell", () => {
     expect(screen.getByTestId("mock-document-body")).toHaveTextContent("growth was good owner is unclear");
     expect(screen.getAllByText("대기 중")).toHaveLength(2);
     expect(screen.getByRole("alert")).toHaveTextContent("제안 상태를 업데이트하지 못했습니다.");
+  });
+
+  it("routes a bulk proposal revision conflict into draft recovery", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response(JSON.stringify({
+      reason: "revision_conflict",
+      document: {
+        ...createDocumentWithContent("doc_1", "Server title", "Server body"),
+        revision: 1,
+      },
+    }), { status: 409 }));
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Local title", "growth was good owner is unclear")}
+        proposals={[
+          createProposal("proposal_1", "pending", "growth was good"),
+          createProposal("proposal_2", "pending", "owner is unclear"),
+        ]}
+        templates={[createTemplate("tpl_1", "Board review")]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "대기 중인 모든 제안 수락" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("다른 곳에서 문서가 변경되었습니다.");
+    expect(screen.getByRole("textbox", { name: "문서 제목" })).toHaveValue("Local title");
+    expect(screen.getByTestId("mock-document-body")).toHaveTextContent("growth was good owner is unclear");
   });
 
   it("does not bulk accept a current-session proposal after the draft content changes", async () => {

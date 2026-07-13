@@ -53,6 +53,7 @@ async function createConcurrencyDatabase(options: { wal?: boolean } = {}) {
     CREATE TABLE documents (
       id text PRIMARY KEY NOT NULL,
       workspace_id text NOT NULL,
+      creation_key text,
       title text NOT NULL,
       content_json text NOT NULL,
       plain_text text DEFAULT '' NOT NULL,
@@ -64,6 +65,7 @@ async function createConcurrencyDatabase(options: { wal?: boolean } = {}) {
       updated_at integer NOT NULL
     );
     CREATE UNIQUE INDEX documents_workspace_id_id_unique ON documents(workspace_id, id);
+    CREATE UNIQUE INDEX documents_workspace_creation_key_unique ON documents(workspace_id, creation_key);
     CREATE TABLE ai_proposals (
       id text PRIMARY KEY NOT NULL,
       workspace_id text NOT NULL,

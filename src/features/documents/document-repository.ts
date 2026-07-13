@@ -84,6 +84,53 @@ export function createDocumentRepository(database: DocumentDatabase = db) {
       return rows[0]!;
     },
 
+    async createDocumentFromDraftIdempotently(
+      scope: WorkspaceScope,
+      input: {
+        title: string;
+        contentJson: TiptapJson;
+        metadataJson: DocumentMetadata;
+        readiness: DocumentReadiness;
+      },
+      creationKey: string,
+    ) {
+      const now = new Date();
+      const rows = await database
+        .insert(documents)
+        .values({
+          workspaceId: scope.workspaceId,
+          creationKey,
+          title: input.title,
+          contentJson: input.contentJson,
+          metadataJson: normalizeDocumentMetadata(input.metadataJson),
+          plainText: extractPlainTextFromTiptap(input.contentJson),
+          readiness: normalizeDocumentReadiness(input.readiness),
+          status: "draft",
+          createdAt: now,
+          updatedAt: now,
+        })
+        .onConflictDoNothing({ target: [documents.workspaceId, documents.creationKey] })
+        .returning();
+
+      if (rows[0]) {
+        return { document: rows[0], replayed: false as const };
+      }
+
+      const existingRows = await database
+        .select()
+        .from(documents)
+        .where(and(
+          eq(documents.workspaceId, scope.workspaceId),
+          eq(documents.creationKey, creationKey),
+        ))
+        .limit(1);
+      const existingDocument = existingRows[0];
+      if (!existingDocument) {
+        throw new Error("Idempotent document creation did not produce a document");
+      }
+      return { document: existingDocument, replayed: true as const };
+    },
+
     async listDocuments(scope: WorkspaceScope) {
       return database
         .select()
@@ -138,7 +185,12 @@ export function createDocumentRepository(database: DocumentDatabase = db) {
       const limit = Math.max(1, Math.min(input.limit ?? 12, 50));
       const normalizedQuery = input.query?.trim().toLocaleLowerCase() ?? "";
       const rows = await database
-        .select()
+        .select({
+          id: documents.id,
+          plainText: documents.plainText,
+          title: documents.title,
+          updatedAt: documents.updatedAt,
+        })
         .from(documents)
         .where(and(eq(documents.workspaceId, scope.workspaceId), eq(documents.status, "draft")))
         .orderBy(desc(documents.updatedAt));
@@ -217,7 +269,7 @@ export function createDocumentRepository(database: DocumentDatabase = db) {
       const now = new Date();
       const rows = await database
         .update(documents)
-        .set({ status: "archived", updatedAt: now })
+        .set({ creationKey: null, status: "archived", updatedAt: now })
         .where(
           and(
             eq(documents.workspaceId, scope.workspaceId),
@@ -237,6 +289,7 @@ const defaultRepository = createDocumentRepository();
 export const createDocumentDraft = defaultRepository.createDocumentDraft;
 export const createDocumentFromContent = defaultRepository.createDocumentFromContent;
 export const createDocumentFromDraft = defaultRepository.createDocumentFromDraft;
+export const createDocumentFromDraftIdempotently = defaultRepository.createDocumentFromDraftIdempotently;
 export const listDocuments = defaultRepository.listDocuments;
 export const getDocumentById = defaultRepository.getDocumentById;
 export const getDocumentsByIds = defaultRepository.getDocumentsByIds;

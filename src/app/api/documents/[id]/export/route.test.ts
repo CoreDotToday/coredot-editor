@@ -67,6 +67,7 @@ describe("POST /api/documents/[id]/export", () => {
     vi.mocked(getDocumentById).mockResolvedValueOnce({
       id: "doc_1",
       workspaceId: "vitest-workspace",
+      creationKey: null,
       title: "Draft",
       contentJson: { type: "doc" },
       metadataJson: {},
@@ -96,6 +97,7 @@ describe("POST /api/documents/[id]/export", () => {
     vi.mocked(getDocumentById).mockResolvedValueOnce({
       id: "doc_1",
       workspaceId: "vitest-workspace",
+      creationKey: null,
       title: "Draft",
       contentJson: { type: "doc" },
       metadataJson: {},
@@ -145,6 +147,7 @@ describe("POST /api/documents/[id]/export", () => {
     vi.mocked(getDocumentById).mockResolvedValueOnce({
       id: "doc_1",
       workspaceId: "vitest-workspace",
+      creationKey: null,
       title: "Draft",
       contentJson: { type: "doc", content: [{ type: "paragraph" }] },
       metadataJson: {},
@@ -171,6 +174,7 @@ describe("POST /api/documents/[id]/export", () => {
     vi.mocked(getDocumentById).mockResolvedValueOnce({
       id: "doc_1",
       workspaceId: "vitest-workspace",
+      creationKey: null,
       title: "Saved title",
       contentJson: { type: "doc", content: [{ type: "paragraph" }] },
       metadataJson: {},

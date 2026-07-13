@@ -32,6 +32,7 @@ function successResult() {
     document: {
       id: "doc_1",
       workspaceId: "vitest-workspace",
+      creationKey: null,
       ...snapshot,
       plainText: "before",
       status: "draft" as const,

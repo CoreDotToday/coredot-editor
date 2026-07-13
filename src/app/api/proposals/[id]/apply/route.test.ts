@@ -36,6 +36,7 @@ function createDocumentRecord(overrides: Partial<DocumentRecord> = {}): Document
   return {
     id: "doc_1",
     workspaceId: "vitest-workspace",
+    creationKey: "internal-recovery-key-123456",
     title: "Dirty draft",
     contentJson: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "new" }] }] },
     plainText: "new",
@@ -121,6 +122,7 @@ describe("POST /api/proposals/[id]/apply", () => {
       kind: "single",
       undoneAt: null,
     });
+    expect(body.document).not.toHaveProperty("creationKey");
     expect(applyProposal).toHaveBeenCalledWith(TEST_REQUEST_CONTEXT, {
       documentId: "doc_1",
       draft: {

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { documentReadinessValues } from "./document-metadata";
 import type { DocumentChangeIdentity, DocumentChangeResult } from "./document-change-service";
+import { toPublicDocument } from "./document-public";
 import {
   documentResourceLimitResponse,
   parseBoundedJson,
@@ -47,7 +48,7 @@ export function documentChangeResponse(result: DocumentChangeResult, singlePropo
   if (result.ok) {
     return NextResponse.json({
       change: toDocumentChangeIdentity(result.change),
-      document: result.document,
+      document: toPublicDocument(result.document),
       ...(singleProposal ? { proposal: result.proposals[0] } : { proposals: result.proposals }),
     });
   }
@@ -60,7 +61,7 @@ export function documentChangeResponse(result: DocumentChangeResult, singlePropo
   }
   return NextResponse.json(
     {
-      document: result.document,
+      document: result.document ? toPublicDocument(result.document) : undefined,
       error: "Document change conflict",
       ...(singleProposal ? { proposal: result.proposals?.[0] } : { proposals: result.proposals }),
       reason: result.applyFailureReason ?? result.reason,

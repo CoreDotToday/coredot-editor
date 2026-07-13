@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { archiveDocument, getDocumentById, saveDocumentDraft } from "@/features/documents/document-repository";
 import { documentReadinessValues } from "@/features/documents/document-metadata";
+import { toPublicDocument } from "@/features/documents/document-public";
 import { createProtectedOptionsHandler, createProtectedRouteHandler } from "@/features/auth/route-context";
 import {
   documentResourceLimitResponse,
@@ -35,7 +36,7 @@ const getHandler = createProtectedRouteHandler(async (context, _request: Request
   if (!document) {
     return NextResponse.json({ error: "Document not found" }, { status: 404 });
   }
-  return NextResponse.json({ document });
+  return NextResponse.json({ document: toPublicDocument(document) });
 });
 
 const putHandler = createProtectedRouteHandler(async (context, request: Request, { params }: Params) => {
@@ -65,12 +66,12 @@ const putHandler = createProtectedRouteHandler(async (context, request: Request,
       {
         error: "Document revision conflict",
         reason: "revision_conflict",
-        document: saveResult.latest,
+        document: toPublicDocument(saveResult.latest),
       },
       { status: 409 },
     );
   }
-  return NextResponse.json({ document: saveResult.document });
+  return NextResponse.json({ document: toPublicDocument(saveResult.document) });
 });
 
 const deleteHandler = createProtectedRouteHandler(async (context, _request: Request, { params }: Params) => {

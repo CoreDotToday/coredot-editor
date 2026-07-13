@@ -27,6 +27,7 @@ async function createIsolatedDocumentDb() {
     CREATE TABLE documents (
       id text PRIMARY KEY NOT NULL,
       workspace_id text NOT NULL,
+      creation_key text,
       title text NOT NULL,
       content_json text NOT NULL,
       plain_text text DEFAULT '' NOT NULL,
@@ -39,6 +40,10 @@ async function createIsolatedDocumentDb() {
       CONSTRAINT "documents_status_check" CHECK(status in ('draft', 'archived')),
       CONSTRAINT "documents_readiness_check" CHECK(readiness in ('draft', 'needs_review', 'ready', 'approved'))
     )
+  `);
+  await db.run(sql`
+    CREATE UNIQUE INDEX documents_workspace_creation_key_unique
+    ON documents (workspace_id, creation_key)
   `);
 
   return db;
@@ -109,6 +114,109 @@ describe("document repository", () => {
       revision: 0,
       status: "draft",
     });
+  });
+
+  it("replays an idempotent recovery create without mutating its original payload", async () => {
+    const db = await createIsolatedDocumentDb();
+    const { createDocumentFromDraftIdempotently } = createDocumentRepository(db);
+    const firstDraft = {
+      title: "Original recovery copy",
+      contentJson: {
+        type: "doc" as const,
+        content: [{ type: "paragraph", content: [{ type: "text", text: "Original local work" }] }],
+      },
+      metadataJson: { owner: "Legal" },
+      readiness: "needs_review" as const,
+    };
+
+    const created = await createDocumentFromDraftIdempotently(workspaceA, firstDraft, "recovery-key-123456");
+    const replayed = await createDocumentFromDraftIdempotently(workspaceA, {
+      ...firstDraft,
+      title: "Must not overwrite",
+    }, "recovery-key-123456");
+
+    expect(created.replayed).toBe(false);
+    expect(replayed).toMatchObject({
+      document: {
+        id: created.document.id,
+        title: "Original recovery copy",
+        creationKey: "recovery-key-123456",
+      },
+      replayed: true,
+    });
+  });
+
+  it("scopes recovery creation keys by workspace", async () => {
+    const db = await createIsolatedDocumentDb();
+    const { createDocumentFromDraftIdempotently } = createDocumentRepository(db);
+    const draft = {
+      title: "Recovery copy",
+      contentJson: { type: "doc" as const, content: [{ type: "paragraph" }] },
+      metadataJson: {},
+      readiness: "draft" as const,
+    };
+
+    const workspaceACopy = await createDocumentFromDraftIdempotently(
+      workspaceA,
+      draft,
+      "shared-recovery-key",
+    );
+    const workspaceBCopy = await createDocumentFromDraftIdempotently(
+      workspaceB,
+      draft,
+      "shared-recovery-key",
+    );
+
+    expect(workspaceACopy.document.id).not.toBe(workspaceBCopy.document.id);
+    expect(workspaceACopy.replayed).toBe(false);
+    expect(workspaceBCopy.replayed).toBe(false);
+  });
+
+  it("creates exactly one document for concurrent requests with the same recovery key", async () => {
+    const db = await createIsolatedDocumentDb();
+    const { createDocumentFromDraftIdempotently, listDocuments } = createDocumentRepository(db);
+    const draft = {
+      title: "Concurrent recovery copy",
+      contentJson: { type: "doc" as const, content: [{ type: "paragraph" }] },
+      metadataJson: {},
+      readiness: "draft" as const,
+    };
+
+    const results = await Promise.all([
+      createDocumentFromDraftIdempotently(workspaceA, draft, "concurrent-recovery-key"),
+      createDocumentFromDraftIdempotently(workspaceA, draft, "concurrent-recovery-key"),
+    ]);
+
+    expect(new Set(results.map((result) => result.document.id)).size).toBe(1);
+    expect(results.filter((result) => result.replayed)).toHaveLength(1);
+    expect(await listDocuments(workspaceA)).toHaveLength(1);
+  });
+
+  it("releases an archived recovery copy key so a retry creates a new active copy", async () => {
+    const db = await createIsolatedDocumentDb();
+    const { archiveDocument, createDocumentFromDraftIdempotently } = createDocumentRepository(db);
+    const draft = {
+      title: "Recovery copy",
+      contentJson: { type: "doc" as const, content: [{ type: "paragraph" }] },
+      metadataJson: {},
+      readiness: "draft" as const,
+    };
+
+    const first = await createDocumentFromDraftIdempotently(
+      workspaceA,
+      draft,
+      "archived-recovery-key",
+    );
+    await archiveDocument(workspaceA, first.document.id);
+    const retried = await createDocumentFromDraftIdempotently(
+      workspaceA,
+      draft,
+      "archived-recovery-key",
+    );
+
+    expect(retried.replayed).toBe(false);
+    expect(retried.document.id).not.toBe(first.document.id);
+    expect(retried.document.status).toBe("draft");
   });
 
   it("archives an existing document and removes it from draft listings", async () => {

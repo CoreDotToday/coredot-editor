@@ -47,11 +47,14 @@ export type AiWorkspaceChatSession = {
 type AiWorkspacePanelProps = {
   activeProposalId?: string | null;
   changeItems: AiWorkspaceChangeItem[];
+  changeLoadErrorMessage?: string;
   children?: ReactNode;
   chatMessages: AiWorkspaceChatMessage[];
   chatSessions?: AiWorkspaceChatSession[];
   errorMessage: string;
   isReviewing: boolean;
+  hasMoreChanges?: boolean;
+  isLoadingChanges?: boolean;
   isRunningCommand?: boolean;
   language?: EditorLanguage;
   layout?: "drawer" | "side";
@@ -61,6 +64,7 @@ type AiWorkspacePanelProps = {
   onChangesOpen?: () => void;
   onClose?: () => void;
   onFocusProposal?: (proposalId: string) => void;
+  onLoadMoreChanges?: () => void;
   onReviewDocument: () => void;
   onRenameChatSession?: (sessionId: string, title: string) => void;
   onUndoChange: (changeId: string) => void;
@@ -87,11 +91,14 @@ const tabs = [
 export function AiWorkspacePanel({
   activeProposalId = null,
   changeItems,
+  changeLoadErrorMessage = "",
   children,
   chatMessages,
   chatSessions = [],
   errorMessage,
+  hasMoreChanges = false,
   isReviewing,
+  isLoadingChanges = false,
   isRunningCommand = false,
   language = DEFAULT_EDITOR_LANGUAGE,
   layout = "side",
@@ -101,6 +108,7 @@ export function AiWorkspacePanel({
   onChangesOpen,
   onClose,
   onFocusProposal,
+  onLoadMoreChanges,
   onReviewDocument,
   onRenameChatSession,
   onUndoChange,
@@ -380,7 +388,14 @@ export function AiWorkspacePanel({
               {undoErrorMessage}
             </p>
           ) : null}
-          {changeItems.length === 0 ? (
+          {changeLoadErrorMessage ? (
+            <p className="mt-3 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700" role="alert">
+              {changeLoadErrorMessage}
+            </p>
+          ) : null}
+          {changeItems.length === 0 && isLoadingChanges ? (
+            <p className="mt-3 text-sm leading-6 text-zinc-500" role="status">{messages.changeLoading}</p>
+          ) : changeItems.length === 0 ? (
             <p className="mt-3 text-sm leading-6 text-zinc-500">{messages.changeEmpty}</p>
           ) : (
             <ul className="mt-4 space-y-4">
@@ -407,6 +422,16 @@ export function AiWorkspacePanel({
               ))}
             </ul>
           )}
+          {hasMoreChanges && onLoadMoreChanges ? (
+            <button
+              className="mt-5 inline-flex h-9 w-full items-center justify-center rounded-md border border-zinc-300 px-3 text-sm font-medium text-zinc-700 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:text-zinc-400"
+              disabled={isLoadingChanges}
+              onClick={onLoadMoreChanges}
+              type="button"
+            >
+              {isLoadingChanges ? messages.changeLoading : messages.changeLoadMore}
+            </button>
+          ) : null}
         </section>
       ) : null}
 

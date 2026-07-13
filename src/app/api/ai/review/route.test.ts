@@ -84,6 +84,7 @@ vi.mock("@/features/ai/providers", () => ({
 const documentRecord = {
   id: "doc_1",
   workspaceId: "vitest-workspace",
+  creationKey: null,
   title: "Memo",
   plainText: "growth was good and someone should follow up",
   contentJson: { type: "doc" },
@@ -123,23 +124,29 @@ describe("POST /api/ai/review", () => {
   });
 
   it("returns 429 before parsing or creating an AI provider when the budget is exhausted", async () => {
-    setRequestBudgetForTests({
-      consume: vi.fn(async () => ({
-        allowed: false,
-        limit: 20,
-        remaining: 0,
-        retryAt: new Date(Date.now() + 5_000),
-      })),
-    });
-    const request = { json: vi.fn() } as unknown as Request;
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    try {
+      setRequestBudgetForTests({
+        consume: vi.fn(async () => ({
+          allowed: false,
+          limit: 20,
+          remaining: 0,
+          retryAt: new Date(Date.now() + 5_000),
+        })),
+      });
+      const request = { json: vi.fn() } as unknown as Request;
 
-    const response = await POST(request);
+      const response = await POST(request);
 
-    expect(response.status).toBe(429);
-    expect(response.headers.get("Retry-After")).toBe("5");
-    expect(request.json).not.toHaveBeenCalled();
-    expect(createAiProvider).not.toHaveBeenCalled();
-    expect(createAiRun).not.toHaveBeenCalled();
+      expect(response.status).toBe(429);
+      expect(response.headers.get("Retry-After")).toBe("5");
+      expect(request.json).not.toHaveBeenCalled();
+      expect(createAiProvider).not.toHaveBeenCalled();
+      expect(createAiRun).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("rejects an oversized submitted AI body before JSON parsing or provider work", async () => {

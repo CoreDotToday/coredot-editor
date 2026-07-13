@@ -37,12 +37,14 @@ vi.mock("@/features/documents/document-repository", () => ({
   getDocumentById: vi.fn(async (_scope, id) => ({
     id,
     workspaceId: "workspace-b",
+    creationKey: "internal-recovery-key-123456",
     title: "Workspace B memo",
     contentJson: { type: "doc" },
     plainText: "Private",
     status: "draft",
     readiness: "draft",
     metadataJson: {},
+    revision: 0,
     createdAt: new Date("2026-01-01T00:00:00.000Z"),
     updatedAt: new Date("2026-01-01T00:00:00.000Z"),
   })),
@@ -79,7 +81,22 @@ describe("protected server pages", () => {
   });
 
   it("passes the authenticated workspace to every direct-id page query", async () => {
-    await DocumentPage({ params: Promise.resolve({ id: "workspace-b-document" }) });
+    const referenceUpdatedAt = new Date("2026-01-02T00:00:00.000Z");
+    vi.mocked(listDocumentReferenceCandidates).mockResolvedValueOnce([{
+      id: "reference-document",
+      workspaceId: "workspace-b",
+      creationKey: "internal-reference-key-123456",
+      title: "Reference memo",
+      contentJson: { type: "doc" },
+      plainText: "Reference text",
+      status: "draft",
+      readiness: "draft",
+      metadataJson: {},
+      revision: 0,
+      createdAt: new Date("2026-01-01T00:00:00.000Z"),
+      updatedAt: referenceUpdatedAt,
+    }] as never);
+    const page = await DocumentPage({ params: Promise.resolve({ id: "workspace-b-document" }) });
 
     expect(getProtectedPageContext).toHaveBeenCalledWith("/documents/workspace-b-document");
     expect(getDocumentById).toHaveBeenCalledWith(workspaceBContext, "workspace-b-document");
@@ -90,6 +107,13 @@ describe("protected server pages", () => {
       excludeDocumentId: "workspace-b-document",
       limit: 24,
     });
+    expect(page.props.document).not.toHaveProperty("creationKey");
+    expect(page.props.referenceDocuments).toEqual([{
+      id: "reference-document",
+      plainText: "Reference text",
+      title: "Reference memo",
+      updatedAt: referenceUpdatedAt,
+    }]);
   });
 
   it("invokes notFound and skips downstream queries for a cross-workspace document id", async () => {

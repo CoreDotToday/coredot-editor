@@ -195,6 +195,7 @@ describe("POST /api/documents/import", () => {
     vi.mocked(createDocumentFromContent).mockResolvedValueOnce({
       id: "doc_imported",
       workspaceId: "vitest-workspace",
+      creationKey: null,
       title: "Contract Draft",
       contentJson: {
         type: "doc",

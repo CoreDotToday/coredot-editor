@@ -64,6 +64,7 @@ vi.mock("@/features/ai/providers", () => ({
 const documentRecord = {
   id: "doc_1",
   workspaceId: "vitest-workspace",
+  creationKey: null,
   title: "Memo",
   plainText: "Old text in a document",
   contentJson: { type: "doc" },

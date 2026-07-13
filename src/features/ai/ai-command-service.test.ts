@@ -49,6 +49,7 @@ function createDependencies(overrides: Partial<AiCommandServiceDependencies> = {
       createdAt: new Date("2026-01-01T00:00:00Z"),
       id: "doc_1",
       workspaceId: scope.workspaceId,
+      creationKey: null,
       metadataJson: {},
       plainText: "Persisted document text",
       readiness: "draft" as const,

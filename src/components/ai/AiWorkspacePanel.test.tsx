@@ -67,4 +67,55 @@ describe("AiWorkspacePanel", () => {
 
     expect(onChangesOpen).toHaveBeenCalledTimes(1);
   });
+
+  it("shows English change-history loading and retry states", () => {
+    const onLoadMoreChanges = vi.fn();
+    render(
+      <AiWorkspacePanel
+        changeItems={[]}
+        changeLoadErrorMessage="Could not load change history. Try again."
+        chatMessages={[]}
+        errorMessage=""
+        hasMoreChanges
+        isLoadingChanges
+        isReviewing={false}
+        language="en"
+        messages={editorMessages.en.aiWorkspace}
+        onLoadMoreChanges={onLoadMoreChanges}
+        onReviewDocument={vi.fn()}
+        onUndoChange={vi.fn()}
+        onUpdateProposalStatus={vi.fn()}
+        proposals={[]}
+        selectedTemplateName=""
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("tab", { name: "Changes" }));
+    expect(screen.getByRole("alert")).toHaveTextContent("Could not load change history. Try again.");
+    expect(screen.getByRole("button", { name: "Loading changes..." })).toBeDisabled();
+  });
+
+  it("loads more change history with the Korean label", () => {
+    const onLoadMoreChanges = vi.fn();
+    render(
+      <AiWorkspacePanel
+        changeItems={[]}
+        chatMessages={[]}
+        errorMessage=""
+        hasMoreChanges
+        isReviewing={false}
+        messages={editorMessages.ko.aiWorkspace}
+        onLoadMoreChanges={onLoadMoreChanges}
+        onReviewDocument={vi.fn()}
+        onUndoChange={vi.fn()}
+        onUpdateProposalStatus={vi.fn()}
+        proposals={[]}
+        selectedTemplateName=""
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("tab", { name: "변경내역" }));
+    fireEvent.click(screen.getByRole("button", { name: "더 불러오기" }));
+    expect(onLoadMoreChanges).toHaveBeenCalledTimes(1);
+  });
 });

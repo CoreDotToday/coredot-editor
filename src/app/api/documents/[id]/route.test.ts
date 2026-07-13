@@ -58,6 +58,32 @@ describe("PUT /api/documents/[id]", () => {
     });
   });
 
+  it("does not expose an internal creation key on direct reads", async () => {
+    vi.mocked(getDocumentById).mockResolvedValueOnce({
+      id: "doc_1",
+      workspaceId: "vitest-workspace",
+      creationKey: "internal-recovery-key-123456",
+      title: "Draft",
+      contentJson: { type: "doc" },
+      metadataJson: {},
+      plainText: "",
+      readiness: "draft",
+      revision: 0,
+      status: "draft",
+      createdAt: new Date("2026-01-01T00:00:00.000Z"),
+      updatedAt: new Date("2026-01-01T00:00:00.000Z"),
+    });
+
+    const response = await GET(
+      new Request("http://localhost/api/documents/doc_1"),
+      { params: Promise.resolve({ id: "doc_1" }) },
+    );
+    const responseBody = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(responseBody.document).not.toHaveProperty("creationKey");
+  });
+
   it("rejects oversized document update bodies before JSON parsing or persistence", async () => {
     const json = vi.fn();
     const request = {

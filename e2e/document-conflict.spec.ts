@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-test("preserves both drafts across a two-tab conflict and can save the local draft as new", async ({ page }) => {
+test("preserves both drafts across a two-tab revision conflict and can save the local draft as new", async ({ page }) => {
   const baseTitle = `Conflict base ${Date.now()}`;
   const writerATitle = `${baseTitle} writer A`;
   const writerBTitle = `${baseTitle} writer B`;

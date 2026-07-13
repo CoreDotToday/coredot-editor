@@ -1,11 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { createDocumentDraft, createDocumentFromDraft } from "@/features/documents/document-repository";
+import {
+  createDocumentDraft,
+  createDocumentFromDraft,
+  createDocumentFromDraftIdempotently,
+  listDocuments,
+} from "@/features/documents/document-repository";
 import { setRequestBudgetForTests } from "@/features/security/request-budget";
-import { POST } from "./route";
+import { GET, POST } from "./route";
 
 vi.mock("@/features/documents/document-repository", () => ({
   createDocumentDraft: vi.fn(),
   createDocumentFromDraft: vi.fn(),
+  createDocumentFromDraftIdempotently: vi.fn(),
   listDocuments: vi.fn(),
 }));
 
@@ -55,6 +61,7 @@ describe("POST /api/documents", () => {
     vi.mocked(createDocumentFromDraft).mockResolvedValueOnce({
       id: "doc_recovered",
       workspaceId: "vitest-workspace",
+      creationKey: null,
       ...draft,
       plainText: "Local work",
       status: "draft",
@@ -74,5 +81,88 @@ describe("POST /api/documents", () => {
       workspaceId: "vitest-workspace",
     }), draft);
     expect(createDocumentDraft).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [false, 201],
+    [true, 200],
+  ])("idempotently creates or replays a recovery draft (replayed=%s)", async (replayed, status) => {
+    const draft = {
+      title: "Recovered local draft",
+      contentJson: { type: "doc" as const, content: [{ type: "paragraph" }] },
+      metadataJson: {},
+      readiness: "draft" as const,
+    };
+    vi.mocked(createDocumentFromDraftIdempotently).mockResolvedValueOnce({
+      document: {
+        id: "doc_recovered",
+        workspaceId: "vitest-workspace",
+        ...draft,
+        creationKey: "recovery-key-123456",
+        plainText: "",
+        status: "draft",
+        revision: 0,
+        createdAt: new Date("2026-01-01T00:00:00.000Z"),
+        updatedAt: new Date("2026-01-01T00:00:00.000Z"),
+      },
+      replayed,
+    });
+
+    const response = await POST(new Request("http://localhost/api/documents", {
+      method: "POST",
+      headers: { "Idempotency-Key": "recovery-key-123456" },
+      body: JSON.stringify(draft),
+    }));
+
+    expect(response.status).toBe(status);
+    const responseBody = await response.json();
+    expect(responseBody).toMatchObject({
+      document: { id: "doc_recovered" },
+      replayed,
+    });
+    expect(responseBody.document).not.toHaveProperty("creationKey");
+    expect(createDocumentFromDraftIdempotently).toHaveBeenCalledWith(
+      expect.objectContaining({ workspaceId: "vitest-workspace" }),
+      draft,
+      "recovery-key-123456",
+    );
+    expect(createDocumentFromDraft).not.toHaveBeenCalled();
+  });
+
+  it("does not expose internal creation keys when listing documents", async () => {
+    vi.mocked(listDocuments).mockResolvedValueOnce([{
+      id: "doc_recovered",
+      workspaceId: "vitest-workspace",
+      creationKey: "internal-recovery-key-123456",
+      title: "Recovered local draft",
+      contentJson: { type: "doc" },
+      metadataJson: {},
+      plainText: "",
+      readiness: "draft",
+      revision: 0,
+      status: "draft",
+      createdAt: new Date("2026-01-01T00:00:00.000Z"),
+      updatedAt: new Date("2026-01-01T00:00:00.000Z"),
+    }]);
+
+    const responseBody = await (await GET()).json();
+
+    expect(responseBody.documents).toHaveLength(1);
+    expect(responseBody.documents[0]).not.toHaveProperty("creationKey");
+  });
+
+  it("rejects malformed idempotency keys before persistence", async () => {
+    const response = await POST(new Request("http://localhost/api/documents", {
+      method: "POST",
+      headers: { "Idempotency-Key": "short" },
+      body: JSON.stringify({
+        title: "Recovered local draft",
+        contentJson: { type: "doc", content: [{ type: "paragraph" }] },
+      }),
+    }));
+
+    expect(response.status).toBe(400);
+    expect(createDocumentFromDraftIdempotently).not.toHaveBeenCalled();
+    expect(createDocumentFromDraft).not.toHaveBeenCalled();
   });
 });

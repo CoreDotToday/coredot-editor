@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   createDocumentSessionClient,
+  DocumentSessionConflictError,
   type DocumentSessionDraft,
 } from "./document-session-client";
 
@@ -115,23 +116,35 @@ describe("document session client", () => {
     });
   });
 
-  it("exposes structured conflict bodies and rejects malformed success responses", async () => {
-    const conflictRequest = vi.fn().mockResolvedValue(jsonResponse({
-      document: { ...serverDocument, revision: 9 },
-      proposal: { id: "proposal_1", status: "accepted" },
-      reason: "revision_conflict",
-    }, 409));
-    const client = createDocumentSessionClient(conflictRequest);
-
-    await expect(client.applyProposal("proposal_1", {
+  it.each([
+    ["single apply", (client: ReturnType<typeof createDocumentSessionClient>) => client.applyProposal("proposal_1", {
       appliedMode: "replace",
       document: { id: "doc_1", ...draft },
       expectedRevision: 3,
-    })).rejects.toMatchObject({
-      name: "DocumentSessionRequestError",
+    })],
+    ["bulk apply", (client: ReturnType<typeof createDocumentSessionClient>) => client.applyProposalBatch({
+      document: { id: "doc_1", ...draft },
+      expectedRevision: 3,
+      proposals: [{ appliedMode: "replace" as const, id: "proposal_1" }],
+    })],
+    ["undo", (client: ReturnType<typeof createDocumentSessionClient>) => client.undoChange("change_1", 3)],
+  ])("preserves the validated server document for a %s revision conflict", async (_, requestChange) => {
+    const latest = { ...serverDocument, title: "Latest server title", revision: 9 };
+    const client = createDocumentSessionClient(vi.fn().mockResolvedValue(jsonResponse({
+      document: latest,
+      reason: "revision_conflict",
+    }, 409)));
+
+    const result = requestChange(client);
+    await expect(result).rejects.toBeInstanceOf(DocumentSessionConflictError);
+    await expect(result).rejects.toMatchObject({
+      name: "DocumentSessionConflictError",
       status: 409,
-      body: { reason: "revision_conflict" },
+      serverDocument: latest,
     });
+  });
+
+  it("rejects malformed successful change responses", async () => {
 
     const malformedClient = createDocumentSessionClient(vi.fn().mockResolvedValue(jsonResponse({ document: {} })));
     await expect(malformedClient.undoChange("change_1", 4)).rejects.toMatchObject({
@@ -153,7 +166,10 @@ describe("document session client", () => {
     };
     const request = vi.fn()
       .mockResolvedValueOnce(jsonResponse({ changes: [historyChange], nextCursor: "change_1" }))
-      .mockResolvedValueOnce(jsonResponse({ document: { ...serverDocument, id: "doc_copy", revision: 0 } }, 201));
+      .mockResolvedValueOnce(jsonResponse({
+        document: { ...serverDocument, id: "doc_copy", revision: 0 },
+        replayed: true,
+      }, 200));
     const client = createDocumentSessionClient(request);
 
     await expect(client.listChanges("doc_1", { cursor: "older", limit: 10 })).resolves.toEqual({
@@ -165,9 +181,13 @@ describe("document session client", () => {
       "/api/document-changes?documentId=doc_1&limit=10&cursor=older",
       { method: "GET" },
     );
-    await expect(client.createFromDraft(draft)).resolves.toMatchObject({ id: "doc_copy", revision: 0 });
+    await expect(client.createFromDraft(draft, "recovery-key-123456")).resolves.toMatchObject({
+      document: { id: "doc_copy", revision: 0 },
+      replayed: true,
+    });
     expect(request).toHaveBeenNthCalledWith(2, "/api/documents", expect.objectContaining({
       method: "POST",
+      headers: expect.objectContaining({ "Idempotency-Key": "recovery-key-123456" }),
       body: JSON.stringify(draft),
     }));
   });

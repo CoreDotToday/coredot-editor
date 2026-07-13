@@ -132,6 +132,14 @@ async function applyDocumentChangesMigration(client: Awaited<ReturnType<typeof c
   }
 }
 
+async function applyDocumentCreationKeyMigration(client: Awaited<ReturnType<typeof createLegacyDatabase>>) {
+  const migration = await readFile(resolve(process.cwd(), "drizzle/0010_document_creation_key.sql"), "utf8");
+  for (const statement of migration.split("--> statement-breakpoint")) {
+    const sql = statement.trim();
+    if (sql) await client.execute(sql);
+  }
+}
+
 describe("workspace ownership migration", () => {
   it("adds tenant-safe document change relations with valid foreign keys", async () => {
     const client = await createLegacyDatabase();
@@ -139,6 +147,7 @@ describe("workspace ownership migration", () => {
     await applyRequestBudgetMigration(client);
     await applyDocumentRevisionMigration(client);
     await applyDocumentChangesMigration(client);
+    await applyDocumentCreationKeyMigration(client);
 
     expect((await client.execute("PRAGMA foreign_key_check")).rows).toEqual([]);
     await client.execute(`
@@ -176,6 +185,41 @@ describe("workspace ownership migration", () => {
         workspace_id, change_id, document_id, proposal_id, applied_mode, ordinal
       ) VALUES ('local', 'change_1', 'legacy_doc', 'second_proposal', 'replace', 0)
     `)).rejects.toThrow();
+  });
+
+  it("adds nullable workspace-scoped document creation keys without disturbing existing rows", async () => {
+    const client = await createLegacyDatabase();
+    await applyWorkspaceOwnershipMigration(client);
+    await applyRequestBudgetMigration(client);
+    await applyDocumentRevisionMigration(client);
+    await applyDocumentChangesMigration(client);
+    await applyDocumentCreationKeyMigration(client);
+
+    expect((await client.execute(
+      "SELECT title, creation_key FROM documents WHERE id = 'legacy_doc'",
+    )).rows).toEqual([
+      expect.objectContaining({ creation_key: null, title: "Legacy memo" }),
+    ]);
+    await client.execute("UPDATE documents SET creation_key = 'recovery-key-123456' WHERE id = 'legacy_doc'");
+    await expect(client.execute(`
+      INSERT INTO documents (
+        id, workspace_id, creation_key, title, content_json, plain_text, status, readiness,
+        metadata_json, revision, created_at, updated_at
+      ) VALUES (
+        'duplicate_local', 'local', 'recovery-key-123456', 'Duplicate', '{"type":"doc"}', '',
+        'draft', 'draft', '{}', 0, 3000, 3000
+      )
+    `)).rejects.toThrow();
+    await expect(client.execute(`
+      INSERT INTO documents (
+        id, workspace_id, creation_key, title, content_json, plain_text, status, readiness,
+        metadata_json, revision, created_at, updated_at
+      ) VALUES (
+        'same_key_other_workspace', 'workspace_b', 'recovery-key-123456', 'Separate',
+        '{"type":"doc"}', '', 'draft', 'draft', '{}', 0, 3000, 3000
+      )
+    `)).resolves.toBeDefined();
+    expect((await client.execute("PRAGMA foreign_key_check")).rows).toEqual([]);
   });
 
   it("adds revision zero to populated documents without disturbing data or foreign keys", async () => {
