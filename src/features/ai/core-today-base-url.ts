@@ -1,8 +1,10 @@
-export type CoreTodayProviderName = "coredot" | "anthropic" | "gemini";
+import { getAiProviderDefinition, type AiProviderName } from "./provider-catalog";
 
-export const DEFAULT_COREDOT_BASE_URL = "https://api.core.today/llm/openai/v1";
-export const DEFAULT_COREDOT_ANTHROPIC_BASE_URL = "https://api.core.today/llm/anthropic/v1";
-export const DEFAULT_COREDOT_GEMINI_BASE_URL = "https://api.core.today/llm/gemini/v1beta";
+export type CoreTodayProviderName = Extract<AiProviderName, "coredot" | "anthropic" | "gemini">;
+
+export const DEFAULT_COREDOT_BASE_URL = getAiProviderDefinition("coredot").defaultBaseUrl;
+export const DEFAULT_COREDOT_ANTHROPIC_BASE_URL = getAiProviderDefinition("anthropic").defaultBaseUrl;
+export const DEFAULT_COREDOT_GEMINI_BASE_URL = getAiProviderDefinition("gemini").defaultBaseUrl;
 
 const allowedCoreTodayPaths: Record<CoreTodayProviderName, string> = {
   anthropic: "/llm/anthropic/v1",

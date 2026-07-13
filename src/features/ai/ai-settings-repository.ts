@@ -9,22 +9,33 @@ import {
   DEFAULT_COREDOT_GEMINI_BASE_URL,
   normalizeCoreTodayBaseUrl,
 } from "./core-today-base-url";
+import {
+  AI_PROVIDER_IDS,
+  AI_REASONING_EFFORTS,
+  getAiProviderDefinition,
+  isAiProviderName,
+  isAiProviderSettingEditable,
+  isCoreTodayProviderName,
+  type AiProviderName,
+  type AiReasoningEffort,
+} from "./provider-catalog";
 
 export { DEFAULT_COREDOT_ANTHROPIC_BASE_URL, DEFAULT_COREDOT_BASE_URL, DEFAULT_COREDOT_GEMINI_BASE_URL };
-export const DEFAULT_COREDOT_MODEL = "gpt-5-nano";
-export const DEFAULT_COREDOT_ANTHROPIC_MODEL = "claude-sonnet-4.5";
-export const DEFAULT_COREDOT_GEMINI_MODEL = "gemini-2.5-flash";
-export const DEFAULT_OPENAI_MODEL = "gpt-4.1-mini";
-export const DEFAULT_COREDOT_MAX_COMPLETION_TOKENS = 32768;
+export const DEFAULT_COREDOT_MODEL = getAiProviderDefinition("coredot").defaultModel;
+export const DEFAULT_COREDOT_ANTHROPIC_MODEL = getAiProviderDefinition("anthropic").defaultModel;
+export const DEFAULT_COREDOT_GEMINI_MODEL = getAiProviderDefinition("gemini").defaultModel;
+export const DEFAULT_OPENAI_MODEL = getAiProviderDefinition("openai").defaultModel;
+export const DEFAULT_COREDOT_MAX_COMPLETION_TOKENS =
+  getAiProviderDefinition("coredot").defaultMaxCompletionTokens;
 
-export const aiReasoningEffortSchema = z.enum(["none", "minimal", "low", "medium", "high", "xhigh"]);
-export type AiReasoningEffort = z.infer<typeof aiReasoningEffortSchema>;
+export const aiReasoningEffortSchema = z.enum(AI_REASONING_EFFORTS);
+export type { AiReasoningEffort };
 
 export const aiSettingsPayloadSchema = z.object({
   aiBaseUrl: z.string().trim().url().nullable().optional(),
   aiMaxCompletionTokens: z.number().int().positive().max(200000).nullable().optional(),
   aiModel: z.string().trim().min(1),
-  aiProvider: z.enum(["stub", "openai", "coredot", "anthropic", "gemini"]),
+  aiProvider: z.enum(AI_PROVIDER_IDS),
   aiReasoningEffort: aiReasoningEffortSchema.nullable().optional(),
 });
 
@@ -109,70 +120,21 @@ async function createDefaultSettings(database: AiSettingsDatabase, scope: Worksp
 
 function getDefaultAiSettingsPayload() {
   const provider = resolveDefaultProvider();
-
-  if (provider === "stub") {
-    return normalizeAiSettingsPayload({
-      aiBaseUrl: null,
-      aiMaxCompletionTokens: null,
-      aiModel: "stub-editor",
-      aiProvider: "stub",
-      aiReasoningEffort: null,
-    });
-  }
-
-  if (provider === "openai") {
-    return normalizeAiSettingsPayload({
-      aiBaseUrl: null,
-      aiMaxCompletionTokens: null,
-      aiModel: process.env.OPENAI_MODEL ?? DEFAULT_OPENAI_MODEL,
-      aiProvider: "openai",
-      aiReasoningEffort: null,
-    });
-  }
-
-  if (provider === "anthropic") {
-    return normalizeAiSettingsPayload({
-      aiBaseUrl: process.env.COREDOT_ANTHROPIC_BASE_URL ?? DEFAULT_COREDOT_ANTHROPIC_BASE_URL,
-      aiMaxCompletionTokens:
-        readOptionalPositiveInteger(process.env.COREDOT_MAX_COMPLETION_TOKENS) ??
-        DEFAULT_COREDOT_MAX_COMPLETION_TOKENS,
-      aiModel: process.env.COREDOT_ANTHROPIC_MODEL ?? DEFAULT_COREDOT_ANTHROPIC_MODEL,
-      aiProvider: "anthropic",
-      aiReasoningEffort: null,
-    });
-  }
-
-  if (provider === "gemini") {
-    return normalizeAiSettingsPayload({
-      aiBaseUrl: process.env.COREDOT_GEMINI_BASE_URL ?? DEFAULT_COREDOT_GEMINI_BASE_URL,
-      aiMaxCompletionTokens:
-        readOptionalPositiveInteger(process.env.COREDOT_MAX_COMPLETION_TOKENS) ??
-        DEFAULT_COREDOT_MAX_COMPLETION_TOKENS,
-      aiModel: process.env.COREDOT_GEMINI_MODEL ?? DEFAULT_COREDOT_GEMINI_MODEL,
-      aiProvider: "gemini",
-      aiReasoningEffort: null,
-    });
-  }
-
+  const definition = getAiProviderDefinition(provider);
   return normalizeAiSettingsPayload({
-    aiBaseUrl: process.env.COREDOT_BASE_URL ?? DEFAULT_COREDOT_BASE_URL,
-    aiMaxCompletionTokens:
-      readOptionalPositiveInteger(process.env.COREDOT_MAX_COMPLETION_TOKENS) ??
-      DEFAULT_COREDOT_MAX_COMPLETION_TOKENS,
-    aiModel: process.env.COREDOT_MODEL ?? DEFAULT_COREDOT_MODEL,
-    aiProvider: "coredot",
+    aiBaseUrl: readProviderBaseUrl(provider) ?? definition.defaultBaseUrl,
+    aiMaxCompletionTokens: isAiProviderSettingEditable(provider, "maxCompletionTokens")
+      ? readOptionalPositiveInteger(process.env.COREDOT_MAX_COMPLETION_TOKENS) ??
+        definition.defaultMaxCompletionTokens
+      : null,
+    aiModel: readProviderModel(provider) ?? definition.defaultModel,
+    aiProvider: provider,
     aiReasoningEffort: null,
   });
 }
 
 function resolveDefaultProvider(): z.infer<typeof aiSettingsPayloadSchema>["aiProvider"] {
-  if (
-    process.env.AI_PROVIDER === "stub" ||
-    process.env.AI_PROVIDER === "openai" ||
-    process.env.AI_PROVIDER === "coredot" ||
-    process.env.AI_PROVIDER === "anthropic" ||
-    process.env.AI_PROVIDER === "gemini"
-  ) {
+  if (isAiProviderName(process.env.AI_PROVIDER)) {
     return process.env.AI_PROVIDER;
   }
 
@@ -188,52 +150,21 @@ function resolveDefaultProvider(): z.infer<typeof aiSettingsPayloadSchema>["aiPr
 }
 
 function normalizeAiSettingsPayload(input: z.infer<typeof aiSettingsPayloadSchema>) {
-  if (input.aiProvider === "stub") {
-    return {
-      aiBaseUrl: null,
-      aiMaxCompletionTokens: null,
-      aiModel: "stub-editor",
-      aiProvider: input.aiProvider,
-      aiReasoningEffort: null,
-    };
-  }
-
-  if (input.aiProvider === "openai") {
-    return {
-      aiBaseUrl: null,
-      aiMaxCompletionTokens: null,
-      aiModel: input.aiModel.trim() || DEFAULT_OPENAI_MODEL,
-      aiProvider: input.aiProvider,
-      aiReasoningEffort: input.aiReasoningEffort ?? null,
-    };
-  }
-
-  if (input.aiProvider === "anthropic") {
-    return {
-      aiBaseUrl: normalizeCoreTodayBaseUrl("anthropic", input.aiBaseUrl),
-      aiMaxCompletionTokens: input.aiMaxCompletionTokens ?? DEFAULT_COREDOT_MAX_COMPLETION_TOKENS,
-      aiModel: input.aiModel.trim() || DEFAULT_COREDOT_ANTHROPIC_MODEL,
-      aiProvider: input.aiProvider,
-      aiReasoningEffort: null,
-    };
-  }
-
-  if (input.aiProvider === "gemini") {
-    return {
-      aiBaseUrl: normalizeCoreTodayBaseUrl("gemini", input.aiBaseUrl),
-      aiMaxCompletionTokens: input.aiMaxCompletionTokens ?? DEFAULT_COREDOT_MAX_COMPLETION_TOKENS,
-      aiModel: input.aiModel.trim() || DEFAULT_COREDOT_GEMINI_MODEL,
-      aiProvider: input.aiProvider,
-      aiReasoningEffort: null,
-    };
-  }
-
+  const definition = getAiProviderDefinition(input.aiProvider);
   return {
-    aiBaseUrl: normalizeCoreTodayBaseUrl("coredot", input.aiBaseUrl),
-    aiMaxCompletionTokens: input.aiMaxCompletionTokens ?? DEFAULT_COREDOT_MAX_COMPLETION_TOKENS,
-    aiModel: input.aiModel.trim() || DEFAULT_COREDOT_MODEL,
+    aiBaseUrl: isCoreTodayProviderName(input.aiProvider)
+      ? normalizeCoreTodayBaseUrl(input.aiProvider, input.aiBaseUrl)
+      : null,
+    aiMaxCompletionTokens: isAiProviderSettingEditable(input.aiProvider, "maxCompletionTokens")
+      ? input.aiMaxCompletionTokens ?? definition.defaultMaxCompletionTokens
+      : null,
+    aiModel: isAiProviderSettingEditable(input.aiProvider, "model")
+      ? input.aiModel.trim() || definition.defaultModel
+      : definition.defaultModel,
     aiProvider: input.aiProvider,
-    aiReasoningEffort: input.aiReasoningEffort ?? null,
+    aiReasoningEffort: isAiProviderSettingEditable(input.aiProvider, "reasoningEffort")
+      ? input.aiReasoningEffort ?? null
+      : null,
   };
 }
 
@@ -250,7 +181,7 @@ function toAiSettings(settings: AppSettingsRecord): AiSettings {
 }
 
 function normalizeExistingAiSettingsBaseUrl(settings: AppSettingsRecord) {
-  if (settings.aiProvider === "stub" || settings.aiProvider === "openai") {
+  if (!isCoreTodayProviderName(settings.aiProvider)) {
     return null;
   }
 
@@ -259,6 +190,21 @@ function normalizeExistingAiSettingsBaseUrl(settings: AppSettingsRecord) {
   } catch {
     return normalizeCoreTodayBaseUrl(settings.aiProvider, null);
   }
+}
+
+function readProviderBaseUrl(provider: AiProviderName) {
+  if (provider === "coredot") return process.env.COREDOT_BASE_URL;
+  if (provider === "anthropic") return process.env.COREDOT_ANTHROPIC_BASE_URL;
+  if (provider === "gemini") return process.env.COREDOT_GEMINI_BASE_URL;
+  return undefined;
+}
+
+function readProviderModel(provider: AiProviderName) {
+  if (provider === "coredot") return process.env.COREDOT_MODEL;
+  if (provider === "anthropic") return process.env.COREDOT_ANTHROPIC_MODEL;
+  if (provider === "gemini") return process.env.COREDOT_GEMINI_MODEL;
+  if (provider === "openai") return process.env.OPENAI_MODEL;
+  return undefined;
 }
 
 function readOptionalPositiveInteger(value: string | undefined) {

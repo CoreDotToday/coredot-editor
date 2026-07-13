@@ -1,6 +1,7 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { AI_REASONING_EFFORTS } from "@/features/ai/provider-catalog";
 import { AiSettingsDialog } from "./AiSettingsDialog";
 
 afterEach(() => {
@@ -90,6 +91,13 @@ describe("AiSettingsDialog", () => {
 
     expect(await screen.findByRole("dialog", { name: "LLM 설정" })).toBeInTheDocument();
     expect(screen.getByLabelText("공급자")).toHaveValue("coredot");
+    expect(screen.getAllByRole("option", { name: /(?:Stub|Core\.Today|Anthropic|Gemini|OpenAI)/ }).map((option) => option.getAttribute("value"))).toEqual([
+      "stub",
+      "coredot",
+      "anthropic",
+      "gemini",
+      "openai",
+    ]);
     expect(screen.getByRole("option", { name: "Anthropic (Core.Today)" })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: "Gemini (Core.Today)" })).toBeInTheDocument();
     expect(screen.getByLabelText("모델")).toHaveValue("gpt-5-nano");
@@ -114,6 +122,57 @@ describe("AiSettingsDialog", () => {
 
     expect(screen.getByLabelText("모델")).toHaveValue("gemini-2.5-flash");
     expect(screen.getByLabelText("Base URL")).toHaveValue("https://api.core.today/llm/gemini/v1beta");
+  });
+
+  it("shows only each provider's editable settings and reasoning control", async () => {
+    const user = userEvent.setup();
+    mockSettingsFetch();
+
+    render(<AiSettingsDialog />);
+
+    await user.click(screen.getByRole("button", { name: "LLM 설정" }));
+    const providerSelect = await screen.findByLabelText("공급자");
+
+    await user.selectOptions(providerSelect, "stub");
+    expect(screen.getByLabelText("모델")).toBeDisabled();
+    expect(screen.queryByLabelText("Base URL")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("최대 출력 토큰")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("추론 강도")).toBeDisabled();
+
+    await user.selectOptions(providerSelect, "coredot");
+    expect(screen.getByLabelText("모델")).toBeEnabled();
+    expect(screen.getByLabelText("Base URL")).toBeEnabled();
+    expect(screen.getByLabelText("최대 출력 토큰")).toBeEnabled();
+    expect(screen.getByLabelText("추론 강도")).toBeEnabled();
+
+    for (const provider of ["anthropic", "gemini"] as const) {
+      await user.selectOptions(providerSelect, provider);
+      expect(screen.getByLabelText("모델")).toBeEnabled();
+      expect(screen.getByLabelText("Base URL")).toBeEnabled();
+      expect(screen.getByLabelText("최대 출력 토큰")).toBeEnabled();
+      expect(screen.getByLabelText("추론 강도")).toBeDisabled();
+    }
+
+    await user.selectOptions(providerSelect, "openai");
+    expect(screen.getByLabelText("모델")).toBeEnabled();
+    expect(screen.queryByLabelText("Base URL")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("최대 출력 토큰")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("추론 강도")).toBeEnabled();
+  });
+
+  it("renders the catalog reasoning efforts exactly once in catalog order", async () => {
+    const user = userEvent.setup();
+    mockSettingsFetch();
+
+    render(<AiSettingsDialog />);
+
+    await user.click(screen.getByRole("button", { name: "LLM 설정" }));
+    const reasoningSelect = await screen.findByLabelText("추론 강도");
+    const optionValues = Array.from(reasoningSelect.querySelectorAll("option"), (option) => option.value);
+
+    expect(optionValues).toEqual(["", ...AI_REASONING_EFFORTS]);
+    expect(optionValues).toEqual(["", "minimal", "low", "medium", "high", "none", "xhigh"]);
+    expect(new Set(optionValues).size).toBe(optionValues.length);
   });
 
   it("saves model settings without sending browser-side secrets", async () => {

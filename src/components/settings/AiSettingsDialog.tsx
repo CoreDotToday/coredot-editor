@@ -2,15 +2,20 @@
 
 import { Settings, X } from "lucide-react";
 import { useCallback, useState } from "react";
-
-type AiProvider = "stub" | "openai" | "coredot" | "anthropic" | "gemini";
-type AiReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+import {
+  AI_PROVIDER_CATALOG,
+  AI_REASONING_EFFORTS,
+  getAiProviderDefinition,
+  isAiProviderSettingEditable,
+  type AiProviderName,
+  type AiReasoningEffort,
+} from "@/features/ai/provider-catalog";
 
 type AiSettingsForm = {
   aiBaseUrl: string | null;
   aiMaxCompletionTokens: number | null;
   aiModel: string;
-  aiProvider: AiProvider;
+  aiProvider: AiProviderName;
   aiReasoningEffort: AiReasoningEffort | null;
 };
 
@@ -22,53 +27,7 @@ type AiSettingsResponse = {
   };
 };
 
-const defaultCoreDotSettings: AiSettingsForm = {
-  aiBaseUrl: "https://api.core.today/llm/openai/v1",
-  aiMaxCompletionTokens: 32768,
-  aiModel: "gpt-5-nano",
-  aiProvider: "coredot",
-  aiReasoningEffort: null,
-};
-
-const providerDefaults: Record<AiProvider, AiSettingsForm> = {
-  anthropic: {
-    aiBaseUrl: "https://api.core.today/llm/anthropic/v1",
-    aiMaxCompletionTokens: 32768,
-    aiModel: "claude-sonnet-4.5",
-    aiProvider: "anthropic",
-    aiReasoningEffort: null,
-  },
-  coredot: defaultCoreDotSettings,
-  gemini: {
-    aiBaseUrl: "https://api.core.today/llm/gemini/v1beta",
-    aiMaxCompletionTokens: 32768,
-    aiModel: "gemini-2.5-flash",
-    aiProvider: "gemini",
-    aiReasoningEffort: null,
-  },
-  openai: {
-    aiBaseUrl: null,
-    aiMaxCompletionTokens: null,
-    aiModel: "gpt-4.1-mini",
-    aiProvider: "openai",
-    aiReasoningEffort: null,
-  },
-  stub: {
-    aiBaseUrl: null,
-    aiMaxCompletionTokens: null,
-    aiModel: "stub-editor",
-    aiProvider: "stub",
-    aiReasoningEffort: null,
-  },
-};
-
-const providerLabels: Record<AiProvider, string> = {
-  anthropic: "Anthropic (Core.Today)",
-  coredot: "Core.Today",
-  gemini: "Gemini (Core.Today)",
-  openai: "OpenAI",
-  stub: "로컬 Stub",
-};
+const defaultCoreDotSettings = createProviderDefaults("coredot");
 
 export function AiSettingsDialog() {
   const [isOpen, setIsOpen] = useState(false);
@@ -114,43 +73,30 @@ export function AiSettingsDialog() {
     setStatusMessage("");
   }, []);
 
-  const updateProvider = useCallback((provider: AiProvider) => {
+  const updateProvider = useCallback((provider: AiProviderName) => {
     setForm((currentForm) => {
-      if (provider === "stub") {
-        return providerDefaults.stub;
-      }
-
-      if (provider === "openai") {
-        return {
-          aiBaseUrl: null,
-          aiMaxCompletionTokens: null,
-          aiModel: currentForm.aiProvider === "openai" ? currentForm.aiModel : "gpt-4.1-mini",
-          aiProvider: provider,
-          aiReasoningEffort: currentForm.aiReasoningEffort,
-        };
-      }
-
-      if (provider === "anthropic" || provider === "gemini") {
-        return {
-          ...providerDefaults[provider],
-          aiBaseUrl:
-            currentForm.aiProvider === provider
-              ? currentForm.aiBaseUrl ?? providerDefaults[provider].aiBaseUrl
-              : providerDefaults[provider].aiBaseUrl,
-          aiMaxCompletionTokens:
-            currentForm.aiProvider === provider
-              ? currentForm.aiMaxCompletionTokens ?? providerDefaults[provider].aiMaxCompletionTokens
-              : providerDefaults[provider].aiMaxCompletionTokens,
-          aiModel: currentForm.aiProvider === provider ? currentForm.aiModel : providerDefaults[provider].aiModel,
-        };
-      }
-
+      const defaults = createProviderDefaults(provider);
+      const isCurrentProvider = currentForm.aiProvider === provider;
       return {
-        aiBaseUrl: currentForm.aiBaseUrl ?? defaultCoreDotSettings.aiBaseUrl,
-        aiMaxCompletionTokens: currentForm.aiMaxCompletionTokens ?? defaultCoreDotSettings.aiMaxCompletionTokens,
-        aiModel: currentForm.aiProvider === "coredot" ? currentForm.aiModel : defaultCoreDotSettings.aiModel,
+        aiBaseUrl: isAiProviderSettingEditable(provider, "baseUrl")
+          ? isCurrentProvider
+            ? currentForm.aiBaseUrl ?? defaults.aiBaseUrl
+            : defaults.aiBaseUrl
+          : null,
+        aiMaxCompletionTokens: isAiProviderSettingEditable(provider, "maxCompletionTokens")
+          ? isCurrentProvider
+            ? currentForm.aiMaxCompletionTokens ?? defaults.aiMaxCompletionTokens
+            : defaults.aiMaxCompletionTokens
+          : null,
+        aiModel: isAiProviderSettingEditable(provider, "model")
+          ? isCurrentProvider
+            ? currentForm.aiModel
+            : defaults.aiModel
+          : defaults.aiModel,
         aiProvider: provider,
-        aiReasoningEffort: currentForm.aiReasoningEffort,
+        aiReasoningEffort: isAiProviderSettingEditable(provider, "reasoningEffort")
+          ? currentForm.aiReasoningEffort
+          : null,
       };
     });
     setStatusMessage("");
@@ -254,12 +200,12 @@ export function AiSettingsDialog() {
                 <select
                   aria-label="공급자"
                   className="mt-2 h-10 w-full rounded-md border border-zinc-300 bg-white px-3 text-sm text-zinc-800 outline-none focus:border-zinc-500"
-                  onChange={(event) => updateProvider(event.currentTarget.value as AiProvider)}
+                  onChange={(event) => updateProvider(event.currentTarget.value as AiProviderName)}
                   value={form.aiProvider}
                 >
-                  {Object.entries(providerLabels).map(([value, label]) => (
-                    <option key={value} value={value}>
-                      {label}
+                  {AI_PROVIDER_CATALOG.map((definition) => (
+                    <option key={definition.id} value={definition.id}>
+                      {definition.label}
                     </option>
                   ))}
                 </select>
@@ -270,7 +216,7 @@ export function AiSettingsDialog() {
                 <input
                   aria-label="모델"
                   className="mt-2 h-10 w-full rounded-md border border-zinc-300 px-3 text-sm text-zinc-800 outline-none focus:border-zinc-500 disabled:bg-zinc-100 disabled:text-zinc-500"
-                  disabled={form.aiProvider === "stub"}
+                  disabled={!isAiProviderSettingEditable(form.aiProvider, "model")}
                   list="ai-model-suggestions"
                   onChange={(event) => {
                     const value = event.currentTarget.value;
@@ -287,7 +233,7 @@ export function AiSettingsDialog() {
                 </datalist>
               </label>
 
-              {usesCoreTodayProxy(form.aiProvider) ? (
+              {isAiProviderSettingEditable(form.aiProvider, "baseUrl") ? (
                 <label className="block">
                   <span className="text-sm font-medium text-zinc-700">Base URL</span>
                   <input
@@ -302,7 +248,7 @@ export function AiSettingsDialog() {
                 </label>
               ) : null}
 
-              {usesCoreTodayProxy(form.aiProvider) ? (
+              {isAiProviderSettingEditable(form.aiProvider, "maxCompletionTokens") ? (
                 <label className="block">
                   <span className="text-sm font-medium text-zinc-700">최대 출력 토큰</span>
                   <input
@@ -327,7 +273,7 @@ export function AiSettingsDialog() {
                 <select
                   aria-label="추론 강도"
                   className="mt-2 h-10 w-full rounded-md border border-zinc-300 bg-white px-3 text-sm text-zinc-800 outline-none focus:border-zinc-500 disabled:bg-zinc-100 disabled:text-zinc-500"
-                  disabled={!supportsReasoningEffort(form.aiProvider)}
+                  disabled={!isAiProviderSettingEditable(form.aiProvider, "reasoningEffort")}
                   onChange={(event) => {
                     const value = event.currentTarget.value;
                     setForm((currentForm) => ({
@@ -338,12 +284,11 @@ export function AiSettingsDialog() {
                   value={form.aiReasoningEffort ?? ""}
                 >
                   <option value="">기본값</option>
-                  <option value="minimal">minimal</option>
-                  <option value="low">low</option>
-                  <option value="medium">medium</option>
-                  <option value="high">high</option>
-                  <option value="none">none</option>
-                  <option value="xhigh">xhigh</option>
+                  {AI_REASONING_EFFORTS.map((effort) => (
+                    <option key={effort} value={effort}>
+                      {effort}
+                    </option>
+                  ))}
                 </select>
               </label>
 
@@ -416,45 +361,29 @@ function toForm(settings: AiSettingsResponse["settings"]): AiSettingsForm {
 }
 
 function toPayload(form: AiSettingsForm) {
-  if (form.aiProvider === "stub") {
-    return {
-      aiBaseUrl: null,
-      aiMaxCompletionTokens: null,
-      aiModel: "stub-editor",
-      aiProvider: "stub" satisfies AiProvider,
-      aiReasoningEffort: null,
-    };
-  }
-
-  if (form.aiProvider === "openai") {
-    return {
-      aiBaseUrl: null,
-      aiMaxCompletionTokens: null,
-      aiModel: form.aiModel,
-      aiProvider: "openai" satisfies AiProvider,
-      aiReasoningEffort: form.aiReasoningEffort,
-    };
-  }
-
-  if (form.aiProvider === "anthropic" || form.aiProvider === "gemini") {
-    return {
-      aiBaseUrl: form.aiBaseUrl,
-      aiMaxCompletionTokens: form.aiMaxCompletionTokens,
-      aiModel: form.aiModel,
-      aiProvider: form.aiProvider,
-      aiReasoningEffort: null,
-    };
-  }
-
-  return form;
+  const definition = getAiProviderDefinition(form.aiProvider);
+  return {
+    aiBaseUrl: isAiProviderSettingEditable(form.aiProvider, "baseUrl") ? form.aiBaseUrl : null,
+    aiMaxCompletionTokens: isAiProviderSettingEditable(form.aiProvider, "maxCompletionTokens")
+      ? form.aiMaxCompletionTokens
+      : null,
+    aiModel: isAiProviderSettingEditable(form.aiProvider, "model") ? form.aiModel : definition.defaultModel,
+    aiProvider: form.aiProvider,
+    aiReasoningEffort: isAiProviderSettingEditable(form.aiProvider, "reasoningEffort")
+      ? form.aiReasoningEffort
+      : null,
+  };
 }
 
-function usesCoreTodayProxy(provider: AiProvider) {
-  return provider === "coredot" || provider === "anthropic" || provider === "gemini";
-}
-
-function supportsReasoningEffort(provider: AiProvider) {
-  return provider === "coredot" || provider === "openai";
+function createProviderDefaults(provider: AiProviderName): AiSettingsForm {
+  const definition = getAiProviderDefinition(provider);
+  return {
+    aiBaseUrl: definition.defaultBaseUrl,
+    aiMaxCompletionTokens: definition.defaultMaxCompletionTokens,
+    aiModel: definition.defaultModel,
+    aiProvider: provider,
+    aiReasoningEffort: null,
+  };
 }
 
 function formatSecretStatus(isConfigured: boolean | undefined) {
@@ -465,12 +394,12 @@ function formatSecretStatus(isConfigured: boolean | undefined) {
   return isConfigured ? "서버에 설정됨" : "서버에 미설정";
 }
 
-function getProviderWarning(provider: AiProvider, secrets: AiSettingsResponse["secrets"]) {
+function getProviderWarning(provider: AiProviderName, secrets: AiSettingsResponse["secrets"]) {
   if (provider === "stub") {
     return "로컬 Stub은 실제 LLM을 호출하지 않습니다. 운영 문서에는 Core.Today 또는 OpenAI 공급자를 사용하세요.";
   }
 
-  if (usesCoreTodayProxy(provider) && !secrets.coredotConfigured) {
+  if (getAiProviderDefinition(provider).capabilities.coreTodayProxy && !secrets.coredotConfigured) {
     return "Core.Today API 키가 서버에 없어 이 공급자는 실제 요청을 처리할 수 없습니다.";
   }
 

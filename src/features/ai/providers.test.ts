@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { buildAiMessages } from "./payload-builder";
-import { createAiProvider, getAiProviderCapabilities } from "./providers";
+import { getAiProviderDefinition, type AiProviderName } from "./provider-catalog";
+import {
+  createAiProvider,
+  getAiProviderCapabilities,
+  type AiProviderSettings,
+} from "./providers";
 
 const { createOpenAIMock } = vi.hoisted(() => ({
   createOpenAIMock: vi.fn((options: { apiKey?: string; baseURL?: string }) => {
@@ -25,6 +30,35 @@ vi.mock("ai", async (importOriginal) => {
     })),
   };
 });
+
+const runtimeModelCases = [
+  { environmentKey: null, provider: "stub" },
+  { environmentKey: "COREDOT_MODEL", provider: "coredot" },
+  { environmentKey: "COREDOT_ANTHROPIC_MODEL", provider: "anthropic" },
+  { environmentKey: "COREDOT_GEMINI_MODEL", provider: "gemini" },
+  { environmentKey: "OPENAI_MODEL", provider: "openai" },
+] as const satisfies readonly { environmentKey: string | null; provider: AiProviderName }[];
+
+const coreTodayRuntimeCases = [
+  {
+    baseUrlEnvironmentKey: "COREDOT_BASE_URL",
+    defaultRuntimeMaxTokens: undefined,
+    modelEnvironmentKey: "COREDOT_MODEL",
+    provider: "coredot",
+  },
+  {
+    baseUrlEnvironmentKey: "COREDOT_ANTHROPIC_BASE_URL",
+    defaultRuntimeMaxTokens: 32768,
+    modelEnvironmentKey: "COREDOT_ANTHROPIC_MODEL",
+    provider: "anthropic",
+  },
+  {
+    baseUrlEnvironmentKey: "COREDOT_GEMINI_BASE_URL",
+    defaultRuntimeMaxTokens: 32768,
+    modelEnvironmentKey: "COREDOT_GEMINI_MODEL",
+    provider: "gemini",
+  },
+] as const;
 
 describe("AI providers", () => {
   it("uses a deterministic stub provider when AI_PROVIDER is absent", async () => {
@@ -140,6 +174,101 @@ describe("AI providers", () => {
       }
     }
   });
+
+  it.each(runtimeModelCases)(
+    "applies $provider model precedence from saved settings to environment to catalog default",
+    async ({ environmentKey, provider }) => {
+      const definition = getAiProviderDefinition(provider);
+      const savedModel = `saved-${provider}-model`;
+      const environmentModel = `environment-${provider}-model`;
+      const commonEnvironment = { COREDOT_API_KEY: "test_core_today_key" };
+      const configuredEnvironment = environmentKey
+        ? { ...commonEnvironment, [environmentKey]: environmentModel }
+        : commonEnvironment;
+
+      await withCleanProviderEnvironment(configuredEnvironment, async () => {
+        const saved = await observeProviderRuntime(provider, { aiModel: savedModel });
+        expect(saved.model).toBe(provider === "stub" ? definition.defaultModel : savedModel);
+      });
+
+      await withCleanProviderEnvironment(configuredEnvironment, async () => {
+        const fromEnvironment = await observeProviderRuntime(provider);
+        expect(fromEnvironment.model).toBe(environmentKey ? environmentModel : definition.defaultModel);
+      });
+
+      await withCleanProviderEnvironment(commonEnvironment, async () => {
+        const fromCatalog = await observeProviderRuntime(provider);
+        expect(fromCatalog.model).toBe(definition.defaultModel);
+      });
+    },
+  );
+
+  it.each(coreTodayRuntimeCases)(
+    "keeps $provider base URL and token precedence aligned with its runtime contract",
+    async ({ baseUrlEnvironmentKey, defaultRuntimeMaxTokens, modelEnvironmentKey, provider }) => {
+      const definition = getAiProviderDefinition(provider);
+      const savedModel = `saved-${provider}-model`;
+      const environmentModel = `environment-${provider}-model`;
+
+      await withCleanProviderEnvironment(
+        {
+          COREDOT_API_KEY: "test_core_today_key",
+          COREDOT_MAX_COMPLETION_TOKENS: "123",
+          [baseUrlEnvironmentKey]: "https://attacker.example.test/v1",
+          [modelEnvironmentKey]: environmentModel,
+        },
+        async () => {
+          const saved = await observeProviderRuntime(provider, {
+            aiBaseUrl: definition.defaultBaseUrl,
+            aiMaxCompletionTokens: 64000,
+            aiModel: savedModel,
+          });
+
+          expect(saved).toMatchObject({
+            baseUrl: definition.defaultBaseUrl,
+            maxOutputTokens: 64000,
+            model: savedModel,
+          });
+        },
+      );
+
+      await withCleanProviderEnvironment(
+        {
+          COREDOT_API_KEY: "test_core_today_key",
+          COREDOT_MAX_COMPLETION_TOKENS: "123",
+          [baseUrlEnvironmentKey]: `${definition.defaultBaseUrl}/`,
+          [modelEnvironmentKey]: environmentModel,
+        },
+        async () => {
+          const fromEnvironment = await observeProviderRuntime(provider);
+          expect(fromEnvironment).toMatchObject({
+            baseUrl: definition.defaultBaseUrl,
+            maxOutputTokens: 123,
+            model: environmentModel,
+          });
+        },
+      );
+
+      await withCleanProviderEnvironment({ COREDOT_API_KEY: "test_core_today_key" }, async () => {
+        const fromCatalog = await observeProviderRuntime(provider);
+        expect(fromCatalog).toMatchObject({
+          baseUrl: definition.defaultBaseUrl,
+          maxOutputTokens: defaultRuntimeMaxTokens,
+          model: definition.defaultModel,
+        });
+      });
+
+      await withCleanProviderEnvironment(
+        {
+          COREDOT_API_KEY: "test_core_today_key",
+          [baseUrlEnvironmentKey]: "https://attacker.example.test/v1",
+        },
+        async () => {
+          await expect(observeProviderRuntime(provider)).rejects.toThrow("Invalid Core.Today base URL");
+        },
+      );
+    },
+  );
 
   it("returns continuation-only stub text for continue writing commands", async () => {
     const originalProvider = process.env.AI_PROVIDER;
@@ -502,3 +631,91 @@ describe("AI providers", () => {
     }
   });
 });
+
+const providerEnvironmentKeys = [
+  "AI_PROVIDER",
+  "COREDOT_API_KEY",
+  "COREDOT_BASE_URL",
+  "COREDOT_MODEL",
+  "COREDOT_ANTHROPIC_BASE_URL",
+  "COREDOT_ANTHROPIC_MODEL",
+  "COREDOT_GEMINI_BASE_URL",
+  "COREDOT_GEMINI_MODEL",
+  "COREDOT_MAX_COMPLETION_TOKENS",
+  "OPENAI_MODEL",
+] as const;
+
+async function withCleanProviderEnvironment<Result>(
+  environment: Record<string, string | undefined>,
+  run: () => Result | Promise<Result>,
+) {
+  const originalEnvironment = Object.fromEntries(providerEnvironmentKeys.map((key) => [key, process.env[key]]));
+  for (const key of providerEnvironmentKeys) {
+    delete process.env[key];
+  }
+  for (const [key, value] of Object.entries(environment)) {
+    if (value !== undefined) process.env[key] = value;
+  }
+
+  try {
+    return await run();
+  } finally {
+    for (const key of providerEnvironmentKeys) {
+      const originalValue = originalEnvironment[key];
+      if (originalValue === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = originalValue;
+      }
+    }
+  }
+}
+
+async function observeProviderRuntime(
+  providerName: AiProviderName,
+  settings: Omit<AiProviderSettings, "aiProvider"> = {},
+) {
+  const { generateText } = await import("ai");
+  const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+    providerName === "anthropic"
+      ? new Response(JSON.stringify({ content: [{ text: "anthropic text", type: "text" }] }))
+      : new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "gemini text" }] } }] })),
+  );
+  createOpenAIMock.mockClear();
+  vi.mocked(generateText).mockClear();
+
+  try {
+    const provider = createAiProvider({ ...settings, aiProvider: providerName });
+    await provider.generateText({ messages: [{ content: "Observe runtime settings.", role: "user" }] });
+
+    if (providerName === "coredot") {
+      const generationCall = vi.mocked(generateText).mock.calls.at(-1)?.[0] as { maxOutputTokens?: number } | undefined;
+      return {
+        baseUrl: createOpenAIMock.mock.calls.at(-1)?.[0].baseURL ?? null,
+        maxOutputTokens: generationCall?.maxOutputTokens,
+        model: provider.model,
+      };
+    }
+
+    if (providerName === "anthropic" || providerName === "gemini") {
+      const [requestUrl, requestInit] = fetchMock.mock.calls.at(-1)!;
+      const body = JSON.parse(String(requestInit?.body)) as {
+        generationConfig?: { maxOutputTokens?: number };
+        max_tokens?: number;
+      };
+      const normalizedRequestUrl = String(requestUrl);
+      return {
+        baseUrl:
+          providerName === "anthropic"
+            ? normalizedRequestUrl.replace(/\/messages$/, "")
+            : normalizedRequestUrl.slice(0, normalizedRequestUrl.indexOf("/models/")),
+        maxOutputTokens: body.max_tokens ?? body.generationConfig?.maxOutputTokens,
+        model: provider.model,
+      };
+    }
+
+    return { baseUrl: null, maxOutputTokens: undefined, model: provider.model };
+  } finally {
+    fetchMock.mockRestore();
+  }
+}
