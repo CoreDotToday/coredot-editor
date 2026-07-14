@@ -1,0 +1,141 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 960" role="img" aria-labelledby="system-boundaries-title system-boundaries-desc" focusable="false">
+  <title id="system-boundaries-title">Coredot Editor system and trust boundaries</title>
+  <desc id="system-boundaries-desc">An untrusted browser enters the server through Clerk or deterministic test identity resolution. Request Context carries principal, Workspace, role, and request ID into protected Next.js pages and APIs. Domain services use Workspace-scoped repositories and SQLite or libSQL. The AI service crosses an external network boundary to model providers. DOCX conversion runs in a bounded terminable worker inside an isolation boundary.</desc>
+  <defs>
+    <marker id="system-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#4f46e5"/>
+    </marker>
+    <marker id="system-arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b"/>
+    </marker>
+    <marker id="system-arrow-external" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#ea580c"/>
+    </marker>
+    <style>
+      .canvas { fill: #ffffff; }
+      .title { fill: #0f172a; font: 700 32px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .subtitle { fill: #475569; font: 400 18px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .boundary { fill: #f8fafc; stroke: #64748b; stroke-width: 2; stroke-dasharray: 10 8; }
+      .boundary-external { fill: #fff7ed; stroke: #ea580c; stroke-width: 2; stroke-dasharray: 10 8; }
+      .boundary-worker { fill: #f8fafc; stroke: #6366f1; stroke-width: 2; stroke-dasharray: 6 6; }
+      .boundary-label { fill: #475569; font: 650 16px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: .07em; }
+      .boundary-label-external { fill: #9a3412; font: 650 16px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: .07em; }
+      .node { fill: #ffffff; stroke: #94a3b8; stroke-width: 2; }
+      .node-accent { fill: #eef2ff; stroke: #6366f1; stroke-width: 2.5; }
+      .node-external { fill: #ffffff; stroke: #ea580c; stroke-width: 2; }
+      .node-worker { fill: #ffffff; stroke: #6366f1; stroke-width: 2; }
+      .node-title { fill: #0f172a; font: 650 19px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .node-copy { fill: #475569; font: 400 15px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .node-copy-small { fill: #475569; font: 400 14px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .edge { fill: none; stroke: #4f46e5; stroke-width: 2.5; marker-end: url(#system-arrow); }
+      .edge-muted { fill: none; stroke: #64748b; stroke-width: 2; marker-end: url(#system-arrow-muted); }
+      .edge-external { fill: none; stroke: #ea580c; stroke-width: 2.5; marker-end: url(#system-arrow-external); }
+      .edge-label { fill: #4338ca; font: 600 14px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .edge-label-muted { fill: #475569; font: 600 14px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .edge-label-external { fill: #9a3412; font: 600 14px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    </style>
+  </defs>
+
+  <rect class="canvas" width="1440" height="960"/>
+  <text class="title" x="48" y="52">System boundaries</text>
+  <text class="subtitle" x="48" y="82">Identity establishes Workspace scope; repositories enforce it while adapters isolate conversion and external calls.</text>
+
+  <rect class="boundary" x="332" y="116" width="770" height="792" rx="20"/>
+  <text class="boundary-label" x="358" y="146">TRUSTED NEXT.JS SERVER BOUNDARY</text>
+
+  <rect class="boundary-external" x="1142" y="116" width="250" height="490" rx="20"/>
+  <text class="boundary-label-external" x="1166" y="146">EXTERNAL SERVICES</text>
+
+  <rect class="node" x="48" y="198" width="230" height="112" rx="14"/>
+  <text class="node-title" x="163" y="238" text-anchor="middle">Browser</text>
+  <text class="node-copy" x="163" y="265" text-anchor="middle">untrusted client input</text>
+  <text class="node-copy" x="163" y="288" text-anchor="middle">document draft + commands</text>
+
+  <rect class="node-accent" x="374" y="180" width="296" height="148" rx="14"/>
+  <text class="node-title" x="522" y="218" text-anchor="middle">Identity resolution</text>
+  <text class="node-copy" x="522" y="246" text-anchor="middle">Clerk identity in deployed mode</text>
+  <text class="node-copy" x="522" y="270" text-anchor="middle">deterministic test identity locally</text>
+  <text class="node-copy-small" x="522" y="299" text-anchor="middle">production rejects test mode</text>
+
+  <rect class="node-accent" x="760" y="180" width="298" height="148" rx="14"/>
+  <text class="node-title" x="909" y="216" text-anchor="middle">RequestContext</text>
+  <text class="node-copy" x="909" y="244" text-anchor="middle">Principal · Workspace</text>
+  <text class="node-copy" x="909" y="268" text-anchor="middle">role · request ID</text>
+  <text class="node-copy-small" x="909" y="299" text-anchor="middle">server-owned authorization context</text>
+
+  <rect class="node-external" x="1178" y="180" width="178" height="112" rx="14"/>
+  <text class="node-title" x="1267" y="220" text-anchor="middle">Clerk</text>
+  <text class="node-copy" x="1267" y="247" text-anchor="middle">user + organization</text>
+  <text class="node-copy" x="1267" y="270" text-anchor="middle">identity service</text>
+
+  <rect class="node-accent" x="522" y="372" width="392" height="104" rx="14"/>
+  <text class="node-title" x="718" y="410" text-anchor="middle">Protected Next.js entry points</text>
+  <text class="node-copy" x="718" y="438" text-anchor="middle">pages + JSON route handlers</text>
+  <text class="node-copy-small" x="718" y="461" text-anchor="middle">authentication, bootstrap, role checks</text>
+
+  <rect class="node" x="374" y="534" width="208" height="118" rx="14"/>
+  <text class="node-title" x="478" y="570" text-anchor="middle">Document service</text>
+  <text class="node-copy" x="478" y="598" text-anchor="middle">revision checks</text>
+  <text class="node-copy" x="478" y="621" text-anchor="middle">atomic changes + undo</text>
+
+  <rect class="node" x="614" y="534" width="208" height="118" rx="14"/>
+  <text class="node-title" x="718" y="570" text-anchor="middle">AI service</text>
+  <text class="node-copy" x="718" y="598" text-anchor="middle">bounded execution</text>
+  <text class="node-copy" x="718" y="621" text-anchor="middle">provider adapter</text>
+
+  <rect class="node" x="854" y="534" width="208" height="118" rx="14"/>
+  <text class="node-title" x="958" y="570" text-anchor="middle">DOCX service</text>
+  <text class="node-copy" x="958" y="598" text-anchor="middle">import / export</text>
+  <text class="node-copy" x="958" y="621" text-anchor="middle">fidelity reporting</text>
+
+  <rect class="node-external" x="1178" y="410" width="178" height="136" rx="14"/>
+  <text class="node-title" x="1267" y="448" text-anchor="middle">AI providers</text>
+  <text class="node-copy" x="1267" y="476" text-anchor="middle">Core.Today</text>
+  <text class="node-copy" x="1267" y="499" text-anchor="middle">OpenAI or another</text>
+  <text class="node-copy-small" x="1267" y="527" text-anchor="middle">network + credentials</text>
+
+  <rect class="node-accent" x="434" y="718" width="432" height="104" rx="14"/>
+  <text class="node-title" x="650" y="756" text-anchor="middle">Workspace-scoped repositories</text>
+  <text class="node-copy" x="650" y="784" text-anchor="middle">Workspace ID in lookup and mutation predicates</text>
+  <text class="node-copy-small" x="650" y="807" text-anchor="middle">documents · Proposals · Runs · settings · Conversations</text>
+
+  <rect class="boundary-worker" x="894" y="706" width="180" height="164" rx="16"/>
+  <text class="boundary-label" x="984" y="736" text-anchor="middle">WORKER ISOLATION</text>
+  <rect class="node-worker" x="914" y="758" width="140" height="88" rx="12"/>
+  <text class="node-title" x="984" y="790" text-anchor="middle">DOCX worker</text>
+  <text class="node-copy" x="984" y="817" text-anchor="middle">bounded</text>
+  <text class="node-copy" x="984" y="838" text-anchor="middle">terminable</text>
+
+  <rect class="boundary" x="1142" y="662" width="250" height="246" rx="20"/>
+  <text class="boundary-label" x="1166" y="692">PERSISTENCE BOUNDARY</text>
+  <rect class="node" x="1178" y="730" width="178" height="112" rx="14"/>
+  <text class="node-title" x="1267" y="770" text-anchor="middle">SQLite / libSQL</text>
+  <text class="node-copy" x="1267" y="797" text-anchor="middle">Drizzle client</text>
+  <text class="node-copy" x="1267" y="820" text-anchor="middle">deployment-owned data</text>
+
+  <path class="edge" d="M 278 254 H 374"/>
+  <text class="edge-label" x="326" y="238" text-anchor="middle">request</text>
+  <path class="edge" d="M 670 254 H 760"/>
+  <path class="edge" d="M 909 328 V 350 H 718 V 372"/>
+  <path class="edge" d="M 718 476 V 508 H 478 V 534"/>
+  <path class="edge" d="M 718 476 V 534"/>
+  <path class="edge" d="M 718 508 H 958 V 534"/>
+
+  <path class="edge-muted" d="M 478 652 V 684 H 650 V 718"/>
+  <path class="edge-muted" d="M 718 652 V 684 H 650 V 718"/>
+  <path class="edge-muted" d="M 958 652 V 684 H 650 V 718"/>
+
+  <path class="edge" d="M 650 822 V 884 H 1120 V 786 H 1178"/>
+  <text class="edge-label-muted" x="1124" y="773" text-anchor="middle">persist</text>
+
+  <path class="edge-muted" d="M 958 652 V 758"/>
+  <text class="edge-label-muted" x="1000" y="687">spawn / terminate</text>
+
+  <path class="edge-external" d="M 1178 210 H 1120 V 160 H 710 V 210 H 670"/>
+  <text class="edge-label-external" x="1118" y="211" text-anchor="middle">deployed mode</text>
+  <path class="edge-external" d="M 822 570 H 840 V 500 H 1120 V 478 H 1178"/>
+  <text class="edge-label-external" x="1120" y="462" text-anchor="middle">server-only call</text>
+
+  <text class="edge-label-muted" x="168" y="344" text-anchor="middle">Trust input only after server validation.</text>
+  <text class="edge-label-external" x="1267" y="582" text-anchor="middle">Crosses external network boundary</text>
+</svg>
