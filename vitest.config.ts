@@ -1,10 +1,14 @@
 import { dirname, resolve } from "node:path";
+import { availableParallelism } from "node:os";
 import { fileURLToPath } from "node:url";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vitest/config";
 
 const rootDir = dirname(fileURLToPath(import.meta.url));
-const MAX_TEST_WORKERS = 8;
+const MAX_TEST_WORKERS = Math.max(
+  1,
+  Math.min(8, availableParallelism() - 1),
+);
 
 export default defineConfig({
   plugins: [react()],
