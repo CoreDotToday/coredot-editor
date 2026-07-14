@@ -28,8 +28,8 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Verify Windows managed process cleanup
-        run: pnpm exec vitest run scripts/docs/managed-process.test.ts
+      - name: Verify Windows capture lifecycle and local font loading
+        run: pnpm exec vitest run scripts/docs/managed-process.test.ts scripts/docs/capture-assets.test.ts
 
   verify:
     runs-on: ubuntu-latest

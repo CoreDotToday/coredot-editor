@@ -32,6 +32,7 @@ import { createMixedFidelityDocx } from "./fixtures/mixed-fidelity-docx";
 import {
   acquireInterruptibleResource,
   createManagedCommandOwner,
+  createManagedProcessOwner,
   interruptExitCode,
   resolvePnpmInvocation,
   runInterruptibleTask,
@@ -39,11 +40,16 @@ import {
   stopManagedProcess,
   waitForPortRelease,
   type ManagedProcess,
+  type ManagedProcessOwner,
   type PnpmInvocation,
 } from "./managed-process";
 
 export const DOCS_VIEWPORT = { width: 1440, height: 1000 } as const;
 export const DOCS_LANGUAGE_STORAGE_KEY = "coredot-editor-language";
+export const DOCS_CHROMIUM_ARGUMENTS = [
+  "--disable-font-subpixel-positioning",
+  "--disable-lcd-text",
+] as const;
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const APP_ROOT = resolve(dirname(SCRIPT_PATH), "../..");
@@ -110,6 +116,7 @@ export const DOCS_CAPTURE_STYLE = `
 
 type CaptureName = (typeof CAPTURE_NAMES)[number];
 export type CaptureLockMetadata = {
+  abandoned?: true;
   createdAt: number;
   leaseExpiresAt: number;
   ownerToken: string;
@@ -117,6 +124,7 @@ export type CaptureLockMetadata = {
   version: typeof CAPTURE_TRANSACTION_VERSION;
 };
 type CaptureOutputLock = {
+  fileIdentity: { dev: number; ino: number };
   handle: FileHandle;
   metadata: CaptureLockMetadata;
   previousOwnerToken?: string;
@@ -263,7 +271,7 @@ export function toNextFontMockFilePath(
     if (!/^[A-Za-z]:[\\/]/.test(path) || !win32.isAbsolute(path)) {
       throw new Error("Docs capture font mock failed");
     }
-    return `/${path.replaceAll("\\", "/")}`;
+    return `//?/${path.replaceAll("\\", "/")}`;
   }
   if (!isAbsolute(path)) throw new Error("Docs capture font mock failed");
   return path;
@@ -319,8 +327,10 @@ async function captureDocsAssets() {
   let browser: Browser | undefined;
   let context: BrowserContext | undefined;
   let server: CaptureServer | undefined;
+  let serverPort: number | undefined;
   let phase: CapturePhase = "database migration";
   const commandOwner = createManagedCommandOwner();
+  const serverOwner = createManagedProcessOwner();
 
   try {
     return await runInterruptibleTask({
@@ -333,7 +343,18 @@ async function captureDocsAssets() {
             failed = true;
           }
           try {
-            if (server) await disposeCaptureServer(server, cleanupSignal);
+            await serverOwner.settle();
+          } catch {
+            failed = true;
+          }
+          try {
+            const port = server?.port ?? serverPort;
+            if (port) {
+              await waitForPortRelease(port, {
+                signal: cleanupSignal,
+                timeoutMs: 5_000,
+              });
+            }
           } catch {
             failed = true;
           }
@@ -406,7 +427,11 @@ async function captureDocsAssets() {
               startCaptureServer({
                 databaseUrl,
                 fontMockPath,
+                onPortReserved: (port) => {
+                  serverPort = port;
+                },
                 pnpm,
+                processOwner: serverOwner,
                 runNonce,
                 signal,
               }),
@@ -419,7 +444,11 @@ async function captureDocsAssets() {
           });
           phase = "browser startup";
           await acquireInterruptibleResource({
-            acquire: () => chromium.launch({ headless: true }),
+            acquire: () =>
+              chromium.launch({
+                args: [...DOCS_CHROMIUM_ARGUMENTS],
+                headless: true,
+              }),
             adopt: (launchedBrowser) => {
               browser = launchedBrowser;
             },
@@ -497,6 +526,7 @@ async function captureProductStates(
 ): Promise<Map<CaptureName, Buffer>> {
   const page = await context.newPage();
   const captures = new Map<CaptureName, Buffer>();
+  await warmCaptureReviewRoute(context.request, baseUrl);
   setPhase("document API creation");
   const response = await createCaptureDocumentRequest(
     context.request,
@@ -545,6 +575,7 @@ async function captureProductStates(
   await page.goto(`${baseUrl}/documents/${encodeURIComponent(documentId)}`, {
     waitUntil: "domcontentloaded",
   });
+  await waitForEnglishCaptureLocale(page);
   await page.getByRole("textbox", { name: "Document title" }).waitFor();
   await page
     .getByRole("complementary", { name: "AI workspace" })
@@ -570,9 +601,7 @@ async function captureProductStates(
   setPhase("review pending status");
   await page.getByText("Pending", { exact: true }).first().waitFor();
   setPhase("review settled");
-  await page
-    .getByRole("button", { exact: true, name: "Review document" })
-    .waitFor();
+  await waitForStableReviewCapture(page);
   setPhase("proposal screenshot");
   captures.set("proposal-review", await capturePage(page));
 
@@ -604,6 +633,49 @@ async function captureProductStates(
     throw new Error("Docs capture failed");
   }
   return captures;
+}
+
+export async function waitForEnglishCaptureLocale(page: Page) {
+  await page
+    .getByRole("combobox", { exact: true, name: "Language" })
+    .waitFor();
+}
+
+export async function warmCaptureReviewRoute(
+  request: APIRequestContext,
+  baseUrl: string,
+) {
+  const endpoint = new URL("/api/ai/review", baseUrl);
+  if (!isCaptureNetworkAllowed(endpoint.href, baseUrl)) {
+    throw new Error("Docs capture review warmup failed");
+  }
+  const response = await request.fetch(endpoint.href, {
+    maxRedirects: 0,
+    method: "OPTIONS",
+  });
+  try {
+    if (!response.ok()) throw new Error("Docs capture review warmup failed");
+  } finally {
+    await response.dispose();
+  }
+}
+
+export async function waitForStableReviewCapture(page: Page) {
+  const waitForCompleteReview = async () => {
+    await page
+      .getByRole("heading", { exact: true, name: "Review summary" })
+      .waitFor();
+    await page.getByText("Stub review completed.", { exact: true }).waitFor();
+    await page
+      .getByText("1 applicable proposals · 0 skipped findings", { exact: true })
+      .waitFor();
+    await page
+      .getByRole("button", { exact: true, name: "Review document" })
+      .waitFor();
+  };
+  await waitForCompleteReview();
+  await page.waitForTimeout(500);
+  await waitForCompleteReview();
 }
 
 async function capturePage(
@@ -776,6 +848,8 @@ export async function writeCapturesAtomically(
     await recoverCaptureOutput({
       backupPrefix,
       directoryName,
+      lock,
+      lockPath,
       manifestPrefix,
       outputRoot,
       parent,
@@ -786,7 +860,7 @@ export async function writeCapturesAtomically(
       await assertApprovedCaptureDirectory(outputRoot);
     }
     if (options.signal?.aborted) throw new Error("interrupted");
-    await renewCaptureOutputLock(lock);
+    await renewCaptureOutputLock(lockPath, lock);
     await writeFile(
       manifestPath,
       JSON.stringify(createCaptureTransactionManifest(directoryName, lock.metadata.ownerToken)),
@@ -805,13 +879,15 @@ export async function writeCapturesAtomically(
     await options.onStep?.("staged");
 
     if (await pathExists(outputRoot)) {
-      await renewCaptureOutputLock(lock);
+      await renewCaptureOutputLock(lockPath, lock);
+      await assertCaptureOutputLockOwned(lockPath, lock);
       await rename(outputRoot, backupPath);
       movedOldSet = true;
     }
     await options.onStep?.("backed-up");
     if (options.signal?.aborted) throw new Error("interrupted");
-    await renewCaptureOutputLock(lock);
+    await renewCaptureOutputLock(lockPath, lock);
+    await assertCaptureOutputLockOwned(lockPath, lock);
     await rename(stagePath, outputRoot);
     committed = true;
     await options.onStep?.("committed");
@@ -829,6 +905,7 @@ export async function writeCapturesAtomically(
     ) {
       try {
         await options.onStep?.("rollback");
+        await assertCaptureOutputLockOwned(lockPath, lock);
         await assertApprovedCaptureDirectory(backupPath);
         await rename(backupPath, outputRoot);
         movedOldSet = false;
@@ -855,7 +932,7 @@ export async function writeCapturesAtomically(
     }
     try {
       if (preserveLockForRecovery) {
-        await preserveExpiredCaptureOutputLock(lock);
+        await preserveExpiredCaptureOutputLock(lockPath, lock);
       } else {
         await releaseCaptureOutputLock(lockPath, lock);
       }
@@ -882,14 +959,24 @@ async function acquireCaptureOutputLock(
         pid: process.pid,
         version: CAPTURE_TRANSACTION_VERSION,
       };
+      const handleStats = await handle.stat();
+      const lock: CaptureOutputLock = {
+        fileIdentity: { dev: handleStats.dev, ino: handleStats.ino },
+        handle,
+        metadata,
+        previousOwnerToken,
+      };
       try {
         await writeCaptureLockMetadata(handle, metadata);
+        await assertCaptureOutputLockOwned(lockPath, lock);
       } catch {
         await handle.close().catch(() => undefined);
-        await rm(lockPath, { force: true }).catch(() => undefined);
+        await removeCaptureOutputLockIfOwned(lockPath, lock).catch(
+          () => undefined,
+        );
         throw new Error("Docs capture output failed");
       }
-      return { handle, metadata, previousOwnerToken };
+      return lock;
     } catch (error) {
       if (attempt !== 0 || !hasErrorCode(error, "EEXIST")) {
         throw new Error("Docs capture output failed");
@@ -927,30 +1014,77 @@ async function writeCaptureLockMetadata(
   await handle.sync();
 }
 
-async function renewCaptureOutputLock(lock: CaptureOutputLock) {
+async function renewCaptureOutputLock(
+  lockPath: string,
+  lock: CaptureOutputLock,
+) {
+  await assertCaptureOutputLockOwned(lockPath, lock);
   lock.metadata.leaseExpiresAt = Date.now() + CAPTURE_LOCK_LEASE_MS;
   await writeCaptureLockMetadata(lock.handle, lock.metadata);
+}
+
+async function assertCaptureOutputLockOwned(
+  lockPath: string,
+  lock: CaptureOutputLock,
+) {
+  let pathHandle: FileHandle | undefined;
+  try {
+    const pathMetadata = await lstat(lockPath);
+    if (!pathMetadata.isFile() || pathMetadata.isSymbolicLink()) {
+      throw new Error("Docs capture output failed");
+    }
+    pathHandle = await open(lockPath, "r");
+    const [pathStats, contents] = await Promise.all([
+      pathHandle.stat(),
+      pathHandle.readFile("utf8"),
+    ]);
+    const metadata = parseCaptureLockMetadata(JSON.parse(contents));
+    if (
+      pathStats.dev !== lock.fileIdentity.dev ||
+      pathStats.ino !== lock.fileIdentity.ino ||
+      metadata?.ownerToken !== lock.metadata.ownerToken
+    ) {
+      throw new Error("Docs capture output failed");
+    }
+  } catch {
+    throw new Error("Docs capture output failed");
+  } finally {
+    await pathHandle?.close().catch(() => undefined);
+  }
+}
+
+async function removeCaptureOutputLockIfOwned(
+  lockPath: string,
+  lock: CaptureOutputLock,
+) {
+  await assertCaptureOutputLockOwned(lockPath, lock);
+  await rm(lockPath);
 }
 
 async function releaseCaptureOutputLock(
   lockPath: string,
   lock: CaptureOutputLock,
 ) {
-  let owned = false;
   try {
-    const metadata = parseCaptureLockMetadata(
-      JSON.parse(await readFile(lockPath, "utf8")),
-    );
-    owned = metadata?.ownerToken === lock.metadata.ownerToken;
+    await assertCaptureOutputLockOwned(lockPath, lock);
   } finally {
     await lock.handle.close();
   }
-  if (!owned) throw new Error("Docs capture output failed");
-  await rm(lockPath, { force: true });
+  // Windows cannot unlink a lock while its owning handle is open. A second
+  // identity/token check after close retains fencing; live-PID fail-closed
+  // prevents another cooperative writer from taking over in this interval.
+  await removeCaptureOutputLockIfOwned(lockPath, lock);
 }
 
-async function preserveExpiredCaptureOutputLock(lock: CaptureOutputLock) {
+async function preserveExpiredCaptureOutputLock(
+  lockPath: string,
+  lock: CaptureOutputLock,
+) {
   try {
+    await assertCaptureOutputLockOwned(lockPath, lock);
+    // This explicit terminal marker is safe to recover even while the process
+    // remains alive: the handle is closed immediately after the synced write.
+    lock.metadata.abandoned = true;
     lock.metadata.createdAt = 0;
     lock.metadata.leaseExpiresAt = 1;
     await writeCaptureLockMetadata(lock.handle, lock.metadata);
@@ -967,10 +1101,11 @@ export function isCaptureLockOwnerStale(
   } = {},
 ) {
   if (!parseCaptureLockMetadata(metadata)) return false;
-  const now = options.now ?? Date.now();
-  if (metadata.leaseExpiresAt <= now) return true;
+  if (metadata.abandoned === true) return true;
   try {
     (options.probePid ?? ((pid) => process.kill(pid, 0)))(metadata.pid);
+    // Expiry alone cannot distinguish a stalled writer from PID reuse. Failing
+    // closed may delay recovery, but prevents a live writer from losing data.
     return false;
   } catch (error) {
     if (hasErrorCode(error, "ESRCH")) return true;
@@ -1002,6 +1137,7 @@ function parseCaptureLockMetadata(value: unknown): CaptureLockMetadata | undefin
     value === null ||
     !("version" in value) ||
     value.version !== CAPTURE_TRANSACTION_VERSION ||
+    ("abandoned" in value && value.abandoned !== true) ||
     !("ownerToken" in value) ||
     typeof value.ownerToken !== "string" ||
     !CAPTURE_OWNER_TOKEN_PATTERN.test(value.ownerToken) ||
@@ -1035,6 +1171,8 @@ async function captureLockMtimeIsStale(lockPath: string) {
 async function recoverCaptureOutput(options: {
   backupPrefix: string;
   directoryName: string;
+  lock: CaptureOutputLock;
+  lockPath: string;
   manifestPrefix: string;
   outputRoot: string;
   parent: string;
@@ -1087,6 +1225,7 @@ async function recoverCaptureOutput(options: {
     if (await pathExists(options.outputRoot)) {
       await rm(backupPath, { recursive: true });
     } else {
+      await assertCaptureOutputLockOwned(options.lockPath, options.lock);
       await rename(backupPath, options.outputRoot);
     }
   }
@@ -1215,7 +1354,9 @@ function hasErrorCode(error: unknown, code: string) {
 async function startCaptureServer(options: {
   databaseUrl: string;
   fontMockPath: string;
+  onPortReserved: (port: number) => void;
   pnpm: PnpmInvocation;
+  processOwner: ManagedProcessOwner;
   runNonce: string;
   signal: AbortSignal;
 }): Promise<CaptureServer> {
@@ -1223,6 +1364,9 @@ async function startCaptureServer(options: {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     if (options.signal.aborted) throw new Error("Docs capture server failed");
     const port = await reserveLoopbackPort();
+    options.onPortReserved(port);
+    // Cleanup may close the owner while port reservation is awaiting I/O.
+    if (options.signal.aborted) throw new Error("Docs capture server failed");
     const environment = createCaptureEnvironment(process.env, {
       databaseUrl: options.databaseUrl,
       fontMockPath: options.fontMockPath,
@@ -1250,6 +1394,7 @@ async function startCaptureServer(options: {
           stdio: "ignore",
         },
       );
+      options.processOwner.adopt(managed);
       const baseUrl = `http://127.0.0.1:${port}`;
       await waitForReadiness({
         baseUrl,
@@ -1264,6 +1409,7 @@ async function startCaptureServer(options: {
       if (managed) {
         try {
           await stopManagedProcess(managed);
+          options.processOwner.release(managed);
         } catch {
           cleanupFailed = true;
         }

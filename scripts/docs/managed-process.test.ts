@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import {
   mkdtemp,
   readFile,
@@ -14,6 +14,8 @@ import { join, resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   acquireInterruptibleResource,
+  createManagedCommandOwner,
+  createManagedProcessOwner,
   createProcessTreeTerminationPlan,
   createWindowsJobRunnerInvocation,
   interruptExitCode,
@@ -24,6 +26,7 @@ import {
   spawnManagedProcess,
   stopManagedProcess,
   waitForPortRelease,
+  type ManagedProcess,
 } from "./managed-process";
 
 async function reservePort() {
@@ -188,6 +191,219 @@ describe("managed package runner", () => {
 });
 
 describe("managed process tree", () => {
+  it("validates stop timeouts before caching so a valid retry can succeed", async () => {
+    const processError = Object.assign(new Error("gone"), { code: "ESRCH" });
+    const kill = vi
+      .spyOn(process, "kill")
+      .mockImplementation((() => {
+        throw processError;
+      }) as typeof process.kill);
+    const managed = {
+      child: {
+        exitCode: 0,
+        kill: vi.fn(),
+        signalCode: null,
+      } as unknown as ChildProcess,
+      exit: new Promise<never>(() => undefined),
+      pid: 2_147_483_646,
+    } satisfies ManagedProcess;
+
+    try {
+      await expect(
+        stopManagedProcess(managed, { gracefulTimeoutMs: 0 }),
+      ).rejects.toThrow(/^Managed process failed$/);
+      await expect(
+        stopManagedProcess(managed, {
+          forceTimeoutMs: 100,
+          gracefulTimeoutMs: 100,
+        }),
+      ).resolves.toBeUndefined();
+    } finally {
+      kill.mockRestore();
+    }
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "deduplicates an in-flight stop but evicts a rejected stop for retry",
+    async () => {
+      let treeAlive = true;
+      const processError = Object.assign(new Error("gone"), { code: "ESRCH" });
+      const kill = vi
+        .spyOn(process, "kill")
+        .mockImplementation(((pid: number, signal?: NodeJS.Signals | 0) => {
+          if (signal === 0) {
+            if (treeAlive) return true;
+            throw processError;
+          }
+          return true;
+        }) as typeof process.kill);
+      const managed = {
+        child: {
+          exitCode: null,
+          kill: vi.fn(),
+          signalCode: null,
+        } as unknown as ChildProcess,
+        exit: new Promise<never>(() => undefined),
+        pid: 2_147_483_645,
+      } satisfies ManagedProcess;
+
+      try {
+        const first = stopManagedProcess(managed, {
+          forceTimeoutMs: 1,
+          gracefulTimeoutMs: 1,
+        });
+        const duplicate = stopManagedProcess(managed, {
+          forceTimeoutMs: 1,
+          gracefulTimeoutMs: 1,
+        });
+        expect(duplicate).toBe(first);
+        await expect(first).rejects.toThrow(
+          /^Managed process cleanup failed$/,
+        );
+
+        treeAlive = false;
+        await expect(
+          stopManagedProcess(managed, {
+            forceTimeoutMs: 100,
+            gracefulTimeoutMs: 100,
+          }),
+        ).resolves.toBeUndefined();
+      } finally {
+        treeAlive = false;
+        kill.mockRestore();
+      }
+    },
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "retains a command whose first stop fails so owner settlement can retry",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "coredot-command-retry-"));
+      const marker = join(root, "ready.json");
+      const port = await reservePort();
+      const fixture = resolve(
+        import.meta.dirname,
+        "fixtures/managed-process-tree.mjs",
+      );
+      const controller = new AbortController();
+      const owner = createManagedCommandOwner();
+      let kill: ReturnType<typeof vi.spyOn> | undefined;
+      let identities: { leafPid: number; parentPid: number } | undefined;
+      const command = owner.run({
+        arguments: [fixture, "parent", String(port), marker],
+        command: process.execPath,
+        cwd: import.meta.dirname,
+        environment: process.env,
+        forceTimeoutMs: 1,
+        gracefulTimeoutMs: 1,
+        signal: controller.signal,
+        timeoutMs: 30_000,
+      });
+
+      try {
+        identities = await waitForJson<{
+          leafPid: number;
+          parentPid: number;
+        }>(marker);
+        kill = vi.spyOn(process, "kill").mockImplementation((() => true) as typeof process.kill);
+        controller.abort();
+        await expect(command).rejects.toThrow(/^Managed command failed$/);
+        kill.mockRestore();
+        kill = undefined;
+
+        await owner.settle({
+          forceTimeoutMs: 2_000,
+          gracefulTimeoutMs: 200,
+        });
+        await waitForPortRelease(port, { timeoutMs: 2_000 });
+        expectProcessGone(identities.parentPid);
+        expectProcessGone(identities.leafPid);
+      } finally {
+        kill?.mockRestore();
+        controller.abort();
+        if (identities) {
+          try {
+            process.kill(-identities.parentPid, "SIGKILL");
+          } catch {
+            // The retained owner may already have reaped the whole group.
+          }
+        }
+        await owner
+          .settle({ forceTimeoutMs: 2_000, gracefulTimeoutMs: 100 })
+          .catch(() => undefined);
+        await rm(root, { force: true, recursive: true });
+      }
+    },
+    10_000,
+  );
+
+  it(
+    "cleans a startup child adopted before readiness after an interrupt",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "coredot-startup-owner-"));
+      const marker = join(root, "ready.json");
+      const openFilePath = join(root, "startup.open");
+      const port = await reservePort();
+      const fixture = resolve(
+        import.meta.dirname,
+        "fixtures/managed-process-tree.mjs",
+      );
+      const source = new EventEmitter();
+      const owner = createManagedProcessOwner();
+      let identities:
+        | { leafPid: number; parentPid: number; port: number }
+        | undefined;
+      let announceReady: (() => void) | undefined;
+      const ready = new Promise<void>((resolveReady) => {
+        announceReady = resolveReady;
+      });
+      const task = runInterruptibleTask({
+        cleanup: async (signal) => {
+          await owner.settle({
+            forceTimeoutMs: 2_000,
+            gracefulTimeoutMs: 200,
+          });
+          await waitForPortRelease(port, { signal, timeoutMs: 2_000 });
+          await rm(root, { force: true, recursive: true });
+        },
+        cleanupTimeoutMs: 8_000,
+        execute: async () => {
+          const managed = spawnManagedProcess(
+            process.execPath,
+            [fixture, "parent", String(port), marker, openFilePath],
+            { cwd: import.meta.dirname, env: process.env },
+          );
+          owner.adopt(managed);
+          identities = await waitForJson<{
+            leafPid: number;
+            parentPid: number;
+            port: number;
+          }>(marker);
+          announceReady?.();
+          await new Promise<never>(() => undefined);
+        },
+        signalSource: source,
+      });
+
+      try {
+        await ready;
+        source.emit("SIGTERM");
+        await expect(task).resolves.toEqual({ signal: "SIGTERM" });
+        await expect(stat(root)).rejects.toMatchObject({ code: "ENOENT" });
+        expectProcessGone(identities!.parentPid);
+        expectProcessGone(identities!.leafPid);
+        await waitForPortRelease(port, { timeoutMs: 2_000 });
+      } finally {
+        source.emit("SIGTERM");
+        await owner
+          .settle({ forceTimeoutMs: 2_000, gracefulTimeoutMs: 100 })
+          .catch(() => undefined);
+        await rm(root, { force: true, recursive: true });
+      }
+    },
+    15_000,
+  );
+
   it.skipIf(process.platform !== "win32")(
     "proves the detached Windows leaf survives without the custom Job Object",
     async () => {

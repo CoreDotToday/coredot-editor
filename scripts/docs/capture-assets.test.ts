@@ -23,6 +23,7 @@ import {
   NEXT_FONT_GOOGLE_URLS,
   NEXT_CAPTURE_BUNDLER_ARGUMENT,
   CAPTURE_TRANSACTION_VERSION,
+  DOCS_CHROMIUM_ARGUMENTS,
   DOCS_CAPTURE_STYLE,
   DOCS_LANGUAGE_STORAGE_KEY,
   DOCS_VIEWPORT,
@@ -35,6 +36,9 @@ import {
   runCaptureCleanup,
   screenshotPath,
   toNextFontMockFilePath,
+  waitForEnglishCaptureLocale,
+  waitForStableReviewCapture,
+  warmCaptureReviewRoute,
   writeCapturesAtomically,
 } from "./capture-assets";
 import { createMixedFidelityDocx } from "./fixtures/mixed-fidelity-docx";
@@ -91,6 +95,10 @@ describe("docs capture constants", () => {
     expect(DOCS_VIEWPORT).toEqual({ height: 1000, width: 1440 });
     expect(DOCS_LANGUAGE_STORAGE_KEY).toBe("coredot-editor-language");
     expect(NEXT_CAPTURE_BUNDLER_ARGUMENT).toBe("--webpack");
+    expect(DOCS_CHROMIUM_ARGUMENTS).toEqual([
+      "--disable-font-subpixel-positioning",
+      "--disable-lcd-text",
+    ]);
   });
 
   it("suppresses native scrollbars so pointer timing cannot change pixels", () => {
@@ -98,6 +106,41 @@ describe("docs capture constants", () => {
     expect(DOCS_CAPTURE_STYLE).toContain("*::-webkit-scrollbar");
     expect(DOCS_CAPTURE_STYLE).toContain("height: 0 !important");
     expect(DOCS_CAPTURE_STYLE).toContain("width: 0 !important");
+  });
+
+  it("waits for English hydration and the complete review summary before capture", async () => {
+    const waits: Array<[string, string]> = [];
+    const page = {
+      getByRole: (role: string, options: { name: string }) => ({
+        waitFor: async () => {
+          waits.push([role, options.name]);
+        },
+      }),
+      getByText: (text: string) => ({
+        waitFor: async () => {
+          waits.push(["text", text]);
+        },
+      }),
+      waitForTimeout: async (milliseconds: number) => {
+        waits.push(["timeout", String(milliseconds)]);
+      },
+    };
+
+    await waitForEnglishCaptureLocale(page as never);
+    await waitForStableReviewCapture(page as never);
+
+    expect(waits).toEqual([
+      ["combobox", "Language"],
+      ["heading", "Review summary"],
+      ["text", "Stub review completed."],
+      ["text", "1 applicable proposals · 0 skipped findings"],
+      ["button", "Review document"],
+      ["timeout", "500"],
+      ["heading", "Review summary"],
+      ["text", "Stub review completed."],
+      ["text", "1 applicable proposals · 0 skipped findings"],
+      ["button", "Review document"],
+    ]);
   });
 });
 
@@ -237,6 +280,30 @@ describe("docs capture environment", () => {
 });
 
 describe("docs capture offline boundary", () => {
+  it("prewarms the review route with a non-mutating, non-redirecting request", async () => {
+    let requestOptions: unknown;
+    let requestUrl = "";
+    let disposed = false;
+    const request = {
+      fetch: async (url: string, options: unknown) => {
+        requestUrl = url;
+        requestOptions = options;
+        return {
+          dispose: async () => {
+            disposed = true;
+          },
+          ok: () => true,
+        };
+      },
+    };
+
+    await warmCaptureReviewRoute(request as never, "http://127.0.0.1:4317");
+
+    expect(requestUrl).toBe("http://127.0.0.1:4317/api/ai/review");
+    expect(requestOptions).toEqual({ maxRedirects: 0, method: "OPTIONS" });
+    expect(disposed).toBe(true);
+  });
+
   const baseUrl = "http://127.0.0.1:43123";
 
   it("allows only the exact HTTP origin and its exact WebSocket peer", () => {
@@ -349,21 +416,58 @@ describe("docs capture offline boundary", () => {
     }
   });
 
-  it("converts Windows drive paths to Next's slash-prefixed local-file form", () => {
+  it("converts Windows drive paths to a slash-prefixed device path", () => {
     expect(
       toNextFontMockFilePath(
         "C:\\repo\\node_modules\\next\\font\\geist-latin.woff2",
         "win32",
       ),
-    ).toBe("/C:/repo/node_modules/next/font/geist-latin.woff2");
+    ).toBe("//?/C:/repo/node_modules/next/font/geist-latin.woff2");
     expect(
       createNextFontMockResponses({
         geistFontPath: "C:\\fonts\\geist-latin.woff2",
         geistMonoFontPath: "D:\\fonts\\geist-mono-latin.woff2",
         platform: "win32",
       })[NEXT_FONT_GOOGLE_URLS[0]],
-    ).toContain("url(/C:/fonts/geist-latin.woff2)");
+    ).toContain("url(//?/C:/fonts/geist-latin.woff2)");
   });
+
+  it.runIf(process.platform === "win32")(
+    "feeds Next's extracted Windows device path to readFileSync unchanged",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "coredot-font-device-"));
+      const geist = join(root, "geist latin.woff2");
+      const mono = join(root, "geist mono.woff2");
+      const expected = Buffer.from("windows-device-path-woff2");
+      const previous = process.env.NEXT_FONT_GOOGLE_MOCKED_RESPONSES;
+      await writeFile(geist, expected);
+      await writeFile(mono, Buffer.from("windows-device-path-mono"));
+
+      try {
+        const responses = createNextFontMockResponses({
+          geistFontPath: geist,
+          geistMonoFontPath: mono,
+        });
+        const [{ googleFontFileUrl }] = findFontFilesInCss(
+          responses[NEXT_FONT_GOOGLE_URLS[0]],
+          ["latin"],
+        );
+        process.env.NEXT_FONT_GOOGLE_MOCKED_RESPONSES = join(root, "mock.cjs");
+
+        expect(googleFontFileUrl).toMatch(/^\/\/\?\/[A-Za-z]:\//);
+        await expect(fetchFontFile(googleFontFileUrl, true)).resolves.toEqual(
+          expected,
+        );
+      } finally {
+        if (previous === undefined) {
+          delete process.env.NEXT_FONT_GOOGLE_MOCKED_RESPONSES;
+        } else {
+          process.env.NEXT_FONT_GOOGLE_MOCKED_RESPONSES = previous;
+        }
+        await rm(root, { force: true, recursive: true });
+      }
+    },
+  );
 
   it("rejects non-absolute or CSS-breaking local font paths generically", () => {
     for (const path of [
@@ -592,7 +696,7 @@ describe("docs screenshot set transaction", () => {
     }
   });
 
-  it("treats ESRCH as dead, EPERM as live, and an expired reused PID as stale", () => {
+  it("treats ESRCH as dead and fails closed for live or EPERM PIDs even after expiry", () => {
     const now = Date.now();
     const metadata = {
       createdAt: now - 1_000,
@@ -625,7 +729,104 @@ describe("docs screenshot set transaction", () => {
         { ...metadata, leaseExpiresAt: now - 1 },
         { now, probePid: () => undefined },
       ),
-    ).toBe(true);
+    ).toBe(false);
+  });
+
+  it("does not let an expired live writer race a second publisher", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "coredot-capture-race-"));
+    const root = join(parent, "screenshots");
+    const lock = join(parent, ".screenshots.capture.lock");
+    let announceStaged: (() => void) | undefined;
+    const staged = new Promise<void>((resolveStaged) => {
+      announceStaged = resolveStaged;
+    });
+    let resumeFirst: (() => void) | undefined;
+    const firstMayContinue = new Promise<void>((resolveFirst) => {
+      resumeFirst = resolveFirst;
+    });
+    await writeSet(root, "old");
+
+    const first = writeCapturesAtomically(captureSet("first"), {
+      onStep: async (step) => {
+        if (step === "staged") {
+          announceStaged?.();
+          await firstMayContinue;
+        }
+      },
+      outputRoot: root,
+    });
+
+    try {
+      await staged;
+      const metadata = JSON.parse(await readFile(lock, "utf8")) as Record<
+        string,
+        unknown
+      >;
+      await writeFile(
+        lock,
+        JSON.stringify({ ...metadata, createdAt: 0, leaseExpiresAt: 1 }),
+        "utf8",
+      );
+
+      await expect(
+        writeCapturesAtomically(captureSet("second"), { outputRoot: root }),
+      ).rejects.toThrow(/^Docs capture output failed$/);
+    } finally {
+      resumeFirst?.();
+    }
+
+    try {
+      await expect(first).resolves.toBeUndefined();
+      expect(await readSet(root)).toEqual(
+        names.map((name) => `first-${name}`),
+      );
+      expect(await readdir(parent)).toEqual(["screenshots"]);
+    } finally {
+      await rm(parent, { force: true, recursive: true });
+    }
+  });
+
+  it("rejects a same-token lock replacement before a destructive rename", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "coredot-capture-fence-"));
+    const root = join(parent, "screenshots");
+    const lock = join(parent, ".screenshots.capture.lock");
+    const displacedLock = `${lock}.displaced`;
+    let announceStaged: (() => void) | undefined;
+    const staged = new Promise<void>((resolveStaged) => {
+      announceStaged = resolveStaged;
+    });
+    let resume: (() => void) | undefined;
+    const mayContinue = new Promise<void>((resolveContinue) => {
+      resume = resolveContinue;
+    });
+    await writeSet(root, "old");
+
+    const operation = writeCapturesAtomically(captureSet("new"), {
+      onStep: async (step) => {
+        if (step === "staged") {
+          announceStaged?.();
+          await mayContinue;
+        }
+      },
+      outputRoot: root,
+    });
+
+    try {
+      await staged;
+      const metadata = await readFile(lock, "utf8");
+      await rename(lock, displacedLock);
+      await writeFile(lock, metadata, "utf8");
+      resume?.();
+
+      await expect(operation).rejects.toThrow(/^Docs capture output failed$/);
+      expect(await readSet(root)).toEqual(
+        names.map((name) => `old-${name}`),
+      );
+    } finally {
+      resume?.();
+      await operation.catch(() => undefined);
+      await rm(parent, { force: true, recursive: true });
+    }
   });
 
   it.each(["rollback", "cleanup"] as const)(

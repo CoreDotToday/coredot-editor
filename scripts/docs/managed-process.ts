@@ -60,6 +60,15 @@ export type ManagedCommandOwner = {
   }): Promise<void>;
 };
 
+export type ManagedProcessOwner = {
+  adopt(managed: ManagedProcess): void;
+  release(managed: ManagedProcess): void;
+  settle(options?: {
+    forceTimeoutMs?: number;
+    gracefulTimeoutMs?: number;
+  }): Promise<void>;
+};
+
 const STOP_OPERATIONS = new WeakMap<ManagedProcess, Promise<void>>();
 
 export async function acquireInterruptibleResource<T>(options: {
@@ -203,37 +212,49 @@ export function spawnManagedProcess(
   return { child, exit, pid: child.pid };
 }
 
-export async function stopManagedProcess(
+export function stopManagedProcess(
   managed: ManagedProcess,
   options: {
     forceTimeoutMs?: number;
     gracefulTimeoutMs?: number;
   } = {},
 ): Promise<void> {
+  const gracefulTimeoutMs = options.gracefulTimeoutMs ?? 2_500;
+  const forceTimeoutMs = options.forceTimeoutMs ?? 5_000;
+  try {
+    // Invalid calls must never poison this process owner's retry cache.
+    validateTimeout(gracefulTimeoutMs);
+    validateTimeout(forceTimeoutMs);
+  } catch (error) {
+    return Promise.reject(error);
+  }
   const existing = STOP_OPERATIONS.get(managed);
   if (existing) return existing;
-  const operation = stopManagedProcessOnce(managed, options);
+  const operation = stopManagedProcessOnce(managed, {
+    forceTimeoutMs,
+    gracefulTimeoutMs,
+  });
   STOP_OPERATIONS.set(managed, operation);
+  void operation.then(undefined, () => {
+    if (STOP_OPERATIONS.get(managed) === operation) {
+      STOP_OPERATIONS.delete(managed);
+    }
+  });
   return operation;
 }
 
 async function stopManagedProcessOnce(
   managed: ManagedProcess,
   options: {
-    forceTimeoutMs?: number;
-    gracefulTimeoutMs?: number;
+    forceTimeoutMs: number;
+    gracefulTimeoutMs: number;
   },
 ): Promise<void> {
-  const gracefulTimeoutMs = options.gracefulTimeoutMs ?? 2_500;
-  const forceTimeoutMs = options.forceTimeoutMs ?? 5_000;
-  validateTimeout(gracefulTimeoutMs);
-  validateTimeout(forceTimeoutMs);
+  signalProcessTree(managed, false, options.gracefulTimeoutMs);
+  if (await waitForTreeGone(managed, options.gracefulTimeoutMs)) return;
 
-  signalProcessTree(managed, false, gracefulTimeoutMs);
-  if (await waitForTreeGone(managed, gracefulTimeoutMs)) return;
-
-  signalProcessTree(managed, true, forceTimeoutMs);
-  if (!(await waitForTreeGone(managed, forceTimeoutMs))) {
+  signalProcessTree(managed, true, options.forceTimeoutMs);
+  if (!(await waitForTreeGone(managed, options.forceTimeoutMs))) {
     throw new Error("Managed process cleanup failed");
   }
 }
@@ -288,6 +309,35 @@ export function createManagedCommandOwner(): ManagedCommandOwner {
   };
 }
 
+export function createManagedProcessOwner(): ManagedProcessOwner {
+  const active = new Set<ManagedProcess>();
+  let closed = false;
+  return {
+    adopt(managed) {
+      if (closed) throw new Error("Managed process failed");
+      active.add(managed);
+    },
+    release(managed) {
+      active.delete(managed);
+    },
+    async settle(options = {}) {
+      closed = true;
+      const managedProcesses = [...active];
+      const results = await Promise.allSettled(
+        managedProcesses.map((managed) => stopManagedProcess(managed, options)),
+      );
+      results.forEach((result, index) => {
+        if (result.status === "fulfilled") {
+          active.delete(managedProcesses[index]);
+        }
+      });
+      if (results.some((result) => result.status === "rejected")) {
+        throw new Error("Managed process cleanup failed");
+      }
+    },
+  };
+}
+
 async function runManagedCommandOwned(
   options: ManagedCommandOptions,
   adopt: (managed: ManagedProcess) => unknown = () => undefined,
@@ -310,15 +360,19 @@ async function runManagedCommandOwned(
   } catch {
     failed = true;
   } finally {
+    let stopped = false;
     try {
       await stopManagedProcess(managed, {
         forceTimeoutMs: options.forceTimeoutMs,
         gracefulTimeoutMs: options.gracefulTimeoutMs,
       });
+      stopped = true;
     } catch {
       failed = true;
     }
-    release(managed);
+    // An owner must retain a failed stop so its outer cleanup can retry after
+    // the rejected in-flight stop operation has been evicted.
+    if (stopped) release(managed);
   }
   if (failed) throw new Error("Managed command failed");
 }
