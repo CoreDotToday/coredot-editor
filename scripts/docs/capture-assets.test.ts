@@ -5,30 +5,58 @@ import {
   readdir,
   rename,
   rm,
+  stat,
   utimes,
   writeFile,
 } from "node:fs/promises";
+import { createServer as createHttpServer, type Server } from "node:http";
+import { createRequire } from "node:module";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import JSZip from "jszip";
+import { request as playwrightRequest } from "playwright";
 import sharp from "sharp";
 import { describe, expect, it } from "vitest";
 import { documentInterchange } from "../../src/features/documents/document-interchange";
 import {
   NEXT_FONT_GOOGLE_URLS,
+  NEXT_CAPTURE_BUNDLER_ARGUMENT,
+  CAPTURE_TRANSACTION_VERSION,
   DOCS_CAPTURE_STYLE,
   DOCS_LANGUAGE_STORAGE_KEY,
   DOCS_VIEWPORT,
   createCaptureEnvironment,
+  createCaptureDocumentRequest,
   createNextFontMockResponses,
   encodeWebpWithinBudget,
   isCaptureNetworkAllowed,
+  isCaptureLockOwnerStale,
   runCaptureCleanup,
   screenshotPath,
   toNextFontMockFilePath,
   writeCapturesAtomically,
 } from "./capture-assets";
 import { createMixedFidelityDocx } from "./fixtures/mixed-fidelity-docx";
+
+const require = createRequire(import.meta.url);
+const nextRoot = dirname(require.resolve("next/package.json"));
+const { findFontFilesInCss } = require(
+  join(
+    nextRoot,
+    "dist/compiled/@next/font/dist/google/find-font-files-in-css.js",
+  ),
+) as {
+  findFontFilesInCss: (
+    css: string,
+    subsets: string[],
+  ) => Array<{ googleFontFileUrl: string }>;
+};
+const { fetchFontFile } = require(
+  join(nextRoot, "dist/compiled/@next/font/dist/google/fetch-font-file.js"),
+) as {
+  fetchFontFile: (url: string, isDev: boolean) => Promise<Buffer>;
+};
 
 function createDeterministicPng() {
   const width = 720;
@@ -40,10 +68,29 @@ function createDeterministicPng() {
   return sharp(pixels, { raw: { channels: 3, height, width } }).png().toBuffer();
 }
 
+async function listenOnLoopback(server: Server): Promise<string> {
+  await new Promise<void>((resolveListen, rejectListen) => {
+    server.once("error", rejectListen);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", rejectListen);
+      resolveListen();
+    });
+  });
+  const address = server.address() as AddressInfo;
+  return `http://127.0.0.1:${address.port}`;
+}
+
+async function closeServer(server: Server): Promise<void> {
+  await new Promise<void>((resolveClose, rejectClose) => {
+    server.close((error) => (error ? rejectClose(error) : resolveClose()));
+  });
+}
+
 describe("docs capture constants", () => {
   it("uses the approved deterministic browser settings", () => {
     expect(DOCS_VIEWPORT).toEqual({ height: 1000, width: 1440 });
     expect(DOCS_LANGUAGE_STORAGE_KEY).toBe("coredot-editor-language");
+    expect(NEXT_CAPTURE_BUNDLER_ARGUMENT).toBe("--webpack");
   });
 
   it("suppresses native scrollbars so pointer timing cannot change pixels", () => {
@@ -208,6 +255,41 @@ describe("docs capture offline boundary", () => {
     }
   });
 
+  it("does not follow a document API redirect or forward its body", async () => {
+    let targetHits = 0;
+    let targetBody = "";
+    const target = createHttpServer((request, response) => {
+      targetHits += 1;
+      request.setEncoding("utf8");
+      request.on("data", (chunk) => {
+        targetBody += chunk;
+      });
+      request.on("end", () => response.end("unexpected"));
+    });
+    const targetUrl = await listenOnLoopback(target);
+    const source = createHttpServer((_request, response) => {
+      response.writeHead(307, { location: `${targetUrl}/exfiltrate` });
+      response.end();
+    });
+    const sourceUrl = await listenOnLoopback(source);
+    const api = await playwrightRequest.newContext({ baseURL: sourceUrl });
+
+    try {
+      const response = await createCaptureDocumentRequest(api, sourceUrl, {
+        secret: "must-not-leave-source-origin",
+      });
+
+      expect(response.status()).toBe(307);
+      await new Promise((resolveTurn) => setTimeout(resolveTurn, 50));
+      expect(targetHits).toBe(0);
+      expect(targetBody).toBe("");
+    } finally {
+      await api.dispose();
+      await closeServer(source);
+      await closeServer(target);
+    }
+  });
+
   it("maps the exact Next Google font requests to bundled absolute WOFF2 files", () => {
     const responses = createNextFontMockResponses({
       geistFontPath: "/tmp/fonts/geist-latin.woff2",
@@ -216,11 +298,55 @@ describe("docs capture offline boundary", () => {
 
     expect(Object.keys(responses)).toEqual([...NEXT_FONT_GOOGLE_URLS]);
     expect(responses[NEXT_FONT_GOOGLE_URLS[0]]).toContain(
-      "url('/tmp/fonts/geist-latin.woff2')",
+      "url(/tmp/fonts/geist-latin.woff2)",
     );
     expect(responses[NEXT_FONT_GOOGLE_URLS[1]]).toContain(
-      "url('/tmp/fonts/geist-mono-latin.woff2')",
+      "url(/tmp/fonts/geist-mono-latin.woff2)",
     );
+  });
+
+  it("survives Next 16's real CSS URL extraction and local mock fetch", async () => {
+    const root = await mkdtemp(join(tmpdir(), "coredot-font mock-"));
+    const geist = join(root, "geist latin.woff2");
+    const mono = join(root, "geist mono.woff2");
+    const expected = Buffer.from("real-local-woff2-fixture");
+    await writeFile(geist, expected);
+    await writeFile(mono, Buffer.from("mono-local-woff2-fixture"));
+    const previous = process.env.NEXT_FONT_GOOGLE_MOCKED_RESPONSES;
+
+    try {
+      const responses = createNextFontMockResponses({
+        geistFontPath: geist,
+        geistMonoFontPath: mono,
+      });
+      const fontFiles = findFontFilesInCss(
+        responses[NEXT_FONT_GOOGLE_URLS[0]],
+        ["latin"],
+      );
+      const [{ googleFontFileUrl }] = fontFiles;
+      process.env.NEXT_FONT_GOOGLE_MOCKED_RESPONSES = join(root, "mock.cjs");
+
+      expect(fontFiles).toHaveLength(1);
+      expect(googleFontFileUrl).toBe(geist);
+      await expect(fetchFontFile(googleFontFileUrl, true)).resolves.toEqual(
+        expected,
+      );
+      expect(
+        responses[NEXT_FONT_GOOGLE_URLS[0]].replaceAll(
+          geist,
+          "@vercel/turbopack-next/internal/font/google/font",
+        ),
+      ).toContain(
+        "src:\n url('@vercel/turbopack-next/internal/font/google/font')",
+      );
+    } finally {
+      if (previous === undefined) {
+        delete process.env.NEXT_FONT_GOOGLE_MOCKED_RESPONSES;
+      } else {
+        process.env.NEXT_FONT_GOOGLE_MOCKED_RESPONSES = previous;
+      }
+      await rm(root, { force: true, recursive: true });
+    }
   });
 
   it("converts Windows drive paths to Next's slash-prefixed local-file form", () => {
@@ -236,7 +362,7 @@ describe("docs capture offline boundary", () => {
         geistMonoFontPath: "D:\\fonts\\geist-mono-latin.woff2",
         platform: "win32",
       })[NEXT_FONT_GOOGLE_URLS[0]],
-    ).toContain("url('/C:/fonts/geist-latin.woff2')");
+    ).toContain("url(/C:/fonts/geist-latin.woff2)");
   });
 
   it("rejects non-absolute or CSS-breaking local font paths generically", () => {
@@ -247,6 +373,7 @@ describe("docs capture offline boundary", () => {
       "/tmp/geist\nbad.woff2",
       "/tmp/geist\rbad.woff2",
       "/tmp/geist\0bad.woff2",
+      "/tmp/geist)bad.woff2",
     ]) {
       expect(() => toNextFontMockFilePath(path, "linux")).toThrow(
         /^Docs capture font mock failed$/,
@@ -299,6 +426,22 @@ describe("docs screenshot set transaction", () => {
   async function readSet(root: string) {
     return Promise.all(
       names.map((name) => readFile(join(root, `${name}.webp`), "utf8")),
+    );
+  }
+
+  async function writeTransactionManifest(
+    parent: string,
+    base: string,
+    ownerToken: string,
+  ) {
+    await writeFile(
+      join(parent, `.${base}.capture-transaction-${ownerToken}.json`),
+      JSON.stringify({
+        ownerToken,
+        targetName: base,
+        version: CAPTURE_TRANSACTION_VERSION,
+      }),
+      "utf8",
     );
   }
 
@@ -377,13 +520,24 @@ describe("docs screenshot set transaction", () => {
     const parent = await mkdtemp(join(tmpdir(), "coredot-capture-set-"));
     const root = join(parent, "screenshots");
     const base = root.slice(root.lastIndexOf(sep) + 1);
-    const backup = join(dirname(root), `.${base}.capture-backup`);
+    const ownerToken = "a".repeat(48);
+    const backup = join(
+      dirname(root),
+      `.${base}.capture-backup-${ownerToken}`,
+    );
     const lock = join(dirname(root), `.${base}.capture.lock`);
     await writeSet(root, "old");
     await rename(root, backup);
+    await writeTransactionManifest(parent, base, ownerToken);
     await writeFile(
       lock,
-      JSON.stringify({ createdAt: 0, pid: 2_147_483_647 }),
+      JSON.stringify({
+        createdAt: 0,
+        leaseExpiresAt: 1,
+        ownerToken,
+        pid: 2_147_483_647,
+        version: 1,
+      }),
       "utf8",
     );
 
@@ -397,6 +551,123 @@ describe("docs screenshot set transaction", () => {
       await rm(parent, { force: true, recursive: true });
     }
   });
+
+  it("preserves a corrupt legacy backup instead of claiming or deleting it", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "coredot-capture-set-"));
+    const root = join(parent, "screenshots");
+    const backup = join(parent, ".screenshots.capture-backup");
+    await mkdir(backup);
+    await writeFile(join(backup, "unowned.txt"), "do-not-delete", "utf8");
+
+    try {
+      await expect(
+        writeCapturesAtomically(captureSet("new"), { outputRoot: root }),
+      ).rejects.toThrow(/^Docs capture output failed$/);
+      await expect(readFile(join(backup, "unowned.txt"), "utf8")).resolves.toBe(
+        "do-not-delete",
+      );
+      await expect(stat(root)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(parent, { force: true, recursive: true });
+    }
+  });
+
+  it("preserves an unrelated stage directory that only matches the prefix", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "coredot-capture-set-"));
+    const root = join(parent, "screenshots");
+    const stage = join(parent, ".screenshots.capture-stage-unowned");
+    await mkdir(stage);
+    await writeFile(join(stage, "keep.txt"), "do-not-delete", "utf8");
+
+    try {
+      await expect(
+        writeCapturesAtomically(captureSet("new"), { outputRoot: root }),
+      ).rejects.toThrow(/^Docs capture output failed$/);
+      await expect(readFile(join(stage, "keep.txt"), "utf8")).resolves.toBe(
+        "do-not-delete",
+      );
+      await expect(stat(root)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(parent, { force: true, recursive: true });
+    }
+  });
+
+  it("treats ESRCH as dead, EPERM as live, and an expired reused PID as stale", () => {
+    const now = Date.now();
+    const metadata = {
+      createdAt: now - 1_000,
+      leaseExpiresAt: now + 60_000,
+      ownerToken: "b".repeat(48),
+      pid: process.pid,
+      version: 1 as const,
+    };
+    const processError = (code: "EPERM" | "ESRCH") =>
+      Object.assign(new Error(code), { code });
+
+    expect(
+      isCaptureLockOwnerStale(metadata, {
+        now,
+        probePid: () => {
+          throw processError("ESRCH");
+        },
+      }),
+    ).toBe(true);
+    expect(
+      isCaptureLockOwnerStale(metadata, {
+        now,
+        probePid: () => {
+          throw processError("EPERM");
+        },
+      }),
+    ).toBe(false);
+    expect(
+      isCaptureLockOwnerStale(
+        { ...metadata, leaseExpiresAt: now - 1 },
+        { now, probePid: () => undefined },
+      ),
+    ).toBe(true);
+  });
+
+  it.each(["rollback", "cleanup"] as const)(
+    "keeps an expired owner record after %s failure and recovers on the next run",
+    async (failurePoint) => {
+      const parent = await mkdtemp(join(tmpdir(), "coredot-capture-set-"));
+      const root = join(parent, "screenshots");
+      await writeSet(root, "old");
+
+      try {
+        await expect(
+          writeCapturesAtomically(captureSet("new"), {
+            onStep: async (step) => {
+              if (failurePoint === "rollback" && step === "backed-up") {
+                throw new Error("enter rollback");
+              }
+              if (step === failurePoint) throw new Error("injected");
+            },
+            outputRoot: root,
+          }),
+        ).rejects.toThrow(/^Docs capture output failed$/);
+
+        const retained = await readdir(parent);
+        expect(retained).toContain(".screenshots.capture.lock");
+        expect(
+          retained.some((name) =>
+            name.startsWith(".screenshots.capture-transaction-"),
+          ),
+        ).toBe(true);
+
+        await writeCapturesAtomically(captureSet("recovered"), {
+          outputRoot: root,
+        });
+        expect(await readSet(root)).toEqual(
+          names.map((name) => `recovered-${name}`),
+        );
+        expect(await readdir(parent)).toEqual(["screenshots"]);
+      } finally {
+        await rm(parent, { force: true, recursive: true });
+      }
+    },
+  );
 
   it("recovers an old empty lock left before metadata was fully written", async () => {
     const parent = await mkdtemp(join(tmpdir(), "coredot-capture-set-"));

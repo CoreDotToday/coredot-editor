@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   mkdtemp,
   readFile,
@@ -15,6 +15,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   acquireInterruptibleResource,
   createProcessTreeTerminationPlan,
+  createWindowsJobRunnerInvocation,
   interruptExitCode,
   resolvePnpmInvocation,
   runBoundedCleanup,
@@ -121,9 +122,179 @@ describe("managed package runner", () => {
       /^Managed process failed$/,
     );
   });
+
+  it("builds a shell-free Windows Job Object runner invocation", () => {
+    const invocation = createWindowsJobRunnerInvocation(
+      "C:\\Program Files\\nodejs\\node.exe",
+      ["fixture.mjs", "value with spaces"],
+      "C:\\repo\\scripts\\docs\\windows-job-runner.ps1",
+    );
+    expect(invocation.command).toBe("powershell.exe");
+    expect(invocation.arguments.slice(0, -1)).toEqual([
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "C:\\repo\\scripts\\docs\\windows-job-runner.ps1",
+    ]);
+    expect(
+      JSON.parse(
+        Buffer.from(invocation.arguments.at(-1)!, "base64").toString("utf8"),
+      ),
+    ).toEqual({
+      arguments: ["fixture.mjs", "value with spaces"],
+      executable: "C:\\Program Files\\nodejs\\node.exe",
+      version: 1,
+    });
+    expect(() =>
+      createWindowsJobRunnerInvocation(
+        "node\0.exe",
+        [],
+        "C:\\repo\\scripts\\docs\\windows-job-runner.ps1",
+      ),
+    ).toThrow(/^Managed process failed$/);
+  });
+
+  it("round-trips adversarial argv through the managed command boundary", async () => {
+    const root = await mkdtemp(join(tmpdir(), "coredot-managed-argv-"));
+    const marker = join(root, "argv.json");
+    const fixture = resolve(import.meta.dirname, "fixtures/argv-marker.mjs");
+    const expected = [
+      "",
+      "-H",
+      "--bootstrap",
+      "value with spaces",
+      "C:\\path with spaces\\",
+      'embedded"quote',
+    ];
+
+    try {
+      await runManagedCommand({
+        arguments: [fixture, marker, ...expected],
+        command: process.execPath,
+        cwd: import.meta.dirname,
+        environment: process.env,
+        timeoutMs: 10_000,
+      });
+      await expect(readFile(marker, "utf8")).resolves.toBe(
+        JSON.stringify(expected),
+      );
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
+  });
 });
 
 describe("managed process tree", () => {
+  it.skipIf(process.platform !== "win32")(
+    "proves the detached Windows leaf survives without the custom Job Object",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "coredot-windows-control-"));
+      const marker = join(root, "ready.json");
+      const port = await reservePort();
+      const fixture = resolve(
+        import.meta.dirname,
+        "fixtures/managed-process-tree.mjs",
+      );
+      const child = spawn(
+        process.execPath,
+        [fixture, "failing-parent", String(port), marker],
+        { cwd: import.meta.dirname, env: process.env, stdio: "ignore" },
+      );
+      const closed = new Promise<void>((resolveClose, rejectClose) => {
+        child.once("error", rejectClose);
+        child.once("close", () => resolveClose());
+      });
+      let leafPid: number | undefined;
+
+      try {
+        const identities = await waitForJson<{ leafPid: number }>(marker);
+        leafPid = identities.leafPid;
+        await closed;
+        await expect(
+          waitForPortRelease(port, { timeoutMs: 250 }),
+        ).rejects.toThrow(/^Managed process cleanup failed$/);
+      } finally {
+        let cleanupFailed = false;
+        try {
+          const childIsLive =
+            child.exitCode === null && child.signalCode === null;
+          if (childIsLive && child.pid) {
+            const rootPlan = createProcessTreeTerminationPlan(
+              "win32",
+              child.pid,
+              true,
+            );
+            const rootCleanup = spawnSync(
+              rootPlan.command,
+              rootPlan.arguments,
+              { shell: false, stdio: "ignore", timeout: 5_000 },
+            );
+            if (rootCleanup.error || rootCleanup.status !== 0) {
+              cleanupFailed = true;
+            }
+            let closeTimeout: ReturnType<typeof setTimeout> | undefined;
+            try {
+              await Promise.race([
+                closed,
+                new Promise<never>((_resolve, reject) =>
+                  (closeTimeout = setTimeout(
+                    () => reject(new Error("root cleanup timed out")),
+                    5_000,
+                  )),
+                ),
+              ]);
+            } catch {
+              cleanupFailed = true;
+            } finally {
+              if (closeTimeout) clearTimeout(closeTimeout);
+            }
+          } else if (childIsLive) {
+            cleanupFailed = true;
+            child.kill("SIGKILL");
+          }
+          if (leafPid) {
+            const leafPlan = createProcessTreeTerminationPlan(
+              "win32",
+              leafPid,
+              true,
+            );
+            const leafCleanup = spawnSync(
+              leafPlan.command,
+              leafPlan.arguments,
+              { shell: false, stdio: "ignore", timeout: 5_000 },
+            );
+            if (leafCleanup.error || leafCleanup.status !== 0) {
+              cleanupFailed = true;
+            }
+          }
+          try {
+            await waitForPortRelease(port, { timeoutMs: 5_000 });
+          } catch {
+            cleanupFailed = true;
+          }
+          if (leafPid) {
+            try {
+              expectProcessGone(leafPid);
+            } catch {
+              cleanupFailed = true;
+            }
+          }
+        } finally {
+          try {
+            await rm(root, { force: true, recursive: true });
+          } catch {
+            cleanupFailed = true;
+          }
+        }
+        if (cleanupFailed) throw new Error("Windows fixture cleanup failed");
+      }
+    },
+    15_000,
+  );
+
   it("reports a spawn failure without an unhandled child-process error", async () => {
     const monitoredErrors: unknown[] = [];
     const monitor = (error: unknown) => monitoredErrors.push(error);
@@ -141,7 +312,7 @@ describe("managed process tree", () => {
           environment: process.env,
           timeoutMs: 500,
         }),
-      ).rejects.toThrow(/^Managed process failed$/);
+      ).rejects.toThrow(/^Managed (?:command|process) failed$/);
       await new Promise((resolveTurn) => setImmediate(resolveTurn));
       expect(monitoredErrors).toEqual([]);
     } finally {
@@ -169,7 +340,9 @@ describe("managed process tree", () => {
         parentPid: number;
         port: number;
       }>(marker);
-      expect(pids.parentPid).toBe(managed.pid);
+      if (process.platform !== "win32") {
+        expect(pids.parentPid).toBe(managed.pid);
+      }
       expect(pids.port).toBe(port);
 
       await stopManagedProcess(managed, {
@@ -189,7 +362,7 @@ describe("managed process tree", () => {
     }
   }, 10_000);
 
-  it.skipIf(process.platform === "win32")(
+  it(
     "cleans the process tree after a direct command exits nonzero",
     async () => {
       const root = await mkdtemp(join(tmpdir(), "coredot-managed-failure-"));
@@ -236,6 +409,10 @@ describe("interruptible task lifecycle", () => {
       announceCleanup = resolveCleanup;
     });
     const disposed: string[] = [];
+    let announceDisposed: (() => void) | undefined;
+    const disposalFinished = new Promise<void>((resolveDisposal) => {
+      announceDisposed = resolveDisposal;
+    });
     const task = runInterruptibleTask({
       cleanup: async () => {
         announceCleanup?.();
@@ -252,6 +429,7 @@ describe("interruptible task lifecycle", () => {
           },
           dispose: async (resource) => {
             disposed.push(resource.id);
+            announceDisposed?.();
           },
           signal,
         });
@@ -261,9 +439,9 @@ describe("interruptible task lifecycle", () => {
 
     source.emit("SIGTERM");
     await cleanupStarted;
-    releaseAcquisition?.({ id: "late-browser" });
-
     await expect(task).resolves.toEqual({ signal: "SIGTERM" });
+    releaseAcquisition?.({ id: "late-browser" });
+    await disposalFinished;
     expect(adopted).toBeUndefined();
     expect(disposed).toEqual(["late-browser"]);
   });
@@ -298,9 +476,8 @@ describe("interruptible task lifecycle", () => {
     expect(source.listenerCount("SIGTERM")).toBe(0);
   });
 
-  it("starts cleanup immediately when interrupted work ignores AbortSignal", async () => {
+  it("returns after bounded cleanup when interrupted work never cooperates", async () => {
     const source = new EventEmitter();
-    let releaseExecution: (() => void) | undefined;
     let announceCleanup: (() => void) | undefined;
     const cleanupStarted = new Promise<void>((resolveCleanup) => {
       announceCleanup = resolveCleanup;
@@ -308,31 +485,48 @@ describe("interruptible task lifecycle", () => {
     const task = runInterruptibleTask({
       cleanup: async () => {
         announceCleanup?.();
-        releaseExecution?.();
       },
-      execute: async () =>
-        new Promise<void>((resolveExecution) => {
-          releaseExecution = resolveExecution;
-        }),
+      execute: async () => new Promise<never>(() => undefined),
       signalSource: source,
     });
 
     source.emit("SIGTERM");
 
+    await expect(
+      Promise.race([
+        cleanupStarted,
+        new Promise<never>((_resolve, reject) =>
+          setTimeout(() => reject(new Error("cleanup did not start")), 100),
+        ),
+      ]),
+    ).resolves.toBeUndefined();
+    await expect(task).resolves.toEqual({ signal: "SIGTERM" });
+  });
+
+  it("handles a rejection that arrives after the interrupted task returned", async () => {
+    const source = new EventEmitter();
+    const unhandled: unknown[] = [];
+    let rejectExecution: ((error: Error) => void) | undefined;
+    const monitor = (error: unknown) => unhandled.push(error);
+    process.on("unhandledRejection", monitor);
+    const task = runInterruptibleTask({
+      cleanup: async () => undefined,
+      execute: async () =>
+        new Promise<never>((_resolve, reject) => {
+          rejectExecution = reject;
+        }),
+      signalSource: source,
+    });
+
     try {
-      await expect(
-        Promise.race([
-          cleanupStarted,
-          new Promise<never>((_resolve, reject) =>
-            setTimeout(() => reject(new Error("cleanup did not start")), 100),
-          ),
-        ]),
-      ).resolves.toBeUndefined();
+      source.emit("SIGINT");
+      await expect(task).resolves.toEqual({ signal: "SIGINT" });
+      rejectExecution?.(new Error("late execution failure"));
+      await new Promise((resolveTurn) => setImmediate(resolveTurn));
+      expect(unhandled).toEqual([]);
     } finally {
-      releaseExecution?.();
-      await task.catch(() => undefined);
+      process.removeListener("unhandledRejection", monitor);
     }
-    expect(await task).toEqual({ signal: "SIGTERM" });
   });
 
   it("uses one absolute cleanup deadline without awaiting an uncooperative loser", async () => {
@@ -361,8 +555,9 @@ describe("interruptible task lifecycle", () => {
     }
   });
 
-  it.skipIf(process.platform === "win32")(
-    "handles a real SIGTERM without leaving a process, port, or temp-directory tail",
+  for (const phase of ["migration", "bootstrap"] as const) {
+    it.skipIf(process.platform === "win32")(
+    `handles SIGTERM during ${phase} without a process, port, file, or temp tail`,
     async () => {
       const root = await mkdtemp(join(tmpdir(), "coredot-interrupt-test-"));
       const resultPath = join(root, "result.json");
@@ -373,7 +568,7 @@ describe("interruptible task lifecycle", () => {
       );
       const child = spawn(
         process.execPath,
-        ["--import", "tsx", harness, resultPath, String(port)],
+        ["--import", "tsx", harness, resultPath, String(port), phase],
         {
         cwd: resolve(import.meta.dirname, "../.."),
         stdio: "ignore",
@@ -390,7 +585,9 @@ describe("interruptible task lifecycle", () => {
       try {
         const ready = await waitForJsonMatching<{
           leafPid: number;
+          openFilePath: string;
           parentPid: number;
+          phase: string;
           status: string;
           temporaryRoot: string;
         }>(resultPath, (value) => value.status === "ready");
@@ -399,7 +596,9 @@ describe("interruptible task lifecycle", () => {
         const cleaned = await waitForJsonMatching<{
           cleanupCount: number;
           leafPid: number;
+          openFilePath: string;
           parentPid: number;
+          phase: string;
           signal: string;
           status: string;
           temporaryRoot: string;
@@ -407,6 +606,8 @@ describe("interruptible task lifecycle", () => {
 
         expect(cleaned).toMatchObject({
           cleanupCount: 1,
+          openFilePath: ready.openFilePath,
+          phase,
           signal: "SIGTERM",
           status: "cleaned",
           temporaryRoot: ready.temporaryRoot,
@@ -427,4 +628,5 @@ describe("interruptible task lifecycle", () => {
     },
     20_000,
   );
+  }
 });

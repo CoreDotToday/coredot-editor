@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import {
+  type FileHandle,
   lstat,
   mkdir,
   mkdtemp,
@@ -19,6 +20,7 @@ import { basename, dirname, isAbsolute, join, resolve, win32 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   chromium,
+  type APIRequestContext,
   type APIResponse,
   type Browser,
   type BrowserContext,
@@ -29,10 +31,10 @@ import { createToolEnvironment } from "./verify-quick-start-shared";
 import { createMixedFidelityDocx } from "./fixtures/mixed-fidelity-docx";
 import {
   acquireInterruptibleResource,
+  createManagedCommandOwner,
   interruptExitCode,
   resolvePnpmInvocation,
   runInterruptibleTask,
-  runManagedCommand,
   spawnManagedProcess,
   stopManagedProcess,
   waitForPortRelease,
@@ -51,10 +53,14 @@ const CAPTURE_NAMES = ["workspace", "proposal-review", "docx-fidelity"] as const
 const WEBP_QUALITY_STEPS = [88, 82, 76, 70, 64, 58, 52] as const;
 const DEFAULT_WEBP_MAX_BYTES = 350 * 1024;
 const MAX_API_RESPONSE_BYTES = 1024 * 1024;
+const CAPTURE_LOCK_LEASE_MS = 10 * 60_000;
+const CAPTURE_OWNER_TOKEN_PATTERN = /^[a-f0-9]{48}$/;
+export const CAPTURE_TRANSACTION_VERSION = 1 as const;
 export const NEXT_FONT_GOOGLE_URLS = [
   "https://fonts.googleapis.com/css2?family=Geist:wght@100..900&display=swap",
   "https://fonts.googleapis.com/css2?family=Geist+Mono:wght@100..900&display=swap",
 ] as const;
+export const NEXT_CAPTURE_BUNDLER_ARGUMENT = "--webpack" as const;
 const FIXED_CAPTURE_ENVIRONMENT = {
   AI_PROVIDER: "stub",
   AUTH_MODE: "test",
@@ -103,6 +109,18 @@ export const DOCS_CAPTURE_STYLE = `
 `;
 
 type CaptureName = (typeof CAPTURE_NAMES)[number];
+export type CaptureLockMetadata = {
+  createdAt: number;
+  leaseExpiresAt: number;
+  ownerToken: string;
+  pid: number;
+  version: typeof CAPTURE_TRANSACTION_VERSION;
+};
+type CaptureOutputLock = {
+  handle: FileHandle;
+  metadata: CaptureLockMetadata;
+  previousOwnerToken?: string;
+};
 type CapturePhase =
   | "browser startup"
   | "database migration"
@@ -187,6 +205,23 @@ export function isCaptureNetworkAllowed(candidate: string, baseUrl: string) {
   }
 }
 
+export function createCaptureDocumentRequest(
+  request: APIRequestContext,
+  baseUrl: string,
+  data: object,
+  headers?: Record<string, string>,
+): Promise<APIResponse> {
+  const endpoint = new URL("/api/documents", baseUrl);
+  if (
+    endpoint.pathname !== "/api/documents" ||
+    endpoint.search !== "" ||
+    !isCaptureNetworkAllowed(endpoint.href, baseUrl)
+  ) {
+    throw new Error("Docs capture document request failed");
+  }
+  return request.post(endpoint.href, { data, headers, maxRedirects: 0 });
+}
+
 export function createNextFontMockResponses(options: {
   geistFontPath: string;
   geistMonoFontPath: string;
@@ -200,11 +235,13 @@ export function createNextFontMockResponses(options: {
     options.geistMonoFontPath,
     options.platform,
   );
+  // Next 16's line extractor needs an unquoted path to read local bytes, while
+  // the rewritten CSS URL must retain quotes for the bundler's module syntax.
   return {
     [NEXT_FONT_GOOGLE_URLS[0]]:
-      `@font-face { font-family: 'Geist'; font-style: normal; font-weight: 100 900; src: url('${geistFontPath}') format('woff2'); }`,
+      `/*font-probe src: url(${geistFontPath})*/\n@font-face { font-family: 'Geist'; font-style: normal; font-weight: 100 900; src:\n url('${geistFontPath}') format('woff2'); }`,
     [NEXT_FONT_GOOGLE_URLS[1]]:
-      `@font-face { font-family: 'Geist Mono'; font-style: normal; font-weight: 100 900; src: url('${geistMonoFontPath}') format('woff2'); }`,
+      `/*font-probe src: url(${geistMonoFontPath})*/\n@font-face { font-family: 'Geist Mono'; font-style: normal; font-weight: 100 900; src:\n url('${geistMonoFontPath}') format('woff2'); }`,
   };
 }
 
@@ -216,6 +253,7 @@ export function toNextFontMockFilePath(
     path.includes("\0") ||
     path.includes("\n") ||
     path.includes("\r") ||
+    path.includes(")") ||
     path.includes("'") ||
     path.includes('"')
   ) {
@@ -282,12 +320,18 @@ async function captureDocsAssets() {
   let context: BrowserContext | undefined;
   let server: CaptureServer | undefined;
   let phase: CapturePhase = "database migration";
+  const commandOwner = createManagedCommandOwner();
 
   try {
     return await runInterruptibleTask({
       cleanup: async (cleanupSignal) => {
         const stopServerThenRemoveTemporaryRoot = async () => {
           let failed = false;
+          try {
+            await commandOwner.settle();
+          } catch {
+            failed = true;
+          }
           try {
             if (server) await disposeCaptureServer(server, cleanupSignal);
           } catch {
@@ -332,7 +376,7 @@ async function captureDocsAssets() {
             port: 1,
             runNonce,
           });
-          await runManagedCommand({
+          await commandOwner.run({
             arguments: [...pnpm.prefixArguments, "db:migrate"],
             command: pnpm.command,
             cwd: APP_ROOT,
@@ -341,7 +385,7 @@ async function captureDocsAssets() {
             timeoutMs: 60_000,
           });
           phase = "workspace bootstrap";
-          await runManagedCommand({
+          await commandOwner.run({
             arguments: [
               ...pnpm.prefixArguments,
               "exec",
@@ -454,8 +498,10 @@ async function captureProductStates(
   const page = await context.newPage();
   const captures = new Map<CaptureName, Buffer>();
   setPhase("document API creation");
-  const response = await context.request.post("/api/documents", {
-    data: {
+  const response = await createCaptureDocumentRequest(
+    context.request,
+    baseUrl,
+    {
       contentJson: {
         content: [
           {
@@ -491,8 +537,8 @@ async function captureProductStates(
       },
       title: "Quarterly Product Strategy Brief",
     },
-    headers: { "Idempotency-Key": "docs_capture_product_brief_v1" },
-  });
+    { "Idempotency-Key": "docs_capture_product_brief_v1" },
+  );
   const documentId = await readCreatedDocumentId(response);
 
   setPhase("editor load");
@@ -686,7 +732,7 @@ export async function writeCapturesAtomically(
   captures: Map<CaptureName, Buffer>,
   options: {
     onStep?: (
-      step: "backed-up" | "committed" | "staged",
+      step: "backed-up" | "cleanup" | "committed" | "rollback" | "staged",
     ) => Promise<unknown>;
     outputRoot?: string;
     signal?: AbortSignal;
@@ -709,29 +755,44 @@ export async function writeCapturesAtomically(
   const parent = dirname(outputRoot);
   const directoryName = basename(outputRoot);
   const lockPath = join(parent, `.${directoryName}.capture.lock`);
-  const backupPath = join(parent, `.${directoryName}.capture-backup`);
+  const backupPrefix = `.${directoryName}.capture-backup-`;
   const stagePrefix = `.${directoryName}.capture-stage-`;
-  const stagePath = join(
-    parent,
-    `${stagePrefix}${process.pid}-${randomBytes(12).toString("hex")}`,
-  );
+  const manifestPrefix = `.${directoryName}.capture-transaction-`;
   await mkdir(parent, { recursive: true });
   const lock = await acquireCaptureOutputLock(lockPath);
+  const backupPath = join(parent, `${backupPrefix}${lock.metadata.ownerToken}`);
+  const stagePath = join(parent, `${stagePrefix}${lock.metadata.ownerToken}`);
+  const manifestPath = join(
+    parent,
+    `${manifestPrefix}${lock.metadata.ownerToken}.json`,
+  );
   let committed = false;
+  let manifestCreated = false;
   let movedOldSet = false;
   let operationFailed = false;
+  let preserveLockForRecovery = false;
 
   try {
     await recoverCaptureOutput({
-      backupPath,
+      backupPrefix,
+      directoryName,
+      manifestPrefix,
       outputRoot,
       parent,
+      previousOwnerToken: lock.previousOwnerToken,
       stagePrefix,
     });
     if (await pathExists(outputRoot)) {
       await assertApprovedCaptureDirectory(outputRoot);
     }
     if (options.signal?.aborted) throw new Error("interrupted");
+    await renewCaptureOutputLock(lock);
+    await writeFile(
+      manifestPath,
+      JSON.stringify(createCaptureTransactionManifest(directoryName, lock.metadata.ownerToken)),
+      { flag: "wx" },
+    );
+    manifestCreated = true;
 
     await mkdir(stagePath, { recursive: false });
     for (const name of CAPTURE_NAMES) {
@@ -744,34 +805,60 @@ export async function writeCapturesAtomically(
     await options.onStep?.("staged");
 
     if (await pathExists(outputRoot)) {
+      await renewCaptureOutputLock(lock);
       await rename(outputRoot, backupPath);
       movedOldSet = true;
     }
     await options.onStep?.("backed-up");
     if (options.signal?.aborted) throw new Error("interrupted");
+    await renewCaptureOutputLock(lock);
     await rename(stagePath, outputRoot);
     committed = true;
     await options.onStep?.("committed");
   } catch {
     operationFailed = true;
-    if (!committed && movedOldSet && !(await pathExists(outputRoot))) {
+    if (
+      !committed &&
+      movedOldSet &&
+      !(await pathExists(outputRoot)) &&
+      (await isOwnedCaptureTransaction(
+        manifestPath,
+        directoryName,
+        lock.metadata.ownerToken,
+      ))
+    ) {
       try {
+        await options.onStep?.("rollback");
+        await assertApprovedCaptureDirectory(backupPath);
         await rename(backupPath, outputRoot);
         movedOldSet = false;
       } catch {
-        // The stable backup is retained for stale recovery on the next run.
+        // The tokenized backup and manifest remain for verified stale recovery.
       }
     }
   } finally {
-    await rm(stagePath, { force: true, recursive: true }).catch(() => undefined);
-    if (committed || !movedOldSet) {
-      await rm(backupPath, { force: true, recursive: true }).catch(
-        () => undefined,
-      );
+    if (manifestCreated) {
+      const cleaned = await cleanupOwnedCaptureTransaction({
+        backupPath,
+        committed,
+        directoryName,
+        manifestPath,
+        movedOldSet,
+        ownerToken: lock.metadata.ownerToken,
+        stagePath,
+        beforeCleanup: () => options.onStep?.("cleanup"),
+      });
+      if (!cleaned) {
+        operationFailed = true;
+        preserveLockForRecovery = true;
+      }
     }
     try {
-      await lock.close();
-      await rm(lockPath, { force: true });
+      if (preserveLockForRecovery) {
+        await preserveExpiredCaptureOutputLock(lock);
+      } else {
+        await releaseCaptureOutputLock(lockPath, lock);
+      }
     } catch {
       operationFailed = true;
     }
@@ -779,32 +866,48 @@ export async function writeCapturesAtomically(
   if (operationFailed) throw new Error("Docs capture output failed");
 }
 
-async function acquireCaptureOutputLock(lockPath: string) {
+async function acquireCaptureOutputLock(
+  lockPath: string,
+): Promise<CaptureOutputLock> {
+  const ownerToken = randomBytes(24).toString("hex");
+  let previousOwnerToken: string | undefined;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
       const handle = await open(lockPath, "wx");
+      const createdAt = Date.now();
+      const metadata: CaptureLockMetadata = {
+        createdAt,
+        leaseExpiresAt: createdAt + CAPTURE_LOCK_LEASE_MS,
+        ownerToken,
+        pid: process.pid,
+        version: CAPTURE_TRANSACTION_VERSION,
+      };
       try {
-        await handle.writeFile(
-          JSON.stringify({ createdAt: Date.now(), pid: process.pid }),
-          "utf8",
-        );
+        await writeCaptureLockMetadata(handle, metadata);
       } catch {
         await handle.close().catch(() => undefined);
         await rm(lockPath, { force: true }).catch(() => undefined);
         throw new Error("Docs capture output failed");
       }
-      return handle;
+      return { handle, metadata, previousOwnerToken };
     } catch (error) {
-      if (
-        attempt !== 0 ||
-        !hasErrorCode(error, "EEXIST") ||
-        !(await isStaleCaptureLock(lockPath))
-      ) {
+      if (attempt !== 0 || !hasErrorCode(error, "EEXIST")) {
         throw new Error("Docs capture output failed");
       }
+      const staleOwner = await readStaleCaptureLockOwner(lockPath);
+      if (!staleOwner.stale) throw new Error("Docs capture output failed");
       const stalePath = `${lockPath}.stale-${randomBytes(12).toString("hex")}`;
       try {
         await rename(lockPath, stalePath);
+        const movedOwner = await readStaleCaptureLockOwner(stalePath);
+        if (
+          !movedOwner.stale ||
+          movedOwner.ownerToken !== staleOwner.ownerToken
+        ) {
+          await rename(stalePath, lockPath).catch(() => undefined);
+          throw new Error("Docs capture output failed");
+        }
+        previousOwnerToken = movedOwner.ownerToken;
         await rm(stalePath, { force: true });
       } catch {
         throw new Error("Docs capture output failed");
@@ -814,29 +917,110 @@ async function acquireCaptureOutputLock(lockPath: string) {
   throw new Error("Docs capture output failed");
 }
 
-async function isStaleCaptureLock(lockPath: string) {
+async function writeCaptureLockMetadata(
+  handle: FileHandle,
+  metadata: CaptureLockMetadata,
+) {
+  const contents = Buffer.from(JSON.stringify(metadata), "utf8");
+  await handle.write(contents, 0, contents.byteLength, 0);
+  await handle.truncate(contents.byteLength);
+  await handle.sync();
+}
+
+async function renewCaptureOutputLock(lock: CaptureOutputLock) {
+  lock.metadata.leaseExpiresAt = Date.now() + CAPTURE_LOCK_LEASE_MS;
+  await writeCaptureLockMetadata(lock.handle, lock.metadata);
+}
+
+async function releaseCaptureOutputLock(
+  lockPath: string,
+  lock: CaptureOutputLock,
+) {
+  let owned = false;
   try {
-    const contents = JSON.parse(await readFile(lockPath, "utf8")) as {
-      createdAt?: unknown;
-      pid?: unknown;
-    };
-    if (
-      typeof contents.pid === "number" &&
-      Number.isSafeInteger(contents.pid) &&
-      contents.pid > 0
-    ) {
-      try {
-        process.kill(contents.pid, 0);
-        return false;
-      } catch {
-        return true;
-      }
-    }
-    return captureLockMtimeIsStale(lockPath);
-  } catch (error) {
-    if (hasErrorCode(error, "ENOENT")) return false;
-    return captureLockMtimeIsStale(lockPath);
+    const metadata = parseCaptureLockMetadata(
+      JSON.parse(await readFile(lockPath, "utf8")),
+    );
+    owned = metadata?.ownerToken === lock.metadata.ownerToken;
+  } finally {
+    await lock.handle.close();
   }
+  if (!owned) throw new Error("Docs capture output failed");
+  await rm(lockPath, { force: true });
+}
+
+async function preserveExpiredCaptureOutputLock(lock: CaptureOutputLock) {
+  try {
+    lock.metadata.createdAt = 0;
+    lock.metadata.leaseExpiresAt = 1;
+    await writeCaptureLockMetadata(lock.handle, lock.metadata);
+  } finally {
+    await lock.handle.close();
+  }
+}
+
+export function isCaptureLockOwnerStale(
+  metadata: CaptureLockMetadata,
+  options: {
+    now?: number;
+    probePid?: (pid: number) => unknown;
+  } = {},
+) {
+  if (!parseCaptureLockMetadata(metadata)) return false;
+  const now = options.now ?? Date.now();
+  if (metadata.leaseExpiresAt <= now) return true;
+  try {
+    (options.probePid ?? ((pid) => process.kill(pid, 0)))(metadata.pid);
+    return false;
+  } catch (error) {
+    if (hasErrorCode(error, "ESRCH")) return true;
+    return false;
+  }
+}
+
+async function readStaleCaptureLockOwner(lockPath: string) {
+  try {
+    const metadata = parseCaptureLockMetadata(
+      JSON.parse(await readFile(lockPath, "utf8")),
+    );
+    if (metadata) {
+      const stale = isCaptureLockOwnerStale(metadata);
+      return {
+        ownerToken: stale ? metadata.ownerToken : undefined,
+        stale,
+      };
+    }
+  } catch (error) {
+    if (hasErrorCode(error, "ENOENT")) return { stale: false };
+  }
+  return { stale: await captureLockMtimeIsStale(lockPath) };
+}
+
+function parseCaptureLockMetadata(value: unknown): CaptureLockMetadata | undefined {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    !("version" in value) ||
+    value.version !== CAPTURE_TRANSACTION_VERSION ||
+    !("ownerToken" in value) ||
+    typeof value.ownerToken !== "string" ||
+    !CAPTURE_OWNER_TOKEN_PATTERN.test(value.ownerToken) ||
+    !("pid" in value) ||
+    typeof value.pid !== "number" ||
+    !Number.isSafeInteger(value.pid) ||
+    value.pid < 1 ||
+    !("createdAt" in value) ||
+    typeof value.createdAt !== "number" ||
+    !Number.isFinite(value.createdAt) ||
+    value.createdAt < 0 ||
+    !("leaseExpiresAt" in value) ||
+    typeof value.leaseExpiresAt !== "number" ||
+    !Number.isFinite(value.leaseExpiresAt) ||
+    value.leaseExpiresAt <= value.createdAt
+  ) {
+    return undefined;
+  }
+  return value as CaptureLockMetadata;
 }
 
 async function captureLockMtimeIsStale(lockPath: string) {
@@ -849,24 +1033,146 @@ async function captureLockMtimeIsStale(lockPath: string) {
 }
 
 async function recoverCaptureOutput(options: {
-  backupPath: string;
+  backupPrefix: string;
+  directoryName: string;
+  manifestPrefix: string;
   outputRoot: string;
   parent: string;
+  previousOwnerToken?: string;
   stagePrefix: string;
 }) {
-  if (await pathExists(options.backupPath)) {
-    await assertApprovedCaptureDirectory(options.backupPath);
+  const legacyBackup = `.${options.directoryName}.capture-backup`;
+  const entries = await readdir(options.parent, { withFileTypes: true });
+  const transactionEntries = entries.filter(
+    (entry) =>
+      entry.name === legacyBackup ||
+      entry.name.startsWith(options.backupPrefix) ||
+      entry.name.startsWith(options.stagePrefix) ||
+      entry.name.startsWith(options.manifestPrefix),
+  );
+  if (transactionEntries.length === 0) return;
+  if (!options.previousOwnerToken) throw new Error("Docs capture output failed");
+
+  const backupName = `${options.backupPrefix}${options.previousOwnerToken}`;
+  const stageName = `${options.stagePrefix}${options.previousOwnerToken}`;
+  const manifestName = `${options.manifestPrefix}${options.previousOwnerToken}.json`;
+  const expectedNames = new Set([backupName, manifestName, stageName]);
+  if (transactionEntries.some((entry) => !expectedNames.has(entry.name))) {
+    throw new Error("Docs capture output failed");
+  }
+
+  const backupPath = join(options.parent, backupName);
+  const stagePath = join(options.parent, stageName);
+  const manifestPath = join(options.parent, manifestName);
+  if (
+    !(await isOwnedCaptureTransaction(
+      manifestPath,
+      options.directoryName,
+      options.previousOwnerToken,
+    ))
+  ) {
+    throw new Error("Docs capture output failed");
+  }
+
+  const hasStage = await pathExists(stagePath);
+  const hasBackup = await pathExists(backupPath);
+  if (hasStage) await assertOwnedCaptureArtifactDirectory(stagePath);
+  if (hasBackup) await assertApprovedCaptureDirectory(backupPath);
+  if (hasBackup && (await pathExists(options.outputRoot))) {
+    await assertApprovedCaptureDirectory(options.outputRoot);
+  }
+
+  if (hasStage) await rm(stagePath, { recursive: true });
+  if (hasBackup) {
     if (await pathExists(options.outputRoot)) {
-      await assertApprovedCaptureDirectory(options.outputRoot);
-      await rm(options.backupPath, { force: true, recursive: true });
+      await rm(backupPath, { recursive: true });
     } else {
-      await rename(options.backupPath, options.outputRoot);
+      await rename(backupPath, options.outputRoot);
     }
   }
-  for (const entry of await readdir(options.parent, { withFileTypes: true })) {
-    if (entry.name.startsWith(options.stagePrefix)) {
-      await rm(join(options.parent, entry.name), { force: true, recursive: true });
+  await rm(manifestPath);
+}
+
+function createCaptureTransactionManifest(
+  targetName: string,
+  ownerToken: string,
+) {
+  return {
+    ownerToken,
+    targetName,
+    version: CAPTURE_TRANSACTION_VERSION,
+  };
+}
+
+async function isOwnedCaptureTransaction(
+  manifestPath: string,
+  targetName: string,
+  ownerToken: string,
+) {
+  try {
+    const metadata = await lstat(manifestPath);
+    if (!metadata.isFile() || metadata.isSymbolicLink()) return false;
+    const value = JSON.parse(await readFile(manifestPath, "utf8")) as Record<
+      string,
+      unknown
+    >;
+    return (
+      value.version === CAPTURE_TRANSACTION_VERSION &&
+      value.ownerToken === ownerToken &&
+      value.targetName === targetName &&
+      Object.keys(value).sort().join(",") === "ownerToken,targetName,version"
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function cleanupOwnedCaptureTransaction(options: {
+  backupPath: string;
+  beforeCleanup: () => Promise<unknown> | undefined;
+  committed: boolean;
+  directoryName: string;
+  manifestPath: string;
+  movedOldSet: boolean;
+  ownerToken: string;
+  stagePath: string;
+}) {
+  if (
+    !(await isOwnedCaptureTransaction(
+      options.manifestPath,
+      options.directoryName,
+      options.ownerToken,
+    ))
+  ) {
+    return false;
+  }
+  try {
+    await options.beforeCleanup();
+    const hasStage = await pathExists(options.stagePath);
+    const hasBackup = await pathExists(options.backupPath);
+    if (hasStage) await assertOwnedCaptureArtifactDirectory(options.stagePath);
+    if (hasBackup) await assertApprovedCaptureDirectory(options.backupPath);
+    if (hasStage) await rm(options.stagePath, { recursive: true });
+    if (hasBackup && (options.committed || !options.movedOldSet)) {
+      await rm(options.backupPath, { recursive: true });
     }
+    if (
+      !(await pathExists(options.stagePath)) &&
+      !(await pathExists(options.backupPath))
+    ) {
+      await rm(options.manifestPath);
+      return true;
+    }
+  } catch {
+    // Preserve any artifact whose exact ownership or contents cannot be proven.
+  }
+  return false;
+}
+
+async function assertOwnedCaptureArtifactDirectory(path: string) {
+  const metadata = await lstat(path);
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+    throw new Error("Docs capture output failed");
   }
 }
 
@@ -932,6 +1238,7 @@ async function startCaptureServer(options: {
           "exec",
           "next",
           "dev",
+          NEXT_CAPTURE_BUNDLER_ARGUMENT,
           "-H",
           "127.0.0.1",
           "-p",

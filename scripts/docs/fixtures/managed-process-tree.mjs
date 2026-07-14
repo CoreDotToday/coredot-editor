@@ -1,19 +1,22 @@
 import { spawn } from "node:child_process";
+import { openSync } from "node:fs";
 import { access, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
 
 const scriptPath = fileURLToPath(import.meta.url);
-const [mode, rawPort, markerPath] = process.argv.slice(2);
+const [mode, rawPort, markerPath, openFilePath] = process.argv.slice(2);
 const port = Number(rawPort);
 
 if (!Number.isInteger(port) || port < 1 || port > 65_535 || !markerPath) {
   process.exitCode = 2;
 } else if (mode === "parent" || mode === "failing-parent") {
   process.on("SIGTERM", () => undefined);
-  const leaf = spawn(process.execPath, [scriptPath, "leaf", String(port), markerPath], {
-    stdio: "ignore",
-  });
+  const leaf = spawn(
+    process.execPath,
+    [scriptPath, "leaf", String(port), markerPath, openFilePath ?? ""],
+    { detached: process.platform === "win32", stdio: "ignore" },
+  );
   leaf.unref();
   if (mode === "parent") {
     setInterval(() => undefined, 1_000);
@@ -30,11 +33,17 @@ if (!Number.isInteger(port) || port < 1 || port > 65_535 || !markerPath) {
   }
 } else if (mode === "leaf") {
   process.on("SIGTERM", () => undefined);
+  if (openFilePath) openSync(openFilePath, "a");
   const server = createServer();
   server.listen(port, "127.0.0.1", async () => {
     await writeFile(
       markerPath,
-      JSON.stringify({ leafPid: process.pid, parentPid: process.ppid, port }),
+      JSON.stringify({
+        leafPid: process.pid,
+        openFilePath: openFilePath || undefined,
+        parentPid: process.ppid,
+        port,
+      }),
       "utf8",
     );
   });

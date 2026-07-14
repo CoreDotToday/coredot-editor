@@ -6,7 +6,13 @@ import {
 } from "node:child_process";
 import { lstat, realpath } from "node:fs/promises";
 import { createServer } from "node:net";
-import { basename, isAbsolute, win32 } from "node:path";
+import { basename, dirname, isAbsolute, resolve, win32 } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const WINDOWS_JOB_RUNNER_PATH = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "windows-job-runner.ps1",
+);
 
 export type PnpmInvocation = {
   command: string;
@@ -16,6 +22,11 @@ export type PnpmInvocation = {
 export type ProcessTreeTerminationPlan = {
   arguments: string[];
   command: "taskkill";
+};
+
+export type WindowsJobRunnerInvocation = {
+  arguments: string[];
+  command: "powershell.exe";
 };
 
 export type ManagedProcess = {
@@ -29,6 +40,27 @@ export type ManagedProcessExit = {
   error: boolean;
   signal: NodeJS.Signals | null;
 };
+
+export type ManagedCommandOptions = {
+  arguments: string[];
+  command: string;
+  cwd: string;
+  environment: NodeJS.ProcessEnv;
+  forceTimeoutMs?: number;
+  gracefulTimeoutMs?: number;
+  signal?: AbortSignal;
+  timeoutMs: number;
+};
+
+export type ManagedCommandOwner = {
+  run(options: ManagedCommandOptions): Promise<void>;
+  settle(options?: {
+    forceTimeoutMs?: number;
+    gracefulTimeoutMs?: number;
+  }): Promise<void>;
+};
+
+const STOP_OPERATIONS = new WeakMap<ManagedProcess, Promise<void>>();
 
 export async function acquireInterruptibleResource<T>(options: {
   acquire: () => Promise<T>;
@@ -74,6 +106,42 @@ export function createProcessTreeTerminationPlan(
   return { arguments: arguments_, command: "taskkill" };
 }
 
+export function createWindowsJobRunnerInvocation(
+  command: string,
+  arguments_: string[],
+  runnerPath = WINDOWS_JOB_RUNNER_PATH,
+): WindowsJobRunnerInvocation {
+  if (
+    !command ||
+    command.includes("\0") ||
+    arguments_.some((argument) => argument.includes("\0")) ||
+    (!isAbsolute(runnerPath) && !win32.isAbsolute(runnerPath))
+  ) {
+    throw new Error("Managed process failed");
+  }
+  const payload = Buffer.from(
+    JSON.stringify({
+      arguments: arguments_,
+      executable: command,
+      version: 1,
+    }),
+    "utf8",
+  ).toString("base64");
+  return {
+    arguments: [
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      runnerPath,
+      payload,
+    ],
+    command: "powershell.exe",
+  };
+}
+
 export async function resolvePnpmInvocation(
   platform: NodeJS.Platform = process.platform,
   environment: Readonly<Record<string, string | undefined>> = process.env,
@@ -115,7 +183,11 @@ export function spawnManagedProcess(
   arguments_: string[],
   options: SpawnOptions,
 ): ManagedProcess {
-  const child = spawn(command, arguments_, {
+  const invocation =
+    process.platform === "win32"
+      ? createWindowsJobRunnerInvocation(command, arguments_)
+      : { arguments: arguments_, command };
+  const child = spawn(invocation.command, invocation.arguments, {
     ...options,
     detached: process.platform !== "win32",
     shell: false,
@@ -137,6 +209,20 @@ export async function stopManagedProcess(
     forceTimeoutMs?: number;
     gracefulTimeoutMs?: number;
   } = {},
+): Promise<void> {
+  const existing = STOP_OPERATIONS.get(managed);
+  if (existing) return existing;
+  const operation = stopManagedProcessOnce(managed, options);
+  STOP_OPERATIONS.set(managed, operation);
+  return operation;
+}
+
+async function stopManagedProcessOnce(
+  managed: ManagedProcess,
+  options: {
+    forceTimeoutMs?: number;
+    gracefulTimeoutMs?: number;
+  },
 ): Promise<void> {
   const gracefulTimeoutMs = options.gracefulTimeoutMs ?? 2_500;
   const forceTimeoutMs = options.forceTimeoutMs ?? 5_000;
@@ -172,21 +258,47 @@ export async function waitForPortRelease(
   throw new Error("Managed process cleanup failed");
 }
 
-export async function runManagedCommand(options: {
-  arguments: string[];
-  command: string;
-  cwd: string;
-  environment: NodeJS.ProcessEnv;
-  forceTimeoutMs?: number;
-  gracefulTimeoutMs?: number;
-  signal?: AbortSignal;
-  timeoutMs: number;
-}): Promise<void> {
+export function runManagedCommand(options: ManagedCommandOptions): Promise<void> {
+  return runManagedCommandOwned(options);
+}
+
+export function createManagedCommandOwner(): ManagedCommandOwner {
+  const active = new Set<ManagedProcess>();
+  let closed = false;
+  return {
+    run(options) {
+      if (closed) {
+        return Promise.reject(new Error("Managed command failed"));
+      }
+      return runManagedCommandOwned(
+        options,
+        (managed) => active.add(managed),
+        (managed) => active.delete(managed),
+      );
+    },
+    async settle(options = {}) {
+      closed = true;
+      const results = await Promise.allSettled(
+        [...active].map((managed) => stopManagedProcess(managed, options)),
+      );
+      if (results.some((result) => result.status === "rejected")) {
+        throw new Error("Managed process cleanup failed");
+      }
+    },
+  };
+}
+
+async function runManagedCommandOwned(
+  options: ManagedCommandOptions,
+  adopt: (managed: ManagedProcess) => unknown = () => undefined,
+  release: (managed: ManagedProcess) => unknown = () => undefined,
+): Promise<void> {
   validateTimeout(options.timeoutMs);
   const managed = spawnManagedProcess(options.command, options.arguments, {
     cwd: options.cwd,
     env: options.environment,
   });
+  adopt(managed);
   let failed = false;
   try {
     const result = await waitForManagedExit(
@@ -206,6 +318,7 @@ export async function runManagedCommand(options: {
     } catch {
       failed = true;
     }
+    release(managed);
   }
   if (failed) throw new Error("Managed command failed");
 }
@@ -259,6 +372,15 @@ export async function runInterruptibleTask<T>(options: {
   const source = options.signalSource ?? process;
   const controller = new AbortController();
   let interruptedBy: NodeJS.Signals | undefined;
+  let resolveInterrupt:
+    | ((outcome: { kind: "interrupted"; signal: NodeJS.Signals }) => void)
+    | undefined;
+  const interruptOutcome = new Promise<{
+    kind: "interrupted";
+    signal: NodeJS.Signals;
+  }>((resolveOutcome) => {
+    resolveInterrupt = resolveOutcome;
+  });
   let cleanupPromise: Promise<void> | undefined;
   const cleanupOnce = () =>
     (cleanupPromise ??= runBoundedCleanup([options.cleanup], {
@@ -271,33 +393,40 @@ export async function runInterruptibleTask<T>(options: {
     // Cleanup owns resources that may be the only way to unblock work which
     // does not cooperate with AbortSignal (for example, a browser operation).
     void cleanupOnce().catch(() => undefined);
+    resolveInterrupt?.({ kind: "interrupted", signal });
   };
   const handleSigint = () => interrupt("SIGINT");
   const handleSigterm = () => interrupt("SIGTERM");
   source.once("SIGINT", handleSigint);
   source.once("SIGTERM", handleSigterm);
 
-  let value: T | undefined;
-  let operationFailure: unknown;
-  let cleanupFailure: unknown;
+  let operation: Promise<T>;
   try {
-    value = await options.execute(controller.signal);
+    operation = options.execute(controller.signal);
   } catch (error) {
-    operationFailure = error;
-  } finally {
+    operation = Promise.reject(error);
+  }
+  const operationOutcome = operation.then(
+    (value) => ({ kind: "fulfilled" as const, value }),
+    (error: unknown) => ({ error, kind: "rejected" as const }),
+  );
+
+  try {
+    const first = await Promise.race([operationOutcome, interruptOutcome]);
     try {
       await cleanupOnce();
-    } catch (error) {
-      cleanupFailure = error;
+    } catch {
+      throw new Error("Managed process cleanup failed");
     }
+
+    if (interruptedBy) return { signal: interruptedBy };
+    if (first.kind === "interrupted") return { signal: first.signal };
+    if (first.kind === "rejected") throw first.error;
+    return { value: first.value };
+  } finally {
     source.removeListener("SIGINT", handleSigint);
     source.removeListener("SIGTERM", handleSigterm);
   }
-
-  if (cleanupFailure) throw new Error("Managed process cleanup failed");
-  if (interruptedBy) return { signal: interruptedBy };
-  if (operationFailure) throw operationFailure;
-  return { value: value as T };
 }
 
 function observeExit(child: ChildProcess): Promise<ManagedProcessExit> {

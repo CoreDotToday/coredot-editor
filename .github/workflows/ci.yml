@@ -7,6 +7,30 @@ on:
       - main
 
 jobs:
+  windows-managed-process:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.6.5
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify Windows managed process cleanup
+        run: pnpm exec vitest run scripts/docs/managed-process.test.ts
+
   verify:
     runs-on: ubuntu-latest
 

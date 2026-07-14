@@ -3,26 +3,30 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  createManagedCommandOwner,
   interruptExitCode,
   runInterruptibleTask,
-  spawnManagedProcess,
-  stopManagedProcess,
   waitForPortRelease,
-  type ManagedProcess,
 } from "../managed-process";
 
 async function main() {
   const fixtureRoot = dirname(fileURLToPath(import.meta.url));
-  const [resultPath, rawPort] = process.argv.slice(2);
+  const [resultPath, rawPort, phase] = process.argv.slice(2);
   const port = Number(rawPort);
-  if (!resultPath || !Number.isInteger(port) || port < 1 || port > 65_535) {
+  if (
+    !resultPath ||
+    !Number.isInteger(port) ||
+    port < 1 ||
+    port > 65_535 ||
+    (phase !== "migration" && phase !== "bootstrap")
+  ) {
     throw new Error("Invalid interrupt harness input");
   }
 
   let temporaryRoot: string | undefined;
-  let managed: ManagedProcess | undefined;
   let identities: { leafPid: number; parentPid: number } | undefined;
   let cleanupCount = 0;
+  const commandOwner = createManagedCommandOwner();
 
   const outcome = await runInterruptibleTask({
     cleanup: async (signal) => {
@@ -30,12 +34,10 @@ async function main() {
       let failed = false;
       for (const step of [
         async () => {
-          if (managed) {
-            await stopManagedProcess(managed, {
-              forceTimeoutMs: 2_000,
-              gracefulTimeoutMs: 200,
-            });
-          }
+          await commandOwner.settle({
+            forceTimeoutMs: 2_000,
+            gracefulTimeoutMs: 200,
+          });
         },
         async () => {
           await waitForPortRelease(port, { signal, timeoutMs: 2_000 });
@@ -60,12 +62,24 @@ async function main() {
         join(tmpdir(), "coredot-interrupt-harness-"),
       );
       const marker = join(temporaryRoot, "tree.json");
+      const openFilePath = join(temporaryRoot, `${phase}.open`);
       const fixture = resolve(fixtureRoot, "managed-process-tree.mjs");
-      managed = spawnManagedProcess(
-        process.execPath,
-        [fixture, "parent", String(port), marker],
-        { cwd: fixtureRoot, env: process.env },
-      );
+      const command = commandOwner.run({
+        arguments: [
+          fixture,
+          "parent",
+          String(port),
+          marker,
+          openFilePath,
+        ],
+        command: process.execPath,
+        cwd: fixtureRoot,
+        environment: process.env,
+        forceTimeoutMs: 2_000,
+        gracefulTimeoutMs: 200,
+        signal,
+        timeoutMs: 30_000,
+      });
       identities = await waitForJson<{
         leafPid: number;
         parentPid: number;
@@ -74,14 +88,15 @@ async function main() {
         resultPath,
         JSON.stringify({
           ...identities,
+          openFilePath,
+          phase,
           port,
           status: "ready",
           temporaryRoot,
         }),
         "utf8",
       );
-      await waitForAbort(signal);
-      throw new Error("Interrupt harness was aborted");
+      await command;
     },
   });
 
@@ -93,6 +108,7 @@ async function main() {
     JSON.stringify({
       ...identities,
       cleanupCount,
+      phase,
       port,
       signal: outcome.signal,
       status: "cleaned",
@@ -112,13 +128,6 @@ async function waitForJson<T>(path: string, signal: AbortSignal): Promise<T> {
     }
   }
   throw new Error("Interrupt harness was aborted");
-}
-
-function waitForAbort(signal: AbortSignal) {
-  if (signal.aborted) return Promise.resolve();
-  return new Promise<void>((resolveAbort) =>
-    signal.addEventListener("abort", () => resolveAbort(), { once: true }),
-  );
 }
 
 void main().catch((error: unknown) => {
