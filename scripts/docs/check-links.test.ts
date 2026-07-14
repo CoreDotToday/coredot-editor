@@ -330,6 +330,20 @@ describe("internal documentation links", () => {
     });
   });
 
+  it("does not apply the MkDocs clean URL fallback to README Markdown links", async () => {
+    await withTemporaryRepository({
+      "README.md": "[Guide](docs/guide/)\n",
+      "docs/guide.md": "# Guide\n",
+    }, async (root) => {
+      await expect(checkInternalLinks(root, ["README.md", "docs/guide.md"]))
+        .resolves.toEqual([{
+          file: "README.md",
+          href: "docs/guide/",
+          message: "Missing file: docs/guide",
+        }]);
+    });
+  });
+
   it("resolves raw HTML assets from the rendered MkDocs page directory", async () => {
     await withTemporaryRepository({
       "docs/product-tour.md": `
@@ -342,6 +356,37 @@ describe("internal documentation links", () => {
     }, async (root) => {
       await expect(checkInternalLinks(root, ["docs/product-tour.md"]))
         .resolves.toEqual([]);
+    });
+  });
+
+  it("checks identical Markdown and raw HTML hrefs with independent provenance", async () => {
+    const source = `
+[Markdown](guide.md)
+<img src="guide.md" alt="Raw HTML">
+`;
+
+    await withTemporaryRepository({
+      "docs/source.md": source,
+      "docs/source/guide.md": "# Raw target\n",
+    }, async (root) => {
+      await expect(checkInternalLinks(root, ["docs/source.md"]))
+        .resolves.toEqual([{
+          file: "docs/source.md",
+          href: "guide.md",
+          message: "Missing file: docs/guide.md",
+        }]);
+    });
+
+    await withTemporaryRepository({
+      "docs/source.md": source,
+      "docs/guide.md": "# Markdown target\n",
+    }, async (root) => {
+      await expect(checkInternalLinks(root, ["docs/source.md"]))
+        .resolves.toEqual([{
+          file: "docs/source.md",
+          href: "guide.md",
+          message: "Missing file: docs/source/guide.md",
+        }]);
     });
   });
 

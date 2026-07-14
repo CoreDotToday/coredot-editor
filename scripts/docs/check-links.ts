@@ -96,28 +96,45 @@ function shouldCollectLink(tokens: Token[], index: number): boolean {
     || !previous.content.endsWith("](");
 }
 
-export function extractMarkdownLinks(markdown: string): string[] {
-  const links: string[] = [];
+type LinkOccurrence = {
+  href: string;
+  provenance: "markdown" | "raw-html";
+  rawTagName?: RawHtmlLink["tagName"];
+};
+
+function normalizeExtractedHref(href: string | null): string | undefined {
+  const normalized = href ? decodeHtmlEntities(href.trim()) : undefined;
+  return !normalized || /^(?:mailto|tel):/iu.test(normalized)
+    ? undefined
+    : normalized;
+}
+
+function extractLinkOccurrences(markdown: string): LinkOccurrence[] {
+  const links: LinkOccurrence[] = [];
   const seen = new Set<string>();
-  const add = (href: string | null) => {
-    const normalized = href ? decodeHtmlEntities(href.trim()) : undefined;
-    if (
-      !normalized
-      || /^(?:mailto|tel):/iu.test(normalized)
-      || seen.has(normalized)
-    ) {
+  const add = (
+    href: string | null,
+    provenance: LinkOccurrence["provenance"],
+    rawTagName?: RawHtmlLink["tagName"],
+  ) => {
+    const normalized = normalizeExtractedHref(href);
+    if (!normalized) {
       return;
     }
-    seen.add(normalized);
-    links.push(normalized);
+    const key = `${provenance}\u0000${rawTagName ?? ""}\u0000${normalized}`;
+    if (seen.has(key)) {
+      return;
+    }
+    seen.add(key);
+    links.push({ href: normalized, provenance, rawTagName });
   };
 
   const visit = (tokens: Token[]) => {
     for (const [index, token] of tokens.entries()) {
       if (token.type === "link_open" && shouldCollectLink(tokens, index)) {
-        add(token.attrGet("href"));
+        add(token.attrGet("href"), "markdown");
       } else if (token.type === "image") {
-        add(token.attrGet("src"));
+        add(token.attrGet("src"), "markdown");
       }
       if (token.children) {
         visit(token.children);
@@ -125,11 +142,15 @@ export function extractMarkdownLinks(markdown: string): string[] {
     }
   };
   visit(markdownParser.parse(markdown, {}));
-  for (const { href } of extractRawHtmlLinks(markdown)) {
-    add(href);
+  for (const { href, tagName } of extractRawHtmlLinks(markdown)) {
+    add(href, "raw-html", tagName);
   }
 
   return links;
+}
+
+export function extractMarkdownLinks(markdown: string): string[] {
+  return [...new Set(extractLinkOccurrences(markdown).map(({ href }) => href))];
 }
 
 function decodeHtmlEntities(value: string): string {
@@ -313,17 +334,8 @@ export async function checkInternalLinks(
       continue;
     }
 
-    const rawHtmlLinks = extractRawHtmlLinks(markdown);
-    const rawHtmlHrefs = new Set(
-      rawHtmlLinks.map(({ href }) => decodeHtmlEntities(href.trim())),
-    );
-    const rawHtmlAnchorHrefs = new Set(
-      rawHtmlLinks
-        .filter(({ tagName }) => tagName === "a")
-        .map(({ href }) => decodeHtmlEntities(href.trim())),
-    );
-
-    for (const href of extractMarkdownLinks(markdown)) {
+    for (const occurrence of extractLinkOccurrences(markdown)) {
+      const { href } = occurrence;
       if (!isInternalHref(href)) {
         continue;
       }
@@ -340,7 +352,8 @@ export async function checkInternalLinks(
 
       if (
         sourceFile.startsWith("docs/")
-        && rawHtmlAnchorHrefs.has(href)
+        && occurrence.provenance === "raw-html"
+        && occurrence.rawTagName === "a"
         && decodedPath.toLowerCase().endsWith(".md")
       ) {
         issues.push({
@@ -351,7 +364,8 @@ export async function checkInternalLinks(
         continue;
       }
 
-      const isRawMkDocsLink = sourceFile.startsWith("docs/") && rawHtmlHrefs.has(href);
+      const isRawMkDocsLink = sourceFile.startsWith("docs/")
+        && occurrence.provenance === "raw-html";
       const renderedPageDirectory = sourceFile === "docs/index.md"
         ? dirname(sourcePath)
         : sourcePath.slice(0, -extname(sourcePath).length);
@@ -368,6 +382,7 @@ export async function checkInternalLinks(
       let target = await resolveInternalTarget(candidatePath, realRepositoryRoot);
       if (
         target.status === "missing"
+        && isRawMkDocsLink
         && decodedPath.endsWith("/")
         && decodedPath !== "/"
       ) {
