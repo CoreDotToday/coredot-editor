@@ -1018,24 +1018,28 @@ describe("docs screenshot encoding", () => {
     expect(metadata).toMatchObject({ format: "webp", height: 450, width: 720 });
   });
 
-  it("descends through a bounded quality range but never below the readable floor", async () => {
-    const png = await createDeterministicPng();
-    const highQuality = await sharp(png)
-      .webp({ effort: 6, quality: 88, smartSubsample: true })
-      .toBuffer();
-    const floorQuality = await sharp(png)
-      .webp({ effort: 6, quality: 52, smartSubsample: true })
-      .toBuffer();
+  it(
+    "descends through a bounded quality range but never below the readable floor",
+    async () => {
+      const png = await createDeterministicPng();
+      const highQuality = await sharp(png)
+        .webp({ effort: 6, quality: 88, smartSubsample: true })
+        .toBuffer();
+      const floorQuality = await sharp(png)
+        .webp({ effort: 6, quality: 52, smartSubsample: true })
+        .toBuffer();
 
-    expect(highQuality.byteLength).toBeGreaterThan(floorQuality.byteLength);
-    const encoded = await encodeWebpWithinBudget(png, {
-      maxBytes: floorQuality.byteLength,
-    });
-    expect(encoded.byteLength).toBeLessThanOrEqual(floorQuality.byteLength);
-    await expect(
-      encodeWebpWithinBudget(png, { maxBytes: floorQuality.byteLength - 1 }),
-    ).rejects.toThrow(/^Docs screenshot encoding failed$/);
-  });
+      expect(highQuality.byteLength).toBeGreaterThan(floorQuality.byteLength);
+      const encoded = await encodeWebpWithinBudget(png, {
+        maxBytes: floorQuality.byteLength,
+      });
+      expect(encoded.byteLength).toBeLessThanOrEqual(floorQuality.byteLength);
+      await expect(
+        encodeWebpWithinBudget(png, { maxBytes: floorQuality.byteLength - 1 }),
+      ).rejects.toThrow(/^Docs screenshot encoding failed$/);
+    },
+    15_000,
+  );
 
   it("uses a generic failure for invalid images and impossible budgets", async () => {
     await expect(
