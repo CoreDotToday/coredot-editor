@@ -2086,10 +2086,12 @@ function DocumentShellContent({
     <>
       <section className="flex h-14 shrink-0 items-center gap-2 border-b border-zinc-200 px-4">
         <div className="flex size-7 items-center justify-center rounded-full bg-zinc-950 text-xs font-semibold text-white">
-          K
+          {messages.aiWorkspace.user.slice(0, 1)}
         </div>
         <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-medium text-zinc-950">Kyunghoon K...</p>
+          <p className="truncate text-sm font-medium text-zinc-950">
+            {messages.aiWorkspace.user}
+          </p>
         </div>
         <button
           aria-label={messages.shell.closeSidebar}

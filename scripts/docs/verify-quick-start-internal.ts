@@ -3,10 +3,10 @@ import {
   spawnSync,
   type ChildProcess,
 } from "node:child_process";
-import { lstat, mkdtemp, realpath } from "node:fs/promises";
+import { mkdtemp } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, join, resolve, win32 } from "node:path";
+import { dirname, isAbsolute, join, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   createCleanupWorkerEnvironment,
@@ -16,6 +16,10 @@ import {
   copyDocumentedEnvironmentTemplate,
   copyTrackedWorkingFiles,
 } from "./verify-quick-start-snapshot";
+import {
+  resolvePnpmInvocation as resolveManagedPnpmInvocation,
+  type PnpmInvocation,
+} from "./managed-process";
 
 export {
   copyDocumentedEnvironmentTemplate,
@@ -40,11 +44,6 @@ const fixedQuickStartEnvironment = {
 } as const;
 const MAX_HTTP_RESPONSE_BYTES = 1024 * 1024;
 
-type PnpmInvocation = {
-  command: string;
-  prefixArguments: string[];
-};
-
 type ChildResult = {
   code: number | null;
   error: boolean;
@@ -56,35 +55,15 @@ export async function resolvePnpmInvocation(
   environment: Readonly<Record<string, string | undefined>> = process.env,
   nodeExecutable = process.execPath,
 ): Promise<PnpmInvocation> {
-  const candidate = environment.npm_execpath;
-  if (
-    candidate &&
-    !candidate.includes("\0") &&
-    !candidate.includes("\n") &&
-    !candidate.includes("\r") &&
-    (isAbsolute(candidate) || win32.isAbsolute(candidate))
-  ) {
-    try {
-      const canonicalCandidate = await realpath(candidate);
-      const stats = await lstat(canonicalCandidate);
-      if (
-        stats.isFile() &&
-        /^pnpm\.(?:c?js|mjs)$/i.test(basename(canonicalCandidate))
-      ) {
-        return {
-          command: nodeExecutable,
-          prefixArguments: [canonicalCandidate],
-        };
-      }
-    } catch {
-      // A missing or non-regular npm_execpath is not a verified JS CLI.
-    }
+  try {
+    return await resolveManagedPnpmInvocation(
+      platform,
+      environment,
+      nodeExecutable,
+    );
+  } catch {
+    throw new Error("Quick-start package runner failed");
   }
-
-  if (platform !== "win32") {
-    return { command: "pnpm", prefixArguments: [] };
-  }
-  throw new Error("Quick-start package runner failed");
 }
 
 function validateDatabaseUrl(databaseUrl: string) {

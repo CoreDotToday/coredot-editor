@@ -10,15 +10,42 @@ vi.mock("@/db/client", () => ({
 import * as route from "./route";
 
 const ALLOWED_METHODS = "GET, HEAD, OPTIONS";
+const TOOL_RUN_NONCE_HEADER = "X-Coredot-Tool-Run-Nonce";
 
-function request(method: "GET" | "HEAD" = "GET") {
-  return new Request("http://localhost/api/ready", { method });
+function request(
+  method: "GET" | "HEAD" = "GET",
+  nonce?: string,
+) {
+  return new Request("http://localhost/api/ready", {
+    headers: nonce ? { [TOOL_RUN_NONCE_HEADER]: nonce } : undefined,
+    method,
+  });
 }
 
 describe("/api/ready", () => {
   beforeEach(() => {
     execute.mockReset();
     execute.mockResolvedValue({ rows: [] });
+    delete process.env.COREDOT_TOOL_RUN_NONCE;
+    delete process.env.AUTH_MODE;
+  });
+
+  it("echoes a matching capture nonce only in test auth mode", async () => {
+    const nonce = "capture_nonce_123456789012345678901234567890";
+    process.env.AUTH_MODE = "test";
+    process.env.COREDOT_TOOL_RUN_NONCE = nonce;
+
+    const matching = await route.GET(request("GET", nonce));
+    const absent = await route.GET(request());
+    const wrong = await route.GET(request("GET", `${nonce}_wrong`));
+    process.env.AUTH_MODE = "clerk";
+    const production = await route.GET(request("GET", nonce));
+
+    expect(matching.headers.get(TOOL_RUN_NONCE_HEADER)).toBe(nonce);
+    expect(absent.headers.get(TOOL_RUN_NONCE_HEADER)).toBeNull();
+    expect(wrong.headers.get(TOOL_RUN_NONCE_HEADER)).toBeNull();
+    expect(production.headers.get(TOOL_RUN_NONCE_HEADER)).toBeNull();
+    await expect(matching.json()).resolves.toEqual({ status: "ready" });
   });
 
   it("uses the gated production database client for the schema-compatible readiness check", async () => {

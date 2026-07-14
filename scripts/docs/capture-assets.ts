@@ -1,8 +1,21 @@
-import { spawn, type ChildProcess } from "node:child_process";
-import { mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  open,
+  readFile,
+  readdir,
+  realpath,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
+import { createRequire } from "node:module";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { dirname, isAbsolute, join, resolve, win32 } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, win32 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   chromium,
@@ -14,23 +27,59 @@ import {
 import sharp from "sharp";
 import { createToolEnvironment } from "./verify-quick-start-shared";
 import { createMixedFidelityDocx } from "./fixtures/mixed-fidelity-docx";
+import {
+  acquireInterruptibleResource,
+  interruptExitCode,
+  resolvePnpmInvocation,
+  runInterruptibleTask,
+  runManagedCommand,
+  spawnManagedProcess,
+  stopManagedProcess,
+  waitForPortRelease,
+  type ManagedProcess,
+  type PnpmInvocation,
+} from "./managed-process";
 
 export const DOCS_VIEWPORT = { width: 1440, height: 1000 } as const;
 export const DOCS_LANGUAGE_STORAGE_KEY = "coredot-editor-language";
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const APP_ROOT = resolve(dirname(SCRIPT_PATH), "../..");
+const REQUIRE = createRequire(import.meta.url);
 const SCREENSHOTS_ROOT = resolve(APP_ROOT, "docs/assets/screenshots");
 const CAPTURE_NAMES = ["workspace", "proposal-review", "docx-fidelity"] as const;
 const WEBP_QUALITY_STEPS = [88, 82, 76, 70, 64, 58, 52] as const;
 const DEFAULT_WEBP_MAX_BYTES = 350 * 1024;
 const MAX_API_RESPONSE_BYTES = 1024 * 1024;
+export const NEXT_FONT_GOOGLE_URLS = [
+  "https://fonts.googleapis.com/css2?family=Geist:wght@100..900&display=swap",
+  "https://fonts.googleapis.com/css2?family=Geist+Mono:wght@100..900&display=swap",
+] as const;
 const FIXED_CAPTURE_ENVIRONMENT = {
   AI_PROVIDER: "stub",
   AUTH_MODE: "test",
+  CLERK_SECRET_KEY: "",
+  CONVERSATION_STORAGE: "database",
+  COREDOT_ANTHROPIC_BASE_URL: "http://127.0.0.1:1",
+  COREDOT_ANTHROPIC_MODEL: "docs-capture-unused",
+  COREDOT_API_KEY: "",
+  COREDOT_BASE_URL: "http://127.0.0.1:1",
+  COREDOT_GEMINI_BASE_URL: "http://127.0.0.1:1",
+  COREDOT_GEMINI_MODEL: "docs-capture-unused",
+  COREDOT_MAX_COMPLETION_TOKENS: "1",
+  COREDOT_MODEL: "docs-capture-unused",
+  DATABASE_AUTH_TOKEN: "",
+  NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: "",
+  NEXT_PUBLIC_CLERK_SIGN_IN_URL: "/sign-in",
+  NEXT_PUBLIC_CLERK_SIGN_UP_URL: "/sign-up",
   NEXT_TELEMETRY_DISABLED: "1",
+  NODE_ENV: "development",
+  OPENAI_API_KEY: "",
+  OPENAI_MODEL: "docs-capture-unused",
+  PROJECT_PROFILE_ID: "default",
   TEST_PRINCIPAL_ID: "test:principal:docs-capture",
   TEST_WORKSPACE_ID: "test:workspace:docs-capture",
+  __NEXT_PROCESSED_ENV: "true",
 } as const;
 export const DOCS_CAPTURE_STYLE = `
   *, *::before, *::after {
@@ -73,38 +122,113 @@ type CapturePhase =
   | "workspace screenshot"
   | "workspace bootstrap";
 
-type ChildExit = {
-  code: number | null;
-  error: boolean;
-  signal: NodeJS.Signals | null;
-};
-
 type CaptureServer = {
   baseUrl: string;
-  child: ChildProcess;
-  exit: Promise<ChildExit>;
+  managed: ManagedProcess;
+  port: number;
 };
 
 export function createCaptureEnvironment(
-  baseEnvironment: NodeJS.ProcessEnv,
-  options: { databaseUrl: string; port: number },
+  baseEnvironment: Readonly<Record<string, string | undefined>>,
+  options: {
+    databaseUrl: string;
+    fontMockPath: string;
+    port: number;
+    runNonce: string;
+  },
 ): NodeJS.ProcessEnv {
   validateDatabaseUrl(options.databaseUrl);
   if (
     !Number.isInteger(options.port) ||
     options.port < 1 ||
-    options.port > 65_535
+    options.port > 65_535 ||
+    (!isAbsolute(options.fontMockPath) &&
+      !win32.isAbsolute(options.fontMockPath)) ||
+    !/^[A-Za-z0-9_-]{32,128}$/.test(options.runNonce)
   ) {
     throw new Error("Docs capture environment failed");
   }
 
   return {
-    ...createToolEnvironment(baseEnvironment),
+    ...createToolEnvironment(baseEnvironment as NodeJS.ProcessEnv),
     ...FIXED_CAPTURE_ENVIRONMENT,
+    COREDOT_TOOL_RUN_NONCE: options.runNonce,
     DATABASE_URL: options.databaseUrl,
     HOSTNAME: "127.0.0.1",
+    NEXT_FONT_GOOGLE_MOCKED_RESPONSES: options.fontMockPath,
     PORT: String(options.port),
   };
+}
+
+export function isCaptureNetworkAllowed(candidate: string, baseUrl: string) {
+  try {
+    const target = new URL(candidate);
+    const base = new URL(baseUrl);
+    if (
+      base.protocol !== "http:" ||
+      base.hostname !== "127.0.0.1" ||
+      !base.port ||
+      base.username ||
+      base.password
+    ) {
+      return false;
+    }
+    const expectedProtocol = target.protocol === "ws:" ? "ws:" : "http:";
+    return (
+      target.protocol === expectedProtocol &&
+      (target.protocol === "http:" || target.protocol === "ws:") &&
+      target.hostname === base.hostname &&
+      target.port === base.port &&
+      !target.username &&
+      !target.password
+    );
+  } catch {
+    return false;
+  }
+}
+
+export function createNextFontMockResponses(options: {
+  geistFontPath: string;
+  geistMonoFontPath: string;
+  platform?: NodeJS.Platform;
+}): Record<(typeof NEXT_FONT_GOOGLE_URLS)[number], string> {
+  const geistFontPath = toNextFontMockFilePath(
+    options.geistFontPath,
+    options.platform,
+  );
+  const geistMonoFontPath = toNextFontMockFilePath(
+    options.geistMonoFontPath,
+    options.platform,
+  );
+  return {
+    [NEXT_FONT_GOOGLE_URLS[0]]:
+      `@font-face { font-family: 'Geist'; font-style: normal; font-weight: 100 900; src: url('${geistFontPath}') format('woff2'); }`,
+    [NEXT_FONT_GOOGLE_URLS[1]]:
+      `@font-face { font-family: 'Geist Mono'; font-style: normal; font-weight: 100 900; src: url('${geistMonoFontPath}') format('woff2'); }`,
+  };
+}
+
+export function toNextFontMockFilePath(
+  path: string,
+  platform: NodeJS.Platform = process.platform,
+) {
+  if (
+    path.includes("\0") ||
+    path.includes("\n") ||
+    path.includes("\r") ||
+    path.includes("'") ||
+    path.includes('"')
+  ) {
+    throw new Error("Docs capture font mock failed");
+  }
+  if (platform === "win32") {
+    if (!/^[A-Za-z]:[\\/]/.test(path) || !win32.isAbsolute(path)) {
+      throw new Error("Docs capture font mock failed");
+    }
+    return `/${path.replaceAll("\\", "/")}`;
+  }
+  if (!isAbsolute(path)) throw new Error("Docs capture font mock failed");
+  return path;
 }
 
 export function screenshotPath(name: CaptureName): string {
@@ -144,95 +268,168 @@ export async function encodeWebpWithinBudget(
 export async function runCaptureCleanup(
   steps: readonly (() => Promise<void>)[],
 ): Promise<void> {
-  let failed = false;
-  for (const step of steps) {
-    try {
-      await step();
-    } catch {
-      failed = true;
-    }
+  const results = await Promise.allSettled(
+    steps.map((step) => Promise.resolve().then(step)),
+  );
+  if (results.some((result) => result.status === "rejected")) {
+    throw new Error("Docs capture cleanup failed");
   }
-  if (failed) throw new Error("Docs capture cleanup failed");
 }
 
 async function captureDocsAssets() {
-  const temporaryRoot = await mkdtemp(join(tmpdir(), "coredot-docs-capture-"));
-  const databasePath = join(temporaryRoot, "capture.sqlite");
-  const databaseUrl = `file:${databasePath}`;
+  let temporaryRoot: string | undefined;
   let browser: Browser | undefined;
   let context: BrowserContext | undefined;
   let server: CaptureServer | undefined;
-  let captureFailed = false;
-  let cleanupFailed = false;
   let phase: CapturePhase = "database migration";
 
   try {
-    const databaseEnvironment = createCaptureEnvironment(process.env, {
-      databaseUrl,
-      port: 1,
-    });
-    await runCommand("pnpm", ["db:migrate"], databaseEnvironment, 60_000);
-    phase = "workspace bootstrap";
-    await runCommand(
-      "pnpm",
-      ["exec", "tsx", SCRIPT_PATH, "--bootstrap"],
-      databaseEnvironment,
-      30_000,
-    );
-
-    phase = "server startup";
-    server = await startCaptureServer(databaseUrl);
-    phase = "browser startup";
-    browser = await chromium.launch({ headless: true });
-    context = await browser.newContext({
-      baseURL: server.baseUrl,
-      colorScheme: "light",
-      deviceScaleFactor: 1,
-      locale: "en-US",
-      reducedMotion: "reduce",
-      timezoneId: "UTC",
-      viewport: DOCS_VIEWPORT,
-    });
-    await installDeterministicPageState(context);
-
-    phase = "document API creation";
-    const captures = await captureProductStates(
-      context,
-      server.baseUrl,
-      (nextPhase) => {
-        phase = nextPhase;
+    return await runInterruptibleTask({
+      cleanup: async (cleanupSignal) => {
+        const stopServerThenRemoveTemporaryRoot = async () => {
+          let failed = false;
+          try {
+            if (server) await disposeCaptureServer(server, cleanupSignal);
+          } catch {
+            failed = true;
+          }
+          try {
+            if (temporaryRoot) {
+              await rm(temporaryRoot, { force: true, recursive: true });
+            }
+          } catch {
+            failed = true;
+          }
+          if (failed) throw new Error("Docs capture cleanup failed");
+        };
+        await runCaptureCleanup([
+          async () => {
+            await browser?.close();
+          },
+          stopServerThenRemoveTemporaryRoot,
+        ]);
       },
-    );
-    phase = "output write";
-    await writeCapturesAtomically(captures);
-    for (const name of CAPTURE_NAMES) {
-      console.log(`${name}.webp ${captures.get(name)!.byteLength} bytes`);
-    }
-  } catch {
-    captureFailed = true;
-  } finally {
-    try {
-      await runCaptureCleanup([
-        async () => {
-          await context?.close();
-        },
-        async () => {
-          await browser?.close();
-        },
-        async () => {
-          if (server) await stopManagedChild(server.child, server.exit);
-        },
-        async () => {
-          await rm(temporaryRoot, { force: true, recursive: true });
-        },
-      ]);
-    } catch {
-      cleanupFailed = true;
-    }
-  }
+      cleanupTimeoutMs: 15_000,
+      execute: async (signal) => {
+        try {
+          await acquireInterruptibleResource({
+            acquire: () =>
+              mkdtemp(join(tmpdir(), "coredot-docs-capture-")),
+            adopt: (root) => {
+              temporaryRoot = root;
+            },
+            dispose: (root) => rm(root, { force: true, recursive: true }),
+            signal,
+          });
+          const root = temporaryRoot!;
+          const runNonce = randomBytes(32).toString("base64url");
+          const fontMockPath = await writeNextFontMock(root, signal);
+          const databaseUrl = `file:${join(root, "capture.sqlite")}`;
+          const pnpm = await resolvePnpmInvocation();
+          const databaseEnvironment = createCaptureEnvironment(process.env, {
+            databaseUrl,
+            fontMockPath,
+            port: 1,
+            runNonce,
+          });
+          await runManagedCommand({
+            arguments: [...pnpm.prefixArguments, "db:migrate"],
+            command: pnpm.command,
+            cwd: APP_ROOT,
+            environment: databaseEnvironment,
+            signal,
+            timeoutMs: 60_000,
+          });
+          phase = "workspace bootstrap";
+          await runManagedCommand({
+            arguments: [
+              ...pnpm.prefixArguments,
+              "exec",
+              "tsx",
+              SCRIPT_PATH,
+              "--bootstrap",
+            ],
+            command: pnpm.command,
+            cwd: APP_ROOT,
+            environment: databaseEnvironment,
+            signal,
+            timeoutMs: 30_000,
+          });
 
-  if (captureFailed) throw new Error(`Docs capture failed during ${phase}`);
-  if (cleanupFailed) throw new Error("Docs capture cleanup failed");
+          phase = "server startup";
+          await acquireInterruptibleResource({
+            acquire: () =>
+              startCaptureServer({
+                databaseUrl,
+                fontMockPath,
+                pnpm,
+                runNonce,
+                signal,
+              }),
+            adopt: (captureServer) => {
+              server = captureServer;
+            },
+            dispose: (captureServer) =>
+              disposeCaptureServer(captureServer),
+            signal,
+          });
+          phase = "browser startup";
+          await acquireInterruptibleResource({
+            acquire: () => chromium.launch({ headless: true }),
+            adopt: (launchedBrowser) => {
+              browser = launchedBrowser;
+            },
+            dispose: (launchedBrowser) => launchedBrowser.close(),
+            signal,
+          });
+          await acquireInterruptibleResource({
+            acquire: () =>
+              browser!.newContext({
+                baseURL: server!.baseUrl,
+                colorScheme: "light",
+                deviceScaleFactor: 1,
+                locale: "en-US",
+                reducedMotion: "reduce",
+                serviceWorkers: "block",
+                timezoneId: "UTC",
+                viewport: DOCS_VIEWPORT,
+              }),
+            adopt: (browserContext) => {
+              context = browserContext;
+            },
+            dispose: (browserContext) => browserContext.close(),
+            signal,
+          });
+          await installCaptureNetworkBoundary(context!, server!.baseUrl);
+          await installDeterministicPageState(context!);
+
+          phase = "document API creation";
+          const captures = await captureProductStates(
+            context!,
+            server!.baseUrl,
+            (nextPhase) => {
+              phase = nextPhase;
+            },
+          );
+          phase = "output write";
+          await writeCapturesAtomically(captures, { signal });
+          for (const name of CAPTURE_NAMES) {
+            console.log(`${name}.webp ${captures.get(name)!.byteLength} bytes`);
+          }
+        } catch {
+          throw new Error(`Docs capture failed during ${phase}`);
+        }
+      },
+    });
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message === "Managed process cleanup failed"
+    ) {
+      throw new Error("Docs capture cleanup failed");
+    }
+    throw error;
+  }
 }
 
 async function bootstrapCaptureWorkspace() {
@@ -382,14 +579,6 @@ async function capturePage(
 }
 
 async function settlePage(page: Page) {
-  const privateIdentity = page.getByText("Kyunghoon K...", { exact: true });
-  if ((await privateIdentity.count()) > 0) {
-    await privateIdentity.evaluateAll((elements) => {
-      for (const element of elements) {
-        (element as HTMLElement).style.visibility = "hidden";
-      }
-    });
-  }
   await page.evaluate(async () => {
     await document.fonts.ready;
     (document.activeElement as HTMLElement | null)?.blur();
@@ -430,6 +619,49 @@ async function installDeterministicPageState(context: BrowserContext) {
   );
 }
 
+async function installCaptureNetworkBoundary(
+  context: BrowserContext,
+  baseUrl: string,
+) {
+  await context.route("**/*", async (route) => {
+    if (isCaptureNetworkAllowed(route.request().url(), baseUrl)) {
+      await route.continue();
+    } else {
+      await route.abort("blockedbyclient");
+    }
+  });
+  await context.routeWebSocket(/.*/, async (route) => {
+    if (isCaptureNetworkAllowed(route.url(), baseUrl)) {
+      route.connectToServer();
+    } else {
+      await route.close({ code: 1008, reason: "blocked" });
+    }
+  });
+}
+
+async function writeNextFontMock(
+  temporaryRoot: string,
+  signal: AbortSignal,
+) {
+  if (signal.aborted) throw new Error("Docs capture font mock failed");
+  const nextRoot = dirname(await realpath(REQUIRE.resolve("next/package.json")));
+  const responses = createNextFontMockResponses({
+    geistFontPath: await realpath(
+      join(nextRoot, "dist/next-devtools/server/font/geist-latin.woff2"),
+    ),
+    geistMonoFontPath: await realpath(
+      join(nextRoot, "dist/next-devtools/server/font/geist-mono-latin.woff2"),
+    ),
+  });
+  const fontMockPath = join(temporaryRoot, "next-font-responses.cjs");
+  await writeFile(
+    fontMockPath,
+    `module.exports = ${JSON.stringify(responses)};\n`,
+    { flag: "wx", signal },
+  );
+  return fontMockPath;
+}
+
 async function readCreatedDocumentId(response: APIResponse) {
   if (response.status() !== 201) throw new Error("Docs capture API failed");
   const bytes = await response.body();
@@ -450,82 +682,403 @@ async function readCreatedDocumentId(response: APIResponse) {
   }
 }
 
-async function writeCapturesAtomically(captures: Map<CaptureName, Buffer>) {
-  await mkdir(SCREENSHOTS_ROOT, { recursive: true });
+export async function writeCapturesAtomically(
+  captures: Map<CaptureName, Buffer>,
+  options: {
+    onStep?: (
+      step: "backed-up" | "committed" | "staged",
+    ) => Promise<unknown>;
+    outputRoot?: string;
+    signal?: AbortSignal;
+  } = {},
+) {
+  const outputRoot = options.outputRoot ?? SCREENSHOTS_ROOT;
+  if (!isAbsolute(outputRoot) && !win32.isAbsolute(outputRoot)) {
+    throw new Error("Docs capture output failed");
+  }
   for (const name of CAPTURE_NAMES) {
     const contents = captures.get(name);
-    if (!contents) throw new Error("Docs capture output failed");
-    const target = screenshotPath(name);
-    const temporary = `${target}.${process.pid}.tmp`;
-    try {
-      await writeFile(temporary, contents, { flag: "wx" });
-      await rename(temporary, target);
-    } catch {
+    if (!Buffer.isBuffer(contents) || contents.byteLength < 1) {
       throw new Error("Docs capture output failed");
-    } finally {
-      await rm(temporary, { force: true });
+    }
+  }
+  if (captures.size !== CAPTURE_NAMES.length) {
+    throw new Error("Docs capture output failed");
+  }
+
+  const parent = dirname(outputRoot);
+  const directoryName = basename(outputRoot);
+  const lockPath = join(parent, `.${directoryName}.capture.lock`);
+  const backupPath = join(parent, `.${directoryName}.capture-backup`);
+  const stagePrefix = `.${directoryName}.capture-stage-`;
+  const stagePath = join(
+    parent,
+    `${stagePrefix}${process.pid}-${randomBytes(12).toString("hex")}`,
+  );
+  await mkdir(parent, { recursive: true });
+  const lock = await acquireCaptureOutputLock(lockPath);
+  let committed = false;
+  let movedOldSet = false;
+  let operationFailed = false;
+
+  try {
+    await recoverCaptureOutput({
+      backupPath,
+      outputRoot,
+      parent,
+      stagePrefix,
+    });
+    if (await pathExists(outputRoot)) {
+      await assertApprovedCaptureDirectory(outputRoot);
+    }
+    if (options.signal?.aborted) throw new Error("interrupted");
+
+    await mkdir(stagePath, { recursive: false });
+    for (const name of CAPTURE_NAMES) {
+      await writeFile(join(stagePath, `${name}.webp`), captures.get(name)!, {
+        flag: "wx",
+        signal: options.signal,
+      });
+    }
+    await assertApprovedCaptureDirectory(stagePath);
+    await options.onStep?.("staged");
+
+    if (await pathExists(outputRoot)) {
+      await rename(outputRoot, backupPath);
+      movedOldSet = true;
+    }
+    await options.onStep?.("backed-up");
+    if (options.signal?.aborted) throw new Error("interrupted");
+    await rename(stagePath, outputRoot);
+    committed = true;
+    await options.onStep?.("committed");
+  } catch {
+    operationFailed = true;
+    if (!committed && movedOldSet && !(await pathExists(outputRoot))) {
+      try {
+        await rename(backupPath, outputRoot);
+        movedOldSet = false;
+      } catch {
+        // The stable backup is retained for stale recovery on the next run.
+      }
+    }
+  } finally {
+    await rm(stagePath, { force: true, recursive: true }).catch(() => undefined);
+    if (committed || !movedOldSet) {
+      await rm(backupPath, { force: true, recursive: true }).catch(
+        () => undefined,
+      );
+    }
+    try {
+      await lock.close();
+      await rm(lockPath, { force: true });
+    } catch {
+      operationFailed = true;
+    }
+  }
+  if (operationFailed) throw new Error("Docs capture output failed");
+}
+
+async function acquireCaptureOutputLock(lockPath: string) {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const handle = await open(lockPath, "wx");
+      try {
+        await handle.writeFile(
+          JSON.stringify({ createdAt: Date.now(), pid: process.pid }),
+          "utf8",
+        );
+      } catch {
+        await handle.close().catch(() => undefined);
+        await rm(lockPath, { force: true }).catch(() => undefined);
+        throw new Error("Docs capture output failed");
+      }
+      return handle;
+    } catch (error) {
+      if (
+        attempt !== 0 ||
+        !hasErrorCode(error, "EEXIST") ||
+        !(await isStaleCaptureLock(lockPath))
+      ) {
+        throw new Error("Docs capture output failed");
+      }
+      const stalePath = `${lockPath}.stale-${randomBytes(12).toString("hex")}`;
+      try {
+        await rename(lockPath, stalePath);
+        await rm(stalePath, { force: true });
+      } catch {
+        throw new Error("Docs capture output failed");
+      }
+    }
+  }
+  throw new Error("Docs capture output failed");
+}
+
+async function isStaleCaptureLock(lockPath: string) {
+  try {
+    const contents = JSON.parse(await readFile(lockPath, "utf8")) as {
+      createdAt?: unknown;
+      pid?: unknown;
+    };
+    if (
+      typeof contents.pid === "number" &&
+      Number.isSafeInteger(contents.pid) &&
+      contents.pid > 0
+    ) {
+      try {
+        process.kill(contents.pid, 0);
+        return false;
+      } catch {
+        return true;
+      }
+    }
+    return captureLockMtimeIsStale(lockPath);
+  } catch (error) {
+    if (hasErrorCode(error, "ENOENT")) return false;
+    return captureLockMtimeIsStale(lockPath);
+  }
+}
+
+async function captureLockMtimeIsStale(lockPath: string) {
+  try {
+    const metadata = await stat(lockPath);
+    return Date.now() - metadata.mtimeMs > 10 * 60_000;
+  } catch {
+    return false;
+  }
+}
+
+async function recoverCaptureOutput(options: {
+  backupPath: string;
+  outputRoot: string;
+  parent: string;
+  stagePrefix: string;
+}) {
+  if (await pathExists(options.backupPath)) {
+    await assertApprovedCaptureDirectory(options.backupPath);
+    if (await pathExists(options.outputRoot)) {
+      await assertApprovedCaptureDirectory(options.outputRoot);
+      await rm(options.backupPath, { force: true, recursive: true });
+    } else {
+      await rename(options.backupPath, options.outputRoot);
+    }
+  }
+  for (const entry of await readdir(options.parent, { withFileTypes: true })) {
+    if (entry.name.startsWith(options.stagePrefix)) {
+      await rm(join(options.parent, entry.name), { force: true, recursive: true });
     }
   }
 }
 
-async function startCaptureServer(databaseUrl: string): Promise<CaptureServer> {
+async function assertApprovedCaptureDirectory(path: string) {
+  const metadata = await lstat(path);
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+    throw new Error("Docs capture output failed");
+  }
+  const entries = await readdir(path, { withFileTypes: true });
+  const expected = CAPTURE_NAMES.map((name) => `${name}.webp`).sort();
+  const actual = entries.map((entry) => entry.name).sort();
+  if (
+    entries.some((entry) => !entry.isFile() || entry.isSymbolicLink()) ||
+    actual.length !== expected.length ||
+    actual.some((name, index) => name !== expected[index])
+  ) {
+    throw new Error("Docs capture output failed");
+  }
+}
+
+async function pathExists(path: string) {
+  try {
+    await lstat(path);
+    return true;
+  } catch (error) {
+    if (hasErrorCode(error, "ENOENT")) return false;
+    throw error;
+  }
+}
+
+function hasErrorCode(error: unknown, code: string) {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === code
+  );
+}
+
+async function startCaptureServer(options: {
+  databaseUrl: string;
+  fontMockPath: string;
+  pnpm: PnpmInvocation;
+  runNonce: string;
+  signal: AbortSignal;
+}): Promise<CaptureServer> {
   const deadline = Date.now() + 90_000;
   for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (options.signal.aborted) throw new Error("Docs capture server failed");
     const port = await reserveLoopbackPort();
     const environment = createCaptureEnvironment(process.env, {
-      databaseUrl,
+      databaseUrl: options.databaseUrl,
+      fontMockPath: options.fontMockPath,
       port,
+      runNonce: options.runNonce,
     });
-    const child = spawn(
-      "pnpm",
-      ["exec", "next", "dev", "-H", "127.0.0.1", "-p", String(port)],
-      {
-        cwd: APP_ROOT,
-        detached: process.platform !== "win32",
-        env: environment,
-        stdio: "ignore",
-      },
-    );
-    const exit = observeChildExit(child);
-    const baseUrl = `http://127.0.0.1:${port}`;
+    let managed: ManagedProcess | undefined;
     try {
-      await waitForReadiness(baseUrl, child, deadline);
-      return { baseUrl, child, exit };
+      managed = spawnManagedProcess(
+        options.pnpm.command,
+        [
+          ...options.pnpm.prefixArguments,
+          "exec",
+          "next",
+          "dev",
+          "-H",
+          "127.0.0.1",
+          "-p",
+          String(port),
+        ],
+        {
+          cwd: APP_ROOT,
+          env: environment,
+          stdio: "ignore",
+        },
+      );
+      const baseUrl = `http://127.0.0.1:${port}`;
+      await waitForReadiness({
+        baseUrl,
+        deadline,
+        managed,
+        runNonce: options.runNonce,
+        signal: options.signal,
+      });
+      return { baseUrl, managed, port };
     } catch {
-      await stopManagedChild(child, exit).catch(() => undefined);
+      let cleanupFailed = false;
+      if (managed) {
+        try {
+          await stopManagedProcess(managed);
+        } catch {
+          cleanupFailed = true;
+        }
+      }
+      try {
+        await waitForPortRelease(port, { timeoutMs: 5_000 });
+      } catch {
+        cleanupFailed = true;
+      }
+      if (cleanupFailed || options.signal.aborted) {
+        throw new Error("Docs capture server failed");
+      }
     }
   }
   throw new Error("Docs capture server failed");
 }
 
-async function waitForReadiness(
-  baseUrl: string,
-  child: ChildProcess,
-  deadline: number,
-) {
-  while (Date.now() < deadline) {
-    if (child.exitCode !== null || child.signalCode !== null) {
-      throw new Error("Docs capture server failed");
-    }
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 2_000);
+async function waitForReadiness(options: {
+  baseUrl: string;
+  deadline: number;
+  managed: ManagedProcess;
+  runNonce: string;
+  signal: AbortSignal;
+}) {
+  const childExited = options.managed.exit.then(() => {
+    throw new Error("Docs capture server failed");
+  });
+  while (Date.now() < options.deadline && !options.signal.aborted) {
     try {
-      const response = await fetch(`${baseUrl}/documents`, {
-        cache: "no-store",
-        redirect: "manual",
-        signal: controller.signal,
-      });
-      const ready = response.status === 200;
-      await response.body?.cancel().catch(() => undefined);
+      const ready = await Promise.race([
+        fetchOwnedReadiness(
+          options.baseUrl,
+          options.runNonce,
+          options.signal,
+        ),
+        childExited,
+      ]);
       if (ready) return;
     } catch {
+      if (
+        options.signal.aborted ||
+        options.managed.child.exitCode !== null ||
+        options.managed.child.signalCode !== null
+      ) {
+        throw new Error("Docs capture server failed");
+      }
       // The reserved port is expected to refuse connections until Next is ready.
-    } finally {
-      clearTimeout(timeout);
     }
-    await delay(250);
+    await waitForReadinessRetry(options.managed, options.signal, 250);
   }
   throw new Error("Docs capture server failed");
+}
+
+function waitForReadinessRetry(
+  managed: ManagedProcess,
+  signal: AbortSignal,
+  milliseconds: number,
+) {
+  return new Promise<void>((resolveDelay, reject) => {
+    let settled = false;
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      signal.removeEventListener("abort", handleAbort);
+      if (error) reject(error);
+      else resolveDelay();
+    };
+    const handleAbort = () => finish(new Error("Docs capture server failed"));
+    const timeout = setTimeout(() => finish(), milliseconds);
+    signal.addEventListener("abort", handleAbort, { once: true });
+    void managed.exit.then(() =>
+      finish(new Error("Docs capture server failed")),
+    );
+    if (signal.aborted) handleAbort();
+  });
+}
+
+async function fetchOwnedReadiness(
+  baseUrl: string,
+  runNonce: string,
+  signal: AbortSignal,
+) {
+  const controller = new AbortController();
+  const handleAbort = () => controller.abort();
+  const timeout = setTimeout(() => controller.abort(), 2_000);
+  signal.addEventListener("abort", handleAbort, { once: true });
+  if (signal.aborted) handleAbort();
+  try {
+    const response = await fetch(`${baseUrl}/api/ready`, {
+      cache: "no-store",
+      headers: { "X-Coredot-Tool-Run-Nonce": runNonce },
+      redirect: "manual",
+      signal: controller.signal,
+    });
+    const ready =
+      response.status === 200 &&
+      response.headers.get("X-Coredot-Tool-Run-Nonce") === runNonce;
+    await response.body?.cancel().catch(() => undefined);
+    return ready;
+  } finally {
+    clearTimeout(timeout);
+    signal.removeEventListener("abort", handleAbort);
+  }
+}
+
+async function disposeCaptureServer(
+  server: CaptureServer,
+  signal?: AbortSignal,
+) {
+  let failed = false;
+  try {
+    await stopManagedProcess(server.managed);
+  } catch {
+    failed = true;
+  }
+  try {
+    await waitForPortRelease(server.port, { signal, timeoutMs: 5_000 });
+  } catch {
+    failed = true;
+  }
+  if (failed) throw new Error("Docs capture cleanup failed");
 }
 
 async function reserveLoopbackPort() {
@@ -542,92 +1095,6 @@ async function reserveLoopbackPort() {
       });
     });
   });
-}
-
-async function runCommand(
-  command: string,
-  arguments_: string[],
-  environment: NodeJS.ProcessEnv,
-  timeoutMs: number,
-) {
-  const child = spawn(command, arguments_, {
-    cwd: APP_ROOT,
-    detached: process.platform !== "win32",
-    env: environment,
-    stdio: "ignore",
-  });
-  const exit = observeChildExit(child);
-  let timeout: ReturnType<typeof setTimeout> | undefined;
-  const timedOut = new Promise<"timeout">((resolveTimeout) => {
-    timeout = setTimeout(() => resolveTimeout("timeout"), timeoutMs);
-  });
-  const result = await Promise.race([exit, timedOut]);
-  if (timeout) clearTimeout(timeout);
-  if (result === "timeout") {
-    await stopManagedChild(child, exit).catch(() => undefined);
-    throw new Error("Docs capture command failed");
-  }
-  if (result.error || result.signal !== null || result.code !== 0) {
-    throw new Error("Docs capture command failed");
-  }
-}
-
-function observeChildExit(child: ChildProcess): Promise<ChildExit> {
-  if (child.exitCode !== null || child.signalCode !== null) {
-    return Promise.resolve({
-      code: child.exitCode,
-      error: false,
-      signal: child.signalCode,
-    });
-  }
-  return new Promise((resolveExit) => {
-    let settled = false;
-    const finish = (result: ChildExit) => {
-      if (settled) return;
-      settled = true;
-      resolveExit(result);
-    };
-    child.once("error", () =>
-      finish({ code: null, error: true, signal: null }),
-    );
-    child.once("close", (code, signal) =>
-      finish({ code, error: false, signal }),
-    );
-  });
-}
-
-async function stopManagedChild(child: ChildProcess, exit: Promise<ChildExit>) {
-  if (child.exitCode !== null || child.signalCode !== null) {
-    await exit;
-    return;
-  }
-  signalProcessTree(child, "SIGTERM");
-  if (await waitForExitWithin(exit, 5_000)) return;
-  signalProcessTree(child, "SIGKILL");
-  if (!(await waitForExitWithin(exit, 5_000))) {
-    throw new Error("Docs capture cleanup failed");
-  }
-}
-
-function signalProcessTree(child: ChildProcess, signal: NodeJS.Signals) {
-  if (!child.pid) return;
-  try {
-    if (process.platform === "win32") child.kill(signal);
-    else process.kill(-child.pid, signal);
-  } catch {
-    // A process may exit between the state check and signal delivery.
-  }
-}
-
-async function waitForExitWithin(exit: Promise<ChildExit>, timeoutMs: number) {
-  return Promise.race([
-    exit.then(() => true),
-    delay(timeoutMs).then(() => false),
-  ]);
-}
-
-function delay(milliseconds: number) {
-  return new Promise<void>((resolveDelay) => setTimeout(resolveDelay, milliseconds));
 }
 
 function validateDatabaseUrl(databaseUrl: string) {
@@ -650,7 +1117,10 @@ async function main() {
     await bootstrapCaptureWorkspace();
     return;
   }
-  await captureDocsAssets();
+  const outcome = await captureDocsAssets();
+  if ("signal" in outcome) {
+    process.exitCode = interruptExitCode(outcome.signal);
+  }
 }
 
 const invokedPath = process.argv[1] ? resolve(process.argv[1]) : "";

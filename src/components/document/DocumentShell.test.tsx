@@ -489,6 +489,21 @@ function expectLastProposalApplyFetch(
 }
 
 describe("DocumentShell", () => {
+  it("uses the localized generic user role instead of a personal placeholder", async () => {
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocument("doc_1", "Product identity")}
+        templates={[]}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("사용자", { exact: true })).toBeInTheDocument();
+      expect(screen.queryByText("Kyunghoon K...")).not.toBeInTheDocument();
+    });
+  });
+
   it("renders plugin workspace tabs and their live document panel", async () => {
     const user = userEvent.setup();
 
