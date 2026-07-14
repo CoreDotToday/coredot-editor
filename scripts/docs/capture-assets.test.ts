@@ -10,6 +10,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { createServer as createHttpServer, type Server } from "node:http";
+import { EventEmitter } from "node:events";
 import { createRequire } from "node:module";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -24,15 +25,19 @@ import {
   NEXT_CAPTURE_BUNDLER_ARGUMENT,
   CAPTURE_TRANSACTION_VERSION,
   DOCS_CHROMIUM_ARGUMENTS,
+  DOCS_CAPTURE_FILE_INPUT_SELECTOR,
   DOCS_CAPTURE_STYLE,
   DOCS_LANGUAGE_STORAGE_KEY,
   DOCS_VIEWPORT,
   createCaptureEnvironment,
   createCaptureDocumentRequest,
+  createCapturePageErrorGuard,
   createNextFontMockResponses,
   encodeWebpWithinBudget,
   isCaptureNetworkAllowed,
   isCaptureLockOwnerStale,
+  installDeterministicPageState,
+  prepareCaptureImportPage,
   runCaptureCleanup,
   screenshotPath,
   toNextFontMockFilePath,
@@ -99,6 +104,9 @@ describe("docs capture constants", () => {
       "--disable-font-subpixel-positioning",
       "--disable-lcd-text",
     ]);
+    expect(DOCS_CAPTURE_FILE_INPUT_SELECTOR).toBe(
+      'input[type="file"][accept*=".docx"]',
+    );
   });
 
   it("suppresses native scrollbars so pointer timing cannot change pixels", () => {
@@ -112,6 +120,9 @@ describe("docs capture constants", () => {
     const waits: Array<[string, string]> = [];
     const page = {
       getByRole: (role: string, options: { name: string }) => ({
+        selectOption: async (value: string) => {
+          waits.push(["select", value]);
+        },
         waitFor: async () => {
           waits.push([role, options.name]);
         },
@@ -124,12 +135,22 @@ describe("docs capture constants", () => {
       waitForTimeout: async (milliseconds: number) => {
         waits.push(["timeout", String(milliseconds)]);
       },
+      waitForLoadState: async (state: string) => {
+        waits.push(["load", state]);
+      },
+      waitForFunction: async (_predicate: unknown, selector: string) => {
+        waits.push(["hydrated", selector]);
+      },
     };
 
     await waitForEnglishCaptureLocale(page as never);
     await waitForStableReviewCapture(page as never);
 
     expect(waits).toEqual([
+      ["load", "load"],
+      ["hydrated", "#editor-language"],
+      ["combobox", "언어"],
+      ["select", "en"],
       ["combobox", "Language"],
       ["heading", "Review summary"],
       ["text", "Stub review completed."],
@@ -140,6 +161,67 @@ describe("docs capture constants", () => {
       ["text", "Stub review completed."],
       ["text", "1 applicable proposals · 0 skipped findings"],
       ["button", "Review document"],
+    ]);
+  });
+
+  it("keeps the init-script locale aligned with the Korean SSR default", async () => {
+    let initScript: unknown;
+    const context = {
+      addInitScript: async (script: unknown) => {
+        initScript = script;
+      },
+    };
+
+    await installDeterministicPageState(context as never);
+
+    expect(initScript).toEqual({
+      content: expect.stringContaining(
+        `window.localStorage.setItem(${JSON.stringify(DOCS_LANGUAGE_STORAGE_KEY)}, "ko")`,
+      ),
+    });
+    expect((initScript as { content: string }).content).toContain(
+      JSON.stringify(DOCS_CAPTURE_STYLE),
+    );
+    expect((initScript as { content: string }).content).not.toContain(
+      "__name",
+    );
+  });
+
+  it("fails closed after any captured page error and detaches its listener", () => {
+    const page = new EventEmitter();
+    const guard = createCapturePageErrorGuard(page as never);
+    page.emit("pageerror", new Error("hydration mismatch at /private/path"));
+
+    expect(() => guard.assertHealthy()).toThrow(
+      /^Docs capture page failed$/,
+    );
+    guard.dispose();
+    expect(page.listenerCount("pageerror")).toBe(0);
+  });
+
+  it("switches stored import language only after the new page finishes loading", async () => {
+    const calls: unknown[] = [];
+    const page = {
+      evaluate: async (_script: unknown, options: unknown) => {
+        calls.push(["evaluate", options]);
+      },
+      waitForLoadState: async (state: string) => {
+        calls.push(["load", state]);
+      },
+      waitForFunction: async (_predicate: unknown, selector: string) => {
+        calls.push(["hydrated", selector]);
+      },
+    };
+
+    await prepareCaptureImportPage(page as never);
+
+    expect(calls).toEqual([
+      ["load", "load"],
+      ["hydrated", DOCS_CAPTURE_FILE_INPUT_SELECTOR],
+      [
+        "evaluate",
+        { language: "en", languageKey: DOCS_LANGUAGE_STORAGE_KEY },
+      ],
     ]);
   });
 });

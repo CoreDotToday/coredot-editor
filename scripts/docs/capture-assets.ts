@@ -50,6 +50,8 @@ export const DOCS_CHROMIUM_ARGUMENTS = [
   "--disable-font-subpixel-positioning",
   "--disable-lcd-text",
 ] as const;
+export const DOCS_CAPTURE_FILE_INPUT_SELECTOR =
+  'input[type="file"][accept*=".docx"]';
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const APP_ROOT = resolve(dirname(SCRIPT_PATH), "../..");
@@ -525,120 +527,175 @@ async function captureProductStates(
   setPhase: (phase: CapturePhase) => void,
 ): Promise<Map<CaptureName, Buffer>> {
   const page = await context.newPage();
-  const captures = new Map<CaptureName, Buffer>();
-  await warmCaptureReviewRoute(context.request, baseUrl);
-  setPhase("document API creation");
-  const response = await createCaptureDocumentRequest(
-    context.request,
-    baseUrl,
-    {
-      contentJson: {
-        content: [
-          {
-            attrs: { level: 1 },
-            content: [{ text: "Decision brief", type: "text" }],
-            type: "heading",
-          },
-          {
-            content: [
-              {
-                text: "Retention improved, but the evidence behind the result is not yet clear.",
-                type: "text",
-              },
-            ],
-            type: "paragraph",
-          },
-          {
-            attrs: { level: 2 },
-            content: [{ text: "Decision needed", type: "text" }],
-            type: "heading",
-          },
-          {
-            content: [
-              {
-                text: "Validate the source metric and assign an accountable owner before approval.",
-                type: "text",
-              },
-            ],
-            type: "paragraph",
-          },
-        ],
-        type: "doc",
+  const pageErrorGuard = createCapturePageErrorGuard(page);
+  try {
+    const captures = new Map<CaptureName, Buffer>();
+    await warmCaptureReviewRoute(context.request, baseUrl);
+    setPhase("document API creation");
+    const response = await createCaptureDocumentRequest(
+      context.request,
+      baseUrl,
+      {
+        contentJson: {
+          content: [
+            {
+              attrs: { level: 1 },
+              content: [{ text: "Decision brief", type: "text" }],
+              type: "heading",
+            },
+            {
+              content: [
+                {
+                  text: "Retention improved, but the evidence behind the result is not yet clear.",
+                  type: "text",
+                },
+              ],
+              type: "paragraph",
+            },
+            {
+              attrs: { level: 2 },
+              content: [{ text: "Decision needed", type: "text" }],
+              type: "heading",
+            },
+            {
+              content: [
+                {
+                  text: "Validate the source metric and assign an accountable owner before approval.",
+                  type: "text",
+                },
+              ],
+              type: "paragraph",
+            },
+          ],
+          type: "doc",
+        },
+        title: "Quarterly Product Strategy Brief",
       },
-      title: "Quarterly Product Strategy Brief",
-    },
-    { "Idempotency-Key": "docs_capture_product_brief_v1" },
-  );
-  const documentId = await readCreatedDocumentId(response);
+      { "Idempotency-Key": "docs_capture_product_brief_v1" },
+    );
+    const documentId = await readCreatedDocumentId(response);
 
-  setPhase("editor load");
-  await page.goto(`${baseUrl}/documents/${encodeURIComponent(documentId)}`, {
-    waitUntil: "domcontentloaded",
-  });
-  await waitForEnglishCaptureLocale(page);
-  await page.getByRole("textbox", { name: "Document title" }).waitFor();
-  await page
-    .getByRole("complementary", { name: "AI workspace" })
-    .waitFor({ state: "visible" });
-  setPhase("workspace screenshot");
-  captures.set("workspace", await capturePage(page));
+    setPhase("editor load");
+    await page.goto(`${baseUrl}/documents/${encodeURIComponent(documentId)}`, {
+      waitUntil: "domcontentloaded",
+    });
+    await waitForEnglishCaptureLocale(page);
+    await page.getByRole("textbox", { name: "Document title" }).waitFor();
+    await page
+      .getByRole("complementary", { name: "AI workspace" })
+      .waitFor({ state: "visible" });
+    setPhase("workspace screenshot");
+    captures.set("workspace", await capturePage(page));
 
-  setPhase("review trigger");
-  const reviewResponsePromise = page.waitForResponse(
-    (candidate) => new URL(candidate.url()).pathname === "/api/ai/review",
-  );
-  await page
-    .getByRole("button", { exact: true, name: "Review document" })
-    .click();
-  setPhase("review response");
-  const reviewResponse = await reviewResponsePromise;
-  if (!reviewResponse.ok()) {
-    console.error(`Docs review response status ${reviewResponse.status()}`);
-    throw new Error("Docs capture failed");
+    setPhase("review trigger");
+    const reviewResponsePromise = page.waitForResponse(
+      (candidate) => new URL(candidate.url()).pathname === "/api/ai/review",
+    );
+    await page
+      .getByRole("button", { exact: true, name: "Review document" })
+      .click();
+    setPhase("review response");
+    const reviewResponse = await reviewResponsePromise;
+    if (!reviewResponse.ok()) {
+      console.error(`Docs review response status ${reviewResponse.status()}`);
+      throw new Error("Docs capture failed");
+    }
+    setPhase("review finding");
+    await page.getByText("Stub review finding").waitFor();
+    setPhase("review pending status");
+    await page.getByText("Pending", { exact: true }).first().waitFor();
+    setPhase("review settled");
+    await waitForStableReviewCapture(page);
+    setPhase("proposal screenshot");
+    captures.set("proposal-review", await capturePage(page));
+
+    setPhase("import page load");
+    await page.goto(`${baseUrl}/documents`, { waitUntil: "domcontentloaded" });
+    await prepareCaptureImportPage(page);
+    const docx = await createMixedFidelityDocx();
+    setPhase("DOCX import");
+    await page.locator(DOCS_CAPTURE_FILE_INPUT_SELECTOR).setInputFiles({
+      buffer: docx,
+      mimeType:
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      name: "Mixed-Fidelity Product Brief.docx",
+    });
+    const importReview = page.getByRole("dialog", {
+      name: "Review import result",
+    });
+    await importReview.waitFor();
+    await importReview
+      .getByText("Other DOCX formatting (review required): Approximated", {
+        exact: true,
+      })
+      .waitFor();
+    await importReview.getByText("Image: Removed", { exact: true }).waitFor();
+    setPhase("fidelity screenshot");
+    captures.set(
+      "docx-fidelity",
+      await capturePage(page, { opaqueModalBackdrop: true }),
+    );
+
+    if (captures.size !== CAPTURE_NAMES.length) {
+      throw new Error("Docs capture failed");
+    }
+    pageErrorGuard.assertHealthy();
+    return captures;
+  } finally {
+    pageErrorGuard.dispose();
   }
-  setPhase("review finding");
-  await page.getByText("Stub review finding").waitFor();
-  setPhase("review pending status");
-  await page.getByText("Pending", { exact: true }).first().waitFor();
-  setPhase("review settled");
-  await waitForStableReviewCapture(page);
-  setPhase("proposal screenshot");
-  captures.set("proposal-review", await capturePage(page));
-
-  setPhase("import page load");
-  await page.goto(`${baseUrl}/documents`, { waitUntil: "domcontentloaded" });
-  const docx = await createMixedFidelityDocx();
-  setPhase("DOCX import");
-  await page.getByLabel("Choose DOCX file").setInputFiles({
-    buffer: docx,
-    mimeType:
-      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    name: "Mixed-Fidelity Product Brief.docx",
-  });
-  const importReview = page.getByRole("dialog", { name: "Review import result" });
-  await importReview.waitFor();
-  await importReview
-    .getByText("Other DOCX formatting (review required): Approximated", {
-      exact: true,
-    })
-    .waitFor();
-  await importReview.getByText("Image: Removed", { exact: true }).waitFor();
-  setPhase("fidelity screenshot");
-  captures.set(
-    "docx-fidelity",
-    await capturePage(page, { opaqueModalBackdrop: true }),
-  );
-
-  if (captures.size !== CAPTURE_NAMES.length) {
-    throw new Error("Docs capture failed");
-  }
-  return captures;
 }
 
 export async function waitForEnglishCaptureLocale(page: Page) {
+  await page.waitForLoadState("load");
+  await waitForReactHydratedElement(page, "#editor-language");
+  const koreanLanguage = page.getByRole("combobox", {
+    exact: true,
+    name: "언어",
+  });
+  await koreanLanguage.waitFor();
+  await koreanLanguage.selectOption("en");
   await page
     .getByRole("combobox", { exact: true, name: "Language" })
     .waitFor();
+}
+
+export async function prepareCaptureImportPage(page: Page) {
+  await page.waitForLoadState("load");
+  await waitForReactHydratedElement(page, DOCS_CAPTURE_FILE_INPUT_SELECTOR);
+  await page.evaluate(
+    ({ language, languageKey }) => {
+      window.localStorage.setItem(languageKey, language);
+    },
+    { language: "en", languageKey: DOCS_LANGUAGE_STORAGE_KEY },
+  );
+}
+
+export function createCapturePageErrorGuard(page: Page) {
+  let failed = false;
+  const handlePageError = () => {
+    failed = true;
+  };
+  page.on("pageerror", handlePageError);
+  return {
+    assertHealthy() {
+      if (failed) throw new Error("Docs capture page failed");
+    },
+    dispose() {
+      page.off("pageerror", handlePageError);
+    },
+  };
+}
+
+async function waitForReactHydratedElement(page: Page, selector: string) {
+  await page.waitForFunction((targetSelector) => {
+    const element = document.querySelector(targetSelector);
+    if (!element) return false;
+    for (const property in element) {
+      if (property.startsWith("__reactProps$")) return true;
+    }
+    return false;
+  }, selector);
 }
 
 export async function warmCaptureReviewRoute(
@@ -719,22 +776,21 @@ async function settlePage(page: Page) {
   }
 }
 
-async function installDeterministicPageState(context: BrowserContext) {
-  await context.addInitScript(
-    ({ css, languageKey }) => {
-      window.localStorage.setItem(languageKey, "en");
+export async function installDeterministicPageState(context: BrowserContext) {
+  await context.addInitScript({
+    content: `
+      window.localStorage.setItem(${JSON.stringify(DOCS_LANGUAGE_STORAGE_KEY)}, "ko");
       const installStyle = () => {
         if (document.getElementById("docs-capture-style")) return;
         const style = document.createElement("style");
         style.id = "docs-capture-style";
-        style.textContent = css;
+        style.textContent = ${JSON.stringify(DOCS_CAPTURE_STYLE)};
         (document.head ?? document.documentElement).append(style);
       };
       if (document.documentElement) installStyle();
       else document.addEventListener("DOMContentLoaded", installStyle, { once: true });
-    },
-    { css: DOCS_CAPTURE_STYLE, languageKey: DOCS_LANGUAGE_STORAGE_KEY },
-  );
+    `,
+  });
 }
 
 async function installCaptureNetworkBoundary(
