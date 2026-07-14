@@ -40,8 +40,8 @@ const createDocumentSchema = z.object({
 const documentCreationKeySchema = z.string().min(16).max(128).regex(/^[A-Za-z0-9_-]+$/);
 
 const optionsHandler = createProtectedOptionsHandler(["GET", "POST"]);
-const getHandler = createProtectedRouteHandler(async (context, request?: Request) => {
-  const url = new URL(request?.url ?? "http://localhost/api/documents");
+const getHandler = createProtectedRouteHandler(async (context, request: Request) => {
+  const url = new URL(request.url);
   const limitValue = url.searchParams.get("limit");
   const limit = limitValue === null ? 20 : Number(limitValue);
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50) {
@@ -136,7 +136,7 @@ const postHandler = createProtectedRouteHandler(async (context, request: Request
   return NextResponse.json({ document: toPublicDocument(document) }, { status: 201 });
 }, { beforeWorkspaceBootstrap: (context) => enforceRequestBudget(context, "documents.create") });
 
-export async function GET(request?: Request) {
+export async function GET(request: Request) {
   return getHandler(request);
 }
 
