@@ -47,26 +47,19 @@ type ExternalHttpResponse = {
 
 const markdownParser = new MarkdownIt({ html: true, linkify: true });
 
-type RawHtmlLink = {
-  attribute: "href" | "src";
-  href: string;
-  tagName: "a" | "img";
+type RawHtmlLinkTagName = "a" | "img";
+
+type RawHtmlOpeningTag = {
+  content: string;
+  tagName: string;
 };
 
-function sanitizeRawHtmlForTagExtraction(html: string): string {
-  let sanitized = html.replace(/<!--[\s\S]*?-->/gu, "");
-  for (const tagName of ["script", "style", "template", "textarea", "title"]) {
-    const rawTextElement = new RegExp(
-      `(<${tagName}\\b(?:[^>"']|"[^"]*"|'[^']*')*>)[\\s\\S]*?(<\\/${tagName}\\s*>|$)`,
-      "giu",
-    );
-    sanitized = sanitized.replace(
-      rawTextElement,
-      (_element, openingTag: string, closingTag: string) => `${openingTag}${closingTag}`,
-    );
-  }
-  return sanitized;
-}
+type RawHtmlTraversalState = {
+  inComment: boolean;
+  suppressedTags: string[];
+};
+
+const RAW_TEXT_TAGS = new Set(["script", "style", "textarea", "title"]);
 
 function extractHtmlAttribute(tag: string, attribute: string): string | undefined {
   const attributeMatch = tag.match(new RegExp(
@@ -76,55 +69,76 @@ function extractHtmlAttribute(tag: string, attribute: string): string | undefine
   return attributeMatch?.[1] ?? attributeMatch?.[2] ?? attributeMatch?.[3];
 }
 
-function extractRawHtmlLinks(markdown: string): RawHtmlLink[] {
-  const links: RawHtmlLink[] = [];
-  const visit = (tokens: Token[]) => {
-    for (const token of tokens) {
-      if (token.type === "html_block" || token.type === "html_inline") {
-        const html = sanitizeRawHtmlForTagExtraction(token.content);
-        const tags = html.matchAll(/<(a|img)\b(?:[^>"']|"[^"]*"|'[^']*')*>/giu);
-        for (const match of tags) {
-          const tagName = match[1].toLowerCase() as RawHtmlLink["tagName"];
-          const attribute: RawHtmlLink["attribute"] = tagName === "a" ? "href" : "src";
-          const href = extractHtmlAttribute(match[0], attribute);
-          if (href !== undefined) {
-            links.push({ attribute, href, tagName });
-          }
-        }
-      }
-      if (token.children) {
-        visit(token.children);
-      }
-    }
-  };
-  visit(markdownParser.parse(markdown, {}));
-  return links;
-}
+function processRawHtmlChunk(
+  html: string,
+  state: RawHtmlTraversalState,
+  onOpeningTag: (tag: RawHtmlOpeningTag) => void,
+): void {
+  const tagPattern = /<!--|<\/?([a-z][a-z\d:-]*)\b(?:[^>"']|"[^"]*"|'[^']*')*>/giu;
+  let cursor = 0;
 
-function extractRawHtmlIds(markdown: string): Set<string> {
-  const ids = new Set<string>();
-  const visit = (tokens: Token[]) => {
-    for (const token of tokens) {
-      if (token.type === "html_block" || token.type === "html_inline") {
-        const html = sanitizeRawHtmlForTagExtraction(token.content);
-        const tags = html.matchAll(
-          /<[a-z][a-z\d:-]*\b(?:[^>"']|"[^"]*"|'[^']*')*>/giu,
-        );
-        for (const match of tags) {
-          const id = extractHtmlAttribute(match[0], "id");
-          const normalized = id === undefined ? "" : decodeHtmlEntities(id.trim());
-          if (normalized) {
-            ids.add(normalized);
-          }
-        }
+  while (cursor < html.length) {
+    if (state.inComment) {
+      const commentEnd = html.indexOf("-->", cursor);
+      if (commentEnd === -1) {
+        return;
       }
-      if (token.children) {
-        visit(token.children);
-      }
+      state.inComment = false;
+      cursor = commentEnd + 3;
+      continue;
     }
-  };
-  visit(markdownParser.parse(markdown, {}));
-  return ids;
+
+    const suppressedTag = state.suppressedTags.at(-1);
+    if (suppressedTag && suppressedTag !== "template") {
+      const closingTag = new RegExp(`<\\/${suppressedTag}\\s*>`, "iu");
+      const match = closingTag.exec(html.slice(cursor));
+      if (!match) {
+        return;
+      }
+      state.suppressedTags.pop();
+      cursor += (match.index ?? 0) + match[0].length;
+      continue;
+    }
+
+    tagPattern.lastIndex = cursor;
+    const match = tagPattern.exec(html);
+    if (!match) {
+      return;
+    }
+    cursor = match.index + match[0].length;
+    if (match[0] === "<!--") {
+      const commentEnd = html.indexOf("-->", cursor);
+      if (commentEnd === -1) {
+        state.inComment = true;
+        return;
+      }
+      cursor = commentEnd + 3;
+      continue;
+    }
+
+    const tagName = match[1].toLowerCase();
+    const isClosingTag = /^<\//u.test(match[0]);
+    if (suppressedTag === "template") {
+      if (tagName === "template") {
+        if (isClosingTag) {
+          state.suppressedTags.pop();
+        } else {
+          state.suppressedTags.push("template");
+        }
+      } else if (!isClosingTag && RAW_TEXT_TAGS.has(tagName)) {
+        state.suppressedTags.push(tagName);
+      }
+      continue;
+    }
+    if (isClosingTag) {
+      continue;
+    }
+
+    onOpeningTag({ content: match[0], tagName });
+    if (tagName === "template" || RAW_TEXT_TAGS.has(tagName)) {
+      state.suppressedTags.push(tagName);
+    }
+  }
 }
 
 function shouldCollectLink(tokens: Token[], index: number): boolean {
@@ -141,10 +155,50 @@ function shouldCollectLink(tokens: Token[], index: number): boolean {
     || !previous.content.endsWith("](");
 }
 
+type RenderedTokenVisitor = {
+  onMarkdownLink?: (href: string | null) => void;
+  onRawOpeningTag?: (tag: RawHtmlOpeningTag) => void;
+};
+
+function walkRenderedTokens(markdown: string, visitor: RenderedTokenVisitor): void {
+  const state: RawHtmlTraversalState = { inComment: false, suppressedTags: [] };
+  const visit = (tokens: Token[]) => {
+    for (const [index, token] of tokens.entries()) {
+      if (token.type === "html_block" || token.type === "html_inline") {
+        processRawHtmlChunk(token.content, state, (tag) => visitor.onRawOpeningTag?.(tag));
+      } else if (!state.inComment && state.suppressedTags.length === 0) {
+        if (token.type === "link_open" && shouldCollectLink(tokens, index)) {
+          visitor.onMarkdownLink?.(token.attrGet("href"));
+        } else if (token.type === "image") {
+          visitor.onMarkdownLink?.(token.attrGet("src"));
+        }
+      }
+      if (token.children) {
+        visit(token.children);
+      }
+    }
+  };
+  visit(markdownParser.parse(markdown, {}));
+}
+
+function extractRawHtmlIds(markdown: string): Set<string> {
+  const ids = new Set<string>();
+  walkRenderedTokens(markdown, {
+    onRawOpeningTag: ({ content }) => {
+      const id = extractHtmlAttribute(content, "id");
+      const normalized = id === undefined ? "" : decodeHtmlEntities(id.trim());
+      if (normalized) {
+        ids.add(normalized);
+      }
+    },
+  });
+  return ids;
+}
+
 type LinkOccurrence = {
   href: string;
   provenance: "markdown" | "raw-html";
-  rawTagName?: RawHtmlLink["tagName"];
+  rawTagName?: RawHtmlLinkTagName;
 };
 
 function normalizeExtractedHref(href: string | null): string | undefined {
@@ -160,7 +214,7 @@ function extractLinkOccurrences(markdown: string): LinkOccurrence[] {
   const add = (
     href: string | null,
     provenance: LinkOccurrence["provenance"],
-    rawTagName?: RawHtmlLink["tagName"],
+    rawTagName?: RawHtmlLinkTagName,
   ) => {
     const normalized = normalizeExtractedHref(href);
     if (!normalized) {
@@ -174,22 +228,16 @@ function extractLinkOccurrences(markdown: string): LinkOccurrence[] {
     links.push({ href: normalized, provenance, rawTagName });
   };
 
-  const visit = (tokens: Token[]) => {
-    for (const [index, token] of tokens.entries()) {
-      if (token.type === "link_open" && shouldCollectLink(tokens, index)) {
-        add(token.attrGet("href"), "markdown");
-      } else if (token.type === "image") {
-        add(token.attrGet("src"), "markdown");
+  walkRenderedTokens(markdown, {
+    onMarkdownLink: (href) => add(href, "markdown"),
+    onRawOpeningTag: ({ content, tagName }) => {
+      if (tagName === "a" || tagName === "img") {
+        const rawTagName = tagName as RawHtmlLinkTagName;
+        const attribute = rawTagName === "a" ? "href" : "src";
+        add(extractHtmlAttribute(content, attribute) ?? null, "raw-html", rawTagName);
       }
-      if (token.children) {
-        visit(token.children);
-      }
-    }
-  };
-  visit(markdownParser.parse(markdown, {}));
-  for (const { href, tagName } of extractRawHtmlLinks(markdown)) {
-    add(href, "raw-html", tagName);
-  }
+    },
+  });
 
   return links;
 }
@@ -398,13 +446,13 @@ export async function checkInternalLinks(
         continue;
       }
 
-      const isRawMkDocsLink = sourceFile.startsWith("docs/")
-        && occurrence.provenance === "raw-html";
-      if (isRawMkDocsLink && parts.path.startsWith("/")) {
+      const isDocsDocument = sourceFile.startsWith("docs/");
+      const isRawMkDocsLink = isDocsDocument && occurrence.provenance === "raw-html";
+      if (isDocsDocument && parts.path.startsWith("/")) {
         issues.push({
           file: sourceFile,
           href,
-          message: "Raw HTML root-absolute paths bypass the configured MkDocs site base; use a relative URL",
+          message: "Root-absolute paths in docs bypass the configured MkDocs site base; use a relative URL",
         });
         continue;
       }
@@ -423,11 +471,15 @@ export async function checkInternalLinks(
       const renderedPageDirectory = sourceFile === "docs/index.md"
         ? dirname(sourcePath)
         : sourcePath.slice(0, -extname(sourcePath).length);
+      const isMkDocsCleanUrl = isDocsDocument
+        && decodedPath.endsWith("/")
+        && decodedPath !== "/";
+      const usesRenderedPageDirectory = isRawMkDocsLink || isMkDocsCleanUrl;
       const candidatePath = decodedPath === ""
         ? sourcePath
         : decodedPath.startsWith("/")
           ? resolve(isRawMkDocsLink ? resolve(repositoryRoot, "docs") : repositoryRoot, `.${decodedPath}`)
-          : resolve(isRawMkDocsLink ? renderedPageDirectory : dirname(sourcePath), decodedPath);
+          : resolve(usesRenderedPageDirectory ? renderedPageDirectory : dirname(sourcePath), decodedPath);
       if (!isInsideRoot(repositoryRoot, candidatePath)) {
         issues.push({ file: sourceFile, href, message: "Link target leaves repository root" });
         continue;
@@ -436,9 +488,7 @@ export async function checkInternalLinks(
       let target = await resolveInternalTarget(candidatePath, realRepositoryRoot);
       if (
         target.status === "missing"
-        && isRawMkDocsLink
-        && decodedPath.endsWith("/")
-        && decodedPath !== "/"
+        && isMkDocsCleanUrl
       ) {
         target = await resolveInternalTarget(`${candidatePath}.md`, realRepositoryRoot);
       }

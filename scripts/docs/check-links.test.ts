@@ -339,6 +339,41 @@ describe("internal documentation links", () => {
     });
   });
 
+  it("keeps inert inline template and script content out of link and id extraction", async () => {
+    const markdown = `<a href="#outer-template">Outer</a> <a href="#inner-id">Inner</a> <a href="#nested-template">Nested</a> <template id="outer-template"><div id="inner-id"><a href="missing.md">Inert</a> [Markdown](markdown-missing.md)<template id="nested-template"><a href="nested.md">Nested</a></template></div></template>
+<a href="#script-id">Script</a> <script>const example = '<span id="script-id"><a href="script-missing.md">Inert</a></span>';</script>`;
+
+    expect(extractMarkdownLinks(markdown)).toEqual([
+      "#outer-template",
+      "#inner-id",
+      "#nested-template",
+      "#script-id",
+    ]);
+
+    await withTemporaryRepository({
+      "docs/source.md": markdown,
+    }, async (root) => {
+      await expect(checkInternalLinks(root, ["docs/source.md"]))
+        .resolves.toEqual([
+          {
+            file: "docs/source.md",
+            href: "#inner-id",
+            message: 'Missing anchor "#inner-id" in docs/source.md',
+          },
+          {
+            file: "docs/source.md",
+            href: "#nested-template",
+            message: 'Missing anchor "#nested-template" in docs/source.md',
+          },
+          {
+            file: "docs/source.md",
+            href: "#script-id",
+            message: 'Missing anchor "#script-id" in docs/source.md',
+          },
+        ]);
+    });
+  });
+
   it("resolves files, directory indexes, encoded paths, and page anchors", async () => {
     await withTemporaryRepository({
       "README.md": `
@@ -372,6 +407,20 @@ describe("internal documentation links", () => {
     }, async (root) => {
       await expect(checkInternalLinks(root, ["docs/index.md", "docs/guide.md"]))
         .resolves.toEqual([]);
+    });
+  });
+
+  it("maps docs Markdown clean URLs from their rendered page directory", async () => {
+    await withTemporaryRepository({
+      "docs/index.md": "[Home guide](guide/)\n",
+      "docs/page.md": "[Page guide](../guide/)\n",
+      "docs/guide.md": "# Guide\n",
+    }, async (root) => {
+      await expect(checkInternalLinks(root, [
+        "docs/index.md",
+        "docs/page.md",
+        "docs/guide.md",
+      ])).resolves.toEqual([]);
     });
   });
 
@@ -473,12 +522,38 @@ describe("internal documentation links", () => {
           {
             file: "docs/source.md",
             href: "/guide/",
-            message: "Raw HTML root-absolute paths bypass the configured MkDocs site base; use a relative URL",
+            message: "Root-absolute paths in docs bypass the configured MkDocs site base; use a relative URL",
           },
           {
             file: "docs/source.md",
             href: "/assets/image.svg",
-            message: "Raw HTML root-absolute paths bypass the configured MkDocs site base; use a relative URL",
+            message: "Root-absolute paths in docs bypass the configured MkDocs site base; use a relative URL",
+          },
+        ]);
+    });
+  });
+
+  it("rejects root-absolute Markdown paths under docs while preserving README root links", async () => {
+    await withTemporaryRepository({
+      "README.md": "[Repository file](/docs/guide.md)\n",
+      "docs/source.md": `
+[Guide](/guide/)
+![Image](/assets/image.svg)
+`,
+      "docs/guide.md": "# Guide\n",
+      "docs/assets/image.svg": "<svg></svg>\n",
+    }, async (root) => {
+      await expect(checkInternalLinks(root, ["README.md", "docs/source.md"]))
+        .resolves.toEqual([
+          {
+            file: "docs/source.md",
+            href: "/guide/",
+            message: "Root-absolute paths in docs bypass the configured MkDocs site base; use a relative URL",
+          },
+          {
+            file: "docs/source.md",
+            href: "/assets/image.svg",
+            message: "Root-absolute paths in docs bypass the configured MkDocs site base; use a relative URL",
           },
         ]);
     });
@@ -504,7 +579,7 @@ describe("internal documentation links", () => {
         {
           file: "docs/source.md",
           href: "/docs/also-missing.md",
-          message: "Missing file: docs/also-missing.md",
+          message: "Root-absolute paths in docs bypass the configured MkDocs site base; use a relative URL",
         },
         {
           file: "docs/source.md",
@@ -526,7 +601,7 @@ describe("internal documentation links", () => {
       await withTemporaryRepository({
         "docs/source.md": `
 [File escape](outside.md#outside-file)
-[Directory escape](outside-guide/#outside-directory)
+[Directory escape](../outside-guide/#outside-directory)
 `,
       }, async (root) => {
         await symlink(join(outside, "outside.md"), join(root, "docs/outside.md"), "file");
@@ -540,7 +615,7 @@ describe("internal documentation links", () => {
           },
           {
             file: "docs/source.md",
-            href: "outside-guide/#outside-directory",
+            href: "../outside-guide/#outside-directory",
             message: "Link target leaves repository root",
           },
         ]);
