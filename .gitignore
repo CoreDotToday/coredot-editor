@@ -3,6 +3,7 @@
 # dependencies
 /node_modules
 /.worktrees/
+/.superpowers/
 /.pnp
 .pnp.*
 .yarn/*
