@@ -424,6 +424,34 @@ describe("internal documentation links", () => {
     });
   });
 
+  it("treats nested index pages as rendered directory roots for Markdown and raw links", async () => {
+    await withTemporaryRepository({
+      "docs/section/index.md": `
+[Markdown](guide/)
+<a href="guide/">Raw HTML</a>
+`,
+      "docs/section/guide.md": "# Guide\n",
+    }, async (root) => {
+      await expect(checkInternalLinks(root, [
+        "docs/section/index.md",
+        "docs/section/guide.md",
+      ])).resolves.toEqual([]);
+    });
+
+    await withTemporaryRepository({
+      "docs/section/INDEX.md": `
+[Markdown](../guide/)
+<a href="../guide/">Raw HTML</a>
+`,
+      "docs/section/guide.md": "# Guide\n",
+    }, async (root) => {
+      await expect(checkInternalLinks(root, [
+        "docs/section/INDEX.md",
+        "docs/section/guide.md",
+      ])).resolves.toEqual([]);
+    });
+  });
+
   it("does not apply the MkDocs clean URL fallback to README Markdown links", async () => {
     await withTemporaryRepository({
       "README.md": "[Guide](docs/guide/)\n",
