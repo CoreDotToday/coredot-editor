@@ -13,6 +13,7 @@ import {
   sep,
 } from "node:path";
 import { fileURLToPath } from "node:url";
+import { JSDOM } from "jsdom";
 import MarkdownIt from "markdown-it";
 import type Token from "markdown-it/lib/token.mjs";
 
@@ -50,98 +51,6 @@ const markdownParser = new MarkdownIt({ html: true, linkify: true });
 
 type RawHtmlLinkTagName = "a" | "img";
 
-type RawHtmlOpeningTag = {
-  content: string;
-  tagName: string;
-};
-
-type RawHtmlTraversalState = {
-  inComment: boolean;
-  suppressedTags: string[];
-};
-
-const RAW_TEXT_TAGS = new Set(["script", "style", "textarea", "title"]);
-
-function extractHtmlAttribute(tag: string, attribute: string): string | undefined {
-  const attributeMatch = tag.match(new RegExp(
-    `\\s${attribute}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'=<>\\x60]+))`,
-    "iu",
-  ));
-  return attributeMatch?.[1] ?? attributeMatch?.[2] ?? attributeMatch?.[3];
-}
-
-function processRawHtmlChunk(
-  html: string,
-  state: RawHtmlTraversalState,
-  onOpeningTag: (tag: RawHtmlOpeningTag) => void,
-): void {
-  const tagPattern = /<!--|<\/?([a-z][a-z\d:-]*)\b(?:[^>"']|"[^"]*"|'[^']*')*>/giu;
-  let cursor = 0;
-
-  while (cursor < html.length) {
-    if (state.inComment) {
-      const commentEnd = html.indexOf("-->", cursor);
-      if (commentEnd === -1) {
-        return;
-      }
-      state.inComment = false;
-      cursor = commentEnd + 3;
-      continue;
-    }
-
-    const suppressedTag = state.suppressedTags.at(-1);
-    if (suppressedTag && suppressedTag !== "template") {
-      const closingTag = new RegExp(`<\\/${suppressedTag}\\s*>`, "iu");
-      const match = closingTag.exec(html.slice(cursor));
-      if (!match) {
-        return;
-      }
-      state.suppressedTags.pop();
-      cursor += (match.index ?? 0) + match[0].length;
-      continue;
-    }
-
-    tagPattern.lastIndex = cursor;
-    const match = tagPattern.exec(html);
-    if (!match) {
-      return;
-    }
-    cursor = match.index + match[0].length;
-    if (match[0] === "<!--") {
-      const commentEnd = html.indexOf("-->", cursor);
-      if (commentEnd === -1) {
-        state.inComment = true;
-        return;
-      }
-      cursor = commentEnd + 3;
-      continue;
-    }
-
-    const tagName = match[1].toLowerCase();
-    const isClosingTag = /^<\//u.test(match[0]);
-    if (suppressedTag === "template") {
-      if (tagName === "template") {
-        if (isClosingTag) {
-          state.suppressedTags.pop();
-        } else {
-          state.suppressedTags.push("template");
-        }
-      } else if (!isClosingTag && RAW_TEXT_TAGS.has(tagName)) {
-        state.suppressedTags.push(tagName);
-      }
-      continue;
-    }
-    if (isClosingTag) {
-      continue;
-    }
-
-    onOpeningTag({ content: match[0], tagName });
-    if (tagName === "template" || RAW_TEXT_TAGS.has(tagName)) {
-      state.suppressedTags.push(tagName);
-    }
-  }
-}
-
 function shouldCollectLink(tokens: Token[], index: number): boolean {
   const token = tokens[index];
   if (token.markup === "linkify") {
@@ -156,44 +65,62 @@ function shouldCollectLink(tokens: Token[], index: number): boolean {
     || !previous.content.endsWith("](");
 }
 
-type RenderedTokenVisitor = {
-  onMarkdownLink?: (href: string | null) => void;
-  onRawOpeningTag?: (tag: RawHtmlOpeningTag) => void;
-};
+function createProvenanceAttribute(markdown: string): string {
+  const normalizedMarkdown = markdown.toLowerCase();
+  let suffix = 0;
+  let attribute = "data-coredot-doc-link";
+  while (normalizedMarkdown.includes(attribute)) {
+    suffix += 1;
+    attribute = `data-coredot-doc-link-${suffix}`;
+  }
+  return attribute;
+}
 
-function walkRenderedTokens(markdown: string, visitor: RenderedTokenVisitor): void {
-  const state: RawHtmlTraversalState = { inComment: false, suppressedTags: [] };
-  const visit = (tokens: Token[]) => {
-    for (const [index, token] of tokens.entries()) {
-      if (token.type === "html_block" || token.type === "html_inline") {
-        processRawHtmlChunk(token.content, state, (tag) => visitor.onRawOpeningTag?.(tag));
-      } else if (!state.inComment && state.suppressedTags.length === 0) {
-        if (token.type === "link_open" && shouldCollectLink(tokens, index)) {
-          visitor.onMarkdownLink?.(token.attrGet("href"));
-        } else if (token.type === "image") {
-          visitor.onMarkdownLink?.(token.attrGet("src"));
-        }
+function markMarkdownLinkTokens(tokens: Token[], provenanceAttribute: string): void {
+  const visit = (nestedTokens: Token[]) => {
+    for (const [index, token] of nestedTokens.entries()) {
+      if (token.type === "link_open") {
+        token.attrSet(
+          provenanceAttribute,
+          shouldCollectLink(nestedTokens, index) ? "markdown" : "ignored",
+        );
+      } else if (token.type === "image") {
+        token.attrSet(provenanceAttribute, "markdown");
       }
       if (token.children) {
         visit(token.children);
       }
     }
   };
-  visit(markdownParser.parse(markdown, {}));
+  visit(tokens);
+}
+
+function renderDocumentationFragment(markdown: string) {
+  const environment = {};
+  const tokens = markdownParser.parse(markdown, environment);
+  const provenanceAttribute = createProvenanceAttribute(markdown);
+  markMarkdownLinkTokens(tokens, provenanceAttribute);
+  const renderedHtml = markdownParser.renderer.render(
+    tokens,
+    markdownParser.options,
+    environment,
+  );
+
+  // `noscript` is deliberately not assigned a checker-specific content model:
+  // its browser parsing depends on the deployed document's scripting state.
+  return {
+    fragment: JSDOM.fragment(renderedHtml),
+    provenanceAttribute,
+  };
 }
 
 function extractRawHtmlIds(markdown: string): Set<string> {
-  const ids = new Set<string>();
-  walkRenderedTokens(markdown, {
-    onRawOpeningTag: ({ content }) => {
-      const id = extractHtmlAttribute(content, "id");
-      const normalized = id === undefined ? "" : decodeHtmlEntities(id.trim());
-      if (normalized) {
-        ids.add(normalized);
-      }
-    },
-  });
-  return ids;
+  const { fragment } = renderDocumentationFragment(markdown);
+  return new Set(
+    [...fragment.querySelectorAll("[id]")]
+      .map((element) => element.getAttribute("id")?.trim() ?? "")
+      .filter(Boolean),
+  );
 }
 
 type LinkOccurrence = {
@@ -203,7 +130,7 @@ type LinkOccurrence = {
 };
 
 function normalizeExtractedHref(href: string | null): string | undefined {
-  const normalized = href ? decodeHtmlEntities(href.trim()) : undefined;
+  const normalized = href?.trim();
   return !normalized || /^(?:mailto|tel):/iu.test(normalized)
     ? undefined
     : normalized;
@@ -229,16 +156,21 @@ function extractLinkOccurrences(markdown: string): LinkOccurrence[] {
     links.push({ href: normalized, provenance, rawTagName });
   };
 
-  walkRenderedTokens(markdown, {
-    onMarkdownLink: (href) => add(href, "markdown"),
-    onRawOpeningTag: ({ content, tagName }) => {
-      if (tagName === "a" || tagName === "img") {
-        const rawTagName = tagName as RawHtmlLinkTagName;
-        const attribute = rawTagName === "a" ? "href" : "src";
-        add(extractHtmlAttribute(content, attribute) ?? null, "raw-html", rawTagName);
-      }
-    },
-  });
+  const { fragment, provenanceAttribute } = renderDocumentationFragment(markdown);
+  for (const element of fragment.querySelectorAll("a[href], img[src]")) {
+    const marker = element.getAttribute(provenanceAttribute);
+    if (marker === "ignored") {
+      continue;
+    }
+    const tagName = element.localName as RawHtmlLinkTagName;
+    const provenance = marker === "markdown" ? "markdown" : "raw-html";
+    const attribute = tagName === "a" ? "href" : "src";
+    add(
+      element.getAttribute(attribute),
+      provenance,
+      provenance === "raw-html" ? tagName : undefined,
+    );
+  }
 
   return links;
 }

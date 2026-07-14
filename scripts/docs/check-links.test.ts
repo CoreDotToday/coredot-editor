@@ -374,6 +374,100 @@ describe("internal documentation links", () => {
     });
   });
 
+  it.each([
+    "iframe",
+    "xmp",
+    "noembed",
+    "noframes",
+    "title",
+    "textarea",
+  ])("keeps %s fallback markup inert while retaining the element id", async (tagName) => {
+    const markdown = `<a href="#${tagName}-element">Element</a> <a href="#${tagName}-inner">Inner</a>
+<${tagName} id="${tagName}-element"><div id="${tagName}-inner"><a href="${tagName}-missing.md">Inert</a> [Markdown](markdown-missing.md)</div></${tagName}>`;
+
+    expect(extractMarkdownLinks(markdown)).toEqual([
+      `#${tagName}-element`,
+      `#${tagName}-inner`,
+    ]);
+
+    await withTemporaryRepository({
+      "docs/source.md": markdown,
+    }, async (root) => {
+      await expect(checkInternalLinks(root, ["docs/source.md"]))
+        .resolves.toEqual([{
+          file: "docs/source.md",
+          href: `#${tagName}-inner`,
+          message: `Missing anchor "#${tagName}-inner" in docs/source.md`,
+        }]);
+    });
+  });
+
+  it("treats plaintext content, including a closing tag, as inert through end of file", async () => {
+    const markdown = `<a href="#plaintext-element">Element</a>
+<plaintext id="plaintext-element"><a href="missing.md">Inert</a></plaintext><a href="after.md">Still inert</a>
+[Markdown after](markdown-after.md)`;
+
+    expect(extractMarkdownLinks(markdown)).toEqual(["#plaintext-element"]);
+
+    await withTemporaryRepository({
+      "docs/source.md": markdown,
+    }, async (root) => {
+      await expect(checkInternalLinks(root, ["docs/source.md"]))
+        .resolves.toEqual([]);
+    });
+  });
+
+  it.each(["</script data-x>", "</script/>"])(
+    "follows browser script termination for %s",
+    async (closingTag) => {
+      const markdown = `<script>
+const inert = '<a href="inert.md">';
+${closingTag}
+<a href="active.svg">Raw</a>
+</script>
+
+[Markdown](markdown.svg)`;
+
+      expect(extractMarkdownLinks(markdown)).toEqual([
+        "active.svg",
+        "markdown.svg",
+      ]);
+
+      await withTemporaryRepository({
+        "docs/source.md": markdown,
+        "docs/source/active.svg": "<svg></svg>\n",
+        "docs/markdown.svg": "<svg></svg>\n",
+      }, async (root) => {
+        await expect(checkInternalLinks(root, ["docs/source.md"]))
+          .resolves.toEqual([]);
+      });
+    },
+  );
+
+  it("does not execute documentation scripts while inspecting rendered links", () => {
+    const sentinel = "__coredotDocsLinkCheckExecuted";
+    const globalState = globalThis as Record<string, unknown>;
+    delete globalState[sentinel];
+
+    extractMarkdownLinks(`<script>globalThis.${sentinel} = true;</script>`);
+
+    expect(globalState[sentinel]).toBeUndefined();
+  });
+
+  it("does not let raw HTML spoof Markdown link provenance", async () => {
+    await withTemporaryRepository({
+      "docs/source.md": '<a data-coredot-doc-link="markdown" href="guide.md">Guide</a>\n',
+      "docs/guide.md": "# Guide\n",
+    }, async (root) => {
+      await expect(checkInternalLinks(root, ["docs/source.md", "docs/guide.md"]))
+        .resolves.toEqual([{
+          file: "docs/source.md",
+          href: "guide.md",
+          message: "Raw HTML local .md targets are not rewritten by MkDocs; use the rendered clean URL",
+        }]);
+    });
+  });
+
   it("resolves files, directory indexes, encoded paths, and page anchors", async () => {
     await withTemporaryRepository({
       "README.md": `
