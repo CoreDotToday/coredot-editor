@@ -179,6 +179,21 @@ Raw: https://example.com/raw.
     ]));
   });
 
+  it("extracts raw HTML anchor and image links without treating comments as content", () => {
+    const markdown = `
+<a class="path" href="docs/guide/">Guide</a>
+<img alt="Diagram" src='assets/diagram.svg'>
+<a href=docs/reference/>Reference</a>
+<!-- <a href="docs/commented.md">Commented</a> -->
+`;
+
+    expect(extractMarkdownLinks(markdown)).toEqual([
+      "docs/guide/",
+      "assets/diagram.svg",
+      "docs/reference/",
+    ]);
+  });
+
   it("ignores mail, telephone, and fenced-code examples", () => {
     const markdown = `
 [Mail](mailto:maintainers@example.com)
@@ -302,6 +317,45 @@ describe("internal documentation links", () => {
         "docs/My File.md",
         "docs/reference.md",
       ])).resolves.toEqual([]);
+    });
+  });
+
+  it("maps MkDocs clean URLs to sibling Markdown source files", async () => {
+    await withTemporaryRepository({
+      "docs/index.md": '<a href="guide/#install">Guide</a>\n',
+      "docs/guide.md": "# Install\n",
+    }, async (root) => {
+      await expect(checkInternalLinks(root, ["docs/index.md", "docs/guide.md"]))
+        .resolves.toEqual([]);
+    });
+  });
+
+  it("resolves raw HTML assets from the rendered MkDocs page directory", async () => {
+    await withTemporaryRepository({
+      "docs/product-tour.md": `
+<a href="../assets/full.svg">
+  <img src="../assets/preview.svg" alt="Preview">
+</a>
+`,
+      "docs/assets/full.svg": "<svg></svg>\n",
+      "docs/assets/preview.svg": "<svg></svg>\n",
+    }, async (root) => {
+      await expect(checkInternalLinks(root, ["docs/product-tour.md"]))
+        .resolves.toEqual([]);
+    });
+  });
+
+  it("rejects local .md destinations in raw HTML anchors under docs", async () => {
+    await withTemporaryRepository({
+      "docs/source.md": '<a href="guide.md">Guide</a>\n',
+      "docs/guide.md": "# Guide\n",
+    }, async (root) => {
+      await expect(checkInternalLinks(root, ["docs/source.md", "docs/guide.md"]))
+        .resolves.toEqual([{
+          file: "docs/source.md",
+          href: "guide.md",
+          message: "Raw HTML local .md links are not rewritten by MkDocs; use the rendered clean URL",
+        }]);
     });
   });
 
@@ -870,6 +924,23 @@ describe("documentation link CLI", () => {
     });
   });
 
+  it("skips localhost and loopback documentation examples in external collection", async () => {
+    await withTemporaryRepository({
+      "README.md": `
+[Localhost](http://localhost:3000)
+[Localhost subdomain](https://docs.localhost/example)
+[IPv4 loopback](http://127.0.0.2/example)
+[IPv6 loopback](http://[::1]/example)
+`,
+    }, async (root) => {
+      const result = await runExecutableCli(root, ["--external"]);
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stderr).toBe("");
+      expect(result.stdout).toBe("Documentation links are valid (external).\n");
+    });
+  });
+
   it("attributes identically redacted external failures to their raw-link source", async () => {
     await withTemporaryRepository({
       "README.md": "[First](ftp://user:first-secret@files.example/archive?token=first-secret)\n",
@@ -920,6 +991,8 @@ describe("link-check command wiring", () => {
     ) as { scripts: Record<string, string> };
     const gitignore = await readFile(join(root, ".gitignore"), "utf8");
     const workflow = await readFile(join(root, ".github/workflows/docs.yml"), "utf8");
+    const exampleEnvironment = await readFile(join(root, ".env.example"), "utf8");
+    const docsHome = await readFile(join(root, "docs/index.md"), "utf8");
 
     expect(packageJson.scripts["docs:check-links"]).toBe(
       "tsx scripts/docs/check-links.ts",
@@ -950,5 +1023,16 @@ describe("link-check command wiring", () => {
       workflow.indexOf("run: pnpm docs:build"),
     );
     expect(workflow).not.toContain("docs:check-links:external");
+    expect(exampleEnvironment).toContain("TURSO_AUTH_TOKEN=\n");
+    for (const path of [
+      "product-tour/",
+      "getting-started/",
+      "ADOPTION/",
+      "production-readiness/",
+      "community/",
+    ]) {
+      expect(docsHome).toContain(`<a href="${path}">`);
+      expect(docsHome).not.toContain(`<a href="${path.slice(0, -1)}.md">`);
+    }
   });
 });

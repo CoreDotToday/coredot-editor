@@ -47,6 +47,41 @@ type ExternalHttpResponse = {
 
 const markdownParser = new MarkdownIt({ html: true, linkify: true });
 
+type RawHtmlLink = {
+  attribute: "href" | "src";
+  href: string;
+  tagName: "a" | "img";
+};
+
+function extractRawHtmlLinks(markdown: string): RawHtmlLink[] {
+  const links: RawHtmlLink[] = [];
+  const visit = (tokens: Token[]) => {
+    for (const token of tokens) {
+      if (token.type === "html_block" || token.type === "html_inline") {
+        const html = token.content.replace(/<!--[\s\S]*?-->/gu, "");
+        const tags = html.matchAll(/<(a|img)\b(?:[^>"']|"[^"]*"|'[^']*')*>/giu);
+        for (const match of tags) {
+          const tagName = match[1].toLowerCase() as RawHtmlLink["tagName"];
+          const attribute: RawHtmlLink["attribute"] = tagName === "a" ? "href" : "src";
+          const attributeMatch = match[0].match(new RegExp(
+            `\\s${attribute}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'=<>\\x60]+))`,
+            "iu",
+          ));
+          const href = attributeMatch?.[1] ?? attributeMatch?.[2] ?? attributeMatch?.[3];
+          if (href !== undefined) {
+            links.push({ attribute, href, tagName });
+          }
+        }
+      }
+      if (token.children) {
+        visit(token.children);
+      }
+    }
+  };
+  visit(markdownParser.parse(markdown, {}));
+  return links;
+}
+
 function shouldCollectLink(tokens: Token[], index: number): boolean {
   const token = tokens[index];
   if (token.markup === "linkify") {
@@ -90,6 +125,9 @@ export function extractMarkdownLinks(markdown: string): string[] {
     }
   };
   visit(markdownParser.parse(markdown, {}));
+  for (const { href } of extractRawHtmlLinks(markdown)) {
+    add(href);
+  }
 
   return links;
 }
@@ -275,6 +313,16 @@ export async function checkInternalLinks(
       continue;
     }
 
+    const rawHtmlLinks = extractRawHtmlLinks(markdown);
+    const rawHtmlHrefs = new Set(
+      rawHtmlLinks.map(({ href }) => decodeHtmlEntities(href.trim())),
+    );
+    const rawHtmlAnchorHrefs = new Set(
+      rawHtmlLinks
+        .filter(({ tagName }) => tagName === "a")
+        .map(({ href }) => decodeHtmlEntities(href.trim())),
+    );
+
     for (const href of extractMarkdownLinks(markdown)) {
       if (!isInternalHref(href)) {
         continue;
@@ -290,17 +338,41 @@ export async function checkInternalLinks(
         continue;
       }
 
+      if (
+        sourceFile.startsWith("docs/")
+        && rawHtmlAnchorHrefs.has(href)
+        && decodedPath.toLowerCase().endsWith(".md")
+      ) {
+        issues.push({
+          file: sourceFile,
+          href,
+          message: "Raw HTML local .md links are not rewritten by MkDocs; use the rendered clean URL",
+        });
+        continue;
+      }
+
+      const isRawMkDocsLink = sourceFile.startsWith("docs/") && rawHtmlHrefs.has(href);
+      const renderedPageDirectory = sourceFile === "docs/index.md"
+        ? dirname(sourcePath)
+        : sourcePath.slice(0, -extname(sourcePath).length);
       const candidatePath = decodedPath === ""
         ? sourcePath
         : decodedPath.startsWith("/")
-          ? resolve(repositoryRoot, `.${decodedPath}`)
-          : resolve(dirname(sourcePath), decodedPath);
+          ? resolve(isRawMkDocsLink ? resolve(repositoryRoot, "docs") : repositoryRoot, `.${decodedPath}`)
+          : resolve(isRawMkDocsLink ? renderedPageDirectory : dirname(sourcePath), decodedPath);
       if (!isInsideRoot(repositoryRoot, candidatePath)) {
         issues.push({ file: sourceFile, href, message: "Link target leaves repository root" });
         continue;
       }
 
-      const target = await resolveInternalTarget(candidatePath, realRepositoryRoot);
+      let target = await resolveInternalTarget(candidatePath, realRepositoryRoot);
+      if (
+        target.status === "missing"
+        && decodedPath.endsWith("/")
+        && decodedPath !== "/"
+      ) {
+        target = await resolveInternalTarget(`${candidatePath}.md`, realRepositoryRoot);
+      }
       if (target.status === "outside") {
         issues.push({ file: sourceFile, href, message: "Link target leaves repository root" });
         continue;
@@ -770,6 +842,56 @@ function isExternalCandidate(href: string): boolean {
     || (!/^(?:mailto|tel):/iu.test(href) && /^[a-z][a-z\d+.-]*:/iu.test(href));
 }
 
+function isLoopbackHostname(hostname: string): boolean {
+  const normalized = hostname
+    .replace(/^\[|\]$/gu, "")
+    .replace(/\.$/u, "")
+    .toLowerCase();
+  if (normalized === "localhost" || normalized.endsWith(".localhost")) {
+    return true;
+  }
+  if (isIP(normalized) === 4) {
+    return ipv4Matches(ipv4ToNumber(normalized), ipv4ToNumber("127.0.0.0"), 8);
+  }
+  if (isIP(normalized) !== 6) {
+    return false;
+  }
+
+  const value = ipv6ToBigInt(normalized);
+  if (value === BigInt(1)) {
+    return true;
+  }
+  if (value >> BigInt(32) !== BigInt(0xffff)) {
+    return false;
+  }
+  const mapped = Number(value & BigInt(0xffff_ffff));
+  const mappedAddress = [24, 16, 8, 0]
+    .map((shift) => String((mapped >>> shift) & 255))
+    .join(".");
+  return ipv4Matches(ipv4ToNumber(mappedAddress), ipv4ToNumber("127.0.0.0"), 8);
+}
+
+function isLocalDocumentationExample(href: string): boolean {
+  const candidates = [href];
+  try {
+    const decoded = decodeURIComponent(href);
+    if (decoded !== href) {
+      candidates.push(decoded);
+    }
+  } catch {
+    // Keep the original candidate. The request validator will reject malformed links.
+  }
+  return candidates.some((candidate) => {
+    try {
+      const url = new URL(candidate.startsWith("//") ? `https:${candidate}` : candidate);
+      return (url.protocol === "http:" || url.protocol === "https:")
+        && isLoopbackHostname(url.hostname);
+    } catch {
+      return false;
+    }
+  });
+}
+
 async function runCli(argv: string[]): Promise<number> {
   if (argv.some((argument) => argument !== "--external")) {
     process.stderr.write("Usage: pnpm docs:check-links [--external]\n");
@@ -785,7 +907,11 @@ async function runCli(argv: string[]): Promise<number> {
     for (const file of files) {
       const markdown = await readFile(resolve(root, file), "utf8");
       for (const href of extractMarkdownLinks(markdown)) {
-        if (isExternalCandidate(href) && !firstSourceByLink.has(href)) {
+        if (
+          isExternalCandidate(href)
+          && !isLocalDocumentationExample(href)
+          && !firstSourceByLink.has(href)
+        ) {
           firstSourceByLink.set(href, file);
         }
       }

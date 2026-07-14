@@ -66,11 +66,11 @@ Use [Project Profiles](project-profiles.md) for domain fields and readiness. Use
 ## Choose your path
 
 <nav class="docs-reader-paths" aria-label="Documentation paths">
-  <a href="product-tour.md"><span>Explore</span><strong>See the product workflow</strong><small>Three real captures, change branches, and trust boundaries.</small><b aria-hidden="true">&#8599;</b></a>
-  <a href="getting-started.md"><span>Build</span><strong>Run a deterministic local copy</strong><small>Start without Clerk or model credentials, then enter the development guides.</small><b aria-hidden="true">&#8599;</b></a>
-  <a href="ADOPTION.md"><span>Extend</span><strong>Turn the starter into your product</strong><small>Choose the right seam for domain workflow, prompts, providers, or UI.</small><b aria-hidden="true">&#8599;</b></a>
-  <a href="production-readiness.md"><span>Operate</span><strong>Review the production boundary</strong><small>Work through identity, data, recovery, deployment, and release gates.</small><b aria-hidden="true">&#8599;</b></a>
-  <a href="community.md"><span>Project</span><strong>Contribute and follow the roadmap</strong><small>Find community expectations, maintainer guidance, and planned work.</small><b aria-hidden="true">&#8599;</b></a>
+  <a href="product-tour/"><span>Explore</span><strong>See the product workflow</strong><small>Three real captures, change branches, and trust boundaries.</small><b aria-hidden="true">&#8599;</b></a>
+  <a href="getting-started/"><span>Build</span><strong>Run a deterministic local copy</strong><small>Start without Clerk or model credentials, then enter the development guides.</small><b aria-hidden="true">&#8599;</b></a>
+  <a href="ADOPTION/"><span>Extend</span><strong>Turn the starter into your product</strong><small>Choose the right seam for domain workflow, prompts, providers, or UI.</small><b aria-hidden="true">&#8599;</b></a>
+  <a href="production-readiness/"><span>Operate</span><strong>Review the production boundary</strong><small>Work through identity, data, recovery, deployment, and release gates.</small><b aria-hidden="true">&#8599;</b></a>
+  <a href="community/"><span>Project</span><strong>Contribute and follow the roadmap</strong><small>Find community expectations, maintainer guidance, and planned work.</small><b aria-hidden="true">&#8599;</b></a>
 </nav>
 
 ## Start with no external credentials
