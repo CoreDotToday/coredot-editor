@@ -2,6 +2,7 @@ import { createClient, type Client } from "@libsql/client";
 import { eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/libsql";
 import { mkdtemp, rm } from "node:fs/promises";
+import { isBuiltin } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Worker } from "node:worker_threads";
@@ -14,6 +15,7 @@ import { createDocumentRepository } from "@/features/documents/document-reposito
 
 const clients: Client[] = [];
 const tempDirs: string[] = [];
+const itWithNodeSqlite = isBuiltin("node:sqlite") ? it : it.skip;
 const scope: RequestContext = {
   authMode: "test",
   principalId: "concurrency_principal",
@@ -256,7 +258,7 @@ function formatErrorChain(error: unknown): string {
 }
 
 describe("proposal and document concurrency", () => {
-  it("retries a document save after an external write lock is released", async () => {
+  itWithNodeSqlite("retries a document save after an external write lock is released", async () => {
     const { createDb, path, setupDb } = await createConcurrencyDatabase();
     await seedDocument(setupDb, "locked_save_doc", "original");
     const repository = createDocumentRepository(await createDb());
@@ -277,7 +279,7 @@ describe("proposal and document concurrency", () => {
     });
   });
 
-  it("retries a proposal transaction after an external write lock is released", async () => {
+  itWithNodeSqlite("retries a proposal transaction after an external write lock is released", async () => {
     const { createDb, path, setupDb } = await createConcurrencyDatabase();
     await seedDocument(setupDb, "locked_doc", "growth was good");
     await seedProposal(setupDb, {

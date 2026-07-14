@@ -38,6 +38,18 @@ describe("production smoke helpers", () => {
     expect(packageJson.scripts["release:check"]).not.toMatch(/e2e:production|docs:build/);
     expect(workflow).toContain("uses: actions/setup-python@v5");
     expect(workflow).toContain("python -m pip install -r requirements-docs.txt");
+    const nodeSqliteJob = workflow
+      .split(/\n(?=  [\w-]+:\s*$)/m)
+      .find((job) => job.startsWith("  node-sqlite-concurrency:"));
+
+    expect(nodeSqliteJob).toBeDefined();
+    expect(nodeSqliteJob).toContain("node-version: 24");
+    expect(nodeSqliteJob).toContain(
+      "node -e \"if (!require('node:module').isBuiltin('node:sqlite')) process.exit(1)\"",
+    );
+    expect(nodeSqliteJob).toContain(
+      "pnpm exec vitest run src/features/proposals/proposal-concurrency.test.ts",
+    );
     expect(workflow).toContain("run: pnpm e2e:production");
     expect(workflow).toContain("run: pnpm docs:build");
     expect(workflow.indexOf("run: pnpm build")).toBeLessThan(

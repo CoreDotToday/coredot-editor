@@ -31,6 +31,33 @@ jobs:
       - name: Verify Windows capture lifecycle and local font loading
         run: pnpm exec vitest run scripts/docs/managed-process.test.ts scripts/docs/capture-assets.test.ts
 
+  node-sqlite-concurrency:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.6.5
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify Node SQLite availability
+        run: node -e "if (!require('node:module').isBuiltin('node:sqlite')) process.exit(1)"
+
+      - name: Verify SQLite lock contention
+        run: pnpm exec vitest run src/features/proposals/proposal-concurrency.test.ts
+
   verify:
     runs-on: ubuntu-latest
 
