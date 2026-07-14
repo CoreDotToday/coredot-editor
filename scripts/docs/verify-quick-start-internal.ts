@@ -18,6 +18,9 @@ import {
 } from "./verify-quick-start-snapshot";
 import {
   resolvePnpmInvocation as resolveManagedPnpmInvocation,
+  spawnManagedProcess,
+  stopManagedProcess,
+  type ManagedProcess,
   type PnpmInvocation,
 } from "./managed-process";
 
@@ -741,7 +744,7 @@ export async function runQuickStartVerification() {
   );
   let temporaryDatabaseDirectory: string | undefined;
   let port: number | undefined;
-  let server: ChildProcess | undefined;
+  let server: ManagedProcess | undefined;
 
   try {
     temporaryDatabaseDirectory = await mkdtemp(
@@ -787,7 +790,7 @@ export async function runQuickStartVerification() {
           databaseUrl,
           port: candidate,
         });
-        const child = spawn(
+        const managed = spawnManagedProcess(
           invocation.command,
           [
             ...invocation.prefixArguments,
@@ -804,10 +807,10 @@ export async function runQuickStartVerification() {
             stdio: "ignore",
           },
         );
-        return { server: child, serverExit: waitForChild(child) };
+        return { server: managed, serverExit: managed.exit };
       },
-      stopServer: async (child) => {
-        await stopProcessTree(child, new AbortController().signal);
+      stopServer: async (managed) => {
+        await stopManagedProcess(managed);
       },
       waitForReady: waitForReadiness,
     });
@@ -825,7 +828,9 @@ export async function runQuickStartVerification() {
         let failed = false;
         for (const step of [
           async () => {
-            if (server) await stopProcessTree(server, signal);
+            if (server) {
+              await stopManagedProcess(server);
+            }
           },
           async () => {
             if (port !== undefined) await waitForPortRelease(port, signal);

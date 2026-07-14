@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -12,6 +12,12 @@ import {
 } from "./run-production-smoke";
 
 describe("production smoke helpers", () => {
+  it("keeps the default local SQLite parent directory in clean checkouts", async () => {
+    const root = resolve(import.meta.dirname, "../..");
+
+    await expect(access(resolve(root, "data/.gitkeep"))).resolves.toBeUndefined();
+  });
+
   it("keys the Docs workflow pip cache from the documentation requirements file", async () => {
     const root = resolve(import.meta.dirname, "../..");
     const workflow = await readFile(resolve(root, ".github/workflows/docs.yml"), "utf8");
