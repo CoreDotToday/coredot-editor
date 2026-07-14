@@ -16,7 +16,7 @@ The captures use deterministic test identity and the local stub provider. They s
 
 The three-pane surface keeps document context on the left, the Tiptap editor in the center, and review work on the right. The current outline, Project Profile metadata, template, command, and draft remain visible together.
 
-<figure class="docs-figure docs-figure--product">
+<figure class="docs-figure docs-figure--product docs-figure--workspace">
   <a href="../assets/screenshots/workspace.webp">
     <img src="../assets/screenshots/workspace.webp" alt="Three-pane Coredot Editor Workspace with document outline and metadata, a central strategy brief, and AI review controls" width="1440" height="1000" loading="eager" decoding="async">
   </a>
@@ -31,7 +31,7 @@ Document saves carry an integer revision. If another tab saves first, the stale 
 
 Review and rewrite commands create AI Runs and zero or more Proposals. A Proposal is review state, not a direct edit: it can remain pending, be rejected, be inserted below, or be accepted through the document-change service.
 
-<figure class="docs-figure docs-figure--product">
+<figure class="docs-figure docs-figure--product docs-figure--proposal">
   <a href="../assets/screenshots/proposal-review.webp">
     <img src="../assets/screenshots/proposal-review.webp" alt="Coredot Editor showing highlighted source text and one pending review Proposal with replace, insert, and reject controls" width="1440" height="1000" loading="lazy" decoding="async">
   </a>
@@ -63,7 +63,7 @@ All-pending actions appear only after Proposal pagination reaches its terminal p
 
 DOCX import converts a file into an unsaved preview first. The user sees warnings and a structured fidelity report before confirmation creates a document. Export also previews fidelity and requires acknowledgement for lossy output.
 
-<figure class="docs-figure docs-figure--product docs-figure--contained">
+<figure class="docs-figure docs-figure--product docs-figure--contained docs-figure--docx">
   <a href="../assets/screenshots/docx-fidelity.webp">
     <img src="../assets/screenshots/docx-fidelity.webp" alt="DOCX import result listing preserved paragraphs, headings, tables, lists, links and marks, approximated formatting, and a removed image" width="1440" height="1000" loading="lazy" decoding="async">
   </a>

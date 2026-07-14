@@ -453,24 +453,38 @@
     margin-top: 3.4rem;
   }
 
+  .docs-hero {
+    gap: 1rem;
+    padding-top: 1.25rem;
+    padding-bottom: 0.8rem;
+  }
+
+  .docs-hero .docs-eyebrow {
+    margin-bottom: 0.7rem;
+    font-size: 0.55rem;
+    letter-spacing: 0.11em;
+    white-space: nowrap;
+  }
+
   .docs-hero h1 {
-    font-size: clamp(2.65rem, 15vw, 3.5rem);
+    font-size: clamp(2.65rem, 14vw, 3.15rem);
   }
 
   .docs-hero h1 + p {
-    margin-top: 1rem;
-    font-size: 0.9rem;
-    line-height: 1.5;
+    margin-top: 0.75rem;
+    font-size: 0.82rem;
+    line-height: 1.45;
   }
 
   .docs-hero .docs-boundary {
-    margin-top: 0.9rem;
-    font-size: 0.7rem;
+    margin-top: 0.7rem;
+    font-size: 0.65rem;
+    line-height: 1.45;
   }
 
   .docs-actions {
     display: block;
-    margin-top: 1.1rem;
+    margin-top: 0.8rem;
   }
 
   .docs-actions > p {
@@ -485,6 +499,24 @@
     font-size: 0.66rem;
     line-height: 1.25;
     text-align: center;
+  }
+
+  .docs-hero__visual > a {
+    position: relative;
+    height: 9rem;
+    overflow: hidden;
+  }
+
+  .docs-hero__visual img {
+    width: 42rem;
+    max-width: none;
+    height: auto;
+    transform: translate3d(-21rem, 0, 0);
+    transform-origin: 0 0;
+  }
+
+  .docs-hero__visual > a:hover img {
+    transform: translate3d(-21rem, 0, 0) scale(1.003);
   }
 
   .docs-proof-strip {
@@ -518,6 +550,49 @@
 
   .docs-figure {
     margin-inline: -0.45rem;
+  }
+
+  .docs-figure--product {
+    --docs-crop-x: 0;
+    --docs-crop-y: 0;
+  }
+
+  .docs-figure--workspace {
+    --docs-crop-x: -24rem;
+  }
+
+  .docs-figure--proposal {
+    --docs-crop-x: -30rem;
+  }
+
+  .docs-figure--docx {
+    --docs-crop-x: -15rem;
+    --docs-crop-y: -9rem;
+  }
+
+  .docs-figure--product > a {
+    position: relative;
+    height: 16rem;
+    overflow: hidden;
+  }
+
+  .docs-figure--docx > a {
+    height: 15rem;
+  }
+
+  .docs-figure--product img {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 48rem;
+    max-width: none;
+    height: auto;
+    transform: translate3d(var(--docs-crop-x), var(--docs-crop-y), 0);
+    transform-origin: 0 0;
+  }
+
+  .docs-figure--product > a:hover img {
+    transform: translate3d(var(--docs-crop-x), var(--docs-crop-y), 0) scale(1.003);
   }
 
   .docs-figure figcaption {
