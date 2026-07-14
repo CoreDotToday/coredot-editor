@@ -443,6 +443,7 @@ describe("docs capture offline boundary", () => {
     const responses = createNextFontMockResponses({
       geistFontPath: "/tmp/fonts/geist-latin.woff2",
       geistMonoFontPath: "/tmp/fonts/geist-mono-latin.woff2",
+      platform: "linux",
     });
 
     expect(Object.keys(responses)).toEqual([...NEXT_FONT_GOOGLE_URLS]);
@@ -473,16 +474,17 @@ describe("docs capture offline boundary", () => {
         ["latin"],
       );
       const [{ googleFontFileUrl }] = fontFiles;
+      const fontMockPath = toNextFontMockFilePath(geist);
       process.env.NEXT_FONT_GOOGLE_MOCKED_RESPONSES = join(root, "mock.cjs");
 
       expect(fontFiles).toHaveLength(1);
-      expect(googleFontFileUrl).toBe(geist);
+      expect(googleFontFileUrl).toBe(fontMockPath);
       await expect(fetchFontFile(googleFontFileUrl, true)).resolves.toEqual(
         expected,
       );
       expect(
         responses[NEXT_FONT_GOOGLE_URLS[0]].replaceAll(
-          geist,
+          fontMockPath,
           "@vercel/turbopack-next/internal/font/google/font",
         ),
       ).toContain(

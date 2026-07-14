@@ -12,6 +12,13 @@ import {
 } from "./run-production-smoke";
 
 describe("production smoke helpers", () => {
+  it("keys the Docs workflow pip cache from the documentation requirements file", async () => {
+    const root = resolve(import.meta.dirname, "../..");
+    const workflow = await readFile(resolve(root, ".github/workflows/docs.yml"), "utf8");
+
+    expect(workflow).toContain("cache-dependency-path: requirements-docs.txt");
+  });
+
   it("keeps the package and CI production gates wired without duplicating the release gate", async () => {
     const root = resolve(import.meta.dirname, "../..");
     const packageJson = JSON.parse(
