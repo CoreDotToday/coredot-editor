@@ -1,78 +1,107 @@
-# Product Tour
+# Product Showcase
 
-Coredot Editor is organized around a three-pane writing Workspace: document context on the left, the Tiptap editor in the center, and AI review work on the right. Clerk users work in a personal owner Workspace or the currently active Clerk organization; stored resources remain scoped to that Workspace.
+Coredot Editor is a working application starter for AI-assisted document products. This tour follows one draft from writing to review, revision-safe change, recovery, and DOCX interchange.
 
-## Document Workspace
+The captures use deterministic test identity and the local stub provider. They show shipped UI behavior without implying a live model response or hosted service.
 
-The center editor supports:
+<nav class="docs-tour-index" aria-label="Product tour sections">
+  <a href="#work-in-one-document-workspace"><span>01</span> Workspace</a>
+  <a href="#review-ai-output-before-it-becomes-document-content"><span>02</span> Proposal review</a>
+  <a href="#follow-a-change-from-draft-to-recovery"><span>03</span> Change safety</a>
+  <a href="#inspect-docx-loss-before-committing"><span>04</span> DOCX fidelity</a>
+  <a href="#keep-trust-boundaries-explicit"><span>05</span> System boundary</a>
+</nav>
 
-- Title and body editing with revision-aware persistence.
-- Slash commands for blocks and AI continuation.
-- Selection AI commands.
-- Block gutter insertion, duplication, deletion, indentation, and drag ordering.
-- Notion-style `Cmd/Ctrl+A` behavior.
-- In-document find and replace with `Cmd/Ctrl+F`.
-- Read-only Source mode for inspecting plain text and Tiptap JSON.
-- Project Profile metadata, typed validation, readiness transitions, and localized labels.
+## Work in one document Workspace
 
-If another tab or client saves first, stale writes return a conflict rather than overwriting the newer revision. The recovery surface preserves both versions and lets the user reload the server draft, copy the local draft, or save the local draft as a new document.
+The three-pane surface keeps document context on the left, the Tiptap editor in the center, and review work on the right. The current outline, Project Profile metadata, template, command, and draft remain visible together.
 
-## AI Review And Rewrite
+<figure class="docs-figure docs-figure--product">
+  <a href="../assets/screenshots/workspace.webp">
+    <img src="../assets/screenshots/workspace.webp" alt="Three-pane Coredot Editor Workspace with document outline and metadata, a central strategy brief, and AI review controls" width="1440" height="1000" loading="eager" decoding="async">
+  </a>
+  <figcaption><span class="docs-figure__evidence"><strong>Evidence.</strong> The captured local app shows the complete Workspace before a review: editable draft, Profile fields, template context, and review action.</span><span class="docs-figure__action">Open the image for the full 1440 × 1000 capture.</span></figcaption>
+</figure>
 
-AI work is Proposal-based. The app does not directly overwrite the document after a model response.
+Document saves carry an integer revision. If another tab saves first, the stale writer receives a conflict and keeps its local draft for reload, copy, or save-as-new recovery.
 
-Review flows create findings with:
+[Review the exact save and recovery contract](ARCHITECTURE.md#revision-and-document-change-lifecycle).
 
-- A problem statement.
-- A reason.
-- Exact `targetText` copied from the document.
-- Drop-in `replacementText`.
+## Review AI output before it becomes document content
 
-Rewrite and translation flows create one Proposal for the selected text, current block, or full-document target. Users decide whether to accept, insert below, reject, or leave a Proposal pending. AI requests have bounded bodies, request budgets, a shared 30-second deadline, abort propagation, idempotent replay, and durable AI Run status; deployments can recover interrupted stale runs with `pnpm ai:recover-stale-runs`.
+Review and rewrite commands create AI Runs and zero or more Proposals. A Proposal is review state, not a direct edit: it can remain pending, be rejected, be inserted below, or be accepted through the document-change service.
 
-## Proposal Safety And Change History
+<figure class="docs-figure docs-figure--product">
+  <a href="../assets/screenshots/proposal-review.webp">
+    <img src="../assets/screenshots/proposal-review.webp" alt="Coredot Editor showing highlighted source text and one pending review Proposal with replace, insert, and reject controls" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <figcaption><span class="docs-figure__evidence"><strong>Evidence.</strong> A deterministic stub review produced one pending Proposal. Source highlights and the redline preview stay visible while the document remains unchanged.</span><span class="docs-figure__action">Open the image for the full capture.</span></figcaption>
+</figure>
 
-Single acceptance and bulk acceptance use one server-owned document-change module. Each operation validates the submitted draft and expected revision, updates the document, records a bounded before-snapshot, and changes linked Proposal statuses in one transaction. Bulk application is all-or-nothing and creates one new document revision; a conflict leaves every Proposal pending.
+The stub proves the application path, not model quality. Evaluate product prompts with representative documents and a real provider before enabling model-backed workflows for users.
 
-The all-pending action appears only after Proposal pagination reaches its terminal page, so unloaded Proposals cannot be silently omitted. Change history is durable, and server-side undo verifies the current revision before restoring the snapshot and resetting linked Proposals atomically. It therefore survives reload and does not depend on a browser-only undo stack.
+Read [Prompting](PROMPTING.md#evaluation-cases) for evaluation cases and [Configuration](configuration.md#ai-providers) for supported provider modes.
 
-## Durable Conversations
+## Follow a change from draft to recovery
 
-The database Conversation adapter is the authenticated default. The list loads bounded summaries without message bodies, follows a stable opaque `(updatedAt, id)` cursor, and fetches the selected exact transcript separately. Older pages append unseen IDs instead of overwriting optimistic or already-mutated sessions.
+Single and bulk acceptance submit the current draft plus `expectedRevision`. The server validates every selected Proposal before one transaction updates the document, Proposal statuses, and durable Document Change.
 
-Conversation create, message append, and fork use idempotency keys. Rename, archive, and status changes use version preconditions; after a conflict the client reloads detail to obtain the current version before retrying. Archive removes a Conversation from default lists but does not block direct detail. Conversation retention expiry hides both list and detail, while expired individual messages are omitted from a visible transcript. These rules change visibility without automatically deleting records. `CONVERSATION_STORAGE=local` is available only as an explicit single-browser demo mode.
+If the revision is stale, no part of the batch applies and Proposals remain pending. Server undo has its own revision precondition; it restores the before-snapshot only while that precondition still holds.
 
-## Prompt Templates And Project Profiles
+<figure class="docs-figure docs-figure--diagram">
+  <a href="../assets/diagrams/product-flow.svg">
+    <img src="../assets/diagrams/product-flow.svg" alt="Branching flow from a draft and AI Run through pending, rejected, accepted, conflicted, and undo outcomes" width="1440" height="940" loading="lazy" decoding="async">
+  </a>
+  <figcaption><span class="docs-figure__evidence"><strong>Decision map.</strong> Pending and rejected paths do not change the document. Acceptance and undo cross a revision check before any mutation.</span><span class="docs-figure__action">Open the SVG for full-size text.</span></figcaption>
+</figure>
 
-Prompt templates are editable Workspace product configuration. Default templates cover strategy review, executive rewrite, market research critique, and contract review. Owners/admins may manage templates; members may use active templates.
+All-pending actions appear only after Proposal pagination reaches its terminal page. This prevents a bulk request from silently excluding records the client has not loaded.
 
-Templates define:
+[Inspect the route contracts](api-reference.md#proposals-and-document-changes) or [read the implementation boundary](ARCHITECTURE.md#revision-and-document-change-lifecycle).
 
-- Name and category.
-- System prompt.
-- Variable schema.
-- Active/default flags.
+## Inspect DOCX loss before committing
 
-The variable schema powers both UI and server validation. A server-owned Project Profile adds typed document fields, readiness states and transitions, filters, localized labels, and stable default-template references. `PROJECT_PROFILE_ID` selects one Profile for the whole deployment; it is not a per-Workspace setting, and an unknown ID fails closed on first Profile resolution. Read [Prompting](PROMPTING.md) before replacing templates.
+DOCX import converts a file into an unsaved preview first. The user sees warnings and a structured fidelity report before confirmation creates a document. Export also previews fidelity and requires acknowledgement for lossy output.
 
-## DOCX Import And Export
+<figure class="docs-figure docs-figure--product docs-figure--contained">
+  <a href="../assets/screenshots/docx-fidelity.webp">
+    <img src="../assets/screenshots/docx-fidelity.webp" alt="DOCX import result listing preserved paragraphs, headings, tables, lists, links and marks, approximated formatting, and a removed image" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <figcaption><span class="docs-figure__evidence"><strong>Evidence.</strong> The fixture reports common structure as preserved, other DOCX formatting as approximated, and an image as removed before the import is opened.</span><span class="docs-figure__action">Open the full capture.</span></figcaption>
+</figure>
 
-DOCX interchange is deliberately two-phase. Import first converts the file into an unsaved preview and shows warnings plus a structured fidelity report; confirmation then creates the document idempotently. Export first previews fidelity, and actual lossy export requires explicit acknowledgement.
+The report does not promise Word parity. Comments, tracked changes, headers, footers, pagination, embedded media, and exact layout still need product-specific work and corpus tests.
 
-Each finding is classified as `preserved`, `approximated`, or `removed`. Common headings, paragraphs, lists, links, inline marks, tables, tasks, Korean text, and unknown nodes are exercised by corpus tests, but some structures are approximated or removed. Exact Word layout, comments, tracked changes, headers/footers, pagination, and embedded-media fidelity are not full-parity features.
+DOCX input is capped at 10 MiB. Conversion runs under the shared 30-second deadline in a terminable worker so timed-out CPU work cannot persist late results.
 
-DOCX bodies are capped at 10 MiB, document JSON at 10 MiB, Tiptap documents at 100,000 nodes and 64 levels, and conversion at 30 seconds. Conversion runs in a terminable worker so timed-out CPU work cannot persist late results.
+[Review resource limits](configuration.md#resource-policies) and [the current DOCX roadmap](ROADMAP.md#full-word-fidelity).
 
-## Plugin Layer
+## Keep trust boundaries explicit
 
-The build-time Editor Plugin layer has real hosts for every public contribution type:
+Browser input becomes trusted only after server authentication and validation. Clerk or deterministic local identity resolves a Request Context, and repositories include its Workspace ID in reads and writes.
 
-- Tiptap extensions.
-- Selection AI commands.
-- Slash commands.
-- Toolbar items.
-- Block actions.
-- Workspace panels.
-- Settings sections.
+AI provider calls cross an external network boundary from a server adapter. DOCX conversion crosses a separate worker-isolation boundary. SQLite or libSQL remains deployment-owned persistence.
 
-Factory, handler, and render failures are isolated to the contribution and reported with its stable ID instead of crashing the editor. Browser UI plugins remain separate from the server-safe document schema profile shared by the editor, import, and export paths. Plugins are statically registered and auditable; this is not a runtime third-party plugin loader. Read [Extension Points](PLUGINS.md) before adding plugins.
+<figure class="docs-figure docs-figure--diagram">
+  <a href="../assets/diagrams/system-boundaries.svg">
+    <img src="../assets/diagrams/system-boundaries.svg" alt="System diagram showing browser, identity resolution, Request Context, protected Next.js routes, services, Workspace repositories, external providers, DOCX worker, and SQLite or libSQL" width="1440" height="960" loading="lazy" decoding="async">
+  </a>
+  <figcaption><span class="docs-figure__evidence"><strong>Trust map.</strong> Identity establishes the server-owned Workspace context; repositories enforce scope while provider and conversion adapters isolate risky work.</span><span class="docs-figure__action">Open the SVG for full-size text.</span></figcaption>
+</figure>
+
+Test identity is only for local development, isolated demos, and automated tests. Production build and startup reject it and require real Clerk configuration.
+
+[Study the system architecture](ARCHITECTURE.md) or work through [Production Readiness](production-readiness.md).
+
+## Continue from the layer you own
+
+<div class="docs-next-actions" markdown>
+
+- **Product engineer:** choose a built-in or custom [Project Profile](project-profiles.md).
+- **AI engineer:** replace templates with the [Prompting contract](PROMPTING.md) intact.
+- **Editor engineer:** add build-time behavior through [Plugins](PLUGINS.md).
+- **Platform engineer:** review [Configuration](configuration.md), [Deployment](DEPLOYMENT.md), and the [release gate](production-readiness.md#release-gate).
+
+</div>
+
+The shortest evaluation path is [Getting Started](getting-started.md): it runs this workflow locally with no external credentials.

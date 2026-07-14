@@ -28,6 +28,9 @@ theme:
     text: Inter
     code: JetBrains Mono
 
+extra_css:
+  - assets/stylesheets/extra.css
+
 plugins:
   - search
 
@@ -49,26 +52,28 @@ markdown_extensions:
       custom_checkbox: true
 
 nav:
-  - Overview: index.md
-  - Start:
-      - Getting Started: getting-started.md
-      - Product Tour: product-tour.md
-      - Configuration: configuration.md
-      - Production Readiness: production-readiness.md
+  - Home: index.md
+  - Explore:
+      - Product Showcase: product-tour.md
   - Build:
+      - Getting Started: getting-started.md
       - Development: development.md
+      - Configuration: configuration.md
       - API Reference: api-reference.md
+  - Extend:
       - Adopting The Starter: ADOPTION.md
-      - Deployment: DEPLOYMENT.md
-  - Architecture:
-      - System Architecture: ARCHITECTURE.md
-      - Architecture Hardening: architecture-hardening.md
-      - Architecture Decisions:
-          - Clerk Identity And Workspace Context: adr/0001-clerk-for-identity-and-workspace-context.md
-      - Extension Points: PLUGINS.md
+      - Project Profiles: project-profiles.md
+      - Plugins: PLUGINS.md
       - Prompting: PROMPTING.md
+  - Operate:
+      - Architecture: ARCHITECTURE.md
+      - Architecture Hardening: architecture-hardening.md
+      - Clerk ADR: adr/0001-clerk-for-identity-and-workspace-context.md
+      - Production Readiness: production-readiness.md
+      - Deployment: DEPLOYMENT.md
       - RAG Docker Stack: RAG_DOCKER.md
   - Project:
       - Roadmap: ROADMAP.md
-      - Maintainers: MAINTAINERS.md
       - Community: community.md
+      - Maintainers: MAINTAINERS.md
+      - Documentation Guide: DOCUMENTATION.md
