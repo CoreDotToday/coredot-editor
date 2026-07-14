@@ -39,6 +39,7 @@
     "docs:build": "python3 -m mkdocs build --strict",
     "docs:check-links": "tsx scripts/docs/check-links.ts",
     "docs:check-links:external": "tsx scripts/docs/check-links.ts --external",
+    "docs:verify-quick-start": "tsx scripts/docs/verify-quick-start.ts",
     "docker:rag:up": "bash scripts/rag/verify-docker-env.sh up",
     "docker:rag:down": "bash scripts/rag/verify-docker-env.sh down",
     "docker:rag:verify": "bash scripts/rag/verify-docker-env.sh verify",

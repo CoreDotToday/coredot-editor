@@ -71,6 +71,9 @@ jobs:
       - name: Install JavaScript dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Verify documented quick start
+        run: pnpm docs:verify-quick-start
+
       - name: Check documentation links
         run: pnpm docs:check-links
 
