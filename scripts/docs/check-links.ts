@@ -53,21 +53,40 @@ type RawHtmlLink = {
   tagName: "a" | "img";
 };
 
+function sanitizeRawHtmlForTagExtraction(html: string): string {
+  let sanitized = html.replace(/<!--[\s\S]*?-->/gu, "");
+  for (const tagName of ["script", "style", "template", "textarea", "title"]) {
+    const rawTextElement = new RegExp(
+      `(<${tagName}\\b(?:[^>"']|"[^"]*"|'[^']*')*>)[\\s\\S]*?(<\\/${tagName}\\s*>|$)`,
+      "giu",
+    );
+    sanitized = sanitized.replace(
+      rawTextElement,
+      (_element, openingTag: string, closingTag: string) => `${openingTag}${closingTag}`,
+    );
+  }
+  return sanitized;
+}
+
+function extractHtmlAttribute(tag: string, attribute: string): string | undefined {
+  const attributeMatch = tag.match(new RegExp(
+    `\\s${attribute}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'=<>\\x60]+))`,
+    "iu",
+  ));
+  return attributeMatch?.[1] ?? attributeMatch?.[2] ?? attributeMatch?.[3];
+}
+
 function extractRawHtmlLinks(markdown: string): RawHtmlLink[] {
   const links: RawHtmlLink[] = [];
   const visit = (tokens: Token[]) => {
     for (const token of tokens) {
       if (token.type === "html_block" || token.type === "html_inline") {
-        const html = token.content.replace(/<!--[\s\S]*?-->/gu, "");
+        const html = sanitizeRawHtmlForTagExtraction(token.content);
         const tags = html.matchAll(/<(a|img)\b(?:[^>"']|"[^"]*"|'[^']*')*>/giu);
         for (const match of tags) {
           const tagName = match[1].toLowerCase() as RawHtmlLink["tagName"];
           const attribute: RawHtmlLink["attribute"] = tagName === "a" ? "href" : "src";
-          const attributeMatch = match[0].match(new RegExp(
-            `\\s${attribute}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'=<>\\x60]+))`,
-            "iu",
-          ));
-          const href = attributeMatch?.[1] ?? attributeMatch?.[2] ?? attributeMatch?.[3];
+          const href = extractHtmlAttribute(match[0], attribute);
           if (href !== undefined) {
             links.push({ attribute, href, tagName });
           }
@@ -80,6 +99,32 @@ function extractRawHtmlLinks(markdown: string): RawHtmlLink[] {
   };
   visit(markdownParser.parse(markdown, {}));
   return links;
+}
+
+function extractRawHtmlIds(markdown: string): Set<string> {
+  const ids = new Set<string>();
+  const visit = (tokens: Token[]) => {
+    for (const token of tokens) {
+      if (token.type === "html_block" || token.type === "html_inline") {
+        const html = sanitizeRawHtmlForTagExtraction(token.content);
+        const tags = html.matchAll(
+          /<[a-z][a-z\d:-]*\b(?:[^>"']|"[^"]*"|'[^']*')*>/giu,
+        );
+        for (const match of tags) {
+          const id = extractHtmlAttribute(match[0], "id");
+          const normalized = id === undefined ? "" : decodeHtmlEntities(id.trim());
+          if (normalized) {
+            ids.add(normalized);
+          }
+        }
+      }
+      if (token.children) {
+        visit(token.children);
+      }
+    }
+  };
+  visit(markdownParser.parse(markdown, {}));
+  return ids;
 }
 
 function shouldCollectLink(tokens: Token[], index: number): boolean {
@@ -214,6 +259,9 @@ function extractHeadingAnchors(markdown: string): Set<string> {
       suffix += 1;
     }
     anchors.add(anchor);
+  }
+  for (const id of extractRawHtmlIds(markdown)) {
+    anchors.add(id);
   }
   return anchors;
 }
@@ -350,22 +398,28 @@ export async function checkInternalLinks(
         continue;
       }
 
+      const isRawMkDocsLink = sourceFile.startsWith("docs/")
+        && occurrence.provenance === "raw-html";
+      if (isRawMkDocsLink && parts.path.startsWith("/")) {
+        issues.push({
+          file: sourceFile,
+          href,
+          message: "Raw HTML root-absolute paths bypass the configured MkDocs site base; use a relative URL",
+        });
+        continue;
+      }
       if (
-        sourceFile.startsWith("docs/")
-        && occurrence.provenance === "raw-html"
-        && occurrence.rawTagName === "a"
+        isRawMkDocsLink
         && decodedPath.toLowerCase().endsWith(".md")
       ) {
         issues.push({
           file: sourceFile,
           href,
-          message: "Raw HTML local .md links are not rewritten by MkDocs; use the rendered clean URL",
+          message: "Raw HTML local .md targets are not rewritten by MkDocs; use the rendered clean URL",
         });
         continue;
       }
 
-      const isRawMkDocsLink = sourceFile.startsWith("docs/")
-        && occurrence.provenance === "raw-html";
       const renderedPageDirectory = sourceFile === "docs/index.md"
         ? dirname(sourcePath)
         : sourcePath.slice(0, -extname(sourcePath).length);

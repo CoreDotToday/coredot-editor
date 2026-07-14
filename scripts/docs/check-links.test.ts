@@ -294,6 +294,51 @@ describe("internal documentation links", () => {
     expect(normalizeHeadingAnchor("한국어 설정")).toBe("");
   });
 
+  it("recognizes raw ids while ignoring comments, script strings, and template content", async () => {
+    await withTemporaryRepository({
+      "docs/source.md": `
+[Heading element](#raw-section)
+[Entity id](#generic%26id)
+[Custom element](#custom-id)
+[Script element](#script-element)
+[Template element](#template-element)
+[Template content](#template-content)
+[Commented id](#commented-id)
+[Script string](#script-string)
+
+<h2 id="raw-section">Raw section</h2>
+<section id='generic&amp;id'>Entity id</section>
+<custom-element id=custom-id>Custom id</custom-element>
+<template id="template-element">
+  <div id="template-content"><a href="template-link.md">Inert link</a></div>
+</template>
+<!-- <div id="commented-id">Commented</div> -->
+<script id="script-element">
+  const template = '<div id="script-string">Not an element</div>';
+</script>
+`,
+    }, async (root) => {
+      await expect(checkInternalLinks(root, ["docs/source.md"]))
+        .resolves.toEqual([
+          {
+            file: "docs/source.md",
+            href: "#template-content",
+            message: 'Missing anchor "#template-content" in docs/source.md',
+          },
+          {
+            file: "docs/source.md",
+            href: "#commented-id",
+            message: 'Missing anchor "#commented-id" in docs/source.md',
+          },
+          {
+            file: "docs/source.md",
+            href: "#script-string",
+            message: 'Missing anchor "#script-string" in docs/source.md',
+          },
+        ]);
+    });
+  });
+
   it("resolves files, directory indexes, encoded paths, and page anchors", async () => {
     await withTemporaryRepository({
       "README.md": `
@@ -361,32 +406,26 @@ describe("internal documentation links", () => {
 
   it("checks identical Markdown and raw HTML hrefs with independent provenance", async () => {
     const source = `
-[Markdown](guide.md)
-<img src="guide.md" alt="Raw HTML">
+[Markdown](asset.svg)
+<img src="asset.svg" alt="Raw HTML">
 `;
 
     await withTemporaryRepository({
       "docs/source.md": source,
-      "docs/source/guide.md": "# Raw target\n",
     }, async (root) => {
       await expect(checkInternalLinks(root, ["docs/source.md"]))
-        .resolves.toEqual([{
-          file: "docs/source.md",
-          href: "guide.md",
-          message: "Missing file: docs/guide.md",
-        }]);
-    });
-
-    await withTemporaryRepository({
-      "docs/source.md": source,
-      "docs/guide.md": "# Markdown target\n",
-    }, async (root) => {
-      await expect(checkInternalLinks(root, ["docs/source.md"]))
-        .resolves.toEqual([{
-          file: "docs/source.md",
-          href: "guide.md",
-          message: "Missing file: docs/source/guide.md",
-        }]);
+        .resolves.toEqual([
+          {
+            file: "docs/source.md",
+            href: "asset.svg",
+            message: "Missing file: docs/asset.svg",
+          },
+          {
+            file: "docs/source.md",
+            href: "asset.svg",
+            message: "Missing file: docs/source/asset.svg",
+          },
+        ]);
     });
   });
 
@@ -399,8 +438,49 @@ describe("internal documentation links", () => {
         .resolves.toEqual([{
           file: "docs/source.md",
           href: "guide.md",
-          message: "Raw HTML local .md links are not rewritten by MkDocs; use the rendered clean URL",
+          message: "Raw HTML local .md targets are not rewritten by MkDocs; use the rendered clean URL",
         }]);
+    });
+  });
+
+  it("rejects local .md destinations in raw HTML images under docs", async () => {
+    await withTemporaryRepository({
+      "docs/source.md": '<img src="guide.md" alt="Guide">\n',
+      "docs/source/guide.md": "# Not an image\n",
+    }, async (root) => {
+      await expect(checkInternalLinks(root, ["docs/source.md"]))
+        .resolves.toEqual([{
+          file: "docs/source.md",
+          href: "guide.md",
+          message: "Raw HTML local .md targets are not rewritten by MkDocs; use the rendered clean URL",
+        }]);
+    });
+  });
+
+  it("rejects root-absolute raw HTML paths under docs without treating network URLs as local", async () => {
+    await withTemporaryRepository({
+      "docs/source.md": `
+<a href="/guide/">Guide</a>
+<img src="/assets/image.svg" alt="Image">
+<a href="//cdn.example/guide/">CDN guide</a>
+<img src="https://cdn.example/image.svg" alt="CDN image">
+`,
+      "docs/guide.md": "# Guide\n",
+      "docs/assets/image.svg": "<svg></svg>\n",
+    }, async (root) => {
+      await expect(checkInternalLinks(root, ["docs/source.md"]))
+        .resolves.toEqual([
+          {
+            file: "docs/source.md",
+            href: "/guide/",
+            message: "Raw HTML root-absolute paths bypass the configured MkDocs site base; use a relative URL",
+          },
+          {
+            file: "docs/source.md",
+            href: "/assets/image.svg",
+            message: "Raw HTML root-absolute paths bypass the configured MkDocs site base; use a relative URL",
+          },
+        ]);
     });
   });
 
