@@ -11,6 +11,20 @@ import {
   withPhaseTimeout,
 } from "./run-production-smoke";
 
+function extractActionUses(workflow: string): string[] {
+  return [...workflow.matchAll(/^\s+uses:\s+(\S+)\s*$/gm)].map((match) => match[1]);
+}
+
+function extractWorkflowJob(workflow: string, jobName: string): string {
+  const jobs = workflow.split(/\njobs:\s*\n/, 2)[1];
+  const job = jobs
+    ?.split(/\n(?=  [\w-]+:\s*$)/m)
+    .find((block) => block.startsWith(`  ${jobName}:`));
+
+  expect(job, `Expected workflow job ${jobName}`).toBeDefined();
+  return job ?? "";
+}
+
 describe("production smoke helpers", () => {
   it("keeps the default local SQLite parent directory in clean checkouts", async () => {
     const root = resolve(import.meta.dirname, "../..");
@@ -36,13 +50,37 @@ describe("production smoke helpers", () => {
       "tsx scripts/e2e/run-production-smoke.ts",
     );
     expect(packageJson.scripts["release:check"]).not.toMatch(/e2e:production|docs:build/);
-    expect(workflow).toContain("uses: actions/setup-python@v5");
+    expect(extractActionUses(workflow)).toEqual([
+      "actions/checkout@v7",
+      "pnpm/action-setup@v6",
+      "actions/setup-node@v7",
+      "actions/checkout@v7",
+      "pnpm/action-setup@v6",
+      "actions/setup-node@v7",
+      "actions/checkout@v7",
+      "pnpm/action-setup@v6",
+      "actions/setup-node@v7",
+      "actions/setup-python@v6",
+    ]);
+    expect(extractActionUses(extractWorkflowJob(workflow, "windows-managed-process"))).toEqual([
+      "actions/checkout@v7",
+      "pnpm/action-setup@v6",
+      "actions/setup-node@v7",
+    ]);
+    expect(extractActionUses(extractWorkflowJob(workflow, "node-sqlite-concurrency"))).toEqual([
+      "actions/checkout@v7",
+      "pnpm/action-setup@v6",
+      "actions/setup-node@v7",
+    ]);
+    expect(extractActionUses(extractWorkflowJob(workflow, "verify"))).toEqual([
+      "actions/checkout@v7",
+      "pnpm/action-setup@v6",
+      "actions/setup-node@v7",
+      "actions/setup-python@v6",
+    ]);
     expect(workflow).toContain("python -m pip install -r requirements-docs.txt");
-    const nodeSqliteJob = workflow
-      .split(/\n(?=  [\w-]+:\s*$)/m)
-      .find((job) => job.startsWith("  node-sqlite-concurrency:"));
+    const nodeSqliteJob = extractWorkflowJob(workflow, "node-sqlite-concurrency");
 
-    expect(nodeSqliteJob).toBeDefined();
     expect(nodeSqliteJob).toContain("node-version: 24");
     expect(nodeSqliteJob).toContain(
       "node -e \"if (!require('node:module').isBuiltin('node:sqlite')) process.exit(1)\"",
