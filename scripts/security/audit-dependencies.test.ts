@@ -163,6 +163,34 @@ packages:
 });
 
 describe("validateAdvisoryResponse", () => {
+  it("rejects an own __proto__ package key before schema transformation", () => {
+    const body = JSON.parse(
+      `{"__proto__":${JSON.stringify([advisory()])}}`,
+    ) as Record<string, unknown>;
+    const requestedPackages = Object.create(null) as Record<string, string[]>;
+    requestedPackages.__proto__ = ["1.0.0"];
+
+    expect(Object.hasOwn(body, "__proto__")).toBe(true);
+    expect(() => validateAdvisoryResponse(body, requestedPackages))
+      .toThrow("package name");
+  });
+
+  it.each(["constructor", "prototype"])(
+    "preserves the safely handled prototype-sensitive package key %s",
+    (packageName) => {
+      const body = JSON.parse(JSON.stringify({
+        [packageName]: [advisory()],
+      })) as Record<string, unknown>;
+      const requestedPackages = Object.create(null) as Record<string, string[]>;
+      requestedPackages[packageName] = ["1.0.0"];
+
+      expect(Object.hasOwn(body, packageName)).toBe(true);
+      expect(validateAdvisoryResponse(body, requestedPackages)).toEqual([
+        advisory({ name: packageName }),
+      ]);
+    },
+  );
+
   it("uses a noncoercing Zod boundary and strips legitimate npm metadata", () => {
     const base = {
       id: 123,
@@ -665,6 +693,31 @@ describe("audit classification and reporting", () => {
     expect(stdout).toEqual([]);
     expect(stderr).toHaveLength(1);
     expect(stderr.join("\n")).not.toMatch(/secret|injected|::error/);
+  });
+
+  it("fails closed when Zod would drop an own __proto__ response bucket", async () => {
+    const hostileAdvisory = {
+      id: 123,
+      severity: "low",
+      title: "secret\n::error::injected",
+      url: "https://github.com/advisories/GHSA-example",
+      vulnerable_versions: "<1.0.1",
+    };
+    const body = JSON.parse(`{"__proto__":[${JSON.stringify(hostileAdvisory)}]}`) as unknown;
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const source = "lockfileVersion: '9.0'\npackages:\n  alpha@1.0.0:\n    resolution: {integrity: sha512-one}\n";
+
+    expect(Object.hasOwn(body as object, "__proto__")).toBe(true);
+    await expect(runAudit({
+      fetchImpl: async () => responseBody(body),
+      lockfileSource: source,
+      stderr: (line) => stderr.push(line),
+      stdout: (line) => stdout.push(line),
+    })).resolves.toBe(2);
+    expect(stdout).toEqual([]);
+    expect(stderr).toHaveLength(1);
+    expect(stderr.join("\n")).not.toMatch(/__proto__|secret|injected|::error/);
   });
 });
 

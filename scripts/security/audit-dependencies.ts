@@ -201,15 +201,51 @@ function describeBoundaryFailure(body: unknown, error: z.ZodError): string {
   return [...labels].sort(compareText).join(", ") || "boundary";
 }
 
+function inspectRawResponsePackageNames(
+  body: unknown,
+  requestedPackages: PackageInventory,
+): string[] | null {
+  if (!isRecord(body)) return null;
+
+  const packageNames = Object.keys(body);
+  for (const packageName of packageNames) {
+    if (packageName === "__proto__" || containsUnsafeOutputCharacters(packageName)) {
+      throw new AuditOperationalError("Dependency advisory package name is invalid");
+    }
+    if (!Object.hasOwn(requestedPackages, packageName)) {
+      throw new AuditOperationalError(
+        "Dependency advisory response contains a package that was not requested",
+      );
+    }
+  }
+  return packageNames;
+}
+
+function hasSameOwnPackageNames(
+  rawPackageNames: string[],
+  parsedResponse: Record<string, unknown>,
+): boolean {
+  const parsedPackageNames = new Set(Object.keys(parsedResponse));
+  return rawPackageNames.length === parsedPackageNames.size
+    && rawPackageNames.every((packageName) => parsedPackageNames.has(packageName));
+}
+
 export function validateAdvisoryResponse(
   body: unknown,
   requestedPackages: PackageInventory,
 ): AuditFinding[] {
+  const rawPackageNames = inspectRawResponsePackageNames(body, requestedPackages);
   const parsedResponse = npmBulkAdvisoryResponseSchema.safeParse(body);
   if (!parsedResponse.success) {
     const safeFailure = describeBoundaryFailure(body, parsedResponse.error);
     throw new AuditOperationalError(
       `Dependency advisory response schema validation failed: ${safeFailure}`,
+    );
+  }
+  if (rawPackageNames === null
+    || !hasSameOwnPackageNames(rawPackageNames, parsedResponse.data)) {
+    throw new AuditOperationalError(
+      "Dependency advisory response package names changed during schema validation",
     );
   }
 
