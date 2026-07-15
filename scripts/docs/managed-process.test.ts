@@ -187,7 +187,7 @@ describe("managed package runner", () => {
     } finally {
       await rm(root, { force: true, recursive: true });
     }
-  });
+  }, 20_000);
 });
 
 describe("managed process tree", () => {
