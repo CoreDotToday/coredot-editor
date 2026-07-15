@@ -24,12 +24,26 @@ function formatCommandType(commandType: AiRunHistoryItem["commandType"], message
 }
 
 function formatRunDate(value: Date | string | number, language: EditorLanguage) {
-  return new Intl.DateTimeFormat(language === "ko" ? "ko-KR" : "en", {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(new Date(value));
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return {
+      dateTime: null,
+      label: language === "ko" ? "유효하지 않은 날짜" : "Invalid date",
+    };
+  }
+
+  const year = date.getUTCFullYear();
+  const month = date.getUTCMonth() + 1;
+  const day = date.getUTCDate();
+  const hours = String(date.getUTCHours()).padStart(2, "0");
+  const minutes = String(date.getUTCMinutes()).padStart(2, "0");
+
+  return {
+    dateTime: date.toISOString(),
+    label: language === "ko"
+      ? `${year}. ${month}. ${day}. ${hours}:${minutes} UTC`
+      : `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")} ${hours}:${minutes} UTC`,
+  };
 }
 
 export function AiRunHistory({
@@ -47,14 +61,21 @@ export function AiRunHistory({
         <p className="mt-3 text-sm leading-6 text-zinc-500">{messages.empty}</p>
       ) : (
         <ul className="mt-3 space-y-3">
-          {runs.map((run) => (
-            <li key={run.id} className="text-sm text-zinc-700">
-              <div className="font-medium">{formatCommandType(run.commandType, messages)}</div>
-              <div className="mt-1 text-xs text-zinc-500">
-                {(messages.statuses[run.status] ?? run.status)} · {formatRunDate(run.createdAt, language)}
-              </div>
-            </li>
-          ))}
+          {runs.map((run) => {
+            const runDate = formatRunDate(run.createdAt, language);
+
+            return (
+              <li key={run.id} className="text-sm text-zinc-700">
+                <div className="font-medium">{formatCommandType(run.commandType, messages)}</div>
+                <div className="mt-1 text-xs text-zinc-500">
+                  {(messages.statuses[run.status] ?? run.status)} ·{" "}
+                  {runDate.dateTime
+                    ? <time dateTime={runDate.dateTime}>{runDate.label}</time>
+                    : <span>{runDate.label}</span>}
+                </div>
+              </li>
+            );
+          })}
         </ul>
       )}
       {hasMore && onLoadMore ? (

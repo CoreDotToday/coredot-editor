@@ -135,7 +135,7 @@ pnpm e2e:production
 git diff --check
 ```
 
-`release:check` runs lint, typecheck, Vitest, development Playwright E2E, production-auth startup verification, the production build, and the configured moderate-or-higher dependency audit.
+`release:check` runs lint, typecheck, Vitest, development Playwright E2E, production-auth startup verification, the production build, and `pnpm security:audit`. The audit uses npm's public bulk advisory endpoint, blocks moderate-or-higher findings, and fails closed when it cannot validate a result.
 
 The production smoke builds and starts an artifact against an isolated migrated database, then checks health, readiness, redirects, and protected-route behavior with bounded cleanup.
 

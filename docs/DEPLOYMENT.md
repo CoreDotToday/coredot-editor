@@ -258,3 +258,5 @@ CI runs lint, typecheck, unit/component tests, development E2E, build, productio
 - [ ] All app instances share the same request-budget database and policy constants.
 - [ ] Default or product-specific templates exist.
 - [ ] Logs are monitored for AI provider failures and route errors.
+
+The security audit uses npm's public bulk advisory endpoint without credentials. It blocks moderate-or-higher advisories and treats lockfile, transport, HTTP, or response-validation errors as release failures.

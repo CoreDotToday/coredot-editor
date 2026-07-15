@@ -1335,9 +1335,33 @@ describe("link-check command wiring", () => {
     ]) {
       expect(workflow).toContain(`- "${path}"`);
     }
-    expect(workflow).toContain("uses: pnpm/action-setup@v4");
+    const jobs = workflow.split(/\njobs:\s*\n/, 2)[1];
+    const jobBlocks = jobs?.split(/\n(?=  [\w-]+:\s*$)/m) ?? [];
+    const buildJob = jobBlocks.find((block) => block.startsWith("  build:"));
+    const deployJob = jobBlocks.find((block) => block.startsWith("  deploy:"));
+    const actionUses = (source: string | undefined) => [
+      ...(source ?? "").matchAll(/^\s+uses:\s+(\S+)\s*$/gm),
+    ].map((match) => match[1]);
+
+    expect(buildJob, "Expected Docs build job").toBeDefined();
+    expect(deployJob, "Expected Docs deploy job").toBeDefined();
+    expect(actionUses(workflow)).toEqual([
+      "actions/checkout@v7",
+      "pnpm/action-setup@v6",
+      "actions/setup-node@v7",
+      "actions/setup-python@v6",
+      "actions/upload-pages-artifact@v5",
+      "actions/deploy-pages@v5",
+    ]);
+    expect(actionUses(buildJob)).toEqual([
+      "actions/checkout@v7",
+      "pnpm/action-setup@v6",
+      "actions/setup-node@v7",
+      "actions/setup-python@v6",
+      "actions/upload-pages-artifact@v5",
+    ]);
+    expect(actionUses(deployJob)).toEqual(["actions/deploy-pages@v5"]);
     expect(workflow).toContain('version: "10.6.5"');
-    expect(workflow).toContain("uses: actions/setup-node@v4");
     expect(workflow).toContain('node-version: "20"');
     expect(workflow).toContain("cache: pnpm");
     expect(workflow).toContain("run: pnpm install --frozen-lockfile");

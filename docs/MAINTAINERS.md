@@ -23,6 +23,8 @@ git diff --check
 6. Check that no real API keys are present outside ignored `.env*` files.
 7. Tag the release if your fork uses tags.
 
+The dependency audit reports all severities, blocks moderate-or-higher findings, and fails closed when the lockfile or npm bulk advisory response cannot be validated.
+
 ## Review Priorities
 
 When reviewing pull requests, focus on:
