@@ -1,5 +1,9 @@
-import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { spawn } from "node:child_process";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -15,6 +19,7 @@ import {
 } from "./audit-dependencies";
 
 const inventory = { alpha: ["1.0.0"] };
+const require = createRequire(import.meta.url);
 
 function advisory(overrides: Record<string, unknown> = {}): AuditFinding {
   return {
@@ -32,6 +37,71 @@ function responseBody(value: unknown): Response {
   const response = new Response(JSON.stringify(value), { status: 200 });
   response.headers.delete("content-type");
   return response;
+}
+
+async function runAuditCli(
+  lockfileSource: string,
+  advisoryResponse: unknown,
+): Promise<{ exitCode: number | null; stderr: string; stdout: string }> {
+  const temporaryDirectory = await mkdtemp(join(tmpdir(), "coredot-audit-cli-"));
+  const preloadPath = join(temporaryDirectory, "mock-fetch.mjs");
+  const scriptPath = resolve(import.meta.dirname, "audit-dependencies.ts");
+  const tsxLoaderPath = require.resolve("tsx");
+
+  try {
+    await writeFile(join(temporaryDirectory, "pnpm-lock.yaml"), lockfileSource, "utf8");
+    await writeFile(preloadPath, `
+const endpoint = ${JSON.stringify(AUDIT_ENDPOINT)};
+const responseBody = JSON.parse(process.env.AUDIT_TEST_RESPONSE ?? "{}");
+globalThis.fetch = async (input, init) => {
+  if (String(input) !== endpoint) throw new Error("Unexpected audit endpoint");
+  if (new Headers(init?.headers).has("authorization")) throw new Error("Unexpected authorization header");
+  return new Response(JSON.stringify(responseBody), { status: 200 });
+};
+`, "utf8");
+
+    return await new Promise((resolveRun, rejectRun) => {
+      const child = spawn(process.execPath, [
+        "--import",
+        tsxLoaderPath,
+        "--import",
+        pathToFileURL(preloadPath).href,
+        scriptPath,
+      ], {
+        cwd: temporaryDirectory,
+        env: {
+          ...process.env,
+          AUDIT_TEST_RESPONSE: JSON.stringify(advisoryResponse),
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let stderr = "";
+      let stdout = "";
+      const timeout = setTimeout(() => {
+        child.kill();
+        rejectRun(new Error("Dependency audit CLI test timed out"));
+      }, 10_000);
+
+      child.stdout.setEncoding("utf8");
+      child.stderr.setEncoding("utf8");
+      child.stdout.on("data", (chunk: string) => {
+        stdout += chunk;
+      });
+      child.stderr.on("data", (chunk: string) => {
+        stderr += chunk;
+      });
+      child.once("error", (error) => {
+        clearTimeout(timeout);
+        rejectRun(error);
+      });
+      child.once("close", (exitCode) => {
+        clearTimeout(timeout);
+        resolveRun({ exitCode, stderr, stdout });
+      });
+    });
+  } finally {
+    await rm(temporaryDirectory, { force: true, recursive: true });
+  }
 }
 
 describe("parsePnpmLockfile", () => {
@@ -108,6 +178,8 @@ describe("validateAdvisoryResponse", () => {
     [{ alpha: [advisory({ url: "file:///tmp/advisory" })] }, "URL"],
     [{ alpha: [advisory({ vulnerable_versions: "" })] }, "vulnerable_versions"],
     [{ alpha: [advisory({ severity: "urgent" })] }, "severity"],
+    [{ alpha: [advisory({ severity: "toString" })] }, "severity"],
+    [{ alpha: [advisory({ severity: "constructor" })] }, "severity"],
   ])("rejects malformed advisory data", (body, message) => {
     expect(() => validateAdvisoryResponse(body, inventory)).toThrow(message);
   });
@@ -276,5 +348,30 @@ describe("audit classification and reporting", () => {
 
     expect(stdout).toHaveLength(2);
     expect(stderr).toEqual([expect.stringContaining("Dependency audit failed")]);
+  });
+});
+
+describe("dependency audit CLI entrypoint", () => {
+  const validLockfile = "lockfileVersion: '9.0'\npackages:\n  alpha@1.0.0:\n    resolution: {integrity: sha512-one}\n";
+
+  it.each([
+    ["no release-blocking findings", validLockfile, {}, 0],
+    [
+      "a moderate finding",
+      validLockfile,
+      { alpha: [advisory({ severity: "moderate" })] },
+      1,
+    ],
+    ["an invalid lockfile", "not a pnpm lockfile", {}, 2],
+  ])("sets the expected process exit code for %s", async (_label, lockfile, body, expectedExitCode) => {
+    const result = await runAuditCli(lockfile, body);
+
+    expect(result.exitCode).toBe(expectedExitCode);
+    if (expectedExitCode === 2) {
+      expect(result.stderr).toContain("Dependency audit failed");
+    } else {
+      expect(result.stderr).toBe("");
+      expect(result.stdout).toContain("Release threshold: moderate or higher.");
+    }
   });
 });

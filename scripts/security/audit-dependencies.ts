@@ -191,7 +191,7 @@ export function validateAdvisoryResponse(
         candidate.vulnerable_versions,
         "vulnerable_versions",
       );
-      if (typeof candidate.severity !== "string" || !(candidate.severity in severityRank)) {
+      if (typeof candidate.severity !== "string" || !Object.hasOwn(severityRank, candidate.severity)) {
         throw new AuditOperationalError(`Dependency advisory severity is invalid for ${packageName}`);
       }
 
