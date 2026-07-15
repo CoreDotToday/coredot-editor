@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import semver from "semver";
 import { parse as parseYaml } from "yaml";
+import { z } from "zod";
 
 export const AUDIT_ENDPOINT = "https://registry.npmjs.org/-/npm/v1/security/advisories/bulk";
 export const MAX_RESPONSE_BYTES = 5 * 1024 * 1024;
@@ -17,6 +18,19 @@ const severityRank = {
   high: 3,
   critical: 4,
 } as const;
+
+const npmBulkAdvisorySchema = z.object({
+  id: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  severity: z.enum(["info", "low", "moderate", "high", "critical"]),
+  title: z.string().min(1),
+  url: z.string().min(1),
+  vulnerable_versions: z.string().min(1),
+});
+
+export const npmBulkAdvisoryResponseSchema = z.record(
+  z.string(),
+  z.array(npmBulkAdvisorySchema),
+);
 
 type Severity = keyof typeof severityRank;
 export type PackageInventory = Record<string, string[]>;
@@ -161,24 +175,51 @@ function validateNonEmptyString(value: unknown, field: string): string {
   return value;
 }
 
+function describeBoundaryFailure(body: unknown, error: z.ZodError): string {
+  if (!isRecord(body)) return "top-level";
+
+  const safeFieldNames: Record<string, string> = {
+    id: "id",
+    severity: "severity",
+    title: "title",
+    url: "URL",
+    vulnerable_versions: "vulnerable_versions",
+  };
+  const labels = new Set<string>();
+  for (const issue of error.issues) {
+    const finalPathSegment = issue.path.at(-1);
+    if (issue.path.length >= 3
+      && typeof finalPathSegment === "string"
+      && Object.hasOwn(safeFieldNames, finalPathSegment)) {
+      labels.add(safeFieldNames[finalPathSegment]);
+    } else if (issue.path.length <= 1) {
+      labels.add("bucket");
+    } else {
+      labels.add("entry");
+    }
+  }
+  return [...labels].sort(compareText).join(", ") || "boundary";
+}
+
 export function validateAdvisoryResponse(
   body: unknown,
   requestedPackages: PackageInventory,
 ): AuditFinding[] {
-  if (!isRecord(body)) {
-    throw new AuditOperationalError("Dependency advisory response top-level value is invalid");
+  const parsedResponse = npmBulkAdvisoryResponseSchema.safeParse(body);
+  if (!parsedResponse.success) {
+    const safeFailure = describeBoundaryFailure(body, parsedResponse.error);
+    throw new AuditOperationalError(
+      `Dependency advisory response schema validation failed: ${safeFailure}`,
+    );
   }
 
   const findings: AuditFinding[] = [];
-  for (const [packageName, bucket] of Object.entries(body)) {
+  for (const [packageName, bucket] of Object.entries(parsedResponse.data)) {
     if (containsUnsafeOutputCharacters(packageName)) {
       throw new AuditOperationalError("Dependency advisory package name is invalid");
     }
     if (!Object.hasOwn(requestedPackages, packageName)) {
       throw new AuditOperationalError("Dependency advisory response contains a package that was not requested");
-    }
-    if (!Array.isArray(bucket)) {
-      throw new AuditOperationalError(`Dependency advisory bucket is invalid for ${packageName}`);
     }
     const requestedVersions = requestedPackages[packageName];
     if (!Array.isArray(requestedVersions)
@@ -188,9 +229,6 @@ export function validateAdvisoryResponse(
     const seenAdvisoryIds = new Set<number>();
 
     for (const candidate of bucket) {
-      if (!isRecord(candidate)) {
-        throw new AuditOperationalError(`Dependency advisory entry is invalid for ${packageName}`);
-      }
       if (typeof candidate.id !== "number"
         || !Number.isSafeInteger(candidate.id)
         || candidate.id <= 0) {

@@ -12,6 +12,7 @@ import {
   awaitCancellation,
   classifyFindings,
   formatAuditReport,
+  npmBulkAdvisoryResponseSchema,
   parsePnpmLockfile,
   requestAdvisories,
   runAudit,
@@ -162,6 +163,39 @@ packages:
 });
 
 describe("validateAdvisoryResponse", () => {
+  it("uses a noncoercing Zod boundary and strips legitimate npm metadata", () => {
+    const base = {
+      id: 123,
+      severity: "low",
+      title: "Example advisory",
+      url: "https://github.com/advisories/GHSA-example",
+      vulnerable_versions: "<1.0.1",
+    };
+
+    expect(npmBulkAdvisoryResponseSchema.safeParse({
+      alpha: [{ ...base, id: "123" }],
+    }).success).toBe(false);
+    expect(npmBulkAdvisoryResponseSchema.parse({
+      alpha: [{
+        ...base,
+        cvss: { score: 3.1, vectorString: "CVSS:3.1/example" },
+        cwe: ["CWE-79"],
+      }],
+    })).toEqual({ alpha: [base] });
+  });
+
+  it.each([
+    [{ alpha: [advisory({ id: "123" })] }, "id"],
+    [{ alpha: [advisory({ title: 123 })] }, "title"],
+    [{ alpha: [advisory({ url: null })] }, "URL"],
+    [{ alpha: [advisory({ vulnerable_versions: ["<1.0.1"] })] }, "vulnerable_versions"],
+    [{ alpha: [advisory({ severity: 1 })] }, "severity"],
+    [{ alpha: [null] }, "entry"],
+    [{ alpha: null }, "bucket"],
+  ])("rejects wrong boundary field and bucket types", (body, safeField) => {
+    expect(() => validateAdvisoryResponse(body, inventory)).toThrow(safeField);
+  });
+
   it("accepts empty and valid requested advisory buckets", () => {
     const registryAdvisory: Record<string, unknown> = { ...advisory() };
     delete registryAdvisory.name;
@@ -606,6 +640,31 @@ describe("audit classification and reporting", () => {
     expect(stderr).toHaveLength(1);
     expect(stderr[0]).not.toContain(controlledName);
     expect(stderr[0]).not.toContain("\u007f");
+  });
+
+  it.each([
+    ["wrong field type", { alpha: [advisory({ id: "123\n::error::secret" })] }],
+    ["array top level", ["secret\n::error::injected"]],
+    ["null top level", null],
+    ["bad bucket", { alpha: { secret: "\n::error::injected" } }],
+    ["controlled package path", { "secret\n::error::injected": null }],
+  ])("returns exit 2 for Zod boundary failure without reflecting %s payloads", async (
+    _label,
+    body,
+  ) => {
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const source = "lockfileVersion: '9.0'\npackages:\n  alpha@1.0.0:\n    resolution: {integrity: sha512-one}\n";
+
+    await expect(runAudit({
+      fetchImpl: async () => responseBody(body),
+      lockfileSource: source,
+      stderr: (line) => stderr.push(line),
+      stdout: (line) => stdout.push(line),
+    })).resolves.toBe(2);
+    expect(stdout).toEqual([]);
+    expect(stderr).toHaveLength(1);
+    expect(stderr.join("\n")).not.toMatch(/secret|injected|::error/);
   });
 });
 
