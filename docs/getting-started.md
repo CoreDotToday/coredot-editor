@@ -4,7 +4,7 @@ This guide gets a local copy running with deterministic AI behavior and an isola
 
 ## Requirements
 
-- Node.js 20 or newer.
+- Node.js 20.19+, 22.13+, or 24+.
 - pnpm 10 or newer.
 - Python 3.12 or newer only when building the documentation site.
 
