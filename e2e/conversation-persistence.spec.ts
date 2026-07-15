@@ -26,7 +26,9 @@ test("persists, reloads, shares, and archives an AI conversation", async ({ brow
   await page.getByRole("button", { name: "한국어로 번역" }).click();
 
   const workspace = page.getByRole("complementary", { name: "AI 작업 영역" });
-  await workspace.getByRole("tab", { name: "대화" }).click();
+  const chatTab = workspace.getByRole("tab", { name: "대화", exact: true });
+  await chatTab.click();
+  await expect(chatTab).toHaveAttribute("aria-selected", "true");
   await expect(workspace.getByRole("tab", { name: "한국어로 번역" })).toBeVisible();
   await expect(workspace.getByText(/대화 저장 중/)).toBeVisible();
   await expect(workspace.getByText("이 문서에 저장됨")).toHaveCount(0);
@@ -62,18 +64,38 @@ test("persists, reloads, shares, and archives an AI conversation", async ({ brow
     conversation: { id: createdPayload.conversation.id, messages: { length: 2 } },
   });
   const reloadedWorkspace = page.getByRole("complementary", { name: "AI 작업 영역" });
-  await reloadedWorkspace.getByRole("tab", { name: "대화" }).click();
+  const reloadedChatTab = reloadedWorkspace.getByRole("tab", { name: "대화", exact: true });
+  await reloadedChatTab.click();
+  await expect(reloadedChatTab).toHaveAttribute("aria-selected", "true");
   await expect(reloadedWorkspace.getByRole("tab", { name: "한국어로 번역" })).toBeVisible();
   await expect(reloadedWorkspace.getByText(`Stub rewrite: ${body}`)).toBeVisible();
 
   const observerContext = await browser.newContext();
   const observer = await observerContext.newPage();
+  const observerPageErrors: string[] = [];
+  const observerHydrationErrors: string[] = [];
+  observer.on("pageerror", (error) => observerPageErrors.push(error.message));
+  observer.on("console", (message) => {
+    if (
+      message.type() === "error" &&
+      /hydration|hydrated|server rendered|did(?: not|n't) match/i.test(message.text())
+    ) {
+      observerHydrationErrors.push(message.text());
+    }
+  });
   try {
     await observer.goto(documentUrl);
     const observerWorkspace = observer.getByRole("complementary", { name: "AI 작업 영역" });
-    await observerWorkspace.getByRole("tab", { name: "대화" }).click();
+    const observerChatTab = observerWorkspace.getByRole("tab", { name: "대화", exact: true });
+    await observerChatTab.click();
+    await expect(observerChatTab).toHaveAttribute("aria-selected", "true");
+    await expect(
+      observerWorkspace.getByRole("alert").filter({ hasText: "대화를 불러오거나 저장하지 못했습니다." }),
+    ).toHaveCount(0);
     await expect(observerWorkspace.getByRole("tab", { name: "한국어로 번역" })).toBeVisible();
     await expect(observerWorkspace.getByText(`Stub rewrite: ${body}`)).toBeVisible();
+    expect(observerPageErrors).toEqual([]);
+    expect(observerHydrationErrors).toEqual([]);
 
     const archived = observer.waitForResponse((response) =>
       response.request().method() === "PATCH" && /\/api\/conversations\/[^/]+$/.test(response.url())
@@ -82,9 +104,13 @@ test("persists, reloads, shares, and archives an AI conversation", async ({ brow
     expect((await archived).ok()).toBe(true);
     await observer.reload();
     const archivedWorkspace = observer.getByRole("complementary", { name: "AI 작업 영역" });
-    await archivedWorkspace.getByRole("tab", { name: "대화" }).click();
+    const archivedChatTab = archivedWorkspace.getByRole("tab", { name: "대화", exact: true });
+    await archivedChatTab.click();
+    await expect(archivedChatTab).toHaveAttribute("aria-selected", "true");
     await expect(archivedWorkspace.getByRole("tab", { name: "한국어로 번역" })).toHaveCount(0);
     await expect(archivedWorkspace.getByText(`Stub rewrite: ${body}`)).toHaveCount(0);
+    expect(observerPageErrors).toEqual([]);
+    expect(observerHydrationErrors).toEqual([]);
   } finally {
     await observerContext.close();
   }
