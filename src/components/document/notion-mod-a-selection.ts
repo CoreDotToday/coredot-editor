@@ -1,4 +1,5 @@
-import { Extension, type Editor } from "@tiptap/react";
+import { Extension } from "@tiptap/core";
+import type { Editor } from "@tiptap/react";
 import { AllSelection, Plugin, TextSelection, type EditorState } from "@tiptap/pm/state";
 
 type NotionModASelectionRange = {
