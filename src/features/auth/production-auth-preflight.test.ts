@@ -27,7 +27,7 @@ function runPreflight(
 
 describe(
   "production auth preflight",
-  { sequential: true, timeout: 20_000 },
+  { concurrent: false, timeout: 20_000 },
   () => {
     it("accepts configured Clerk production startup", () => {
       const result = runPreflight();
