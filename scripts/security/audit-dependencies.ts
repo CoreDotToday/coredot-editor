@@ -8,6 +8,7 @@ export const AUDIT_ENDPOINT = "https://registry.npmjs.org/-/npm/v1/security/advi
 export const MAX_RESPONSE_BYTES = 5 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 15_000;
 const MAX_ATTEMPTS = 3;
+const unsafeOutputCharacters = /[\u0000-\u001F\u007F-\u009F\u2028\u2029]/u;
 
 const severityRank = {
   info: 0,
@@ -69,10 +70,17 @@ function compareText(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
+function containsUnsafeOutputCharacters(value: string): boolean {
+  return unsafeOutputCharacters.test(value);
+}
+
 function parsePackageKey(key: string): { name: string; version: string } {
+  if (containsUnsafeOutputCharacters(key)) {
+    throw new AuditOperationalError("Dependency lockfile package key is invalid");
+  }
   const versionDelimiter = key.startsWith("@") ? key.indexOf("@", 1) : key.indexOf("@");
   if (versionDelimiter <= 0) {
-    throw new AuditOperationalError(`Dependency lockfile package key is invalid: ${key}`);
+    throw new AuditOperationalError("Dependency lockfile package key is invalid");
   }
 
   const name = key.slice(0, versionDelimiter);
@@ -84,10 +92,10 @@ function parsePackageKey(key: string): { name: string; version: string } {
   const peerContext = peerContextStart === -1 ? "" : versionWithPeerContext.slice(peerContextStart);
 
   if (!/^(?:@[^/@\s]+\/)?[^/@\s]+$/.test(name) || !version) {
-    throw new AuditOperationalError(`Dependency lockfile package key is invalid: ${key}`);
+    throw new AuditOperationalError("Dependency lockfile package key is invalid");
   }
   if (semver.valid(version) !== version) {
-    throw new AuditOperationalError(`Dependency lockfile package does not use an exact version: ${key}`);
+    throw new AuditOperationalError("Dependency lockfile package does not use an exact version");
   }
   if (peerContext) {
     let depth = 0;
@@ -97,7 +105,7 @@ function parsePackageKey(key: string): { name: string; version: string } {
       if (depth < 0) break;
     }
     if (!peerContext.startsWith("(") || depth !== 0) {
-      throw new AuditOperationalError(`Dependency lockfile package peer context is invalid: ${key}`);
+      throw new AuditOperationalError("Dependency lockfile package peer context is invalid");
     }
   }
 
@@ -128,7 +136,7 @@ export function parsePnpmLockfile(source: string): PackageInventory {
     if (!isRecord(entry) || !isRecord(entry.resolution)
       || typeof entry.resolution.integrity !== "string"
       || entry.resolution.integrity.trim() === "") {
-      throw new AuditOperationalError(`Dependency lockfile registry resolution is invalid: ${key}`);
+      throw new AuditOperationalError("Dependency lockfile registry resolution is invalid");
     }
 
     const { name, version } = parsePackageKey(key);
@@ -145,7 +153,9 @@ export function parsePnpmLockfile(source: string): PackageInventory {
 }
 
 function validateNonEmptyString(value: unknown, field: string): string {
-  if (typeof value !== "string" || value.trim() === "") {
+  if (typeof value !== "string"
+    || value.trim() === ""
+    || containsUnsafeOutputCharacters(value)) {
     throw new AuditOperationalError(`Dependency advisory ${field} is invalid`);
   }
   return value;
@@ -161,20 +171,35 @@ export function validateAdvisoryResponse(
 
   const findings: AuditFinding[] = [];
   for (const [packageName, bucket] of Object.entries(body)) {
+    if (containsUnsafeOutputCharacters(packageName)) {
+      throw new AuditOperationalError("Dependency advisory package name is invalid");
+    }
     if (!Object.hasOwn(requestedPackages, packageName)) {
       throw new AuditOperationalError("Dependency advisory response contains a package that was not requested");
     }
     if (!Array.isArray(bucket)) {
       throw new AuditOperationalError(`Dependency advisory bucket is invalid for ${packageName}`);
     }
+    const requestedVersions = requestedPackages[packageName];
+    if (!Array.isArray(requestedVersions)
+      || requestedVersions.some((version) => semver.valid(version) !== version)) {
+      throw new AuditOperationalError("Dependency advisory requested versions are invalid");
+    }
+    const seenAdvisoryIds = new Set<number>();
 
     for (const candidate of bucket) {
       if (!isRecord(candidate)) {
         throw new AuditOperationalError(`Dependency advisory entry is invalid for ${packageName}`);
       }
-      if (typeof candidate.id !== "number" || !Number.isFinite(candidate.id)) {
+      if (typeof candidate.id !== "number"
+        || !Number.isSafeInteger(candidate.id)
+        || candidate.id <= 0) {
         throw new AuditOperationalError(`Dependency advisory id is invalid for ${packageName}`);
       }
+      if (seenAdvisoryIds.has(candidate.id)) {
+        throw new AuditOperationalError("Dependency advisory response contains a duplicate package advisory id");
+      }
+      seenAdvisoryIds.add(candidate.id);
       const name = packageName;
       const title = validateNonEmptyString(candidate.title, "title");
       const url = validateNonEmptyString(candidate.url, "URL");
@@ -191,6 +216,22 @@ export function validateAdvisoryResponse(
         candidate.vulnerable_versions,
         "vulnerable_versions",
       );
+      let validVulnerableRange: string | null;
+      try {
+        validVulnerableRange = semver.validRange(vulnerableVersions, {
+          includePrerelease: true,
+        });
+      } catch {
+        validVulnerableRange = null;
+      }
+      if (validVulnerableRange === null) {
+        throw new AuditOperationalError("Dependency advisory vulnerable_versions is not a valid semver range");
+      }
+      const affectsSubmittedVersion = requestedVersions.some((version) =>
+        semver.satisfies(version, validVulnerableRange, { includePrerelease: true }));
+      if (!affectsSubmittedVersion) {
+        throw new AuditOperationalError("Dependency advisory does not affect a submitted version");
+      }
       if (typeof candidate.severity !== "string" || !Object.hasOwn(severityRank, candidate.severity)) {
         throw new AuditOperationalError(`Dependency advisory severity is invalid for ${packageName}`);
       }
@@ -213,19 +254,67 @@ async function readStreamChunk(
   reader: ReadableStreamDefaultReader<Uint8Array>,
   signal: AbortSignal,
 ): Promise<ReadableStreamReadResult<Uint8Array>> {
-  if (signal.aborted) {
-    throw new DOMException("Dependency advisory request timed out", "AbortError");
-  }
-
   return await new Promise((resolveChunk, rejectChunk) => {
+    let finished = false;
+    const finish = () => {
+      if (finished) return false;
+      finished = true;
+      signal.removeEventListener("abort", handleAbort);
+      return true;
+    };
     const handleAbort = () => {
-      rejectChunk(new DOMException("Dependency advisory request timed out", "AbortError"));
+      if (finish()) {
+        rejectChunk(new DOMException("Dependency advisory request timed out", "AbortError"));
+      }
     };
     signal.addEventListener("abort", handleAbort, { once: true });
-    void reader.read().then(resolveChunk, rejectChunk).finally(() => {
-      signal.removeEventListener("abort", handleAbort);
-    });
+    if (signal.aborted) handleAbort();
+    if (finished) return;
+    void reader.read().then(
+      (result) => {
+        if (finish()) resolveChunk(result);
+      },
+      (error: unknown) => {
+        if (finish()) rejectChunk(error);
+      },
+    );
   });
+}
+
+export async function awaitCancellation(
+  cancellation: Promise<unknown>,
+  signal: AbortSignal,
+): Promise<void> {
+  const settled = cancellation.then(
+    () => undefined,
+    () => undefined,
+  );
+  await new Promise<void>((resolveCancellation) => {
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      signal.removeEventListener("abort", finish);
+      resolveCancellation();
+    };
+    signal.addEventListener("abort", finish, { once: true });
+    if (signal.aborted) finish();
+    void settled.then(finish);
+  });
+}
+
+async function cancelResponseBody(response: Response, signal: AbortSignal): Promise<void> {
+  if (!response.body) return;
+  await awaitCancellation(response.body.cancel(), signal);
+}
+
+function releaseReaderLock(reader: ReadableStreamDefaultReader<Uint8Array>): boolean {
+  try {
+    reader.releaseLock();
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function readBoundedResponseBody(response: Response, signal: AbortSignal): Promise<string> {
@@ -233,7 +322,7 @@ async function readBoundedResponseBody(response: Response, signal: AbortSignal):
   if (contentLength !== null) {
     const declaredBytes = Number(contentLength);
     if (Number.isFinite(declaredBytes) && declaredBytes > MAX_RESPONSE_BYTES) {
-      void response.body?.cancel().catch(() => undefined);
+      await cancelResponseBody(response, signal);
       throw new AuditOperationalError("Dependency advisory response exceeds the 5 MiB limit");
     }
   }
@@ -245,15 +334,14 @@ async function readBoundedResponseBody(response: Response, signal: AbortSignal):
   const decoder = new TextDecoder();
   let totalBytes = 0;
   let text = "";
-  let readAborted = false;
+  let shouldCancelReader = false;
   try {
     while (true) {
       const { done, value } = await readStreamChunk(reader, signal);
       if (done) break;
       totalBytes += value.byteLength;
       if (totalBytes > MAX_RESPONSE_BYTES) {
-        readAborted = true;
-        void reader.cancel().catch(() => undefined);
+        shouldCancelReader = true;
         throw new AuditOperationalError("Dependency advisory response exceeds the 5 MiB limit");
       }
       text += decoder.decode(value, { stream: true });
@@ -261,12 +349,23 @@ async function readBoundedResponseBody(response: Response, signal: AbortSignal):
     text += decoder.decode();
   } catch (error) {
     if (isRetryableNetworkError(error)) {
-      readAborted = true;
-      void reader.cancel().catch(() => undefined);
+      shouldCancelReader = true;
     }
     throw error;
   } finally {
-    if (!readAborted) reader.releaseLock();
+    if (shouldCancelReader) {
+      const cancellation = reader.cancel();
+      await awaitCancellation(cancellation, signal);
+      if (!releaseReaderLock(reader)) {
+        // If the request deadline won, release as soon as the stream acknowledges cancellation.
+        void cancellation.then(
+          () => releaseReaderLock(reader),
+          () => releaseReaderLock(reader),
+        );
+      }
+    } else {
+      releaseReaderLock(reader);
+    }
   }
   return text;
 }
@@ -279,11 +378,6 @@ function isRetryableNetworkError(error: unknown): boolean {
 
 async function defaultDelay(milliseconds: number): Promise<void> {
   await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, milliseconds));
-}
-
-function cancelResponse(response: Response): void {
-  // The response is discarded before a bounded retry. Never let cancellation delay the next attempt.
-  void response.body?.cancel().catch(() => undefined);
 }
 
 async function performAuditRequest(
@@ -301,14 +395,15 @@ async function performAuditRequest(
         "content-type": "application/json",
       },
       method: "POST",
+      redirect: "manual",
       signal: controller.signal,
     });
 
     if (!response.ok) {
       const retryable = response.status === 408
         || response.status === 429
-        || response.status >= 500;
-      cancelResponse(response);
+        || (response.status >= 500 && response.status <= 599);
+      await cancelResponseBody(response, controller.signal);
       if (retryable) {
         throw new RetryableAuditRequestError(`HTTP ${response.status}`);
       }
@@ -374,13 +469,28 @@ function sortFindings(findings: AuditFinding[]): AuditFinding[] {
     || left.id - right.id);
 }
 
+function assertFindingCanBeReported(finding: AuditFinding): void {
+  validateNonEmptyString(finding.name, "package name");
+  validateNonEmptyString(finding.title, "title");
+  validateNonEmptyString(finding.url, "URL");
+  validateNonEmptyString(finding.vulnerable_versions, "vulnerable_versions");
+  if (!Number.isSafeInteger(finding.id) || finding.id <= 0) {
+    throw new AuditOperationalError("Dependency advisory id is invalid");
+  }
+  if (!Object.hasOwn(severityRank, finding.severity)) {
+    throw new AuditOperationalError("Dependency advisory severity is invalid");
+  }
+}
+
 export function classifyFindings(findings: AuditFinding[]): 0 | 1 {
+  findings.forEach(assertFindingCanBeReported);
   return findings.some((finding) => severityRank[finding.severity] >= severityRank.moderate)
     ? 1
     : 0;
 }
 
 export function formatAuditReport(findings: AuditFinding[]): string {
+  findings.forEach(assertFindingCanBeReported);
   const sorted = sortFindings(findings);
   const counts: Record<Severity, number> = {
     info: 0,

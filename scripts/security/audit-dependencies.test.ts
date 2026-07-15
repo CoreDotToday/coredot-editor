@@ -9,6 +9,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   AUDIT_ENDPOINT,
   MAX_RESPONSE_BYTES,
+  awaitCancellation,
   classifyFindings,
   formatAuditReport,
   parsePnpmLockfile,
@@ -140,6 +141,10 @@ packages:
       "lockfileVersion: '9.0'\npackages:\n  pkg@1.0.0: {}\n",
       "resolution",
     ],
+    [
+      "lockfileVersion: '9.0'\npackages:\n  \"bad\\u007fname@1.0.0\":\n    resolution: {integrity: sha512-one}\n",
+      "package key",
+    ],
   ])("fails closed for an uninterpretable lockfile", (lockfile, message) => {
     expect(() => parsePnpmLockfile(lockfile)).toThrow(message);
   });
@@ -167,29 +172,113 @@ describe("validateAdvisoryResponse", () => {
     ]);
   });
 
+  it("keeps ordinary Unicode titles valid", () => {
+    expect(validateAdvisoryResponse({
+      alpha: [advisory({ title: "일반 취약점 – café" })],
+    }, inventory)).toEqual([
+      advisory({ title: "일반 취약점 – café" }),
+    ]);
+  });
+
+  it.each([
+    ["line feed", "Unsafe title\n::error file=secret::injected"],
+    ["carriage return", "Unsafe title\rinjected"],
+    ["escape", "Unsafe title\u001b[31mred"],
+    ["C0 control", "Unsafe title\u0000hidden"],
+    ["C1 control", "Unsafe title\u0085hidden"],
+    ["Unicode line separator", "Unsafe title\u2028injected"],
+  ])("rejects %s in advisory output fields", (_label, title) => {
+    expect(() => validateAdvisoryResponse({ alpha: [advisory({ title })] }, inventory))
+      .toThrow("title");
+  });
+
+  it("rejects controls in URL, vulnerable range, and package name fields", () => {
+    expect(() => validateAdvisoryResponse({
+      alpha: [advisory({ url: "https://example.com/\u001binjected" })],
+    }, inventory)).toThrow("URL");
+    expect(() => validateAdvisoryResponse({
+      alpha: [advisory({ vulnerable_versions: "<1.0.1\n::error::injected" })],
+    }, inventory)).toThrow("vulnerable_versions");
+    expect(() => validateAdvisoryResponse({
+      "alpha\u007f": [advisory()],
+    }, { "alpha\u007f": ["1.0.0"] })).toThrow("package name");
+  });
+
   it.each([
     [null, "top-level"],
     [[], "top-level"],
     [{ alpha: {} }, "bucket"],
     [{ unexpected: [] }, "requested"],
     [{ alpha: [advisory({ id: Number.NaN })] }, "id"],
+    [{ alpha: [advisory({ id: 0 })] }, "id"],
+    [{ alpha: [advisory({ id: -1 })] }, "id"],
+    [{ alpha: [advisory({ id: 1.5 })] }, "id"],
+    [{ alpha: [advisory({ id: Number.MAX_SAFE_INTEGER + 1 })] }, "id"],
     [{ alpha: [advisory({ title: undefined })] }, "title"],
     [{ alpha: [advisory({ title: "" })] }, "title"],
     [{ alpha: [advisory({ url: "file:///tmp/advisory" })] }, "URL"],
     [{ alpha: [advisory({ vulnerable_versions: "" })] }, "vulnerable_versions"],
+    [{ alpha: [advisory({ vulnerable_versions: "not a semver range" })] }, "semver range"],
+    [{ alpha: [advisory({ vulnerable_versions: ">=2.0.0" })] }, "submitted version"],
     [{ alpha: [advisory({ severity: "urgent" })] }, "severity"],
     [{ alpha: [advisory({ severity: "toString" })] }, "severity"],
     [{ alpha: [advisory({ severity: "constructor" })] }, "severity"],
   ])("rejects malformed advisory data", (body, message) => {
     expect(() => validateAdvisoryResponse(body, inventory)).toThrow(message);
   });
+
+  it("rejects duplicate advisory IDs within a package", () => {
+    expect(() => validateAdvisoryResponse({
+      alpha: [advisory(), advisory({ title: "Duplicate copy" })],
+    }, inventory)).toThrow("duplicate");
+  });
+
+  it("intentionally includes prerelease package versions when checking vulnerable ranges", () => {
+    expect(validateAdvisoryResponse({
+      alpha: [advisory({ vulnerable_versions: "<1.0.0" })],
+    }, { alpha: ["1.0.0-beta.1"] })).toEqual([
+      advisory({ vulnerable_versions: "<1.0.0" }),
+    ]);
+  });
 });
 
 describe("requestAdvisories", () => {
+  it("cannot miss an abort between checking and registering its cleanup listener", async () => {
+    let abortListener: (() => void) | undefined;
+    let firstAbortedRead = true;
+    const signal = {
+      addEventListener: (_type: string, listener: EventListenerOrEventListenerObject) => {
+        abortListener = typeof listener === "function"
+          ? () => listener(new Event("abort"))
+          : () => listener.handleEvent(new Event("abort"));
+      },
+      get aborted() {
+        if (firstAbortedRead) {
+          firstAbortedRead = false;
+          abortListener?.();
+          return false;
+        }
+        return true;
+      },
+      removeEventListener: () => undefined,
+    } as unknown as AbortSignal;
+    const neverSettles = new Promise<void>(() => undefined);
+
+    const outcome = await Promise.race([
+      awaitCancellation(neverSettles, signal).then(() => "completed"),
+      new Promise<string>((resolveStalled) => {
+        setTimeout(() => resolveStalled("stalled"), 0);
+      }),
+    ]);
+
+    expect(outcome).toBe("completed");
+  });
+
   it("posts only the deterministic package inventory and accepts no Content-Type response", async () => {
     const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       expect(new Headers(init?.headers).has("authorization")).toBe(false);
       expect(init?.body).toBe(JSON.stringify(inventory));
+      expect(init?.redirect).toBe("manual");
       return responseBody({ alpha: [advisory()] });
     });
 
@@ -200,7 +289,7 @@ describe("requestAdvisories", () => {
     );
   });
 
-  it.each([408, 429, 500, 503])("retries retryable HTTP %i responses", async (status) => {
+  it.each([408, 429, 500, 503, 599])("retries retryable HTTP %i responses", async (status) => {
     const delay = vi.fn(async () => undefined);
     const fetchImpl = vi
       .fn()
@@ -210,6 +299,119 @@ describe("requestAdvisories", () => {
     await expect(requestAdvisories(inventory, { delay, fetchImpl })).resolves.toEqual([]);
     expect(fetchImpl).toHaveBeenCalledTimes(2);
     expect(delay).toHaveBeenCalledOnce();
+  });
+
+  it("treats redirects as nonretryable protocol failures without forwarding the body", async () => {
+    const delay = vi.fn(async () => undefined);
+    const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      expect(init?.redirect).toBe("manual");
+      return new Response(null, {
+        headers: { location: "https://untrusted.example/redirect" },
+        status: 307,
+      });
+    });
+
+    await expect(requestAdvisories(inventory, { delay, fetchImpl })).rejects.toThrow("HTTP 307");
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(delay).not.toHaveBeenCalled();
+  });
+
+  it("does not retry status codes above the HTTP 5xx range", async () => {
+    const delay = vi.fn(async () => undefined);
+    const response = { body: null, ok: false, status: 600 } as Response;
+    const fetchImpl = vi.fn(async () => response);
+
+    await expect(requestAdvisories(inventory, { delay, fetchImpl })).rejects.toThrow("HTTP 600");
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(delay).not.toHaveBeenCalled();
+  });
+
+  it("waits for response cancellation before retrying", async () => {
+    const events: string[] = [];
+    let finishCancellation: (() => void) | undefined;
+    let markCancellationStarted: (() => void) | undefined;
+    const cancellationStarted = new Promise<void>((resolveStarted) => {
+      markCancellationStarted = resolveStarted;
+    });
+    const stream = new ReadableStream({
+      cancel: () => {
+        events.push("cancel-start");
+        markCancellationStarted?.();
+        return new Promise<void>((resolveCancellation) => {
+          let finished = false;
+          finishCancellation = () => {
+            if (finished) return;
+            finished = true;
+            events.push("cancel-end");
+            resolveCancellation();
+          };
+        });
+      },
+    });
+    const fetchImpl = vi
+      .fn(async () => {
+        events.push(`fetch-${fetchImpl.mock.calls.length}`);
+        return fetchImpl.mock.calls.length === 1
+          ? new Response(stream, { status: 503 })
+          : responseBody({});
+      });
+    const pending = requestAdvisories(inventory, {
+      delay: async () => undefined,
+      fetchImpl,
+    });
+
+    try {
+      await cancellationStarted;
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(fetchImpl).toHaveBeenCalledOnce();
+      finishCancellation?.();
+      await expect(pending).resolves.toEqual([]);
+    } finally {
+      finishCancellation?.();
+      await pending.catch(() => undefined);
+    }
+
+    expect(events).toEqual(["fetch-1", "cancel-start", "cancel-end", "fetch-2"]);
+  });
+
+  it("awaits oversized-body reader cancellation and releases its lock", async () => {
+    let finishCancellation: (() => void) | undefined;
+    let markCancellationStarted: (() => void) | undefined;
+    const cancellationStarted = new Promise<void>((resolveStarted) => {
+      markCancellationStarted = resolveStarted;
+    });
+    const stream = new ReadableStream<Uint8Array>({
+      start: (controller) => {
+        controller.enqueue(new Uint8Array(MAX_RESPONSE_BYTES + 1));
+      },
+      cancel: () => {
+        markCancellationStarted?.();
+        return new Promise<void>((resolveCancellation) => {
+          finishCancellation = resolveCancellation;
+        });
+      },
+    });
+    const pending = requestAdvisories(inventory, {
+      fetchImpl: async () => new Response(stream, { status: 200 }),
+    });
+    let settled = false;
+    void pending.finally(() => {
+      settled = true;
+    }).catch(() => undefined);
+
+    try {
+      await cancellationStarted;
+      await Promise.resolve();
+      expect(settled).toBe(false);
+      finishCancellation?.();
+      await expect(pending).rejects.toThrow("5 MiB");
+    } finally {
+      finishCancellation?.();
+      await pending.catch(() => undefined);
+    }
+
+    expect(stream.locked).toBe(false);
   });
 
   it("retries network errors and fails after three attempts", async () => {
@@ -254,9 +456,12 @@ describe("requestAdvisories", () => {
   it("keeps the injected deadline active while reading the response body", async () => {
     vi.useFakeTimers();
     const delay = vi.fn(async () => undefined);
-    const fetchImpl = vi.fn(async () => new Response(new ReadableStream({
-      pull: () => undefined,
-    }), { status: 200 }));
+    const streams: ReadableStream[] = [];
+    const fetchImpl = vi.fn(async () => {
+      const stream = new ReadableStream({ pull: () => undefined });
+      streams.push(stream);
+      return new Response(stream, { status: 200 });
+    });
 
     try {
       const pending = requestAdvisories(inventory, { delay, fetchImpl, timeoutMs: 10 });
@@ -271,6 +476,7 @@ describe("requestAdvisories", () => {
         message: expect.stringContaining("after 3 attempts"),
       }));
       expect(fetchImpl).toHaveBeenCalledTimes(3);
+      expect(streams.every((stream) => !stream.locked)).toBe(true);
     } finally {
       vi.useRealTimers();
     }
@@ -311,6 +517,12 @@ describe("audit classification and reporting", () => {
     expect(classifyFindings([...findings])).toBe(exitCode);
   });
 
+  it("fails closed when preconstructed findings bypass severity validation", () => {
+    expect(() => classifyFindings([
+      advisory({ severity: "constructor" }),
+    ])).toThrow("severity");
+  });
+
   it("prints findings deterministically by severity, package, and advisory id", () => {
     const findings = [
       advisory({ id: 9, name: "zulu", severity: "low" }),
@@ -320,6 +532,15 @@ describe("audit classification and reporting", () => {
     ];
 
     expect(formatAuditReport(findings)).toMatchSnapshot();
+  });
+
+  it("defensively rejects controls when formatting preconstructed findings", () => {
+    expect(() => formatAuditReport([
+      advisory({ title: "Unsafe\n::error::injected" }),
+    ])).toThrow("title");
+    expect(() => formatAuditReport([
+      advisory({ name: "alpha\u007f" }),
+    ])).toThrow("package name");
   });
 
   it("returns exit 0 or 1 for valid findings and exit 2 for operational failure", async () => {
@@ -348,6 +569,43 @@ describe("audit classification and reporting", () => {
 
     expect(stdout).toHaveLength(2);
     expect(stderr).toEqual([expect.stringContaining("Dependency audit failed")]);
+  });
+
+  it.each([
+    ["log controls", { alpha: [advisory({ title: "Unsafe\n::error::injected" })] }],
+    ["an invalid range", { alpha: [advisory({ vulnerable_versions: "invalid range" })] }],
+    ["an irrelevant range", { alpha: [advisory({ vulnerable_versions: ">=2.0.0" })] }],
+    ["a duplicate advisory", { alpha: [advisory(), advisory()] }],
+  ])("returns operational exit 2 without findings for %s", async (_label, body) => {
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const source = "lockfileVersion: '9.0'\npackages:\n  alpha@1.0.0:\n    resolution: {integrity: sha512-one}\n";
+
+    await expect(runAudit({
+      fetchImpl: async () => responseBody(body),
+      lockfileSource: source,
+      stderr: (line) => stderr.push(line),
+      stdout: (line) => stdout.push(line),
+    })).resolves.toBe(2);
+    expect(stdout).toEqual([]);
+    expect(stderr).toEqual([expect.stringContaining("Dependency audit failed")]);
+    expect(stderr.join("\n")).not.toContain("::error");
+  });
+
+  it("rejects a controlled lockfile package name without reflecting it to stderr", async () => {
+    const stderr: string[] = [];
+    const controlledName = "alpha\u007f";
+    const source = `lockfileVersion: '9.0'\npackages:\n  "${controlledName}@1.0.0":\n    resolution: {integrity: sha512-one}\n`;
+
+    await expect(runAudit({
+      fetchImpl: async () => responseBody({}),
+      lockfileSource: source,
+      stderr: (line) => stderr.push(line),
+      stdout: () => undefined,
+    })).resolves.toBe(2);
+    expect(stderr).toHaveLength(1);
+    expect(stderr[0]).not.toContain(controlledName);
+    expect(stderr[0]).not.toContain("\u007f");
   });
 });
 
