@@ -52,7 +52,7 @@
     "release:check": "pnpm lint && pnpm typecheck && pnpm test && pnpm e2e && pnpm security:verify-auth-startup && pnpm build && pnpm security:audit"
   },
   "dependencies": {
-    "@ai-sdk/openai": "^3.0.63",
+    "@ai-sdk/openai": "^3.0.85",
     "@clerk/nextjs": "^7.5.17",
     "@libsql/client": "^0.17.3",
     "@tiptap/core": "^3.23.1",
@@ -68,7 +68,7 @@
     "@tiptap/react": "^3.23.1",
     "@tiptap/starter-kit": "^3.23.1",
     "@xmldom/xmldom": "^0.8.13",
-    "ai": "^6.0.176",
+    "ai": "^6.0.226",
     "docx": "^9.7.1",
     "drizzle-orm": "^0.45.2",
     "happy-dom": "^20.9.0",
