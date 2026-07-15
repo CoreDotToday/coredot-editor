@@ -19,6 +19,8 @@ pnpm security:audit
 
 Use focused tests while editing and run the full relevant gate before committing.
 
+`pnpm security:audit` reads the checked-in pnpm lockfile and fails closed if npm's public bulk advisory service cannot return a valid result; moderate-or-higher findings block the release gate.
+
 ## Documentation Commands
 
 Install docs dependencies:

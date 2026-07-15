@@ -49,6 +49,10 @@ describe("production smoke helpers", () => {
     expect(packageJson.scripts["e2e:production"]).toBe(
       "tsx scripts/e2e/run-production-smoke.ts",
     );
+    expect(packageJson.scripts["security:audit"]).toBe(
+      "tsx scripts/security/audit-dependencies.ts",
+    );
+    expect(packageJson.scripts["release:check"]).toContain("pnpm security:audit");
     expect(packageJson.scripts["release:check"]).not.toMatch(/e2e:production|docs:build/);
     expect(extractActionUses(workflow)).toEqual([
       "actions/checkout@v7",
@@ -89,6 +93,7 @@ describe("production smoke helpers", () => {
       "pnpm exec vitest run src/features/proposals/proposal-concurrency.test.ts",
     );
     expect(workflow).toContain("run: pnpm e2e:production");
+    expect(workflow).toContain("run: pnpm security:audit");
     expect(workflow).toContain("run: pnpm docs:build");
     expect(workflow.indexOf("run: pnpm build")).toBeLessThan(
       workflow.indexOf("run: pnpm e2e:production"),

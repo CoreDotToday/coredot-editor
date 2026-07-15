@@ -47,7 +47,7 @@
     "e2e:prepare": "tsx scripts/e2e/prepare.ts",
     "e2e": "pnpm e2e:prepare && playwright test",
     "e2e:production": "tsx scripts/e2e/run-production-smoke.ts",
-    "security:audit": "pnpm audit --audit-level moderate",
+    "security:audit": "tsx scripts/security/audit-dependencies.ts",
     "security:verify-auth-startup": "pnpm build:docx-worker && node scripts/security/verify-production-auth-startup.mjs",
     "release:check": "pnpm lint && pnpm typecheck && pnpm test && pnpm e2e && pnpm security:verify-auth-startup && pnpm build && pnpm security:audit"
   },
@@ -93,6 +93,7 @@
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "@types/semver": "^7.7.1",
     "@vitejs/plugin-react": "^6.0.1",
     "drizzle-kit": "^0.31.10",
     "esbuild": "^0.25.12",
@@ -101,12 +102,14 @@
     "jsdom": "^29.1.1",
     "markdown-it": "^14.3.0",
     "playwright": "^1.59.1",
+    "semver": "^7.8.5",
     "sharp": "^0.34.5",
     "tailwindcss": "^4",
     "tsx": "^4.21.0",
     "typescript": "^5",
     "vite": "^8.0.16",
-    "vitest": "^4.1.5"
+    "vitest": "^4.1.5",
+    "yaml": "^2.9.0"
   },
   "pnpm": {
     "overrides": {

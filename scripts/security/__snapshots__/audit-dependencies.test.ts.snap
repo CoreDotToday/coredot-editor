@@ -1,0 +1,10 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`audit classification and reporting > prints findings deterministically by severity, package, and advisory id 1`] = `
+"[critical] alpha advisory #1: Example advisory (vulnerable: <1.0.1) https://github.com/advisories/GHSA-example
+[critical] alpha advisory #2: Example advisory (vulnerable: <1.0.1) https://github.com/advisories/GHSA-example
+[critical] bravo advisory #8: Example advisory (vulnerable: <1.0.1) https://github.com/advisories/GHSA-example
+[low] zulu advisory #9: Example advisory (vulnerable: <1.0.1) https://github.com/advisories/GHSA-example
+Dependency audit: 4 finding(s); info=0, low=1, moderate=0, high=0, critical=3.
+Release threshold: moderate or higher."
+`;

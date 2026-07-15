@@ -155,6 +155,6 @@ pnpm e2e:production
 git diff --check
 ```
 
-`release:check` runs lint, TypeScript checks, the Vitest suite, development Playwright E2E, production-auth startup validation, the production build, and `pnpm audit --audit-level moderate`. The audit therefore blocks findings at the configured moderate-or-higher threshold; it is not a claim that every package has zero findings at every severity setting.
+`release:check` runs lint, TypeScript checks, the Vitest suite, development Playwright E2E, production-auth startup validation, the production build, and `pnpm security:audit`. The audit queries npm's public bulk advisory endpoint without credentials, reports every advisory severity, and blocks findings at the configured moderate-or-higher threshold. Lockfile, network, HTTP, or response-validation failures also block the release rather than passing without a result.
 
 `e2e:production` creates and migrates an isolated temporary database, builds the app, starts the built artifact through `pnpm start` with Clerk mode and test-format smoke credentials, and verifies bounded health/readiness responses, public redirects, protected-page redirects, and protected API rejection. Cleanup is bounded even after failures. The strict MkDocs build and `git diff --check` finish documentation and patch hygiene verification.
