@@ -58,6 +58,7 @@ test("selection AI toolbar does not shift or cover selected editor text", async 
   await expect(selectionResult).toContainText("제안");
   await expect(selectionResult).toContainText(`Stub rewrite: ${body}`);
   await expect(selectionResult.getByRole("button", { name: "아래에 추가" })).toBeVisible();
+  await expect(page.getByRole("status", { name: "문서 저장 상태" })).toHaveText("저장됨");
   await selectionResult.getByRole("button", { name: "아래에 추가" }).click();
 
   await expect(page.getByRole("status", { name: "선택 AI 적용 상태" })).toContainText("초안에 반영되었습니다");
