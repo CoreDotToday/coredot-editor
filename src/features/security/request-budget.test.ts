@@ -54,6 +54,13 @@ describe("durable request budget", () => {
     expect(REQUEST_BUDGET_POLICIES["documents.export"]).toEqual({ limit: 20, windowMs: 60_000 });
   });
 
+  it("defines a separate refresh-safe collaboration capability budget", () => {
+    expect(REQUEST_BUDGET_POLICIES["collaboration.capability"]).toEqual({
+      limit: 120,
+      windowMs: 60_000,
+    });
+  });
+
   it("allows exactly the configured number of requests and rejects the next request", async () => {
     const { client } = await createBudgetClient();
     const budget = createRequestBudget({ client, policies: { test: policy } });
