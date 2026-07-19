@@ -1,11 +1,17 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { CollaborationSessionSnapshot } from "./session-store";
 import {
+  COLLABORATION_NAVIGATION_RESTORE_TIMEOUT_MS,
+  createBrowserCollaborationNavigationEnvironment,
   createCollaborationNavigationController,
   type CollaborationNavigationEnvironment,
   type CollaborationNavigationTarget,
 } from "./navigation-controller";
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe("collaboration navigation controller", () => {
   it("keeps an own transition pending until the user confirms and explicitly continues", () => {
@@ -173,6 +179,156 @@ describe("collaboration navigation controller", () => {
     expect(environment.href).toBe("https://editor.example.test/documents/current");
   });
 
+  it("keeps restoration ownership after uninstall until a canceled go(-3) returns to the protected URL", () => {
+    vi.useFakeTimers();
+    const protectedHref = "https://editor.example.test/documents/current?panel=review#proposal-2";
+    const environment = createEnvironment({ confirm: false, href: protectedHref });
+    const onRestoreProtectedRoute = vi.fn();
+    const controller = createCollaborationNavigationController({
+      environment,
+      getSnapshot: pendingSnapshot,
+      getMessage: () => "Pending collaboration update",
+      onHandoff: vi.fn(),
+      onRestoreProtectedRoute,
+    });
+    const uninstall = controller.install();
+    const baseState = environment.replacedStates[0];
+
+    environment.history.go(-3);
+    environment.moveTo("https://editor.example.test/templates?jump=3", { route: "foreign-target" });
+    environment.dispatch("popstate", new PopStateEvent("popstate", {
+      state: { route: "foreign-target" },
+    }));
+    uninstall();
+
+    expect(environment.confirm).toHaveBeenCalledOnce();
+    expect(environment.history.go).toHaveBeenCalledWith(-3);
+    expect(environment.listenerCount("popstate")).toBe(1);
+    expect(environment.listenerCount("beforeunload")).toBe(1);
+
+    const competingEnvironment = createEnvironment({ confirm: false });
+    const competingController = createCollaborationNavigationController({
+      environment: competingEnvironment,
+      getSnapshot: pendingSnapshot,
+      getMessage: () => "Pending collaboration update",
+      onHandoff: vi.fn(),
+    });
+    const uninstallCompeting = competingController.install();
+    expect(competingEnvironment.pushedStates).toEqual([]);
+    expect(competingEnvironment.replacedStates).toEqual([]);
+    expect(competingEnvironment.listenerCount("popstate")).toBe(0);
+    expect(competingController.requestTransition()).toBeNull();
+    expect(competingEnvironment.confirm).not.toHaveBeenCalled();
+
+    environment.moveTo("https://editor.example.test/documents", { route: "foreign-middle" });
+    environment.dispatch("popstate", new PopStateEvent("popstate", {
+      state: { route: "foreign-middle" },
+    }));
+    environment.moveTo(protectedHref, baseState);
+    environment.dispatch("popstate", new PopStateEvent("popstate", { state: baseState }));
+
+    expect(environment.confirm).toHaveBeenCalledOnce();
+    expect(environment.history.forward).toHaveBeenCalledTimes(2);
+    expect(onRestoreProtectedRoute).toHaveBeenCalledOnce();
+    expect(onRestoreProtectedRoute).toHaveBeenCalledWith(protectedHref);
+    expect(environment.listenerCount("popstate")).toBe(0);
+    expect(environment.listenerCount("beforeunload")).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+    uninstallCompeting();
+    expect(competingEnvironment.listenerCount("beforeunload")).toBe(0);
+  });
+
+  it("bounds an abandoned canceled traversal and releases every recovery resource", async () => {
+    vi.useFakeTimers();
+    const protectedHref = "https://editor.example.test/documents/current?mode=collaboration#body";
+    const environment = createEnvironment({ confirm: false, href: protectedHref });
+    const onRestoreProtectedRoute = vi.fn();
+    const controller = createCollaborationNavigationController({
+      environment,
+      getSnapshot: pendingSnapshot,
+      getMessage: () => "Pending collaboration update",
+      onHandoff: vi.fn(),
+      onRestoreProtectedRoute,
+    });
+    const uninstall = controller.install();
+
+    environment.moveTo("https://editor.example.test/templates", { route: "stalled" });
+    environment.dispatch("popstate", new PopStateEvent("popstate", { state: { route: "stalled" } }));
+    uninstall();
+    expect(environment.listenerCount("popstate")).toBe(1);
+    expect(vi.getTimerCount()).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(COLLABORATION_NAVIGATION_RESTORE_TIMEOUT_MS - 1);
+    expect(onRestoreProtectedRoute).not.toHaveBeenCalled();
+    expect(environment.listenerCount("popstate")).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(onRestoreProtectedRoute).toHaveBeenCalledOnce();
+    expect(onRestoreProtectedRoute).toHaveBeenCalledWith(protectedHref);
+    expect(environment.replacedUrls.at(-1)).toBe(protectedHref);
+    expect(environment.pushedUrls.at(-1)).toBe(protectedHref);
+    expect(environment.listenerCount("popstate")).toBe(0);
+    expect(environment.listenerCount("beforeunload")).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("recovers with the browser history implementation after an unmounted go(-3)", async () => {
+    const initialHref = window.location.href;
+    const initialState = window.history.state;
+    const listenerCounts = new Map<string, number>();
+    const protectedPath = "/documents/current?panel=review#proposal-2";
+    let uninstall: () => void = () => undefined;
+    const onRestoreProtectedRoute = vi.fn();
+
+    try {
+      window.history.replaceState({ route: "foreign-oldest" }, "", "/templates?jump=3");
+      window.history.pushState({ route: "foreign-middle" }, "", "/documents");
+      window.history.pushState({ route: "protected" }, "", protectedPath);
+      const browserEnvironment = createBrowserCollaborationNavigationEnvironment();
+      const environment: CollaborationNavigationEnvironment = {
+        addEventListener(type, listener) {
+          listenerCounts.set(type, (listenerCounts.get(type) ?? 0) + 1);
+          window.addEventListener(type, listener);
+        },
+        confirm: vi.fn(() => {
+          queueMicrotask(() => uninstall());
+          return false;
+        }),
+        history: browserEnvironment.history,
+        get href() {
+          return window.location.href;
+        },
+        navigation: undefined,
+        removeEventListener(type, listener) {
+          listenerCounts.set(type, (listenerCounts.get(type) ?? 0) - 1);
+          window.removeEventListener(type, listener);
+        },
+      };
+      const controller = createCollaborationNavigationController({
+        environment,
+        getSnapshot: pendingSnapshot,
+        getMessage: () => "Pending collaboration update",
+        onHandoff: vi.fn(),
+        onRestoreProtectedRoute,
+      });
+      uninstall = controller.install();
+
+      window.history.go(-3);
+
+      await vi.waitFor(() => {
+        expect(onRestoreProtectedRoute).toHaveBeenCalledOnce();
+      });
+      expect(onRestoreProtectedRoute).toHaveBeenCalledWith(new URL(protectedPath, initialHref).href);
+      expect(window.location.href).toBe(new URL(protectedPath, initialHref).href);
+      expect(listenerCounts.get("popstate")).toBe(0);
+      expect(listenerCounts.get("beforeunload")).toBe(0);
+    } finally {
+      uninstall();
+      window.history.replaceState(initialState, "", initialHref);
+    }
+  });
+
   it("approves an arbitrary captured history target exactly once without another back", () => {
     const environment = createEnvironment({ confirm: true });
     const approvedTargets: CollaborationNavigationTarget[] = [];
@@ -310,12 +466,126 @@ describe("collaboration navigation controller", () => {
     expect(onHandoff).not.toHaveBeenCalled();
 
     environment.confirm.mockReturnValue(true);
-    const approved = environment.dispatchNavigate("https://editor.example.test/templates");
+    const approved = environment.dispatchNavigate("https://editor.example.test/templates", {
+      sameDocument: false,
+    });
     expect(approved.preventDefault).not.toHaveBeenCalled();
-    expect(onHandoff).toHaveBeenCalledOnce();
+    expect(onHandoff).not.toHaveBeenCalled();
 
     uninstall();
     expect(environment.listenerCount("navigate")).toBe(0);
+  });
+
+  it("keeps pending-update guards active after an approved same-document navigation", () => {
+    const environment = createEnvironment({ confirm: true, navigation: true });
+    const onHandoff = vi.fn();
+    const controller = createCollaborationNavigationController({
+      environment,
+      getSnapshot: pendingSnapshot,
+      getMessage: () => "Pending collaboration update",
+      onHandoff,
+    });
+    controller.install();
+
+    const navigation = environment.dispatchNavigate(
+      "https://editor.example.test/documents/current#comments",
+      { sameDocument: true },
+    );
+    expect(navigation.preventDefault).not.toHaveBeenCalled();
+    expect(onHandoff).not.toHaveBeenCalled();
+
+    environment.confirm.mockReturnValue(false);
+    const pendingUnload = new Event("beforeunload", { cancelable: true });
+    environment.dispatch("beforeunload", pendingUnload);
+    expect(pendingUnload.defaultPrevented).toBe(true);
+    expect(controller.requestTransition()).toBeNull();
+    expect(environment.confirm).toHaveBeenCalledTimes(2);
+  });
+
+  it("avoids a duplicate unload prompt and restores guards when an approved navigation aborts", () => {
+    const environment = createEnvironment({ confirm: true, navigation: true });
+    const onHandoff = vi.fn();
+    const controller = createCollaborationNavigationController({
+      environment,
+      getSnapshot: pendingSnapshot,
+      getMessage: () => "Pending collaboration update",
+      onHandoff,
+    });
+    controller.install();
+    const abortController = new AbortController();
+
+    environment.dispatchNavigate("https://editor.example.test/documents/next", {
+      sameDocument: false,
+      signal: abortController.signal,
+    });
+    const approvedUnload = new Event("beforeunload", { cancelable: true });
+    environment.dispatch("beforeunload", approvedUnload);
+    expect(approvedUnload.defaultPrevented).toBe(false);
+
+    abortController.abort();
+
+    expect(onHandoff).not.toHaveBeenCalled();
+    environment.confirm.mockReturnValue(false);
+    const pendingUnload = new Event("beforeunload", { cancelable: true });
+    environment.dispatch("beforeunload", pendingUnload);
+    expect(pendingUnload.defaultPrevented).toBe(true);
+    expect(controller.requestTransition()).toBeNull();
+    expect(environment.confirm).toHaveBeenCalledTimes(2);
+  });
+
+  it("restores guards when an approved document navigation emits navigateerror", () => {
+    const environment = createEnvironment({ confirm: true, navigation: true });
+    const controller = createCollaborationNavigationController({
+      environment,
+      getSnapshot: pendingSnapshot,
+      getMessage: () => "Pending collaboration update",
+      onHandoff: vi.fn(),
+    });
+    controller.install();
+
+    environment.dispatchNavigate("https://editor.example.test/documents/next", {
+      sameDocument: false,
+    });
+    const approvedUnload = new Event("beforeunload", { cancelable: true });
+    environment.dispatch("beforeunload", approvedUnload);
+    expect(approvedUnload.defaultPrevented).toBe(false);
+
+    environment.dispatch("navigateerror", new Event("navigateerror"));
+    const failedUnload = new Event("beforeunload", { cancelable: true });
+    environment.dispatch("beforeunload", failedUnload);
+    expect(failedUnload.defaultPrevented).toBe(true);
+  });
+
+  it("does not infer a successful document handoff before the owning shell unmounts", () => {
+    const environment = createEnvironment({ confirm: true, navigation: true });
+    const onHandoff = vi.fn();
+    const controller = createCollaborationNavigationController({
+      environment,
+      getSnapshot: pendingSnapshot,
+      getMessage: () => "Pending collaboration update",
+      onHandoff,
+    });
+    const uninstall = controller.install();
+
+    environment.dispatchNavigate("https://editor.example.test/documents/next", {
+      sameDocument: false,
+    });
+    const approvedUnload = new Event("beforeunload", { cancelable: true });
+    environment.dispatch("beforeunload", approvedUnload);
+    expect(approvedUnload.defaultPrevented).toBe(false);
+
+    environment.dispatch("navigatesuccess", new Event("navigatesuccess"));
+
+    expect(onHandoff).not.toHaveBeenCalled();
+    const pendingUnload = new Event("beforeunload", { cancelable: true });
+    environment.dispatch("beforeunload", pendingUnload);
+    expect(pendingUnload.defaultPrevented).toBe(true);
+
+    uninstall();
+    expect(environment.listenerCount("navigate")).toBe(0);
+    expect(environment.listenerCount("navigateerror")).toBe(0);
+    expect(environment.listenerCount("navigatesuccess")).toBe(0);
+    expect(environment.listenerCount("beforeunload")).toBe(0);
   });
 
   it("keeps exactly one active listener set across a StrictMode-style reinstall", () => {
@@ -343,7 +613,7 @@ describe("collaboration navigation controller", () => {
   });
 });
 
-function createEnvironment(options: { confirm: boolean; navigation?: boolean }) {
+function createEnvironment(options: { confirm: boolean; href?: string; navigation?: boolean }) {
   const listeners = new Map<string, Set<EventListener>>();
   const pushedStates: unknown[] = [];
   const pushedUrls: string[] = [];
@@ -353,6 +623,7 @@ function createEnvironment(options: { confirm: boolean; navigation?: boolean }) 
   const history = {
     back: vi.fn(),
     forward: vi.fn(),
+    go: vi.fn(),
     get state() {
       return state;
     },
@@ -377,11 +648,18 @@ function createEnvironment(options: { confirm: boolean; navigation?: boolean }) 
     dispatch(type: string, event: Event) {
       for (const listener of listeners.get(type) ?? []) listener(event);
     },
-    dispatchNavigate(destinationUrl: string) {
+    dispatchNavigate(
+      destinationUrl: string,
+      navigationOptions: { sameDocument?: boolean; signal?: AbortSignal } = {},
+    ) {
       const event = {
         canIntercept: true,
-        destination: { url: destinationUrl },
+        destination: {
+          sameDocument: navigationOptions.sameDocument ?? false,
+          url: destinationUrl,
+        },
         preventDefault: vi.fn(),
+        signal: navigationOptions.signal ?? new AbortController().signal,
       };
       for (const listener of listeners.get("navigate") ?? []) {
         listener(event as unknown as Event);
@@ -389,7 +667,7 @@ function createEnvironment(options: { confirm: boolean; navigation?: boolean }) 
       return event;
     },
     history,
-    href: "https://editor.example.test/documents/current",
+    href: options.href ?? "https://editor.example.test/documents/current",
     listenerCount(type: string) {
       return listeners.get(type)?.size ?? 0;
     },
@@ -399,10 +677,16 @@ function createEnvironment(options: { confirm: boolean; navigation?: boolean }) 
     },
     navigation: options.navigation
       ? {
-          addEventListener(type: "navigate", listener: EventListener) {
+          addEventListener(
+            type: "navigate" | "navigateerror" | "navigatesuccess",
+            listener: EventListener,
+          ) {
             environment.addEventListener(type, listener);
           },
-          removeEventListener(type: "navigate", listener: EventListener) {
+          removeEventListener(
+            type: "navigate" | "navigateerror" | "navigatesuccess",
+            listener: EventListener,
+          ) {
             environment.removeEventListener(type, listener);
           },
         }
@@ -416,7 +700,10 @@ function createEnvironment(options: { confirm: boolean; navigation?: boolean }) 
     replacedUrls,
   } satisfies CollaborationNavigationEnvironment & {
     dispatch(type: string, event: Event): void;
-    dispatchNavigate(destinationUrl: string): { preventDefault: ReturnType<typeof vi.fn> };
+    dispatchNavigate(
+      destinationUrl: string,
+      options?: { sameDocument?: boolean; signal?: AbortSignal },
+    ): { preventDefault: ReturnType<typeof vi.fn> };
     listenerCount(type: string): number;
     moveTo(href: string, state: unknown): void;
     pushedStates: unknown[];

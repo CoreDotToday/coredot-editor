@@ -309,6 +309,8 @@ The editor does not become writable until the initial provider sync and schema c
 
 After a successful initial sync, an open tab may continue editing during a network interruption. Navigation and tab close warn when updates are not durably acknowledged. A failed initial connection never falls back to legacy autosave because that would create a second canonical history.
 
+When the browser exposes the Navigation API, the client intercepts navigation attempts without rewriting browser history. Other browsers use a same-URL history sentinel. If a canceled multi-entry traversal temporarily renders another route, the recovery listener remains alive for a bounded interval, restores the exact protected URL, and keeps the durability warning active until recovery completes.
+
 The participant UI includes accessible names, current-user labeling, a compact `+N` state, and a keyboard-readable participant list. Cursor colors meet contrast requirements.
 
 ## Compatibility And Migration
@@ -319,6 +321,8 @@ The participant UI includes accessible names, current-user labeling, a compact `
 - Self-hosted mode initializes or opens Yjs collaboration.
 - Once a collaboration record exists, legacy body/title/metadata writers fail closed even if the sidecar is unavailable.
 - Downgrade requires an explicit, audited export-and-reset operation and is not part of the first release.
+
+The same-URL sentinel fallback is used only in browsers without the Navigation API. Installing that fallback with `pushState` can truncate entries that were already in the browser's forward stack. It does not weaken data safety: pending collaborative updates remain guarded, canceled backward or multi-entry traversals return to the protected document, and approved navigation still targets the browser's actual destination.
 
 Initial migration converts one SQL snapshot to Yjs exactly once under a document-generation compare-and-set. Concurrent bootstrap attempts return the already-created generation. The original SQL snapshot stays available through normal backup history.
 
