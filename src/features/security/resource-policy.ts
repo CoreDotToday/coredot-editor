@@ -1,5 +1,3 @@
-import { NextResponse } from "next/server";
-
 export const RESOURCE_LIMITS = Object.freeze({
   docxBytes: 10 * 1024 * 1024,
   documentJsonBytes: 10 * 1024 * 1024,
@@ -233,10 +231,10 @@ export function resourcePolicyErrorResponse(error: unknown): Response | null {
     return documentResourceLimitResponse();
   }
   if (error instanceof OperationTimeoutError) {
-    return NextResponse.json({ error: "Operation timed out" }, { status: 504 });
+    return Response.json({ error: "Operation timed out" }, { status: 504 });
   }
   if (error instanceof RequestBodyAbortedError) {
-    return NextResponse.json({ error: "Request aborted" }, { status: 408 });
+    return Response.json({ error: "Request aborted" }, { status: 408 });
   }
   return null;
 }
@@ -359,7 +357,7 @@ export async function parseBoundedFormData(
 }
 
 export function documentResourceLimitResponse() {
-  return NextResponse.json({ error: "Document exceeds resource limits" }, { status: 413 });
+  return Response.json({ error: "Document exceeds resource limits" }, { status: 413 });
 }
 
 function isNode(value: unknown): value is Record<string, unknown> & { type: string } {

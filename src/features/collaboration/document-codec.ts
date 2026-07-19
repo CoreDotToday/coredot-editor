@@ -1,5 +1,3 @@
-import "server-only";
-
 import { createHash } from "node:crypto";
 
 import { getSchema } from "@tiptap/core";
@@ -8,7 +6,12 @@ import { prosemirrorToYXmlFragment, yXmlFragmentToProseMirrorRootNode } from "y-
 import * as Y from "yjs";
 
 import { extractPlainTextFromTiptap } from "@/features/documents/tiptap-text";
-import { validateProjectMetadata, type ProjectProfile } from "@/features/projects/project-profile";
+import {
+  getProjectMetadataFieldLimits,
+  validateProjectMetadata,
+  type ProjectMetadataField,
+  type ProjectProfile,
+} from "@/features/projects/project-profile";
 import { validateTiptapResource } from "@/features/security/resource-policy";
 import {
   createServerSchemaExtensions,
@@ -44,6 +47,23 @@ export type CollaborationSchemaExtensionDescriptor = {
   version: string;
 };
 
+export type CollaborationMetadataFieldDescriptor = {
+  id: string;
+  limits: {
+    itemMaxLength: number | null;
+    maxItems: number | null;
+    maxLength: number | null;
+  };
+  options: readonly string[] | null;
+  required: boolean;
+  type: ProjectMetadataField["type"];
+};
+
+export type CollaborationProjectProfileDescriptor = {
+  id: string;
+  metadataFields: readonly CollaborationMetadataFieldDescriptor[];
+};
+
 export const COLLABORATION_SCHEMA_EXTENSION_DESCRIPTORS = [
   { name: "starterKit", version: COLLABORATION_TIPTAP_SCHEMA_VERSION },
   { name: "link", version: COLLABORATION_TIPTAP_SCHEMA_VERSION },
@@ -64,16 +84,17 @@ export class CollaborationCodecError extends Error {
 export function createCollaborationDocumentCodec(
   projectProfile: ProjectProfile,
 ): CollaborationDocumentCodec {
+  const capturedProjectProfile = captureProjectProfile(projectProfile);
   const extensions = createServerSchemaExtensions();
   const schema = getSchema(extensions);
   assertSchemaExtensionDescriptors(extensions.map((extension) => extension.name));
   const schemaFingerprint = createCollaborationSchemaFingerprint({
-    projectProfileId: projectProfile.id,
+    projectProfile: capturedProjectProfile,
   });
 
   const codec: CollaborationDocumentCodec = {
     bootstrap(snapshot) {
-      const snapshotResult = validateSnapshot(snapshot, projectProfile, schema);
+      const snapshotResult = validateSnapshot(snapshot, capturedProjectProfile, schema);
       if (!snapshotResult.ok) throw new CollaborationCodecError(snapshotResult);
 
       const document = new Y.Doc();
@@ -108,16 +129,22 @@ export function createCollaborationDocumentCodec(
     },
 
     materialize(document) {
-      const result = validateDocument(document, projectProfile, schema);
+      const result = validateDocument(document, capturedProjectProfile, schema);
       if (!result.ok) throw new CollaborationCodecError(result);
       return result.value;
     },
 
     validate(document, profile) {
-      if (profile.id !== projectProfile.id) {
+      let suppliedFingerprint: string;
+      try {
+        suppliedFingerprint = createCollaborationSchemaFingerprint({ projectProfile: profile });
+      } catch {
         throw new CollaborationCodecError({ ok: false, reason: "profile_mismatch" });
       }
-      const result = validateDocument(document, profile, schema);
+      if (suppliedFingerprint !== schemaFingerprint) {
+        throw new CollaborationCodecError({ ok: false, reason: "profile_mismatch" });
+      }
+      const result = validateDocument(document, capturedProjectProfile, schema);
       if (!result.ok) throw new CollaborationCodecError(result);
       return result.value;
     },
@@ -128,11 +155,11 @@ export function createCollaborationDocumentCodec(
 
 export function createCollaborationSchemaFingerprint({
   extensionDescriptors = COLLABORATION_SCHEMA_EXTENSION_DESCRIPTORS,
-  projectProfileId,
+  projectProfile,
   schemaVersion = COLLABORATION_DOCUMENT_SCHEMA_VERSION,
 }: {
   extensionDescriptors?: readonly CollaborationSchemaExtensionDescriptor[];
-  projectProfileId: string;
+  projectProfile: Pick<ProjectProfile, "id" | "metadataFields">;
   schemaVersion?: number;
 }) {
   const descriptor = {
@@ -144,10 +171,50 @@ export function createCollaborationSchemaFingerprint({
       title: COLLABORATION_TITLE_NAME,
     },
     layoutVersion: COLLABORATION_DOCUMENT_LAYOUT_VERSION,
-    projectProfileId,
+    projectProfile: createCollaborationProjectProfileDescriptor(projectProfile),
     schemaVersion,
   };
   return createHash("sha256").update(JSON.stringify(descriptor), "utf8").digest("hex");
+}
+
+export function createCollaborationProjectProfileDescriptor(
+  profile: Pick<ProjectProfile, "id" | "metadataFields">,
+): CollaborationProjectProfileDescriptor {
+  return {
+    id: profile.id,
+    metadataFields: profile.metadataFields
+      .map((field) => {
+        const limits = getProjectMetadataFieldLimits(field);
+        return {
+          id: field.id,
+          limits: {
+            itemMaxLength: limits.itemMaxLength ?? null,
+            maxItems: limits.maxItems ?? null,
+            maxLength: limits.maxLength ?? null,
+          },
+          options: field.options ? [...field.options].sort(compareStrings) : null,
+          required: field.required === true,
+          type: field.type,
+        };
+      })
+      .sort((left, right) => compareStrings(left.id, right.id)),
+  };
+}
+
+function captureProjectProfile(profile: ProjectProfile): ProjectProfile {
+  const metadataFields = profile.metadataFields.map((field) => Object.freeze({
+    ...field,
+    labels: Object.freeze({ ...field.labels }),
+    options: field.options ? Object.freeze([...field.options]) : undefined,
+  }));
+  return Object.freeze({
+    ...profile,
+    metadataFields: Object.freeze(metadataFields),
+  });
+}
+
+function compareStrings(left: string, right: string) {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function assertSchemaExtensionDescriptors(actualNames: readonly string[]) {

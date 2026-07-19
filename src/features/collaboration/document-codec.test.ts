@@ -3,6 +3,7 @@ import * as Y from "yjs";
 import { describe, expect, it } from "vitest";
 
 import { getProjectProfile } from "@/features/projects/default-project-profiles";
+import type { ProjectProfile } from "@/features/projects/project-profile";
 import { createServerSchemaExtensions } from "@/plugins/document-schema-profile";
 
 import {
@@ -179,6 +180,41 @@ describe("CollaborationDocumentCodec", () => {
     expect(JSON.stringify(failure)).not.toContain("legal-review");
   });
 
+  it("rejects a same-id profile whose collaborative metadata rules changed", () => {
+    const profile = cloneProjectProfile(getProjectProfile("default"));
+    const changedProfile: ProjectProfile = {
+      ...cloneProjectProfile(profile),
+      metadataFields: profile.metadataFields.map((field) => (
+        field.id === "owner" ? { ...field, required: !field.required } : field
+      )),
+    };
+    const codec = createCollaborationDocumentCodec(profile);
+    const document = codec.bootstrap(snapshot);
+
+    expect(captureCodecFailure(() => codec.validate(document, changedProfile))).toEqual({
+      ok: false,
+      reason: "profile_mismatch",
+    });
+    expect(createCollaborationSchemaFingerprint({ projectProfile: changedProfile }))
+      .not.toBe(createCollaborationSchemaFingerprint({ projectProfile: profile }));
+  });
+
+  it("keeps validation bound to a frozen metadata contract after caller mutation", () => {
+    const mutableProfile = cloneProjectProfile(getProjectProfile("default"));
+    const codec = createCollaborationDocumentCodec(mutableProfile);
+    const document = codec.bootstrap(snapshot);
+    const ownerField = mutableProfile.metadataFields.find((field) => field.id === "owner");
+    if (!ownerField) throw new Error("Expected owner field");
+
+    ownerField.maxLength = 1;
+
+    expect(codec.materialize(document).metadataJson.owner).toBe("Ada");
+    expect(captureCodecFailure(() => codec.validate(document, mutableProfile))).toEqual({
+      ok: false,
+      reason: "profile_mismatch",
+    });
+  });
+
   it.each([
     { expected: "title_blank", title: "   " },
     { expected: "title_too_long", title: "x".repeat(501) },
@@ -275,17 +311,18 @@ describe("CollaborationDocumentCodec", () => {
       { name: "typography", version: "3.27.4" },
     ]);
 
-    const baseline = createCollaborationSchemaFingerprint({ projectProfileId: "default" });
+    const projectProfile = getProjectProfile("default");
+    const baseline = createCollaborationSchemaFingerprint({ projectProfile });
     const changedExtensions = COLLABORATION_SCHEMA_EXTENSION_DESCRIPTORS.map((descriptor) => (
       descriptor.name === "link" ? { ...descriptor, version: "3.27.5" } : descriptor
     ));
 
     expect(createCollaborationSchemaFingerprint({
       extensionDescriptors: changedExtensions,
-      projectProfileId: "default",
+      projectProfile,
     })).not.toBe(baseline);
     expect(createCollaborationSchemaFingerprint({
-      projectProfileId: "default",
+      projectProfile,
       schemaVersion: COLLABORATION_DOCUMENT_SCHEMA_VERSION + 1,
     })).not.toBe(baseline);
   });
@@ -309,4 +346,8 @@ function captureCodecFailure(operation: () => unknown) {
   }
   expect(thrown.message).toBe("Collaboration document is invalid");
   return thrown.failure;
+}
+
+function cloneProjectProfile(profile: ProjectProfile): ProjectProfile {
+  return structuredClone(profile);
 }
