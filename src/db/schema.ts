@@ -631,6 +631,92 @@ export const collaborationUpdates = sqliteTable(
   ],
 );
 
+export const collaborationNoopReceipts = sqliteTable(
+  "collaboration_noop_receipts",
+  {
+    workspaceId: text("workspace_id").notNull(),
+    documentId: text("document_id").notNull(),
+    idempotencyKey: text("idempotency_key").notNull(),
+    generation: integer("generation").notNull(),
+    headSeq: integer("head_seq").notNull(),
+    checksum: text("checksum").notNull(),
+    originKind: text("origin_kind", {
+      enum: ["client", "proposal_command", "undo_command", "migration", "repair"],
+    }).notNull(),
+    principalId: text("principal_id").notNull(),
+    requestId: text("request_id"),
+    sessionId: text("session_id"),
+    semanticActionId: text("semantic_action_id"),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.workspaceId, table.documentId, table.idempotencyKey],
+      name: "collaboration_noop_receipts_pk",
+    }),
+    foreignKey({
+      columns: [table.workspaceId, table.documentId, table.generation],
+      foreignColumns: [
+        collaborationDocuments.workspaceId,
+        collaborationDocuments.documentId,
+        collaborationDocuments.generation,
+      ],
+      name: "collaboration_noop_receipts_document_generation_fk",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.workspaceId, table.semanticActionId, table.documentId, table.generation],
+      foreignColumns: [
+        collaborationActions.workspaceId,
+        collaborationActions.id,
+        collaborationActions.documentId,
+        collaborationActions.generation,
+      ],
+      name: "collaboration_noop_receipts_semantic_action_fk",
+    }),
+    check(
+      "collaboration_noop_receipts_sequence_check",
+      sql`typeof(${table.generation}) = 'integer' and ${table.generation} between 1 and 9007199254740991
+        and typeof(${table.headSeq}) = 'integer' and ${table.headSeq} between 0 and 9007199254740991`,
+    ),
+    check(
+      "collaboration_noop_receipts_checksum_check",
+      sql`typeof(${table.checksum}) = 'text'
+        and length(${table.checksum}) = 64
+        and ${table.checksum} not glob '*[^0-9a-f]*'`,
+    ),
+    check(
+      "collaboration_noop_receipts_origin_check",
+      sql`${table.originKind} in ('client', 'proposal_command', 'undo_command', 'migration', 'repair')`,
+    ),
+    check(
+      "collaboration_noop_receipts_idempotency_key_check",
+      sql`typeof(${table.idempotencyKey}) = 'text'
+        and ${table.idempotencyKey} = trim(${table.idempotencyKey}, ${COLLABORATION_KEY_BOUNDARY_WHITESPACE_SQL})
+        and length(cast(${table.idempotencyKey} as blob)) between 1 and ${COLLABORATION_STORAGE_LIMIT_SQL.correctnessKeyBytes}`,
+    ),
+    check(
+      "collaboration_noop_receipts_audit_identity_check",
+      sql`(${table.principalId} is null or (
+          typeof(${table.principalId}) = 'text'
+          and ${table.principalId} = trim(${table.principalId}, ${COLLABORATION_KEY_BOUNDARY_WHITESPACE_SQL})
+          and length(cast(${table.principalId} as blob)) between 1 and ${COLLABORATION_STORAGE_LIMIT_SQL.correctnessKeyBytes}
+        )) and (${table.requestId} is null or (
+          typeof(${table.requestId}) = 'text'
+          and ${table.requestId} = trim(${table.requestId}, ${COLLABORATION_KEY_BOUNDARY_WHITESPACE_SQL})
+          and length(cast(${table.requestId} as blob)) between 1 and ${COLLABORATION_STORAGE_LIMIT_SQL.correctnessKeyBytes}
+        )) and (${table.sessionId} is null or (
+          typeof(${table.sessionId}) = 'text'
+          and ${table.sessionId} = trim(${table.sessionId}, ${COLLABORATION_KEY_BOUNDARY_WHITESPACE_SQL})
+          and length(cast(${table.sessionId} as blob)) between 1 and ${COLLABORATION_STORAGE_LIMIT_SQL.correctnessKeyBytes}
+        )) and (${table.semanticActionId} is null or (
+          typeof(${table.semanticActionId}) = 'text'
+          and ${table.semanticActionId} = trim(${table.semanticActionId}, ${COLLABORATION_KEY_BOUNDARY_WHITESPACE_SQL})
+          and length(cast(${table.semanticActionId} as blob)) between 1 and ${COLLABORATION_STORAGE_LIMIT_SQL.correctnessKeyBytes}
+        ))`,
+    ),
+  ],
+);
+
 export const collaborationAuthorizationEpochs = sqliteTable(
   "collaboration_authorization_epochs",
   {
@@ -1041,6 +1127,8 @@ export type CollaborationDocumentRecord = typeof collaborationDocuments.$inferSe
 export type NewCollaborationDocumentRecord = typeof collaborationDocuments.$inferInsert;
 export type CollaborationUpdateRecord = typeof collaborationUpdates.$inferSelect;
 export type NewCollaborationUpdateRecord = typeof collaborationUpdates.$inferInsert;
+export type CollaborationNoopReceiptRecord = typeof collaborationNoopReceipts.$inferSelect;
+export type NewCollaborationNoopReceiptRecord = typeof collaborationNoopReceipts.$inferInsert;
 export type CollaborationActionRecord = typeof collaborationActions.$inferSelect;
 export type NewCollaborationActionRecord = typeof collaborationActions.$inferInsert;
 export type CollaborationAuthorizationEpochRecord = typeof collaborationAuthorizationEpochs.$inferSelect;

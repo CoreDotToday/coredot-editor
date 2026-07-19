@@ -6,6 +6,7 @@ import * as Y from "yjs";
 import {
   COLLABORATION_STORAGE_LIMITS,
   collaborationDocuments,
+  collaborationNoopReceipts,
   collaborationUpdates,
   documentApprovals,
   documents,
@@ -23,6 +24,11 @@ import {
   type CollaborationMaterialization,
 } from "./contracts";
 import { CollaborationCodecError, createCollaborationDocumentCodec } from "./document-codec";
+import {
+  AppendCandidateEvaluationError,
+  evaluateAppendCandidate,
+  shouldRotateAppend,
+} from "./persistence-candidate";
 import {
   createCollaborationRepository,
   type CollaborationDatabase,
@@ -56,9 +62,9 @@ export type AppendCollaborationUpdate = {
 };
 
 /**
- * Changed updates return their durable row sequence. A Yjs no-op returns the
- * current generation/head with `seq === headSeq` and the input checksum; it
- * creates no durable update or idempotency row.
+ * Changed updates return their durable update-row sequence. A Yjs no-op stores
+ * a durable receipt and returns its captured generation/head with
+ * `seq === headSeq`, so exact retries remain stable as the document advances.
  */
 export type DurableUpdateReceipt = {
   checksum: string;
@@ -195,89 +201,61 @@ export function createCollaborationPersistence(
         );
         await assertAppendableDocument(transaction, scope, input.documentId);
         const updateChecksum = checksum(input.update);
-        const replay = await findIdempotentUpdate(transaction, scope, input);
+        const replay = await findIdempotentReceipt(transaction, scope, input);
         if (replay) {
-          if (!matchesIdempotentUpdate(replay, input, updateChecksum)) {
+          if (!matchesIdempotentReceipt(replay, input, updateChecksum)) {
             throw persistenceError("idempotency_conflict", false);
           }
-          return updateReceipt(replay);
+          return durableReceipt(replay);
         }
 
         if (loaded.generation !== input.generation) {
           throw persistenceError("stale_generation", true);
         }
 
-        const [storageState] = await transaction
-          .select({
-            checkpointBytes: sql<number>`length(${collaborationDocuments.checkpointBlob})`,
-            checkpointSeq: collaborationDocuments.checkpointSeq,
-          })
-          .from(collaborationDocuments)
-          .where(and(
-            eq(collaborationDocuments.workspaceId, scope.workspaceId),
-            eq(collaborationDocuments.documentId, input.documentId),
-            eq(collaborationDocuments.generation, loaded.generation),
-            eq(collaborationDocuments.isCurrent, true),
-          ))
-          .limit(1);
-        if (!storageState) throw new CollaborationCasRetryError();
-        const [{ tailBytes }] = await transaction
-          .select({ tailBytes: sql<number>`coalesce(sum(length(${collaborationUpdates.updateBlob})), 0)` })
-          .from(collaborationUpdates)
-          .where(and(
-            eq(collaborationUpdates.workspaceId, scope.workspaceId),
-            eq(collaborationUpdates.documentId, input.documentId),
-            eq(collaborationUpdates.generation, loaded.generation),
-            gt(collaborationUpdates.seq, storageState.checkpointSeq),
-          ));
-        const mustRotate = Number(storageState.checkpointBytes)
-          + Number(tailBytes ?? 0)
-          + input.update.byteLength
-          > storageLimits.cumulativeUpdateBytes;
-        let appendDocument = loaded.document;
+        const mustRotate = await planAppendStorage(
+          transaction,
+          scope,
+          loaded,
+          input.update.byteLength,
+          storageLimits.cumulativeUpdateBytes,
+        );
         let appendGeneration = loaded.generation;
         let appendHeadSeq = loaded.headSeq;
         let projectedDuringRotation = false;
         const timestamp = now();
-        let rotationCheckpoint: Uint8Array | undefined;
-        let rotationMaterialization: CollaborationMaterialization | undefined;
-
-        if (mustRotate) {
-          try {
-            rotationCheckpoint = codec.encodeCheckpoint(loaded.document);
-          } catch {
-            throw persistenceError("storage_budget", true);
-          }
-          if (rotationCheckpoint.byteLength > storageLimits.checkpointBytes) {
-            throw persistenceError("storage_budget", true);
-          }
-          if (loaded.projectedSeq < loaded.headSeq) {
-            try {
-              rotationMaterialization = codec.materialize(loaded.document);
-            } catch {
-              throw persistenceError("storage_budget", true);
-            }
-          }
-          try {
-            appendDocument = codec.loadCheckpoint(rotationCheckpoint);
-          } catch {
-            throw persistenceError("storage_budget", true);
-          }
-        }
-
-        let changed = false;
-        const observeCandidateUpdate = () => {
-          changed = true;
-        };
-        appendDocument.on("update", observeCandidateUpdate);
+        let evaluation: ReturnType<typeof evaluateAppendCandidate>;
         try {
-          Y.applyUpdate(appendDocument, input.update, "durable-append-validation");
-        } catch {
-          throw persistenceError("corrupt_state", false);
-        } finally {
-          appendDocument.off("update", observeCandidateUpdate);
+          evaluation = evaluateAppendCandidate({
+            checkpointBytesLimit: storageLimits.checkpointBytes,
+            codec,
+            document: loaded.document,
+            projectProfile,
+            shouldMaterializeBeforeRotation: loaded.projectedSeq < loaded.headSeq,
+            shouldRotate: mustRotate,
+            update: input.update,
+          });
+        } catch (error) {
+          if (error instanceof AppendCandidateEvaluationError) {
+            throw persistenceError(error.failure, error.failure === "storage_budget");
+          }
+          throw error;
         }
-        if (!changed) {
+        if (!evaluation.changed) {
+          await transaction.insert(collaborationNoopReceipts).values({
+            checksum: updateChecksum,
+            createdAt: timestamp,
+            documentId: input.documentId,
+            generation: loaded.generation,
+            headSeq: loaded.headSeq,
+            idempotencyKey: input.idempotencyKey,
+            originKind: input.originKind,
+            principalId: input.principalId,
+            requestId: input.requestId,
+            semanticActionId: input.semanticActionId,
+            sessionId: input.sessionId,
+            workspaceId: scope.workspaceId,
+          });
           return {
             checksum: updateChecksum,
             documentId: input.documentId,
@@ -287,37 +265,21 @@ export function createCollaborationPersistence(
           };
         }
 
-        try {
-          codec.validate(appendDocument, projectProfile);
-          const candidateCheckpoint = codec.encodeCheckpoint(appendDocument);
-          if (candidateCheckpoint.byteLength > storageLimits.checkpointBytes) {
-            throw persistenceError("storage_budget", true);
-          }
-        } catch (error) {
-          if (error instanceof CollaborationPersistenceError) throw error;
-          if (
-            error instanceof CollaborationCodecError
-            && error.failure.reason === "checkpoint_budget"
-          ) {
-            throw persistenceError("storage_budget", true);
-          }
-          throw persistenceError("corrupt_state", false);
-        }
-
         if (mustRotate) {
-          if (!rotationCheckpoint) throw persistenceError("corrupt_state", false);
+          const rotation = evaluation.rotation;
+          if (!rotation) throw persistenceError("corrupt_state", false);
           if (
-            rotationCheckpoint.byteLength + input.update.byteLength
+            rotation.checkpoint.byteLength + input.update.byteLength
             > storageLimits.cumulativeUpdateBytes
           ) {
             throw persistenceError("storage_budget", true);
           }
-          if (rotationMaterialization) {
+          if (rotation.materialization) {
             await writeMaterializedDocument(
               transaction,
               scope,
               input.documentId,
-              rotationMaterialization,
+              rotation.materialization,
               timestamp,
             );
             projectedDuringRotation = true;
@@ -340,8 +302,8 @@ export function createCollaborationPersistence(
           if (!retired[0]) throw new CollaborationCasRetryError();
           appendGeneration = loaded.generation + 1;
           await transaction.insert(collaborationDocuments).values({
-            checkpointBlob: Buffer.from(rotationCheckpoint),
-            checkpointChecksum: checksum(rotationCheckpoint),
+            checkpointBlob: Buffer.from(rotation.checkpoint),
+            checkpointChecksum: checksum(rotation.checkpoint),
             checkpointSeq: loaded.headSeq,
             createdAt: timestamp,
             documentId: input.documentId,
@@ -577,6 +539,44 @@ export function createCollaborationPersistence(
       });
     },
   };
+}
+
+async function planAppendStorage(
+  transaction: CollaborationTransaction,
+  scope: WorkspaceScope,
+  loaded: CollaborationSnapshot,
+  updateBytes: number,
+  cumulativeLimitBytes: number,
+) {
+  const [storageState] = await transaction
+    .select({
+      checkpointBytes: sql<number>`length(${collaborationDocuments.checkpointBlob})`,
+      checkpointSeq: collaborationDocuments.checkpointSeq,
+    })
+    .from(collaborationDocuments)
+    .where(and(
+      eq(collaborationDocuments.workspaceId, scope.workspaceId),
+      eq(collaborationDocuments.documentId, loaded.documentId),
+      eq(collaborationDocuments.generation, loaded.generation),
+      eq(collaborationDocuments.isCurrent, true),
+    ))
+    .limit(1);
+  if (!storageState) throw new CollaborationCasRetryError();
+  const [{ tailBytes }] = await transaction
+    .select({ tailBytes: sql<number>`coalesce(sum(length(${collaborationUpdates.updateBlob})), 0)` })
+    .from(collaborationUpdates)
+    .where(and(
+      eq(collaborationUpdates.workspaceId, scope.workspaceId),
+      eq(collaborationUpdates.documentId, loaded.documentId),
+      eq(collaborationUpdates.generation, loaded.generation),
+      gt(collaborationUpdates.seq, storageState.checkpointSeq),
+    ));
+  return shouldRotateAppend({
+    checkpointBytes: Number(storageState.checkpointBytes),
+    cumulativeLimitBytes,
+    tailBytes: Number(tailBytes ?? 0),
+    updateBytes,
+  });
 }
 
 async function ensureInitializedInTransaction(
@@ -915,12 +915,18 @@ function isPlainJsonObject(value: unknown): value is Record<string, unknown> {
   return prototype === Object.prototype || prototype === null;
 }
 
-async function findIdempotentUpdate(
+type StoredIdempotentReceipt =
+  | { kind: "noop"; stored: typeof collaborationNoopReceipts.$inferSelect }
+  | { kind: "update"; stored: typeof collaborationUpdates.$inferSelect };
+
+async function findIdempotentReceipt(
   transaction: CollaborationTransaction,
   scope: WorkspaceScope,
   input: AppendCollaborationUpdate,
-) {
-  const rows = await transaction
+): Promise<StoredIdempotentReceipt | null> {
+  // 0016 deliberately has no synthetic backfill: pre-0016 changed appends keep
+  // replaying from collaboration_updates, while new no-op appends use receipts.
+  const updateRows = await transaction
     .select()
     .from(collaborationUpdates)
     .where(and(
@@ -930,15 +936,53 @@ async function findIdempotentUpdate(
     ))
     .orderBy(asc(collaborationUpdates.generation), asc(collaborationUpdates.seq))
     .limit(2);
-  if (rows.length > 1) throw persistenceError("corrupt_state", false);
-  return rows[0] ?? null;
+  const noOpRows = await transaction
+    .select()
+    .from(collaborationNoopReceipts)
+    .where(and(
+      eq(collaborationNoopReceipts.workspaceId, scope.workspaceId),
+      eq(collaborationNoopReceipts.documentId, input.documentId),
+      eq(collaborationNoopReceipts.idempotencyKey, input.idempotencyKey),
+    ))
+    .limit(2);
+  if (updateRows.length + noOpRows.length > 1) {
+    throw persistenceError("corrupt_state", false);
+  }
+  const receipt: StoredIdempotentReceipt | null = noOpRows[0]
+    ? { kind: "noop", stored: noOpRows[0] }
+    : updateRows[0]
+      ? { kind: "update", stored: updateRows[0] }
+      : null;
+  if (receipt) await assertReceiptGenerationFence(transaction, receipt);
+  return receipt;
 }
 
-function matchesIdempotentUpdate(
-  stored: typeof collaborationUpdates.$inferSelect,
+async function assertReceiptGenerationFence(
+  transaction: CollaborationTransaction,
+  receipt: StoredIdempotentReceipt,
+) {
+  const { stored } = receipt;
+  const generations = await transaction
+    .select({ headSeq: collaborationDocuments.headSeq })
+    .from(collaborationDocuments)
+    .where(and(
+      eq(collaborationDocuments.workspaceId, stored.workspaceId),
+      eq(collaborationDocuments.documentId, stored.documentId),
+      eq(collaborationDocuments.generation, stored.generation),
+    ))
+    .limit(2);
+  const receiptSeq = receipt.kind === "noop" ? receipt.stored.headSeq : receipt.stored.seq;
+  if (generations.length !== 1 || receiptSeq > generations[0]!.headSeq) {
+    throw persistenceError("corrupt_state", false);
+  }
+}
+
+function matchesIdempotentReceipt(
+  receipt: StoredIdempotentReceipt,
   input: AppendCollaborationUpdate,
   updateChecksum: string,
 ) {
+  const { stored } = receipt;
   return stored.checksum === updateChecksum
     && stored.originKind === input.originKind
     && stored.principalId === input.principalId
@@ -947,13 +991,15 @@ function matchesIdempotentUpdate(
     && stored.semanticActionId === (input.semanticActionId ?? null);
 }
 
-function updateReceipt(stored: typeof collaborationUpdates.$inferSelect): DurableUpdateReceipt {
+function durableReceipt(receipt: StoredIdempotentReceipt): DurableUpdateReceipt {
+  const { stored } = receipt;
+  const headSeq = receipt.kind === "noop" ? receipt.stored.headSeq : receipt.stored.seq;
   return {
     checksum: stored.checksum,
     documentId: stored.documentId,
     generation: stored.generation,
-    headSeq: stored.seq,
-    seq: stored.seq,
+    headSeq,
+    seq: headSeq,
   };
 }
 

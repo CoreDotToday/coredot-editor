@@ -21,6 +21,7 @@ import {
   collaborationAuthorizationEpochs,
   collaborationDocumentChanges,
   collaborationDocuments,
+  collaborationNoopReceipts,
   collaborationProposalAnchors,
   collaborationUpdates,
   documentApprovals,
@@ -29,6 +30,7 @@ import {
 const COLLABORATION_TABLES = [
   "collaboration_documents",
   "collaboration_updates",
+  "collaboration_noop_receipts",
   "collaboration_actions",
   "collaboration_authorization_epochs",
   "document_approvals",
@@ -53,6 +55,7 @@ const parityTypeProbe = sqliteTable("parity_type_probe", {
 const COLLABORATION_SCHEMA_TABLES = [
   collaborationDocuments,
   collaborationUpdates,
+  collaborationNoopReceipts,
   collaborationActions,
   collaborationAuthorizationEpochs,
   documentApprovals,
@@ -70,12 +73,13 @@ afterEach(async () => {
 });
 
 describe("collaboration migration", () => {
-  it("exports all eight collaboration tables from the Drizzle schema", async () => {
+  it("exports all nine collaboration tables from the Drizzle schema", async () => {
     const schema = await import("./schema");
 
     for (const exportName of [
       "collaborationDocuments",
       "collaborationUpdates",
+      "collaborationNoopReceipts",
       "collaborationActions",
       "collaborationAuthorizationEpochs",
       "documentApprovals",
@@ -209,6 +213,7 @@ describe("collaboration migration", () => {
       { column: "schema_fingerprint", table: "collaboration_documents" },
       { column: "checkpoint_checksum", table: "collaboration_documents" },
       { column: "checksum", table: "collaboration_updates" },
+      { column: "checksum", table: "collaboration_noop_receipts" },
       { column: "approved_content_hash", table: "document_approvals" },
       { column: "schema_fingerprint", table: "collaboration_proposal_anchors" },
       { column: "target_hash", table: "collaboration_proposal_anchors" },
@@ -276,6 +281,11 @@ describe("collaboration migration", () => {
       },
       ...correctnessKeyCases("collaboration_actions", "command_id", "id = 'action-a'"),
       ...correctnessKeyCases("collaboration_updates", "idempotency_key", "seq = 1"),
+      ...correctnessKeyCases("collaboration_noop_receipts", "idempotency_key", "head_seq = 1"),
+      ...correctnessKeyCases("collaboration_noop_receipts", "principal_id", "head_seq = 1"),
+      ...correctnessKeyCases("collaboration_noop_receipts", "request_id", "head_seq = 1"),
+      ...correctnessKeyCases("collaboration_noop_receipts", "session_id", "head_seq = 1"),
+      ...correctnessKeyCases("collaboration_noop_receipts", "semantic_action_id", "head_seq = 1"),
     ];
 
     await expectAllReject(client, cases);
@@ -287,6 +297,10 @@ describe("collaboration migration", () => {
       })).resolves.toBeDefined();
       await expect(client.execute({
         sql: "UPDATE collaboration_updates SET idempotency_key = ? WHERE seq = 1",
+        args: [`key${internalWhitespace}part`],
+      })).resolves.toBeDefined();
+      await expect(client.execute({
+        sql: "UPDATE collaboration_noop_receipts SET idempotency_key = ? WHERE head_seq = 1",
         args: [`key${internalWhitespace}part`],
       })).resolves.toBeDefined();
     }
@@ -306,6 +320,7 @@ describe("collaboration migration", () => {
 
     await expectReject(client, collaborationDocumentInsert("b", "doc-a"));
     await expectReject(client, collaborationUpdateInsert({ workspace: "b", document: "doc-a", seq: 2 }));
+    await expectReject(client, collaborationNoopReceiptInsert({ workspace: "b", document: "doc-a" }));
     await expectReject(client, collaborationUpdateInsert({ workspace: "a", document: "doc-a", generation: 2, seq: 2 }));
     await expectReject(client, collaborationActionInsert({
       id: "action-wrong-workspace",
@@ -342,6 +357,16 @@ describe("collaboration migration", () => {
       seq: 2,
       semanticAction: "action-b",
     }));
+    await expectReject(client, collaborationNoopReceiptInsert({
+      workspace: "a",
+      document: "doc-a",
+      semanticAction: "action-b",
+    }));
+    await expectReject(client, collaborationNoopReceiptInsert({
+      workspace: "a",
+      document: "doc-a",
+      idempotencyKey: "noop-key-a-1",
+    }));
 
     await expectReject(client, collaborationUpdateInsert({ workspace: "a", document: "doc-a", seq: 2 }));
     await expectReject(client, collaborationActionInsert({
@@ -361,6 +386,20 @@ describe("collaboration migration", () => {
       document: "doc-a",
       seq: MAX_SAFE_INTEGER + 1,
     }));
+    await expectReject(client, collaborationNoopReceiptInsert({
+      workspace: "a",
+      document: "doc-a",
+      headSeq: -1,
+      idempotencyKey: "noop-negative-head",
+    }));
+    await expectReject(client, collaborationNoopReceiptInsert({
+      workspace: "a",
+      document: "doc-a",
+      headSeq: 0.5,
+      idempotencyKey: "noop-fractional-head",
+    }));
+    await expectReject(client, `UPDATE collaboration_noop_receipts
+      SET origin_kind = 'unknown' WHERE workspace_id = 'workspace-a'`);
     await expectReject(client, authorizationEpochInsert("epoch-negative", -1));
     await expectReject(client, authorizationEpochInsert("epoch-fractional", 0.5));
     await expectReject(client, authorizationEpochInsert("epoch-too-large", MAX_SAFE_INTEGER + 1));
@@ -408,6 +447,28 @@ describe("collaboration migration", () => {
     for (const table of COLLABORATION_TABLES) {
       expect(await rowCount(client, table), table).toBe(0);
     }
+    expect((await client.execute("PRAGMA foreign_key_check")).rows).toEqual([]);
+  });
+
+  it("upgrades populated 0015 collaboration data without inventing no-op receipts", async () => {
+    const client = await createDatabase("noop-receipt-upgrade");
+    const database = drizzle(client);
+    const through0015 = await createMigrationPrefix(15);
+    await migrate(database, { migrationsFolder: through0015 });
+    await client.execute("PRAGMA foreign_keys=ON");
+    await seedLegacyGraph(client, "noop-upgrade");
+    await insertCollaborationDocument(client, "noop-upgrade");
+    await insertFullCollaborationGraph(client, "noop-upgrade", { includeNoopReceipt: false });
+    const updatesBefore = (await client.execute(
+      "SELECT * FROM collaboration_updates ORDER BY workspace_id, document_id, generation, seq",
+    )).rows;
+
+    await migrate(database, { migrationsFolder });
+
+    expect((await client.execute(
+      "SELECT * FROM collaboration_updates ORDER BY workspace_id, document_id, generation, seq",
+    )).rows).toEqual(updatesBefore);
+    expect(await rowCount(client, "collaboration_noop_receipts")).toBe(0);
     expect((await client.execute("PRAGMA foreign_key_check")).rows).toEqual([]);
   });
 });
@@ -518,7 +579,11 @@ function collaborationDocumentInsert(
   };
 }
 
-async function insertFullCollaborationGraph(client: Client, suffix: string) {
+async function insertFullCollaborationGraph(
+  client: Client,
+  suffix: string,
+  options: { includeNoopReceipt?: boolean } = {},
+) {
   await client.execute(collaborationActionInsert({
     id: `action-${suffix}`,
     workspace: suffix,
@@ -533,6 +598,13 @@ async function insertFullCollaborationGraph(client: Client, suffix: string) {
     seq: 1,
     semanticAction: `action-${suffix}`,
   }));
+  if (options.includeNoopReceipt !== false) {
+    await client.execute(collaborationNoopReceiptInsert({
+      workspace: suffix,
+      document: `doc-${suffix}`,
+      semanticAction: `action-${suffix}`,
+    }));
+  }
   await client.execute(authorizationEpochInsert(`principal-${suffix}`, 0, suffix));
   await client.execute(approvalInsert({ id: `approval-${suffix}`, workspace: suffix, document: `doc-${suffix}` }));
   await client.execute(anchorInsert({
@@ -547,6 +619,34 @@ async function insertFullCollaborationGraph(client: Client, suffix: string) {
     action: `action-${suffix}`,
   }));
   await client.execute(aiSnapshotInsert({ workspace: suffix, run: `run-${suffix}`, document: `doc-${suffix}` }));
+}
+
+function collaborationNoopReceiptInsert(input: {
+  workspace: string;
+  document: string;
+  generation?: number;
+  headSeq?: number;
+  idempotencyKey?: string;
+  semanticAction?: string;
+}) {
+  return {
+    sql: `INSERT INTO collaboration_noop_receipts (
+      workspace_id, document_id, idempotency_key, generation, head_seq, checksum,
+      origin_kind, principal_id, request_id, session_id, semantic_action_id, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, 'proposal_command', ?, ?, ?, ?, 7000)`,
+    args: [
+      `workspace-${input.workspace}`,
+      input.document,
+      input.idempotencyKey ?? `noop-key-${input.workspace}-1`,
+      input.generation ?? 1,
+      input.headSeq ?? 1,
+      HASH_B,
+      `principal-${input.workspace}`,
+      `request-${input.workspace}`,
+      `session-${input.workspace}`,
+      input.semanticAction ?? null,
+    ],
+  };
 }
 
 function collaborationUpdateInsert(input: {

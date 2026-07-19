@@ -25,6 +25,7 @@ const FULL_WORKSPACE_TABLES = [
   "document_change_proposals",
   "ai_workspace_messages",
   "collaboration_updates",
+  "collaboration_noop_receipts",
   "collaboration_proposal_anchors",
   "collaboration_document_changes",
   "app_settings",
@@ -42,6 +43,7 @@ const FULL_SUMMARY_KEYS = [
   "collaborationDocuments",
   "collaborationProposalAnchors",
   "collaborationUpdates",
+  "collaborationNoopReceipts",
   "documentApprovals",
   "documentChangeProposals",
   "documentChanges",
@@ -225,6 +227,11 @@ async function createFullClaimDatabase() {
       origin_kind, principal_id, request_id, session_id, semantic_action_id, diagnostic_json, created_at
     ) VALUES ('local', 'full_doc', 1, 1, X'0304', '${HASH_A}', 'full-update-key',
       'proposal_command', 'full_principal', 'full_request', 'full_session', 'full_action', '{}', 6000);
+    INSERT INTO collaboration_noop_receipts (
+      workspace_id, document_id, idempotency_key, generation, head_seq, checksum,
+      origin_kind, principal_id, request_id, session_id, semantic_action_id, created_at
+    ) VALUES ('local', 'full_doc', 'full-noop-key', 1, 1, '${HASH_B}', 'proposal_command',
+      'full_principal', 'full_request', 'full_session', 'full_action', 6000);
     INSERT INTO collaboration_authorization_epochs (
       workspace_id, principal_id, epoch, updated_at
     ) VALUES ('local', 'full_principal', 1, 6000);

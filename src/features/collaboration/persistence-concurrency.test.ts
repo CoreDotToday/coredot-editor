@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 
 import * as schema from "@/db/schema";
-import { collaborationUpdates, documents } from "@/db/schema";
+import { collaborationNoopReceipts, collaborationUpdates, documents } from "@/db/schema";
 import { getProjectProfile } from "@/features/projects/default-project-profiles";
 
 import { COLLABORATION_METADATA_NAME } from "./contracts";
@@ -81,6 +81,73 @@ describe("CollaborationPersistence cross-client contention", () => {
     expect(second).toEqual(first);
     expect(first).toMatchObject({ headSeq: 1, seq: 1 });
     await expect(harness.databaseA.select().from(collaborationUpdates)).resolves.toHaveLength(1);
+  });
+
+  it("converges an identical no-op race on one durable receipt", async () => {
+    const harness = await createTwoClientHarness("noop-idempotency-race");
+    const snapshot = await harness.persistenceA.initialize(scope, harness.documentId);
+    const duplicateState = Y.encodeStateAsUpdate(snapshot.document);
+    const input = command(harness.documentId, duplicateState, "shared-noop-key", "principal-a");
+
+    const [first, second] = await Promise.all([
+      harness.persistenceA.appendValidatedUpdate(scope, input),
+      harness.persistenceB.appendValidatedUpdate(scope, input),
+    ]);
+
+    expect(second).toEqual(first);
+    expect(first).toMatchObject({ generation: 1, headSeq: 0, seq: 0 });
+    await expect(harness.databaseA.select().from(collaborationNoopReceipts)).resolves.toHaveLength(1);
+    await expect(harness.databaseA.select().from(collaborationUpdates)).resolves.toHaveLength(0);
+  });
+
+  it("returns one success and one conflict for audit-mismatched no-op races", async () => {
+    const harness = await createTwoClientHarness("noop-conflict-race");
+    const snapshot = await harness.persistenceA.initialize(scope, harness.documentId);
+    const duplicateState = Y.encodeStateAsUpdate(snapshot.document);
+    const first = command(harness.documentId, duplicateState, "conflicting-noop-key", "principal-a");
+    const second = command(harness.documentId, duplicateState, "conflicting-noop-key", "principal-b");
+
+    const outcomes = await Promise.allSettled([
+      harness.persistenceA.appendValidatedUpdate(scope, first),
+      harness.persistenceB.appendValidatedUpdate(scope, second),
+    ]);
+
+    expect(outcomes.filter(({ status }) => status === "fulfilled")).toHaveLength(1);
+    const [failure] = outcomes.filter(({ status }) => status === "rejected");
+    expect(failure).toMatchObject({
+      reason: { category: "idempotency_conflict", retryable: false },
+      status: "rejected",
+    });
+    await expect(harness.databaseA.select().from(collaborationNoopReceipts)).resolves.toHaveLength(1);
+    await expect(harness.databaseA.select().from(collaborationUpdates)).resolves.toHaveLength(0);
+  });
+
+  it("allows only one owner when changed and no-op appends race for the same key", async () => {
+    const harness = await createTwoClientHarness("cross-table-key-race");
+    const snapshot = await harness.persistenceA.initialize(scope, harness.documentId);
+    const duplicateState = Y.encodeStateAsUpdate(snapshot.document);
+    const changed = metadataUpdate(snapshot, "owner", "Race winner");
+
+    const outcomes = await Promise.allSettled([
+      harness.persistenceA.appendValidatedUpdate(
+        scope,
+        command(harness.documentId, duplicateState, "cross-table-key", "principal-a"),
+      ),
+      harness.persistenceB.appendValidatedUpdate(
+        scope,
+        command(harness.documentId, changed, "cross-table-key", "principal-a"),
+      ),
+    ]);
+
+    expect(outcomes.filter(({ status }) => status === "fulfilled")).toHaveLength(1);
+    expect(outcomes.filter(({ status }) => status === "rejected")).toEqual([
+      expect.objectContaining({
+        reason: expect.objectContaining({ category: "idempotency_conflict", retryable: false }),
+      }),
+    ]);
+    const updateRows = await harness.databaseA.select().from(collaborationUpdates);
+    const noOpRows = await harness.databaseA.select().from(collaborationNoopReceipts);
+    expect(updateRows.length + noOpRows.length).toBe(1);
   });
 
   it("serializes archive before append and rejects the stale initialized writer", async () => {

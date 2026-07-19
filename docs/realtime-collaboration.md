@@ -141,6 +141,12 @@ Canonical persistence limits are deliberately below the general SQLite value bou
 
 The unique keys prevent replayed provider messages or server commands from allocating a second sequence. Applying the same Yjs update more than once must remain harmless.
 
+### Collaboration No-op Receipt
+
+`collaboration_noop_receipts` records accepted updates that do not change the canonical Yjs checkpoint. A receipt keeps the document-wide idempotency key, input checksum, origin and audit identity, and the exact generation and head observed when the no-op was accepted. It does not allocate a new update sequence or invalidate approval/readiness. Exact retries therefore return the saved `generation` and `headSeq` even after later appends or a storage rotation.
+
+The receipt primary key is Workspace/document/idempotency key, so the key remains owned across generations. Replay checks both `collaboration_noop_receipts` and `collaboration_updates`; a key found in both sources, more than once in the update history, or beyond its retained generation head is treated as corrupt state. Migration `0016_collaboration_noop_receipts` intentionally does not backfill receipts because pre-migration no-op requests cannot be reconstructed safely. Existing changed-update idempotency records remain replayable from `collaboration_updates` as the compatibility fallback.
+
 ### Collaboration Action
 
 `collaboration_actions` gives binary updates semantic audit meaning. It records the command id, action type, Principal, request id, base and applied head sequence, related Proposal or Document Change ids, status, and bounded failure category. It does not store prompt bodies, document text, credentials, or Awareness payloads.
@@ -186,9 +192,9 @@ For each provider update, the sidecar:
 
 1. Revalidates token expiry, authorization epoch, room binding, and write permission.
 2. Acquires the document sequencer.
-3. Applies the update to a clone of the current Y.Doc.
-4. Validates update bytes, title, metadata, Tiptap resource limits, schema fingerprint, and complete Project Profile candidate state.
-5. Atomically allocates `headSeq` and appends the update and audit envelope.
+3. Encodes the current canonical checkpoint, applies the update to a clone of the current Y.Doc, validates the complete candidate, and encodes the candidate checkpoint.
+4. Compares the complete checkpoint bytes, including unresolved Yjs `pendingStructs` and `pendingDs`. A byte-identical candidate stores a no-op receipt without advancing the head; a pending-only dependency difference remains a durable update.
+5. For a changed candidate, validates update bytes, title, metadata, Tiptap resource limits, schema fingerprint, and complete Project Profile state, then atomically allocates `headSeq` and appends the update and audit envelope.
 6. If the current document is approved, invalidates that approval and changes readiness to `needs_review` in the same transaction.
 7. Allows Hocuspocus to apply and broadcast the already durable update.
 8. Releases the sequencer after the Hocuspocus message lifecycle finishes.
