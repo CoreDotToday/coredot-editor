@@ -1362,7 +1362,7 @@ describe("link-check command wiring", () => {
     ]);
     expect(actionUses(deployJob)).toEqual(["actions/deploy-pages@v5"]);
     expect(workflow).toContain('version: "10.6.5"');
-    expect(workflow).toContain('node-version: "20"');
+    expect(workflow).toContain('node-version: "22"');
     expect(workflow).toContain("cache: pnpm");
     expect(workflow).toContain("run: pnpm install --frozen-lockfile");
     expect(workflow.indexOf("run: pnpm docs:check-links")).toBeLessThan(

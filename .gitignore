@@ -29,6 +29,7 @@
 # next.js
 /.next/
 /out/
+/src/features/collaboration/server/.generated/
 /src/features/documents/.generated/
 
 # production

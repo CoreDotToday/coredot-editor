@@ -55,7 +55,7 @@ See the [Product Tour](docs/product-tour.md) for the complete user journey and [
 
 ## Quick Evaluation
 
-Requirements: Node.js 20.19+, 22.13+, or 24+, and pnpm 10 or newer.
+Requirements: Node.js 22.13+ and pnpm 10 or newer.
 
 ```bash
 pnpm install --frozen-lockfile
