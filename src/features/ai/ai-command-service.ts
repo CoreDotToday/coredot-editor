@@ -1,4 +1,18 @@
+import { createHash } from "node:crypto";
 import type { DocumentRecord, PromptTemplateRecord } from "@/db/schema";
+import { COLLABORATION_STORAGE_LIMITS } from "@/db/schema";
+import * as Y from "yjs";
+import type { CollaborationDocumentCodec } from "@/features/collaboration/contracts";
+import {
+  createCollaborativeProposalAnchor,
+  findUniqueCollaborativeTextRange,
+  type CollaborativeProposalAnchor,
+} from "@/features/collaboration/proposal-command";
+import { hashCanonicalMaterialization } from "@/features/collaboration/exact-document-materialization";
+import {
+  CollaborationPersistenceError,
+  type CollaborationSnapshot,
+} from "@/features/collaboration/persistence";
 import { getDocumentById } from "@/features/documents/document-repository";
 import type { WorkspaceScope } from "@/features/auth/request-context";
 import { getPromptTemplateById } from "@/features/templates/template-repository";
@@ -7,6 +21,40 @@ import { getAiSettings, type AiSettings } from "./ai-settings-repository";
 import { hydrateAiReferenceDocuments, type HydratedAiReferenceDocument } from "./reference-hydration";
 import { createAiProvider, type AiProvider } from "./providers";
 import type { AiCommandPayload } from "./types";
+import { aiCollaborationCodec, loadAiCollaborationSnapshot } from "./ai-collaboration-snapshot";
+
+export type PreparedAiCollaborationSnapshot = {
+  checkpoint: Uint8Array;
+  contentHash: string;
+  generation: number;
+  headSeq: number;
+  schemaFingerprint: string;
+  schemaVersion: number;
+  stateVector: Uint8Array;
+};
+
+export function createAiCollaborativeProposalAnchor(
+  snapshot: PreparedAiCollaborationSnapshot,
+  input: { range?: { from: number; to: number }; targetText: string },
+): CollaborativeProposalAnchor {
+  const document = collaborationCodec.loadCheckpoint(snapshot.checkpoint);
+  try {
+    const range = input.range ?? findUniqueCollaborativeTextRange(document, input.targetText);
+    if (!range) throw new Error("Collaborative AI proposal target is not unique");
+    const anchor = createCollaborativeProposalAnchor(document, {
+      baseHeadSeq: snapshot.headSeq,
+      generation: snapshot.generation,
+      range,
+      schemaFingerprint: snapshot.schemaFingerprint,
+    });
+    if (anchor.targetHash !== sha256(input.targetText)) {
+      throw new Error("Collaborative AI proposal target does not match its exact snapshot");
+    }
+    return anchor;
+  } finally {
+    document.destroy();
+  }
+}
 
 export type PreparedAiCommandRequest = {
   aiSettings: AiSettings;
@@ -15,13 +63,15 @@ export type PreparedAiCommandRequest = {
   referencedDocuments: HydratedAiReferenceDocument[];
   reviewedText: string;
   template: PromptTemplateRecord;
+  collaborationSnapshot?: PreparedAiCollaborationSnapshot;
 };
 
 export type AiCommandRequestFailure = {
+  code?: string;
   details?: unknown;
   error: string;
   ok: false;
-  status: 400 | 404 | 500;
+  status: 400 | 404 | 409 | 500 | 503;
 };
 
 export type AiCommandRequestResult =
@@ -39,19 +89,30 @@ export type AiProviderCreationResult =
   | AiCommandRequestFailure;
 
 export type AiCommandServiceDependencies = {
+  collaborationCodec: Pick<
+    CollaborationDocumentCodec,
+    "encodeCheckpoint" | "materialize"
+  >;
   createAiProvider: typeof createAiProvider;
   getAiSettings: typeof getAiSettings;
   getDocumentById: typeof getDocumentById;
   getPromptTemplateById: typeof getPromptTemplateById;
   hydrateAiReferenceDocuments: typeof hydrateAiReferenceDocuments;
+  loadCollaborationSnapshot(
+    scope: WorkspaceScope,
+    documentId: string,
+  ): Promise<CollaborationSnapshot | null>;
 };
 
+const collaborationCodec = aiCollaborationCodec;
 const defaultDependencies: AiCommandServiceDependencies = {
+  collaborationCodec,
   createAiProvider,
   getAiSettings,
   getDocumentById,
   getPromptTemplateById,
   hydrateAiReferenceDocuments,
+  loadCollaborationSnapshot: loadAiCollaborationSnapshot,
 };
 
 export async function createAiProviderForCommand(
@@ -115,6 +176,64 @@ export async function prepareAiCommandRequest(scope: WorkspaceScope, {
     return { error: "Template not found", ok: false, status: 404 };
   }
 
+  let collaborationSnapshot: CollaborationSnapshot | null;
+  try {
+    collaborationSnapshot = await dependencies.loadCollaborationSnapshot(scope, document.id);
+  } catch (error) {
+    return collaborationLoadFailure(error);
+  }
+
+  let exactDocument = document;
+  let preparedCollaborationSnapshot: PreparedAiCollaborationSnapshot | undefined;
+  if (collaborationSnapshot) {
+    try {
+      if (!isCompatibleBarrier(payload, collaborationSnapshot)) {
+        return {
+          code: "collaboration_snapshot_conflict",
+          error: "Collaboration snapshot is not available for this request",
+          ok: false,
+          status: 409,
+        };
+      }
+      const materialization = dependencies.collaborationCodec.materialize(
+        collaborationSnapshot.document,
+      );
+      const stateVector = Y.encodeStateVector(collaborationSnapshot.document);
+      preparedCollaborationSnapshot = {
+        checkpoint: dependencies.collaborationCodec.encodeCheckpoint(collaborationSnapshot.document),
+        contentHash: hashCanonicalMaterialization(materialization),
+        generation: collaborationSnapshot.generation,
+        headSeq: collaborationSnapshot.headSeq,
+        schemaFingerprint: collaborationSnapshot.schemaFingerprint,
+        schemaVersion: collaborationSnapshot.schemaVersion,
+        stateVector,
+      };
+      exactDocument = {
+        ...document,
+        contentJson: materialization.contentJson,
+        metadataJson: materialization.metadataJson,
+        plainText: materialization.plainText,
+        title: materialization.title,
+      };
+    } catch {
+      return {
+        code: "collaboration_snapshot_conflict",
+        error: "Collaboration snapshot is not available for this request",
+        ok: false,
+        status: 409,
+      };
+    } finally {
+      collaborationSnapshot.document.destroy();
+    }
+  } else if (payload.collaborationBarrier) {
+    return {
+      code: "collaboration_snapshot_conflict",
+      error: "Collaboration snapshot is not available for this request",
+      ok: false,
+      status: 409,
+    };
+  }
+
   const variableValidation = validateTemplateVariables(template.variableSchemaJson, payload.variables);
   if (!variableValidation.ok) {
     return {
@@ -132,10 +251,15 @@ export async function prepareAiCommandRequest(scope: WorkspaceScope, {
   );
 
   const preparedContext = {
-    document,
+    ...(preparedCollaborationSnapshot
+      ? { collaborationSnapshot: preparedCollaborationSnapshot }
+      : {}),
+    document: exactDocument,
     ok: true,
     referencedDocuments,
-    reviewedText: useSubmittedDocumentText ? payload.documentText : document.plainText,
+    reviewedText: preparedCollaborationSnapshot
+      ? exactDocument.plainText
+      : useSubmittedDocumentText ? payload.documentText : exactDocument.plainText,
     template,
   } satisfies { ok: true } & PreparedAiCommandContext;
 
@@ -153,4 +277,50 @@ export async function prepareAiCommandRequest(scope: WorkspaceScope, {
     aiSettings: providerResult.aiSettings,
     provider: providerResult.provider,
   };
+}
+
+function isCompatibleBarrier(payload: AiCommandPayload, snapshot: CollaborationSnapshot) {
+  const barrier = payload.collaborationBarrier;
+  if (!barrier || barrier.generation !== snapshot.generation) return false;
+  let encoded: Uint8Array;
+  let clientVector: Map<number, number>;
+  let serverVector: Map<number, number>;
+  try {
+    const buffer = Buffer.from(barrier.stateVector, "base64url");
+    if (
+      buffer.byteLength < 1
+      || buffer.byteLength > COLLABORATION_STORAGE_LIMITS.stateVectorBytes
+      || buffer.toString("base64url") !== barrier.stateVector
+    ) {
+      return false;
+    }
+    encoded = new Uint8Array(buffer);
+    clientVector = Y.decodeStateVector(encoded);
+    serverVector = Y.decodeStateVector(Y.encodeStateVector(snapshot.document));
+  } catch {
+    return false;
+  }
+  return [...clientVector].every(([clientId, clock]) =>
+    Number.isSafeInteger(clock) && clock >= 0 && clock <= (serverVector.get(clientId) ?? 0));
+}
+
+function collaborationLoadFailure(error: unknown): AiCommandRequestFailure {
+  if (error instanceof CollaborationPersistenceError && !error.retryable) {
+    return {
+      code: "collaboration_snapshot_conflict",
+      error: "Collaboration snapshot is not available for this request",
+      ok: false,
+      status: 409,
+    };
+  }
+  return {
+    code: "collaboration_snapshot_unavailable",
+    error: "Collaboration snapshot is temporarily unavailable",
+    ok: false,
+    status: 503,
+  };
+}
+
+function sha256(value: string) {
+  return createHash("sha256").update(value, "utf8").digest("hex");
 }

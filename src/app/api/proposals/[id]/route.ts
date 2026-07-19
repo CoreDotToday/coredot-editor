@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { getProposalById, updateProposalStatus } from "@/features/proposals/proposal-repository";
 import { createProtectedOptionsHandler, createProtectedRouteHandler } from "@/features/auth/route-context";
+import { ProposalStatusUpdateConflictError } from "@/features/proposals/proposal-status-errors";
 
 const proposalStatusPayloadSchema = z.object({
   status: z.enum(["pending", "accepted", "rejected"]),
@@ -51,7 +52,21 @@ const patchHandler = createProtectedRouteHandler(async (
     return NextResponse.json({ error: "Use proposal apply endpoint for accepted proposals" }, { status: 400 });
   }
 
-  const proposal = await updateProposalStatus(requestContext, id, status, appliedMode, { expectedStatus });
+  let proposal;
+  try {
+    proposal = await updateProposalStatus(requestContext, id, status, appliedMode, { expectedStatus });
+  } catch (error) {
+    if (!(error instanceof ProposalStatusUpdateConflictError)) throw error;
+    const existingProposal = await getProposalById(requestContext, id);
+    return NextResponse.json(
+      {
+        error: error.message,
+        proposal: existingProposal,
+        reason: error.reason,
+      },
+      { status: 409 },
+    );
+  }
   if (!proposal) {
     const existingProposal = await getProposalById(requestContext, id);
     if (existingProposal) {

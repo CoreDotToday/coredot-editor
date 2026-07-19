@@ -425,6 +425,21 @@ export function createCollaborationSidecar(options: {
         generation,
         workspaceId: scope.workspaceId,
       });
+      for (const loadedRoom of server.hocuspocus.documents.keys()) {
+        let loadedIdentity: ReturnType<typeof parseCollaborationRoomName>;
+        try {
+          loadedIdentity = parseCollaborationRoomName(loadedRoom);
+        } catch {
+          continue;
+        }
+        if (
+          loadedIdentity.workspaceId === scope.workspaceId
+          && loadedIdentity.documentId === documentId
+          && loadedIdentity.generation < generation
+        ) {
+          closeRoomByName(loadedRoom, "room_rotated");
+        }
+      }
       const document = server.hocuspocus.documents.get(room);
       if (!document) return;
       let growth: ReturnType<typeof resources.reserveDocumentGrowth>;

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { AiRunCollaborationFenceError } from "./ai-collaboration-fence";
 import {
   admitAiOperation,
   createAiOperationFingerprint,
@@ -64,7 +65,9 @@ function createBaseOptions() {
       run: durable.run,
     })),
     operationFingerprint: "fingerprint-1",
-    preflight: vi.fn<() => Promise<AiExecutionStepSuccess<unknown> | AiExecutionStepFailure>>(),
+    preflight: vi.fn<() => Promise<AiExecutionStepSuccess<unknown> | AiExecutionStepFailure>>(
+      async () => ({ ok: true, value: {} }),
+    ),
     prepareFinalization: vi.fn(() => ({ outputText: "", proposals: [] })),
     resolveProvider: vi.fn<(_context: unknown) => Promise<ProviderReadiness<unknown>>>(),
     runInput: {
@@ -101,7 +104,7 @@ describe("executeAiOperation", () => {
     expect(result.ok ? null : result.response?.headers.get("Retry-After")).toBe("7");
   });
 
-  it("resolves the operation fingerprint after budget admission and before durable lookup", async () => {
+  it("resolves the incoming operation fingerprint before durable lookup", async () => {
     const options = createBaseOptions();
     const operationFingerprint = vi.fn(async () => "fingerprint-1");
 
@@ -207,8 +210,9 @@ describe("executeAiOperation", () => {
     expect(options.getAiRunByIdempotencyKey).not.toHaveBeenCalled();
   });
 
-  it("admits budget before replaying an exact completed durable result without provider work", async () => {
+  it("replays a completed exact snapshot after the live document head advances", async () => {
     const options = createBaseOptions();
+    options.preflight.mockRejectedValueOnce(new Error("live collaboration head advanced"));
 
     const result = await executeAiOperation(options);
 
@@ -420,7 +424,7 @@ describe("executeAiOperation", () => {
     expect(inProgress.preflight).not.toHaveBeenCalled();
   });
 
-  it("rejects a failed key with a different fingerprint before preflight or provider construction", async () => {
+  it("rejects a failed key with a different incoming barrier before preflight or provider construction", async () => {
     const options = createBaseOptions();
     options.getAiRunByIdempotencyKey.mockResolvedValueOnce({
       proposals: [],
@@ -626,6 +630,57 @@ describe("executeAiOperation", () => {
       expect(JSON.stringify(result)).not.toMatch(/secret|OPENAI_API_KEY|workspace/);
       expect(options.execute).not.toHaveBeenCalled();
     }
+  });
+
+  it("classifies a legacy claim race as a stable collaboration conflict before provider execution", async () => {
+    const options = createBaseOptions();
+    options.getAiRunByIdempotencyKey.mockResolvedValueOnce(null);
+    options.preflight.mockResolvedValueOnce({ ok: true, value: { documentId: "doc_1" } });
+    options.resolveProvider.mockResolvedValueOnce({
+      model: "stub-editor",
+      ok: true,
+      provider: { name: "stub" },
+      providerName: "stub",
+    });
+    options.claimAiRun.mockRejectedValueOnce(new AiRunCollaborationFenceError());
+
+    await expect(executeAiOperation(options)).resolves.toMatchObject({
+      code: "collaboration_snapshot_conflict",
+      ok: false,
+      status: 409,
+    });
+    expect(options.execute).not.toHaveBeenCalled();
+    expect(options.failAiRun).not.toHaveBeenCalled();
+  });
+
+  it("classifies a legacy finalization race as a conflict and durably fails its claimed run", async () => {
+    const options = createBaseOptions();
+    options.getAiRunByIdempotencyKey.mockResolvedValueOnce(null);
+    options.preflight.mockResolvedValueOnce({ ok: true, value: { documentId: "doc_1" } });
+    options.resolveProvider.mockResolvedValueOnce({
+      model: "stub-editor",
+      ok: true,
+      provider: { name: "stub" },
+      providerName: "stub",
+    });
+    options.claimAiRun.mockResolvedValueOnce({
+      kind: "claimed",
+      run: { executionToken: "attempt-token-1", id: "run_1", status: "pending" },
+    });
+    options.completeAiRunWithProposals.mockRejectedValueOnce(new AiRunCollaborationFenceError());
+    options.failAiRun.mockResolvedValueOnce({ id: "run_1", status: "failed" });
+
+    await expect(executeAiOperation(options)).resolves.toMatchObject({
+      code: "collaboration_snapshot_conflict",
+      ok: false,
+      status: 409,
+    });
+    expect(options.failAiRun).toHaveBeenCalledWith(
+      scope,
+      "run_1",
+      "attempt-token-1",
+      "Collaboration snapshot is not available for this request",
+    );
   });
 
   it("keeps the primary timeout response when guarded failure persistence throws", async () => {

@@ -49,4 +49,24 @@ describe("aiCommandPayloadSchema", () => {
 
     expect(result.success).toBe(true);
   });
+
+  it("accepts only a canonical bounded collaboration snapshot barrier", () => {
+    const valid = aiCommandPayloadSchema.safeParse({
+      ...basePayload,
+      collaborationBarrier: { generation: 2, stateVector: "AA" },
+    });
+    expect(valid.success).toBe(true);
+
+    for (const collaborationBarrier of [
+      { generation: 0, stateVector: "AA" },
+      { generation: 2, stateVector: "AA=" },
+      { generation: 2, stateVector: "" },
+      { generation: 2, stateVector: "AA", extra: true },
+    ]) {
+      expect(aiCommandPayloadSchema.safeParse({
+        ...basePayload,
+        collaborationBarrier,
+      }).success).toBe(false);
+    }
+  });
 });

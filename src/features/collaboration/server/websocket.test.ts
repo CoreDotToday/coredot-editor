@@ -406,6 +406,44 @@ describe("the pinned Hocuspocus durable message lifecycle", () => {
     }
   });
 
+  it("closes a loaded retired room when a durable command targets the next unloaded generation", async () => {
+    const fixture = await createFixture({
+      append: async (input) => receipt(input),
+    });
+    try {
+      const connected = await fixture.connect("principal:rotated-command-room");
+      const closed = vi.fn();
+      connected.provider.on("close", closed);
+
+      fixture.publishDurableUpdateAtGeneration(2, createUpdate("rotated command"));
+
+      await eventually(() => expect(closed).toHaveBeenCalledWith({
+        event: { code: 1000, reason: "room_rotated" },
+      }));
+    } finally {
+      await fixture.destroy();
+    }
+  });
+
+  it("keeps a loaded newer room open when an older durable delivery is reconciled", async () => {
+    const fixture = await createFixture({
+      append: async (input) => receipt(input),
+      generation: 2,
+    });
+    try {
+      const connected = await fixture.connect("principal:newer-command-room");
+      const closed = vi.fn();
+      connected.provider.on("close", closed);
+
+      fixture.publishDurableUpdateAtGeneration(1, createUpdate("older command"));
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      expect(closed).not.toHaveBeenCalled();
+    } finally {
+      await fixture.destroy();
+    }
+  });
+
   it("keeps clock-zero awareness a no-op and broadcasts only canonical owned presence", async () => {
     const fixture = await createFixture({
       append: async (input) => receipt(input),
@@ -710,6 +748,7 @@ async function createFixture(options: {
   append(input: AppendCollaborationUpdate): Promise<DurableUpdateReceipt>;
   beforeLoad?: () => Promise<void>;
   checkpoint?: () => Promise<void>;
+  generation?: number;
   onCapabilityAuthorityRead?: (principalId: string) => void;
   onDocumentKeys?: () => void;
   resourceRegistry?: ReturnType<typeof createCollaborationResourceRegistry>;
@@ -719,6 +758,12 @@ async function createFixture(options: {
   const { signing, verification } = await createKeyRings();
   const now = () => new Date("2026-07-19T09:00:00.000Z");
   const issuer = createCollaborationCapabilityAuthority({ now, signingKeyRing: signing });
+  const fixtureGeneration = options.generation ?? 1;
+  const fixtureRoom = createCollaborationRoomName({
+    documentId,
+    generation: fixtureGeneration,
+    workspaceId,
+  });
   const appendInputs: AppendCollaborationUpdate[] = [];
   const checkpointInputs: Array<{
     documentId: string;
@@ -726,7 +771,7 @@ async function createFixture(options: {
     workspaceId: string;
   }> = [];
   const baseDocument = new Y.Doc();
-  const snapshot = createSnapshot(baseDocument);
+  const snapshot = { ...createSnapshot(baseDocument), generation: fixtureGeneration };
   const persistence: CollaborationPersistence = {
     async appendAuthorizedClientUpdate(_scope, input) {
       appendInputs.push(input);
@@ -750,6 +795,9 @@ async function createFixture(options: {
         generation,
         projectedSeq: 0,
       };
+    },
+    async commitServerCommand() {
+      throw new Error("not used");
     },
     async findDurableUpdateReplay() {
       return null;
@@ -775,7 +823,7 @@ async function createFixture(options: {
       async readCapabilityAuthority(_scope, input) {
         options.onCapabilityAuthorityRead?.(input.principalId);
         return input.documentId === documentId
-          ? { authorizationEpoch: 0, generation: 1 }
+          ? { authorizationEpoch: 0, generation: fixtureGeneration }
           : null;
       },
       async readEpoch() {
@@ -816,13 +864,13 @@ async function createFixture(options: {
     sessionId = randomUUID(),
   ) => ({
     expiresInSeconds: 60,
-    room,
+    room: fixtureRoom,
     token: await issuer.issue({
       authorizationEpoch: 0,
       documentId,
       permission,
       principalId,
-      room,
+      room: fixtureRoom,
       sessionId,
       workspaceId,
     }),
@@ -847,7 +895,7 @@ async function createFixture(options: {
       const provider = new HocuspocusProvider({
         awareness,
         document,
-        name: room,
+        name: fixtureRoom,
         onAuthenticated: () => events.push("authenticated"),
         onAuthenticationFailed: ({ reason }) => events.push(`authentication_failed:${reason}`),
         onClose: ({ event }) => events.push(`closed:${event.reason}`),
@@ -881,10 +929,13 @@ async function createFixture(options: {
     httpUrl: sidecar.httpUrl,
     issueCapability,
     publishDurableUpdate(update: Uint8Array) {
-      return sidecar.publishDurableUpdate({ workspaceId }, documentId, 1, update);
+      return sidecar.publishDurableUpdate({ workspaceId }, documentId, fixtureGeneration, update);
+    },
+    publishDurableUpdateAtGeneration(generation: number, update: Uint8Array) {
+      return sidecar.publishDurableUpdate({ workspaceId }, documentId, generation, update);
     },
     publishWorkflowChanged() {
-      return sidecar.publishWorkflowChanged({ workspaceId }, documentId, 1);
+      return sidecar.publishWorkflowChanged({ workspaceId }, documentId, fixtureGeneration);
     },
     webSocketUrl: sidecar.webSocketUrl,
   };

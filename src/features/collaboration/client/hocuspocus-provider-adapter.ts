@@ -5,7 +5,7 @@ import {
 } from "@hocuspocus/provider";
 import * as decoding from "lib0/decoding";
 import type { Awareness } from "y-protocols/awareness";
-import type * as Y from "yjs";
+import * as Y from "yjs";
 
 import { parseCollaborationRoomName } from "../room-name";
 import { isCollaborationWorkflowChangedPayload } from "../workflow-notification";
@@ -57,6 +57,10 @@ type CollaborationSessionErrorCategory =
   | "capability_invalid"
   | "capability_unavailable"
   | "destroyed"
+  | "flush_aborted"
+  | "flush_timeout"
+  | "flush_unavailable"
+  | "not_writable"
   | "transport_unavailable";
 
 export class CollaborationSessionError extends Error {
@@ -71,6 +75,10 @@ export type CollaborationSession = {
   connect(): Promise<void>;
   readonly document: Y.Doc;
   destroy(): void;
+  flushPendingUpdates(options?: { signal?: AbortSignal; timeoutMs?: number }): Promise<{
+    generation: number;
+    stateVector: Uint8Array;
+  }>;
   readonly provider: CollaborationHocuspocusProvider | null;
   refreshCapability(): Promise<void>;
   readonly room: string;
@@ -111,6 +119,7 @@ export function createHocuspocusProviderAdapter(options: {
   const timers = options.timers ?? browserTimers;
   const pendingUpdates: PendingUpdate[] = [];
   const reconnectBarrierUpdates: PendingUpdate[] = [];
+  const flushListeners = new Set<() => void>();
   const workflowChangedListeners = new Set<() => void>();
   let capability: CollaborationCapability | undefined;
   let connectPromise: Promise<void> | undefined;
@@ -127,6 +136,11 @@ export function createHocuspocusProviderAdapter(options: {
   let refreshPromise: Promise<void> | undefined;
   let refreshTimer: unknown;
   let storageDelayTimer: unknown;
+  let unsyncedChanges: number | null = 0;
+
+  const notifyFlushListeners = () => {
+    for (const listener of flushListeners) listener();
+  };
 
   const clearRefreshTimer = () => {
     if (refreshTimer === undefined) return;
@@ -146,6 +160,7 @@ export function createHocuspocusProviderAdapter(options: {
     lifecycleId += 1;
     clearRefreshTimer();
     clearStorageDelayTimer();
+    unsyncedChanges = null;
     try {
       current?.destroy();
     } catch {
@@ -157,6 +172,7 @@ export function createHocuspocusProviderAdapter(options: {
     reauthenticationPending = false;
     options.store.markFatal();
     teardownProvider();
+    notifyFlushListeners();
   };
 
   const finishReauthenticationIfReady = () => {
@@ -266,6 +282,7 @@ export function createHocuspocusProviderAdapter(options: {
     status(status) {
       if (!isCurrent(id)) return;
       if (status === "connecting") {
+        unsyncedChanges = null;
         awaitingTransportBarrier = true;
         reconnectBarrierUpdates.push(...pendingUpdates.splice(0));
         if (reauthenticationPending && reauthenticationSawDisconnect) {
@@ -279,6 +296,7 @@ export function createHocuspocusProviderAdapter(options: {
           reconnecting: snapshot.hasCompletedInitialSync || snapshot.status !== "connecting",
         });
       } else if (status === "disconnected") {
+        unsyncedChanges = null;
         // A checksum-less SyncStatus can only be associated with frames from
         // the active transport. Preserve their logical updates, but let the
         // next SyncStep2 acknowledgement act as the durable state barrier.
@@ -294,6 +312,8 @@ export function createHocuspocusProviderAdapter(options: {
       if (!isCurrent(id) || !state) return;
       if (reauthenticationPending && !acceptingReauthenticationEvents) return;
       options.store.markTransportSynced();
+      if (unsyncedChanges === null) unsyncedChanges = 0;
+      notifyFlushListeners();
       if (reauthenticationPending) {
         reauthenticationSynced = true;
         finishReauthenticationIfReady();
@@ -306,6 +326,8 @@ export function createHocuspocusProviderAdapter(options: {
       }
       if (number > 0) scheduleStorageDelay(id);
       else if (!hasPendingUpdateFrames()) clearStorageDelayTimer();
+      unsyncedChanges = number;
+      notifyFlushListeners();
     },
     workflowChanged() {
       if (!isCurrent(id)) return;
@@ -514,6 +536,69 @@ export function createHocuspocusProviderAdapter(options: {
       pendingUpdates.length = 0;
       reconnectBarrierUpdates.length = 0;
       workflowChangedListeners.clear();
+      notifyFlushListeners();
+      flushListeners.clear();
+    },
+    flushPendingUpdates(flushOptions = {}) {
+      const timeoutMs = flushOptions.timeoutMs ?? 15_000;
+      if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30_000) {
+        return Promise.reject(new CollaborationSessionError("flush_unavailable"));
+      }
+      return new Promise((resolve, reject) => {
+        let settled = false;
+        let unsubscribe: () => void = () => undefined;
+        const timeout: { current?: unknown } = {};
+        const abort = () => finish(new CollaborationSessionError("flush_aborted"));
+        const finish = (
+          result: { generation: number; stateVector: Uint8Array } | CollaborationSessionError,
+        ) => {
+          if (settled) return;
+          settled = true;
+          unsubscribe();
+          flushListeners.delete(check);
+          flushOptions.signal?.removeEventListener("abort", abort);
+          if (timeout.current !== undefined) timers.clear(timeout.current);
+          if (result instanceof CollaborationSessionError) reject(result);
+          else resolve(result);
+        };
+        const check = () => {
+          if (destroyed) return finish(new CollaborationSessionError("destroyed"));
+          const snapshot = options.store.getSnapshot();
+          if (snapshot.permission === "read") {
+            return finish(new CollaborationSessionError("not_writable"));
+          }
+          if (snapshot.status === "fatal" || snapshot.status === "authorization_expired") {
+            return finish(new CollaborationSessionError("flush_unavailable"));
+          }
+          if (
+            snapshot.hasCompletedInitialSync
+            && snapshot.permission === "write"
+            && snapshot.transportSynced
+            && snapshot.status === "synced"
+            && snapshot.pendingLocalUpdateCount === 0
+            && snapshot.pendingLocalChecksums.length === 0
+            && snapshot.pendingDurableAcknowledgementChecksums.length === 0
+            && unsyncedChanges === 0
+          ) {
+            return finish({
+              generation: parseCollaborationRoomName(options.room).generation,
+              stateVector: Y.encodeStateVector(options.document),
+            });
+          }
+        };
+        unsubscribe = options.store.subscribe(check);
+        flushListeners.add(check);
+        if (flushOptions.signal?.aborted) {
+          finish(new CollaborationSessionError("flush_aborted"));
+          return;
+        }
+        flushOptions.signal?.addEventListener("abort", abort, { once: true });
+        timeout.current = timers.set(
+          () => finish(new CollaborationSessionError("flush_timeout")),
+          timeoutMs,
+        );
+        check();
+      });
     },
     get provider() {
       return providerHandle?.provider ?? null;

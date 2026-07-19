@@ -12,6 +12,10 @@ import {
 } from "./main";
 
 describe("collaboration sidecar production wiring", () => {
+  it("requires the exact command delivery outbox migration", () => {
+    expect(COLLABORATION_MIGRATION_TABLES).toContain("collaboration_command_delivery_jobs");
+  });
+
   it("requires a non-destructive database probe and every collaboration table", async () => {
     const execute = vi.fn(async (statement: string | { args: unknown[]; sql: string }) => {
       if (typeof statement === "string") return { rows: [{ ok: 1 }] };

@@ -1,11 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AiProposalRecord, DocumentChangeRecord, DocumentRecord } from "@/db/schema";
 import { applyProposalBatch } from "@/features/documents/document-change-service";
+import { applyCollaborativeProposalCommand } from "@/features/collaboration/proposal-command-service";
 import { RESOURCE_LIMITS } from "@/features/security/resource-policy";
 import { TEST_REQUEST_CONTEXT } from "@/test/auth-context";
 import { POST } from "./route";
 
 vi.mock("@/features/documents/document-change-service", () => ({ applyProposalBatch: vi.fn() }));
+vi.mock("@/features/collaboration/proposal-command-service", () => ({
+  applyCollaborativeProposalCommand: vi.fn(),
+}));
 
 const createdAt = new Date("2026-01-01T00:00:00.000Z");
 const dirtyDocument = {
@@ -85,6 +89,54 @@ function request(body: unknown) {
 
 describe("POST /api/proposals/bulk-apply", () => {
   beforeEach(() => vi.clearAllMocks());
+
+  it("accepts an ordered semantic collaborative batch without a client draft", async () => {
+    vi.mocked(applyCollaborativeProposalCommand).mockResolvedValueOnce({
+      ...successResult(),
+      collaboration: { generation: 1, headSeq: 3 },
+      replayed: false,
+    });
+    const response = await POST(request({
+      commandId: "command-batch",
+      items: [
+        { mode: "replace", proposalId: "proposal_1" },
+        { mode: "insert_below", proposalId: "proposal_2" },
+      ],
+      observedHeadSeq: 2,
+    }));
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      collaboration: { generation: 1, headSeq: 3 },
+      proposals: [{ id: "proposal_1" }, { id: "proposal_2" }],
+    });
+    expect(applyCollaborativeProposalCommand).toHaveBeenCalledWith(TEST_REQUEST_CONTEXT, {
+      commandId: "command-batch",
+      items: [
+        { mode: "replace", proposalId: "proposal_1" },
+        { mode: "insert_below", proposalId: "proposal_2" },
+      ],
+      observedHeadSeq: 2,
+    });
+    expect(applyProposalBatch).not.toHaveBeenCalled();
+  });
+
+  it("maps an atomic collaborative overlap conflict", async () => {
+    vi.mocked(applyCollaborativeProposalCommand).mockResolvedValueOnce({
+      ok: false,
+      reason: "proposal_overlap_conflict",
+    });
+    const response = await POST(request({
+      commandId: "command-overlap",
+      items: [
+        { mode: "replace", proposalId: "proposal_1" },
+        { mode: "replace", proposalId: "proposal_2" },
+      ],
+      observedHeadSeq: 2,
+    }));
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({ reason: "proposal_overlap_conflict" });
+  });
 
   it("rejects readiness smuggling before bulk proposal service access", async () => {
     const base = payload();

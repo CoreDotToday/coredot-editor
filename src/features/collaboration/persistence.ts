@@ -5,6 +5,7 @@ import * as Y from "yjs";
 
 import {
   COLLABORATION_STORAGE_LIMITS,
+  aiProposals,
   collaborationAuthorizationEpochs,
   collaborationDocuments,
   collaborationNoopReceipts,
@@ -98,6 +99,29 @@ export type DurableUpdateReplay = {
   update: Uint8Array | null;
 };
 
+export type ServerCommandAppendIdentity = Omit<
+  AppendCollaborationUpdate,
+  "generation" | "update"
+> & {
+  expectedGeneration: number;
+};
+
+export type ServerCommandAppendPosition = {
+  changed: boolean;
+  generation: number;
+  headSeq: number;
+  revisionAdvanced: boolean;
+  seq: number;
+  timestamp: Date;
+};
+
+export type CommitServerCommandResult<T> = {
+  receipt: DurableUpdateReceipt;
+  replayed: boolean;
+  result: T;
+  update: Uint8Array | null;
+};
+
 export type CheckpointReceipt = {
   checkpointSeq: number;
   checksum: string;
@@ -167,6 +191,41 @@ export interface CollaborationPersistence {
     documentId: string,
     generation: number,
   ): Promise<CheckpointReceipt>;
+  commitServerCommand<TPlan, TResult>(
+    scope: WorkspaceScope,
+    input: ServerCommandAppendIdentity,
+    operations: {
+      commit(
+        transaction: CollaborationTransaction,
+        input: {
+          plan: TPlan;
+          position: ServerCommandAppendPosition;
+          receipt: DurableUpdateReceipt;
+          snapshot: CollaborationSnapshot;
+        },
+      ): Promise<TResult>;
+      plan(
+        transaction: CollaborationTransaction,
+        snapshot: CollaborationSnapshot,
+      ): Promise<{ plan: TPlan; update: Uint8Array }>;
+      prepare(
+        transaction: CollaborationTransaction,
+        input: {
+          plan: TPlan;
+          position: ServerCommandAppendPosition;
+          snapshot: CollaborationSnapshot;
+        },
+      ): Promise<void>;
+      replay(
+        transaction: CollaborationTransaction,
+        input: {
+          receipt: DurableUpdateReceipt;
+          snapshot: CollaborationSnapshot;
+          update: Uint8Array | null;
+        },
+      ): Promise<TResult>;
+    },
+  ): Promise<CommitServerCommandResult<TResult>>;
   findDurableUpdateReplay(
     scope: WorkspaceScope,
     identity: DurableUpdateReplayIdentity,
@@ -198,6 +257,401 @@ type CollaborationPersistenceOptions = {
   };
 };
 
+type ServerCommandLifecycle<TPlan, TResult> = {
+  commit(
+    transaction: CollaborationTransaction,
+    input: {
+      plan: TPlan;
+      position: ServerCommandAppendPosition;
+      receipt: DurableUpdateReceipt;
+      snapshot: CollaborationSnapshot;
+    },
+  ): Promise<TResult>;
+  plan: TPlan;
+  prepare(
+    transaction: CollaborationTransaction,
+    input: {
+      plan: TPlan;
+      position: ServerCommandAppendPosition;
+      snapshot: CollaborationSnapshot;
+    },
+  ): Promise<void>;
+};
+
+type AppendInTransactionResult<TResult> = {
+  receipt: DurableUpdateReceipt;
+  result?: TResult;
+  update: Uint8Array | null;
+};
+
+type AppendEvaluation = {
+  evaluation: ReturnType<typeof evaluateAppendCandidate>;
+  mustRotate: boolean;
+  timestamp: Date;
+};
+
+type AppendPositionBasis = {
+  appendGeneration: number;
+  appendHeadSeq: number;
+  projectedDuringRotation: boolean;
+};
+
+async function resolveAppendReplay<TResult>(
+  transaction: CollaborationTransaction,
+  scope: WorkspaceScope,
+  input: AppendCollaborationUpdate,
+  updateChecksum: string,
+): Promise<AppendInTransactionResult<TResult> | null> {
+  const replay = await findIdempotentReceipt(transaction, scope, input);
+  if (!replay) return null;
+  if (!matchesIdempotentReceipt(replay, input, updateChecksum)) {
+    throw persistenceError("idempotency_conflict", false);
+  }
+  return {
+    receipt: durableReceipt(replay),
+    update: replay.kind === "update" ? Uint8Array.from(replay.stored.updateBlob) : null,
+  };
+}
+
+async function evaluateAppendInTransaction(
+  transaction: CollaborationTransaction,
+  scope: WorkspaceScope,
+  input: AppendCollaborationUpdate,
+  loaded: CollaborationSnapshot,
+  codec: CollaborationDocumentCodec,
+  projectProfile: ProjectProfile,
+  storageLimits: { checkpointBytes: number; cumulativeUpdateBytes: number },
+  now: () => Date,
+): Promise<AppendEvaluation> {
+  const mustRotate = await planAppendStorage(
+    transaction,
+    scope,
+    loaded,
+    input.update.byteLength,
+    storageLimits.cumulativeUpdateBytes,
+  );
+  const timestamp = now();
+  try {
+    return {
+      evaluation: evaluateAppendCandidate({
+        checkpointBytesLimit: storageLimits.checkpointBytes,
+        codec,
+        document: loaded.document,
+        projectProfile,
+        shouldMaterializeBeforeRotation: loaded.projectedSeq < loaded.headSeq,
+        shouldRotate: mustRotate,
+        update: input.update,
+      }),
+      mustRotate,
+      timestamp,
+    };
+  } catch (error) {
+    if (error instanceof AppendCandidateEvaluationError) {
+      throw persistenceError(error.failure, error.failure === "storage_budget");
+    }
+    throw error;
+  }
+}
+
+async function commitNoopAppend<TPlan, TResult>(
+  transaction: CollaborationTransaction,
+  scope: WorkspaceScope,
+  input: AppendCollaborationUpdate,
+  loaded: CollaborationSnapshot,
+  updateChecksum: string,
+  timestamp: Date,
+  lifecycle?: ServerCommandLifecycle<TPlan, TResult>,
+): Promise<AppendInTransactionResult<TResult>> {
+  const position: ServerCommandAppendPosition = {
+    changed: false,
+    generation: loaded.generation,
+    headSeq: loaded.headSeq,
+    revisionAdvanced: false,
+    seq: loaded.headSeq,
+    timestamp,
+  };
+  if (lifecycle) {
+    await lifecycle.prepare(transaction, { plan: lifecycle.plan, position, snapshot: loaded });
+  }
+  await transaction.insert(collaborationNoopReceipts).values({
+    checksum: updateChecksum,
+    createdAt: timestamp,
+    documentId: input.documentId,
+    generation: loaded.generation,
+    headSeq: loaded.headSeq,
+    idempotencyKey: input.idempotencyKey,
+    originKind: input.originKind,
+    principalId: input.principalId,
+    requestId: input.requestId,
+    semanticActionId: input.semanticActionId,
+    sessionId: input.sessionId,
+    workspaceId: scope.workspaceId,
+  });
+  const receipt: DurableUpdateReceipt = {
+    checksum: updateChecksum,
+    documentId: input.documentId,
+    generation: loaded.generation,
+    headSeq: loaded.headSeq,
+    seq: loaded.headSeq,
+    workflowChanged: false,
+  };
+  const result = lifecycle
+    ? await lifecycle.commit(transaction, {
+        plan: lifecycle.plan,
+        position,
+        receipt,
+        snapshot: loaded,
+      })
+    : undefined;
+  return { receipt, result, update: null };
+}
+
+async function rotateAppendInTransaction(
+  transaction: CollaborationTransaction,
+  scope: WorkspaceScope,
+  input: AppendCollaborationUpdate,
+  loaded: CollaborationSnapshot,
+  evaluation: ReturnType<typeof evaluateAppendCandidate>,
+  mustRotate: boolean,
+  cumulativeUpdateBytes: number,
+  timestamp: Date,
+): Promise<AppendPositionBasis> {
+  if (!mustRotate) {
+    return {
+      appendGeneration: loaded.generation,
+      appendHeadSeq: loaded.headSeq,
+      projectedDuringRotation: false,
+    };
+  }
+
+  const rotation = evaluation.rotation;
+  if (!rotation) throw persistenceError("corrupt_state", false);
+  if (rotation.checkpoint.byteLength + input.update.byteLength > cumulativeUpdateBytes) {
+    throw persistenceError("storage_budget", true);
+  }
+  let projectedDuringRotation = false;
+  if (rotation.materialization) {
+    await writeMaterializedDocument(
+      transaction,
+      scope,
+      input.documentId,
+      rotation.materialization,
+      timestamp,
+    );
+    projectedDuringRotation = true;
+  }
+  const retired = await transaction
+    .update(collaborationDocuments)
+    .set({ isCurrent: false, projectedSeq: loaded.headSeq, updatedAt: timestamp })
+    .where(and(
+      eq(collaborationDocuments.workspaceId, scope.workspaceId),
+      eq(collaborationDocuments.documentId, input.documentId),
+      eq(collaborationDocuments.generation, loaded.generation),
+      eq(collaborationDocuments.isCurrent, true),
+      eq(collaborationDocuments.headSeq, loaded.headSeq),
+    ))
+    .returning({ generation: collaborationDocuments.generation });
+  if (!retired[0]) throw new CollaborationCasRetryError();
+  const appendGeneration = loaded.generation + 1;
+  await transaction.insert(collaborationDocuments).values({
+    checkpointBlob: Buffer.from(rotation.checkpoint),
+    checkpointChecksum: checksum(rotation.checkpoint),
+    checkpointSeq: loaded.headSeq,
+    createdAt: timestamp,
+    documentId: input.documentId,
+    generation: appendGeneration,
+    headSeq: loaded.headSeq,
+    isCurrent: true,
+    lastCheckpointAt: timestamp,
+    projectedSeq: loaded.headSeq,
+    schemaFingerprint: loaded.schemaFingerprint,
+    schemaVersion: loaded.schemaVersion,
+    updatedAt: timestamp,
+    workspaceId: scope.workspaceId,
+  });
+  return {
+    appendGeneration,
+    appendHeadSeq: loaded.headSeq,
+    projectedDuringRotation,
+  };
+}
+
+async function commitChangedAppend<TPlan, TResult>(
+  transaction: CollaborationTransaction,
+  scope: WorkspaceScope,
+  input: AppendCollaborationUpdate,
+  loaded: CollaborationSnapshot,
+  updateChecksum: string,
+  timestamp: Date,
+  positionBasis: AppendPositionBasis,
+  lifecycle?: ServerCommandLifecycle<TPlan, TResult>,
+): Promise<AppendInTransactionResult<TResult>> {
+  const { appendGeneration, appendHeadSeq, projectedDuringRotation } = positionBasis;
+  const seq = appendHeadSeq + 1;
+  const advanced = await transaction
+    .update(collaborationDocuments)
+    .set({ headSeq: seq, updatedAt: timestamp })
+    .where(and(
+      eq(collaborationDocuments.workspaceId, scope.workspaceId),
+      eq(collaborationDocuments.documentId, input.documentId),
+      eq(collaborationDocuments.generation, appendGeneration),
+      eq(collaborationDocuments.isCurrent, true),
+      eq(collaborationDocuments.headSeq, appendHeadSeq),
+    ))
+    .returning({ generation: collaborationDocuments.generation });
+  if (!advanced[0]) throw new CollaborationCasRetryError();
+
+  const position: ServerCommandAppendPosition = {
+    changed: true,
+    generation: appendGeneration,
+    headSeq: seq,
+    revisionAdvanced: projectedDuringRotation,
+    seq,
+    timestamp,
+  };
+  if (lifecycle) {
+    await lifecycle.prepare(transaction, { plan: lifecycle.plan, position, snapshot: loaded });
+  }
+  await transaction.insert(collaborationUpdates).values({
+    checksum: updateChecksum,
+    createdAt: timestamp,
+    diagnosticJson: input.diagnosticJson,
+    documentId: input.documentId,
+    generation: appendGeneration,
+    idempotencyKey: input.idempotencyKey,
+    originKind: input.originKind,
+    principalId: input.principalId,
+    requestId: input.requestId,
+    semanticActionId: input.semanticActionId,
+    seq,
+    sessionId: input.sessionId,
+    updateBlob: Buffer.from(input.update),
+    workspaceId: scope.workspaceId,
+  });
+
+  const invalidated = await transaction
+    .update(documentApprovals)
+    .set({
+      invalidatedAt: timestamp,
+      invalidatedPrincipalId: input.principalId,
+      invalidatedSeq: seq,
+    })
+    .where(and(
+      eq(documentApprovals.workspaceId, scope.workspaceId),
+      eq(documentApprovals.documentId, input.documentId),
+      isNull(documentApprovals.invalidatedAt),
+      isNull(documentApprovals.revokedAt),
+    ))
+    .returning({ id: documentApprovals.id });
+  const readinessChanged = await transaction
+    .update(documents)
+    .set({
+      readiness: "needs_review",
+      ...(!projectedDuringRotation && { revision: sql`${documents.revision} + 1` }),
+      updatedAt: timestamp,
+    })
+    .where(and(
+      eq(documents.workspaceId, scope.workspaceId),
+      eq(documents.id, input.documentId),
+      invalidated[0] ? undefined : eq(documents.readiness, "approved"),
+    ))
+    .returning({ readiness: documents.readiness });
+  const receipt: DurableUpdateReceipt = {
+    checksum: updateChecksum,
+    documentId: input.documentId,
+    generation: appendGeneration,
+    headSeq: seq,
+    seq,
+    workflowChanged: invalidated.length > 0 || readinessChanged.length > 0,
+  };
+  position.revisionAdvanced = position.revisionAdvanced || receipt.workflowChanged;
+  const result = lifecycle
+    ? await lifecycle.commit(transaction, {
+        plan: lifecycle.plan,
+        position,
+        receipt,
+        snapshot: loaded,
+      })
+    : undefined;
+  return { receipt, result, update: input.update };
+}
+
+async function resolveServerCommandReplay<TResult>(
+  transaction: CollaborationTransaction,
+  scope: WorkspaceScope,
+  input: ServerCommandAppendIdentity,
+  snapshot: CollaborationSnapshot,
+  replay: (
+    transaction: CollaborationTransaction,
+    input: {
+      receipt: DurableUpdateReceipt;
+      snapshot: CollaborationSnapshot;
+      update: Uint8Array | null;
+    },
+  ) => Promise<TResult>,
+): Promise<CommitServerCommandResult<TResult> | null> {
+  const stored = await findIdempotentReceipt(transaction, scope, input);
+  if (!stored) return null;
+  if (!matchesServerCommandReplayIdentity(stored, input)) {
+    throw persistenceError("idempotency_conflict", false);
+  }
+  if (
+    stored.kind === "update"
+    && checksum(stored.stored.updateBlob) !== stored.stored.checksum
+  ) {
+    throw persistenceError("corrupt_state", false);
+  }
+  const receipt = durableReceipt(stored);
+  const update = stored.kind === "update"
+    ? Uint8Array.from(stored.stored.updateBlob)
+    : null;
+  return {
+    receipt,
+    replayed: true,
+    result: await replay(transaction, { receipt, snapshot, update }),
+    update,
+  };
+}
+
+async function planServerCommandInIsolation<TPlan>(
+  transaction: CollaborationTransaction,
+  snapshot: CollaborationSnapshot,
+  plan: (
+    transaction: CollaborationTransaction,
+    snapshot: CollaborationSnapshot,
+  ) => Promise<{ plan: TPlan; update: Uint8Array }>,
+) {
+  const planningDocument = new Y.Doc();
+  Y.applyUpdate(planningDocument, Y.encodeStateAsUpdate(snapshot.document));
+  try {
+    return await plan(transaction, {
+      ...snapshot,
+      document: planningDocument,
+    });
+  } finally {
+    planningDocument.destroy();
+  }
+}
+
+function mapServerCommandAppendInput(
+  input: ServerCommandAppendIdentity,
+  snapshot: CollaborationSnapshot,
+  update: Uint8Array,
+): AppendCollaborationUpdate {
+  return {
+    diagnosticJson: input.diagnosticJson,
+    documentId: input.documentId,
+    generation: snapshot.generation,
+    idempotencyKey: input.idempotencyKey,
+    originKind: input.originKind,
+    principalId: input.principalId,
+    requestId: input.requestId,
+    semanticActionId: input.semanticActionId,
+    sessionId: input.sessionId,
+    update,
+  };
+}
+
 export function createCollaborationPersistence(
   database: CollaborationDatabase,
   options: CollaborationPersistenceOptions = {},
@@ -226,6 +680,70 @@ export function createCollaborationPersistence(
       )));
   });
 
+  const appendInTransaction = async <TPlan, TResult>(
+    transaction: CollaborationTransaction,
+    scope: WorkspaceScope,
+    input: AppendCollaborationUpdate,
+    loaded: CollaborationSnapshot,
+    authorizationEpoch?: number,
+    lifecycle?: ServerCommandLifecycle<TPlan, TResult>,
+  ): Promise<AppendInTransactionResult<TResult>> => {
+    await assertAppendableDocument(transaction, scope, input.documentId);
+    if (authorizationEpoch !== undefined) {
+      await assertAuthorizedClientAppend(transaction, scope, input, authorizationEpoch);
+    }
+    const updateChecksum = checksum(input.update);
+    const replay = await resolveAppendReplay<TResult>(transaction, scope, input, updateChecksum);
+    if (replay) return replay;
+    if (loaded.generation !== input.generation) {
+      throw persistenceError("stale_generation", true);
+    }
+
+    const { evaluation, mustRotate, timestamp } = await evaluateAppendInTransaction(
+      transaction,
+      scope,
+      input,
+      loaded,
+      codec,
+      projectProfile,
+      storageLimits,
+      now,
+    );
+
+    if (!evaluation.changed) {
+      return commitNoopAppend(
+        transaction,
+        scope,
+        input,
+        loaded,
+        updateChecksum,
+        timestamp,
+        lifecycle,
+      );
+    }
+
+    const positionBasis = await rotateAppendInTransaction(
+      transaction,
+      scope,
+      input,
+      loaded,
+      evaluation,
+      mustRotate,
+      storageLimits.cumulativeUpdateBytes,
+      timestamp,
+    );
+    return commitChangedAppend(
+      transaction,
+      scope,
+      input,
+      loaded,
+      updateChecksum,
+      timestamp,
+      positionBasis,
+      lifecycle,
+    );
+  };
+
   const append = (
     scope: WorkspaceScope,
     input: AppendCollaborationUpdate,
@@ -243,205 +761,14 @@ export function createCollaborationPersistence(
           storageLimits.checkpointBytes,
           now,
         );
-        await assertAppendableDocument(transaction, scope, input.documentId);
-        if (authorizationEpoch !== undefined) {
-          await assertAuthorizedClientAppend(
-            transaction,
-            scope,
-            input,
-            authorizationEpoch,
-          );
-        }
-        const updateChecksum = checksum(input.update);
-        const replay = await findIdempotentReceipt(transaction, scope, input);
-        if (replay) {
-          if (!matchesIdempotentReceipt(replay, input, updateChecksum)) {
-            throw persistenceError("idempotency_conflict", false);
-          }
-          return durableReceipt(replay);
-        }
-
-        if (loaded.generation !== input.generation) {
-          throw persistenceError("stale_generation", true);
-        }
-
-        const mustRotate = await planAppendStorage(
+        const appended = await appendInTransaction(
           transaction,
           scope,
+          input,
           loaded,
-          input.update.byteLength,
-          storageLimits.cumulativeUpdateBytes,
+          authorizationEpoch,
         );
-        let appendGeneration = loaded.generation;
-        let appendHeadSeq = loaded.headSeq;
-        let projectedDuringRotation = false;
-        const timestamp = now();
-        let evaluation: ReturnType<typeof evaluateAppendCandidate>;
-        try {
-          evaluation = evaluateAppendCandidate({
-            checkpointBytesLimit: storageLimits.checkpointBytes,
-            codec,
-            document: loaded.document,
-            projectProfile,
-            shouldMaterializeBeforeRotation: loaded.projectedSeq < loaded.headSeq,
-            shouldRotate: mustRotate,
-            update: input.update,
-          });
-        } catch (error) {
-          if (error instanceof AppendCandidateEvaluationError) {
-            throw persistenceError(error.failure, error.failure === "storage_budget");
-          }
-          throw error;
-        }
-        if (!evaluation.changed) {
-          await transaction.insert(collaborationNoopReceipts).values({
-            checksum: updateChecksum,
-            createdAt: timestamp,
-            documentId: input.documentId,
-            generation: loaded.generation,
-            headSeq: loaded.headSeq,
-            idempotencyKey: input.idempotencyKey,
-            originKind: input.originKind,
-            principalId: input.principalId,
-            requestId: input.requestId,
-            semanticActionId: input.semanticActionId,
-            sessionId: input.sessionId,
-            workspaceId: scope.workspaceId,
-          });
-          return {
-            checksum: updateChecksum,
-            documentId: input.documentId,
-            generation: loaded.generation,
-            headSeq: loaded.headSeq,
-            seq: loaded.headSeq,
-            workflowChanged: false,
-          };
-        }
-
-        if (mustRotate) {
-          const rotation = evaluation.rotation;
-          if (!rotation) throw persistenceError("corrupt_state", false);
-          if (
-            rotation.checkpoint.byteLength + input.update.byteLength
-            > storageLimits.cumulativeUpdateBytes
-          ) {
-            throw persistenceError("storage_budget", true);
-          }
-          if (rotation.materialization) {
-            await writeMaterializedDocument(
-              transaction,
-              scope,
-              input.documentId,
-              rotation.materialization,
-              timestamp,
-            );
-            projectedDuringRotation = true;
-          }
-          const retired = await transaction
-            .update(collaborationDocuments)
-            .set({
-              isCurrent: false,
-              projectedSeq: loaded.headSeq,
-              updatedAt: timestamp,
-            })
-            .where(and(
-              eq(collaborationDocuments.workspaceId, scope.workspaceId),
-              eq(collaborationDocuments.documentId, input.documentId),
-              eq(collaborationDocuments.generation, loaded.generation),
-              eq(collaborationDocuments.isCurrent, true),
-              eq(collaborationDocuments.headSeq, loaded.headSeq),
-            ))
-            .returning({ generation: collaborationDocuments.generation });
-          if (!retired[0]) throw new CollaborationCasRetryError();
-          appendGeneration = loaded.generation + 1;
-          await transaction.insert(collaborationDocuments).values({
-            checkpointBlob: Buffer.from(rotation.checkpoint),
-            checkpointChecksum: checksum(rotation.checkpoint),
-            checkpointSeq: loaded.headSeq,
-            createdAt: timestamp,
-            documentId: input.documentId,
-            generation: appendGeneration,
-            headSeq: loaded.headSeq,
-            isCurrent: true,
-            lastCheckpointAt: timestamp,
-            projectedSeq: loaded.headSeq,
-            schemaFingerprint: loaded.schemaFingerprint,
-            schemaVersion: loaded.schemaVersion,
-            updatedAt: timestamp,
-            workspaceId: scope.workspaceId,
-          });
-          appendHeadSeq = loaded.headSeq;
-        }
-
-        const seq = appendHeadSeq + 1;
-        const advanced = await transaction
-          .update(collaborationDocuments)
-          .set({ headSeq: seq, updatedAt: timestamp })
-          .where(and(
-            eq(collaborationDocuments.workspaceId, scope.workspaceId),
-            eq(collaborationDocuments.documentId, input.documentId),
-            eq(collaborationDocuments.generation, appendGeneration),
-            eq(collaborationDocuments.isCurrent, true),
-            eq(collaborationDocuments.headSeq, appendHeadSeq),
-          ))
-          .returning({ generation: collaborationDocuments.generation });
-        if (!advanced[0]) throw new CollaborationCasRetryError();
-
-        await transaction.insert(collaborationUpdates).values({
-          checksum: updateChecksum,
-          createdAt: timestamp,
-          diagnosticJson: input.diagnosticJson,
-          documentId: input.documentId,
-          generation: appendGeneration,
-          idempotencyKey: input.idempotencyKey,
-          originKind: input.originKind,
-          principalId: input.principalId,
-          requestId: input.requestId,
-          semanticActionId: input.semanticActionId,
-          seq,
-          sessionId: input.sessionId,
-          updateBlob: Buffer.from(input.update),
-          workspaceId: scope.workspaceId,
-        });
-
-        const invalidated = await transaction
-          .update(documentApprovals)
-          .set({
-            invalidatedAt: timestamp,
-            invalidatedPrincipalId: input.principalId,
-            invalidatedSeq: seq,
-          })
-          .where(and(
-            eq(documentApprovals.workspaceId, scope.workspaceId),
-            eq(documentApprovals.documentId, input.documentId),
-            isNull(documentApprovals.invalidatedAt),
-            isNull(documentApprovals.revokedAt),
-          ))
-          .returning({ id: documentApprovals.id });
-        const readinessChanged = await transaction
-          .update(documents)
-          .set({
-            readiness: "needs_review",
-            ...(!projectedDuringRotation && {
-              revision: sql`${documents.revision} + 1`,
-            }),
-            updatedAt: timestamp,
-          })
-          .where(and(
-            eq(documents.workspaceId, scope.workspaceId),
-            eq(documents.id, input.documentId),
-            invalidated[0] ? undefined : eq(documents.readiness, "approved"),
-          ))
-          .returning({ readiness: documents.readiness });
-
-        return {
-          checksum: updateChecksum,
-          documentId: input.documentId,
-          generation: appendGeneration,
-          headSeq: seq,
-          seq,
-          workflowChanged: invalidated.length > 0 || readinessChanged.length > 0,
-        };
+        return appended.receipt;
         }));
       });
 
@@ -525,6 +852,108 @@ export function createCollaborationPersistence(
           projectedSeq: loaded.headSeq,
         };
         });
+      });
+    },
+
+    commitServerCommand<TPlan, TResult>(
+      scope: WorkspaceScope,
+      input: ServerCommandAppendIdentity,
+      operations: {
+        commit(
+          transaction: CollaborationTransaction,
+          input: {
+            plan: TPlan;
+            position: ServerCommandAppendPosition;
+            receipt: DurableUpdateReceipt;
+            snapshot: CollaborationSnapshot;
+          },
+        ): Promise<TResult>;
+        plan(
+          transaction: CollaborationTransaction,
+          snapshot: CollaborationSnapshot,
+        ): Promise<{ plan: TPlan; update: Uint8Array }>;
+        prepare(
+          transaction: CollaborationTransaction,
+          input: {
+            plan: TPlan;
+            position: ServerCommandAppendPosition;
+            snapshot: CollaborationSnapshot;
+          },
+        ): Promise<void>;
+        replay(
+          transaction: CollaborationTransaction,
+          input: {
+            receipt: DurableUpdateReceipt;
+            snapshot: CollaborationSnapshot;
+            update: Uint8Array | null;
+          },
+        ): Promise<TResult>;
+      },
+    ) {
+      return executePersistenceOperation(() => {
+        validateScopeAndDocument(scope, input.documentId);
+        validateGeneration(input.expectedGeneration);
+        validateReplayIdentity({
+          documentId: input.documentId,
+          idempotencyKey: input.idempotencyKey,
+          originKind: input.originKind,
+          principalId: input.principalId,
+          requestId: input.requestId,
+          semanticActionId: input.semanticActionId,
+          sessionId: input.sessionId,
+        });
+        if (input.originKind !== "proposal_command" && input.originKind !== "undo_command") {
+          throw persistenceError("invalid_input", false);
+        }
+        return withSerializedDocumentWrite(scope, input.documentId, () =>
+          repository.write(async (transaction) => {
+            const snapshot = await ensureInitializedInTransaction(
+              transaction,
+              scope,
+              input.documentId,
+              codec,
+              projectProfile,
+              storageLimits.checkpointBytes,
+              now,
+            );
+            await assertAppendableDocument(transaction, scope, input.documentId);
+            const replay = await resolveServerCommandReplay(
+              transaction,
+              scope,
+              input,
+              snapshot,
+              (replayTransaction, replayInput) => operations.replay(replayTransaction, replayInput),
+            );
+            if (replay) return replay;
+            if (snapshot.generation !== input.expectedGeneration) {
+              throw persistenceError("stale_generation", true);
+            }
+            const planned = await planServerCommandInIsolation(
+              transaction,
+              snapshot,
+              (planTransaction, planningSnapshot) => operations.plan(planTransaction, planningSnapshot),
+            );
+            const appendInput = mapServerCommandAppendInput(input, snapshot, planned.update);
+            validateAppendInput(appendInput);
+            const appended = await appendInTransaction(
+              transaction,
+              scope,
+              appendInput,
+              snapshot,
+              undefined,
+              {
+                commit: operations.commit,
+                plan: planned.plan,
+                prepare: operations.prepare,
+              },
+            );
+            return {
+              receipt: appended.receipt,
+              replayed: false,
+              result: appended.result as TResult,
+              update: appended.update,
+            };
+          }));
       });
     },
 
@@ -776,6 +1205,14 @@ async function ensureInitializedInTransaction(
     updatedAt: timestamp,
     workspaceId: scope.workspaceId,
   });
+  await transaction.update(aiProposals).set({
+    status: "rejected",
+    updatedAt: timestamp,
+  }).where(and(
+    eq(aiProposals.workspaceId, scope.workspaceId),
+    eq(aiProposals.documentId, documentId),
+    eq(aiProposals.status, "pending"),
+  ));
 
   const initialized = await loadSnapshot(
     transaction,
@@ -1178,6 +1615,17 @@ function matchesDurableReplayIdentity(
   return stored.originKind === input.originKind
     && stored.principalId === input.principalId
     && (input.requestId === undefined || stored.requestId === input.requestId)
+    && stored.sessionId === (input.sessionId ?? null)
+    && stored.semanticActionId === (input.semanticActionId ?? null);
+}
+
+function matchesServerCommandReplayIdentity(
+  receipt: StoredIdempotentReceipt,
+  input: ServerCommandAppendIdentity,
+) {
+  const { stored } = receipt;
+  return stored.originKind === input.originKind
+    && stored.principalId === input.principalId
     && stored.sessionId === (input.sessionId ?? null)
     && stored.semanticActionId === (input.semanticActionId ?? null);
 }

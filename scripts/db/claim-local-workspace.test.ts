@@ -25,6 +25,7 @@ const FULL_WORKSPACE_TABLES = [
   "document_change_proposals",
   "ai_workspace_messages",
   "collaboration_updates",
+  "collaboration_command_delivery_jobs",
   "collaboration_noop_receipts",
   "collaboration_room_closure_jobs",
   "collaboration_workflow_notification_jobs",
@@ -41,6 +42,7 @@ const FULL_SUMMARY_KEYS = [
   "collaborationActions",
   "collaborationAiRunSnapshots",
   "collaborationAuthorizationEpochs",
+  "collaborationCommandDeliveryJobs",
   "collaborationDocumentChanges",
   "collaborationDocuments",
   "collaborationProposalAnchors",
@@ -220,10 +222,10 @@ async function createFullClaimDatabase() {
     ) VALUES ('local', 'full_doc', 1, 1, 1, '${HASH_A}', X'0102', '${HASH_B}', 1, 0, 0,
       6000, 6000, 6000);
     INSERT INTO collaboration_actions (
-      id, workspace_id, document_id, generation, command_id, action_type, principal_id,
+      id, workspace_id, document_id, generation, command_id, command_fingerprint, action_type, principal_id,
       request_id, base_head_seq, applied_head_seq, proposal_id, document_change_id,
       status, failure_category, created_at, updated_at
-    ) VALUES ('full_action', 'local', 'full_doc', 1, 'full-command', 'proposal_apply',
+    ) VALUES ('full_action', 'local', 'full_doc', 1, 'full-command', '${HASH_B}', 'proposal_apply',
       'full_principal', 'full_request', 0, 1, 'full_proposal', 'full_change',
       'applied', NULL, 6000, 6000);
     INSERT INTO collaboration_updates (
@@ -231,6 +233,11 @@ async function createFullClaimDatabase() {
       origin_kind, principal_id, request_id, session_id, semantic_action_id, diagnostic_json, created_at
     ) VALUES ('local', 'full_doc', 1, 1, X'0304', '${HASH_A}', 'full-update-key',
       'proposal_command', 'full_principal', 'full_request', 'full_session', 'full_action', '{}', 6000);
+    INSERT INTO collaboration_command_delivery_jobs (
+      workspace_id, action_id, command_id, command_fingerprint, document_id, generation,
+      seq, checksum, status, attempts, next_attempt_at, failure_category, created_at, updated_at
+    ) VALUES ('local', 'full_action', 'full-command', '${HASH_B}', 'full_doc', 1,
+      1, '${HASH_A}', 'exhausted', 5, NULL, 'delivery_failed', 6000, 6000);
     INSERT INTO collaboration_noop_receipts (
       workspace_id, document_id, idempotency_key, generation, head_seq, checksum,
       origin_kind, principal_id, request_id, session_id, semantic_action_id, created_at
@@ -462,9 +469,9 @@ describe("claimLocalWorkspace", () => {
         `);
         await client.execute(`
           INSERT INTO collaboration_actions (
-            id, workspace_id, document_id, generation, command_id, action_type, principal_id,
+            id, workspace_id, document_id, generation, command_id, command_fingerprint, action_type, principal_id,
             request_id, base_head_seq, applied_head_seq, status, failure_category, created_at, updated_at
-          ) VALUES ('target-action', 'workspace-full', 'target-action-doc', 1, 'full-command', 'repair',
+          ) VALUES ('target-action', 'workspace-full', 'target-action-doc', 1, 'full-command', '${HASH_A}', 'repair',
             'target-principal', 'target-request', 0, NULL, 'pending', NULL, 1, 1)
         `);
       },

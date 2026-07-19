@@ -584,6 +584,8 @@ async function insertFullCollaborationGraph(
   suffix: string,
   options: { includeNoopReceipt?: boolean } = {},
 ) {
+  const actionColumns = await client.execute("PRAGMA table_info(collaboration_actions)");
+  const includeCommandFingerprint = actionColumns.rows.some((row) => row.name === "command_fingerprint");
   await client.execute(collaborationActionInsert({
     id: `action-${suffix}`,
     workspace: suffix,
@@ -591,7 +593,7 @@ async function insertFullCollaborationGraph(
     command: `command-${suffix}`,
     proposal: `proposal-${suffix}`,
     change: `change-${suffix}`,
-  }));
+  }, { includeCommandFingerprint }));
   await client.execute(collaborationUpdateInsert({
     workspace: suffix,
     document: `doc-${suffix}`,
@@ -685,20 +687,43 @@ function collaborationActionInsert(input: {
   change?: string;
   status?: "applied" | "failed" | "pending";
   appliedHead?: number | null;
-}) {
+}, options: { includeCommandFingerprint?: boolean } = {}) {
   const status = input.status ?? "applied";
   const appliedHead = input.appliedHead === undefined ? (status === "applied" ? 1 : null) : input.appliedHead;
+  if (options.includeCommandFingerprint === false) {
+    return {
+      sql: `INSERT INTO collaboration_actions (
+        id, workspace_id, document_id, generation, command_id, action_type, principal_id, request_id,
+        base_head_seq, applied_head_seq, proposal_id, document_change_id, status, failure_category,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, 1, ?, 'proposal_apply', ?, ?, 0, ?, ?, ?, ?, ?, 7000, 7000)`,
+      args: [
+        input.id,
+        `workspace-${input.workspace}`,
+        input.document,
+        input.command,
+        `principal-${input.workspace}`,
+        `request-${input.workspace}`,
+        appliedHead,
+        input.proposal ?? null,
+        input.change ?? null,
+        status,
+        status === "failed" ? "proposal_target_conflict" : null,
+      ],
+    };
+  }
   return {
     sql: `INSERT INTO collaboration_actions (
-      id, workspace_id, document_id, generation, command_id, action_type, principal_id, request_id,
+      id, workspace_id, document_id, generation, command_id, command_fingerprint, action_type, principal_id, request_id,
       base_head_seq, applied_head_seq, proposal_id, document_change_id, status, failure_category,
       created_at, updated_at
-    ) VALUES (?, ?, ?, 1, ?, 'proposal_apply', ?, ?, 0, ?, ?, ?, ?, ?, 7000, 7000)`,
+    ) VALUES (?, ?, ?, 1, ?, ?, 'proposal_apply', ?, ?, 0, ?, ?, ?, ?, ?, 7000, 7000)`,
     args: [
       input.id,
       `workspace-${input.workspace}`,
       input.document,
       input.command,
+      HASH_B,
       `principal-${input.workspace}`,
       `request-${input.workspace}`,
       appliedHead,

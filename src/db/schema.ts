@@ -20,6 +20,9 @@ export const COLLABORATION_ROOM_CLOSURE_MAX_ATTEMPTS = 5;
 export type CollaborationWorkflowNotificationStatus = "exhausted" | "pending";
 export type CollaborationWorkflowNotificationFailureCategory = "delivery_failed";
 export const COLLABORATION_WORKFLOW_NOTIFICATION_MAX_ATTEMPTS = 5;
+export type CollaborationCommandDeliveryStatus = "exhausted" | "pending";
+export type CollaborationCommandDeliveryFailureCategory = "delivery_failed";
+export const COLLABORATION_COMMAND_DELIVERY_MAX_ATTEMPTS = 5;
 export const COLLABORATION_STORAGE_LIMITS = {
   codecBytes: 10 * 1024 * 1024,
   correctnessKeyBytes: 256,
@@ -602,6 +605,7 @@ export const collaborationActions = sqliteTable(
     documentId: text("document_id").notNull(),
     generation: integer("generation").notNull(),
     commandId: text("command_id").notNull(),
+    commandFingerprint: text("command_fingerprint").notNull(),
     actionType: text("action_type", {
       enum: ["proposal_apply", "proposal_batch_apply", "selective_undo", "repair"],
     }).notNull(),
@@ -624,6 +628,14 @@ export const collaborationActions = sqliteTable(
       table.generation,
     ),
     uniqueIndex("collaboration_actions_workspace_command_unique").on(table.workspaceId, table.commandId),
+    uniqueIndex("collaboration_actions_delivery_identity_unique").on(
+      table.workspaceId,
+      table.id,
+      table.documentId,
+      table.generation,
+      table.commandId,
+      table.commandFingerprint,
+    ),
     index("collaboration_actions_workspace_document_generation_created_id_idx").on(
       table.workspaceId,
       table.documentId,
@@ -681,6 +693,12 @@ export const collaborationActions = sqliteTable(
         and length(cast(${table.commandId} as blob)) between 1 and ${COLLABORATION_STORAGE_LIMIT_SQL.correctnessKeyBytes}`,
     ),
     check(
+      "collaboration_actions_command_fingerprint_check",
+      sql`typeof(${table.commandFingerprint}) = 'text'
+        and length(${table.commandFingerprint}) = 64
+        and ${table.commandFingerprint} not glob '*[^0-9a-f]*'`,
+    ),
+    check(
       "collaboration_actions_failure_category_check",
       sql`${table.failureCategory} is null or (
         typeof(${table.failureCategory}) = 'text'
@@ -721,6 +739,13 @@ export const collaborationUpdates = sqliteTable(
       table.documentId,
       table.generation,
       table.idempotencyKey,
+    ),
+    uniqueIndex("collaboration_updates_exact_checksum_unique").on(
+      table.workspaceId,
+      table.documentId,
+      table.generation,
+      table.seq,
+      table.checksum,
     ),
     foreignKey({
       columns: [table.workspaceId, table.documentId, table.generation],
@@ -777,6 +802,121 @@ export const collaborationUpdates = sqliteTable(
           else 0
         end
       )`,
+    ),
+  ],
+);
+
+export const collaborationCommandDeliveryJobs = sqliteTable(
+  "collaboration_command_delivery_jobs",
+  {
+    workspaceId: text("workspace_id").notNull(),
+    actionId: text("action_id").notNull(),
+    commandId: text("command_id").notNull(),
+    commandFingerprint: text("command_fingerprint").notNull(),
+    documentId: text("document_id").notNull(),
+    generation: integer("generation").notNull(),
+    seq: integer("seq").notNull(),
+    checksum: text("checksum").notNull(),
+    status: text("status", { enum: ["pending", "exhausted"] }).notNull().default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    nextAttemptAt: integer("next_attempt_at", { mode: "timestamp_ms" }),
+    failureCategory: text("failure_category", { enum: ["delivery_failed"] }),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+    updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.workspaceId, table.actionId],
+      name: "collaboration_command_delivery_jobs_pk",
+    }),
+    uniqueIndex("collaboration_command_delivery_jobs_update_unique").on(
+      table.workspaceId,
+      table.documentId,
+      table.generation,
+      table.seq,
+    ),
+    index("collaboration_command_delivery_jobs_due_idx").on(
+      table.status,
+      table.nextAttemptAt,
+      table.createdAt,
+      table.workspaceId,
+      table.documentId,
+      table.generation,
+      table.seq,
+    ),
+    foreignKey({
+      columns: [
+        table.workspaceId,
+        table.actionId,
+        table.documentId,
+        table.generation,
+        table.commandId,
+        table.commandFingerprint,
+      ],
+      foreignColumns: [
+        collaborationActions.workspaceId,
+        collaborationActions.id,
+        collaborationActions.documentId,
+        collaborationActions.generation,
+        collaborationActions.commandId,
+        collaborationActions.commandFingerprint,
+      ],
+      name: "collaboration_command_delivery_jobs_action_fk",
+    }),
+    foreignKey({
+      columns: [table.workspaceId, table.documentId, table.generation, table.seq, table.checksum],
+      foreignColumns: [
+        collaborationUpdates.workspaceId,
+        collaborationUpdates.documentId,
+        collaborationUpdates.generation,
+        collaborationUpdates.seq,
+        collaborationUpdates.checksum,
+      ],
+      name: "collaboration_command_delivery_jobs_update_fk",
+    }),
+    check(
+      "collaboration_command_delivery_jobs_sequence_check",
+      sql`typeof(${table.generation}) = 'integer'
+        and ${table.generation} between 1 and 9007199254740991
+        and typeof(${table.seq}) = 'integer'
+        and ${table.seq} between 1 and 9007199254740991`,
+    ),
+    check(
+      "collaboration_command_delivery_jobs_checksum_check",
+      sql`typeof(${table.checksum}) = 'text'
+        and length(${table.checksum}) = 64
+        and ${table.checksum} not glob '*[^0-9a-f]*'`,
+    ),
+    check(
+      "collaboration_command_delivery_jobs_command_fingerprint_check",
+      sql`typeof(${table.commandFingerprint}) = 'text'
+        and length(${table.commandFingerprint}) = 64
+        and ${table.commandFingerprint} not glob '*[^0-9a-f]*'`,
+    ),
+    check(
+      "collaboration_command_delivery_jobs_retry_state_check",
+      sql`(
+          ${table.status} = 'pending'
+          and typeof(${table.attempts}) = 'integer'
+          and ${table.attempts} between 0 and ${sql.raw(String(COLLABORATION_COMMAND_DELIVERY_MAX_ATTEMPTS - 1))}
+          and typeof(${table.nextAttemptAt}) = 'integer'
+          and ${table.nextAttemptAt} >= ${table.createdAt}
+          and (
+            (${table.attempts} = 0 and ${table.failureCategory} is null)
+            or (${table.attempts} > 0 and ${table.failureCategory} = 'delivery_failed')
+          )
+        ) or (
+          ${table.status} = 'exhausted'
+          and ${table.attempts} = ${sql.raw(String(COLLABORATION_COMMAND_DELIVERY_MAX_ATTEMPTS))}
+          and ${table.nextAttemptAt} is null
+          and ${table.failureCategory} = 'delivery_failed'
+        )`,
+    ),
+    check(
+      "collaboration_command_delivery_jobs_timestamps_check",
+      sql`typeof(${table.createdAt}) = 'integer'
+        and typeof(${table.updatedAt}) = 'integer'
+        and ${table.updatedAt} >= ${table.createdAt}`,
     ),
   ],
 );
@@ -1311,6 +1451,8 @@ export type CollaborationRoomClosureJobRecord = typeof collaborationRoomClosureJ
 export type NewCollaborationRoomClosureJobRecord = typeof collaborationRoomClosureJobs.$inferInsert;
 export type CollaborationWorkflowNotificationJobRecord = typeof collaborationWorkflowNotificationJobs.$inferSelect;
 export type NewCollaborationWorkflowNotificationJobRecord = typeof collaborationWorkflowNotificationJobs.$inferInsert;
+export type CollaborationCommandDeliveryJobRecord = typeof collaborationCommandDeliveryJobs.$inferSelect;
+export type NewCollaborationCommandDeliveryJobRecord = typeof collaborationCommandDeliveryJobs.$inferInsert;
 export type CollaborationUpdateRecord = typeof collaborationUpdates.$inferSelect;
 export type NewCollaborationUpdateRecord = typeof collaborationUpdates.$inferInsert;
 export type CollaborationNoopReceiptRecord = typeof collaborationNoopReceipts.$inferSelect;

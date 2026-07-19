@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { getDocumentById, getDocumentsByIds } from "@/features/documents/document-repository";
+import { getDocumentById } from "@/features/documents/document-repository";
+import { getAiReferenceProjectionsByIds } from "@/features/ai/reference-projection-repository";
 import { getAiSettings } from "@/features/ai/ai-settings-repository";
 import { createAiProvider } from "@/features/ai/providers";
 import {
@@ -17,10 +18,23 @@ import { RESOURCE_LIMITS } from "@/features/security/resource-policy";
 import { createAiOperationFingerprint } from "@/features/ai/ai-execution";
 import { aiCommandPayloadSchema } from "@/features/ai/types";
 import { POST } from "./route";
+import {
+  aiCollaborationCodec as collaborationCodec,
+  loadAiCollaborationSnapshot,
+} from "@/features/ai/ai-collaboration-snapshot";
+import * as Y from "yjs";
 
 vi.mock("@/features/documents/document-repository", () => ({
   getDocumentById: vi.fn(),
-  getDocumentsByIds: vi.fn(async () => []),
+}));
+
+vi.mock("@/features/ai/reference-projection-repository", () => ({
+  getAiReferenceProjectionsByIds: vi.fn(async () => []),
+}));
+
+vi.mock("@/features/ai/ai-collaboration-snapshot", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@/features/ai/ai-collaboration-snapshot")>(),
+  loadAiCollaborationSnapshot: vi.fn(async () => null),
 }));
 
 vi.mock("@/features/templates/template-repository", () => ({
@@ -122,6 +136,34 @@ function createJsonRequest(body: unknown, idempotencyKey?: string) {
     headers: idempotencyKey === undefined ? undefined : { "Idempotency-Key": idempotencyKey },
     body: JSON.stringify(body),
   });
+}
+
+function createCollaborativeSnapshot(text: string) {
+  const document = collaborationCodec.bootstrap({
+    contentJson: {
+      type: "doc",
+      content: [{ type: "paragraph", content: [{ type: "text", text }] }],
+    },
+    metadataJson: { owner: "Exact owner" },
+    plainText: text,
+    title: "Exact title",
+  });
+  const checkpoint = collaborationCodec.encodeCheckpoint(document);
+  const stateVector = Y.encodeStateVector(document);
+  document.destroy();
+  return {
+    barrier: { generation: 2, stateVector: Buffer.from(stateVector).toString("base64url") },
+    snapshot: {
+      checkpointSeq: 0,
+      document: collaborationCodec.loadCheckpoint(checkpoint),
+      documentId: "doc_1",
+      generation: 2,
+      headSeq: 9,
+      projectedSeq: 5,
+      schemaFingerprint: collaborationCodec.fingerprint(),
+      schemaVersion: 1,
+    },
+  };
 }
 
 const validBody = {
@@ -413,13 +455,88 @@ describe("POST /api/ai/rewrite", () => {
     );
   });
 
+  it("uses exact collaborative selection text and fixes run identity plus anchor", async () => {
+    const collaborative = createCollaborativeSnapshot("Old text in the exact document");
+    const generateText = vi.fn(async () => "Exact replacement");
+    vi.mocked(loadAiCollaborationSnapshot).mockResolvedValueOnce(collaborative.snapshot);
+    vi.mocked(getDocumentById).mockResolvedValueOnce({ ...documentRecord, plainText: "Stale SQL" });
+    vi.mocked(getPromptTemplateById).mockResolvedValueOnce(templateRecord);
+    vi.mocked(createAiProvider).mockReturnValueOnce({
+      capabilities: { coreTodayProxy: false, reasoningEffort: false, streaming: "buffered", structuredReview: true },
+      generateReview: vi.fn(),
+      generateText,
+      model: "stub-editor",
+      name: "stub",
+      streamText: vi.fn(),
+    });
+
+    const response = await POST(createJsonRequest({
+      ...validBody,
+      collaborationBarrier: collaborative.barrier,
+      documentText: "Untrusted browser draft",
+      selectionRange: { from: 1, to: 9 },
+    }, "collaboration-rewrite"));
+
+    expect(response.status).toBe(200);
+    expect(JSON.stringify(generateText.mock.calls)).toContain("Old text in the exact document");
+    expect(JSON.stringify(generateText.mock.calls)).not.toMatch(/Stale SQL|Untrusted browser draft/u);
+    expect(claimAiRun).toHaveBeenCalledWith(localWorkspace, expect.objectContaining({
+      collaborationSnapshot: expect.objectContaining({
+        documentId: "doc_1",
+        generation: 2,
+        headSeq: 9,
+        schemaFingerprint: collaborationCodec.fingerprint(),
+        stateVector: expect.any(Uint8Array),
+      }),
+    }));
+    expect(completeAiRunWithProposals).toHaveBeenCalledWith(
+      localWorkspace,
+      "run_1",
+      "attempt-token-1",
+      "Exact replacement",
+      [expect.objectContaining({
+        anchor: expect.objectContaining({
+          baseHeadSeq: 9,
+          endAssoc: 1,
+          generation: 2,
+          startAssoc: -1,
+        }),
+        targetText: "Old text",
+      })],
+    );
+  });
+
+  it("rejects a collaborative selection range/text mismatch before provider and claim", async () => {
+    const collaborative = createCollaborativeSnapshot("Old text in the exact document");
+    vi.mocked(loadAiCollaborationSnapshot).mockResolvedValueOnce(collaborative.snapshot);
+    vi.mocked(getDocumentById).mockResolvedValueOnce(documentRecord);
+    vi.mocked(getPromptTemplateById).mockResolvedValueOnce(templateRecord);
+
+    const response = await POST(createJsonRequest({
+      ...validBody,
+      collaborationBarrier: collaborative.barrier,
+      selectionRange: { from: 2, to: 10 },
+    }, "collaboration-rewrite-conflict"));
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      code: "preflight_rejected",
+      error: "The collaborative selection no longer matches the exact document snapshot",
+    });
+    expect(createAiProvider).not.toHaveBeenCalled();
+    expect(claimAiRun).not.toHaveBeenCalled();
+  });
+
   it("hydrates referenced documents by id before building the rewrite prompt", async () => {
     const generateText = vi.fn(async () => "Improved text");
     vi.mocked(getDocumentById).mockResolvedValueOnce(documentRecord);
-    vi.mocked(getDocumentsByIds).mockResolvedValueOnce([
+    vi.mocked(getAiReferenceProjectionsByIds).mockResolvedValueOnce([
       {
         ...documentRecord,
+        generation: null,
+        headSeq: null,
         id: "doc_ref",
+        projectedSeq: null,
         title: "Reference Memo",
         plainText: "Reference memo body",
       },
@@ -447,7 +564,7 @@ describe("POST /api/ai/rewrite", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(getDocumentsByIds).toHaveBeenCalledWith(localWorkspace, ["doc_ref"]);
+    expect(getAiReferenceProjectionsByIds).toHaveBeenCalledWith(localWorkspace, ["doc_ref"]);
     expect(generateText).toHaveBeenCalledWith(expect.objectContaining({
       messages: expect.arrayContaining([
         expect.objectContaining({
@@ -477,10 +594,13 @@ describe("POST /api/ai/rewrite", () => {
   it("excludes the current document from referenced rewrite context", async () => {
     const generateText = vi.fn(async () => "Improved text");
     vi.mocked(getDocumentById).mockResolvedValueOnce(documentRecord);
-    vi.mocked(getDocumentsByIds).mockResolvedValueOnce([
+    vi.mocked(getAiReferenceProjectionsByIds).mockResolvedValueOnce([
       {
         ...documentRecord,
+        generation: null,
+        headSeq: null,
         id: "doc_ref",
+        projectedSeq: null,
         title: "Reference Memo",
         plainText: "Reference memo body",
       },
@@ -513,7 +633,7 @@ describe("POST /api/ai/rewrite", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(getDocumentsByIds).toHaveBeenCalledWith(localWorkspace, ["doc_ref"]);
+    expect(getAiReferenceProjectionsByIds).toHaveBeenCalledWith(localWorkspace, ["doc_ref"]);
     expect(generateText).toHaveBeenCalledWith(expect.objectContaining({
       messages: expect.arrayContaining([
         expect.objectContaining({

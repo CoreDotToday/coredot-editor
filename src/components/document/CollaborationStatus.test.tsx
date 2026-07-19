@@ -19,8 +19,8 @@ const expectedMessages: Record<
     offline_pending: /offline.*2 changes.*merge/i,
     read_only: /read-only/i,
     reconnecting: /reconnecting/i,
-    storage_delayed: /storage is delayed.*2 changes/i,
-    synced: /synchronized and durably saved/i,
+    storage_delayed: /shared editing sync is delayed.*2 changes/i,
+    synced: /all shared edits are synchronized/i,
   },
   ko: {
     authorization_expired: /접근 권한이 만료되었습니다/,
@@ -29,8 +29,8 @@ const expectedMessages: Record<
     offline_pending: /오프라인.*변경 2건.*병합/,
     read_only: /읽기 전용입니다/,
     reconnecting: /다시 연결하는 중입니다/,
-    storage_delayed: /저장소 응답이 지연.*변경 2건/,
-    synced: /동기화 및 영구 저장이 완료되었습니다/,
+    storage_delayed: /공동 편집 동기화가 지연.*변경 2건/,
+    synced: /공동 편집 내용이 모두 동기화되었습니다/,
   },
 };
 
@@ -75,7 +75,7 @@ describe("CollaborationStatus", () => {
       />,
     );
 
-    expect(screen.getByRole("status")).toHaveTextContent(/변경 5건의 영구 저장을 확인/);
+    expect(screen.getByRole("status")).toHaveTextContent(/변경 5건을 서버에 반영/);
     expect(screen.getByRole("status")).not.toHaveTextContent("a".repeat(64));
     expect(screen.getByRole("status")).not.toHaveTextContent("b".repeat(64));
     expect(screen.getByRole("status")).not.toHaveTextContent("c".repeat(64));

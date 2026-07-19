@@ -15,6 +15,91 @@ const ROTATED_ROOM = "collab:v1:workspace-a:document-a:g2";
 const CHECKSUM = "a".repeat(64);
 
 describe("Hocuspocus provider adapter", () => {
+  it("returns an exact generation and state-vector barrier only after durable local flush", async () => {
+    const fixture = createFixture();
+    await fixture.session.connect();
+    const events = fixture.providers[0]!.options.events;
+    events.authenticated("read-write");
+    events.synced(true);
+    fixture.document.getText("test").insert(0, "local");
+    events.unsyncedChanges(1);
+    events.outgoingUpdate(new Uint8Array([1]), "incremental");
+    await settleMicrotasks();
+
+    let settled = false;
+    const barrier = fixture.session.flushPendingUpdates({ timeoutMs: 1_000 }).then((value) => {
+      settled = true;
+      return value;
+    });
+    await settleMicrotasks();
+    expect(settled).toBe(false);
+
+    events.durableAcknowledged();
+    events.unsyncedChanges(0);
+    await expect(barrier).resolves.toEqual({
+      generation: 1,
+      stateVector: Y.encodeStateVector(fixture.document),
+    });
+  });
+
+  it("fails a snapshot barrier for readonly, fatal, destroyed, or timed-out sessions", async () => {
+    const readonly = createFixture();
+    await readonly.session.connect();
+    readonly.providers[0]!.options.events.authenticated("readonly");
+    readonly.providers[0]!.options.events.synced(true);
+    await expect(readonly.session.flushPendingUpdates()).rejects.toEqual(
+      new CollaborationSessionError("not_writable"),
+    );
+
+    const fatal = createFixture();
+    await fatal.session.connect();
+    fatal.providers[0]!.options.events.authenticationFailed("invalid");
+    await expect(fatal.session.flushPendingUpdates()).rejects.toEqual(
+      new CollaborationSessionError("flush_unavailable"),
+    );
+
+    const destroyed = createFixture();
+    destroyed.session.destroy();
+    await expect(destroyed.session.flushPendingUpdates()).rejects.toEqual(
+      new CollaborationSessionError("destroyed"),
+    );
+
+    const pending = createFixture();
+    await pending.session.connect();
+    pending.providers[0]!.options.events.authenticated("read-write");
+    pending.providers[0]!.options.events.synced(true);
+    pending.providers[0]!.options.events.unsyncedChanges(1);
+    const timedOut = pending.session.flushPendingUpdates({ timeoutMs: 1 });
+    await pending.timers.findLast((timer) => timer.delay === 1)?.callback();
+    await expect(timedOut).rejects.toEqual(new CollaborationSessionError("flush_timeout"));
+  });
+
+  it("cancels a pending barrier and fences stale unsynced counts across reconnect", async () => {
+    const fixture = createFixture();
+    await fixture.session.connect();
+    const events = fixture.providers[0]!.options.events;
+    events.authenticated("read-write");
+    events.synced(true);
+    events.unsyncedChanges(1);
+
+    const controller = new AbortController();
+    const aborted = fixture.session.flushPendingUpdates({ signal: controller.signal });
+    controller.abort();
+    await expect(aborted).rejects.toEqual(new CollaborationSessionError("flush_aborted"));
+
+    events.status("disconnected");
+    events.status("connecting");
+    let settled = false;
+    const reconnected = fixture.session.flushPendingUpdates().then((value) => {
+      settled = true;
+      return value;
+    });
+    await settleMicrotasks();
+    expect(settled).toBe(false);
+    events.synced(true);
+    await expect(reconnected).resolves.toMatchObject({ generation: 1 });
+  });
+
   it("delivers workflow-changed notifications only while the active session subscription exists", async () => {
     const fixture = createFixture();
     const listener = vi.fn();

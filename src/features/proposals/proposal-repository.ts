@@ -1,8 +1,14 @@
 import { and, desc, eq, inArray, lt, or, sql } from "drizzle-orm";
 import { db } from "@/db/client";
-import { aiProposals, type NewAiProposalRecord } from "@/db/schema";
+import {
+  aiProposals,
+  collaborationDocuments,
+  collaborationProposalAnchors,
+  type NewAiProposalRecord,
+} from "@/db/schema";
 import type { WorkspaceScope } from "@/features/auth/request-context";
 import { decodeCollectionCursor, encodeCollectionCursor } from "@/features/pagination/collection-cursor";
+import { ProposalStatusUpdateConflictError } from "./proposal-status-errors";
 
 type ProposalDatabase = typeof db;
 
@@ -116,29 +122,63 @@ export function createProposalRepository(database: ProposalDatabase = db) {
     ) {
       if (status === "accepted") return null;
 
-      const whereClause = options.expectedStatus
-        ? and(
-            eq(aiProposals.workspaceId, scope.workspaceId),
-            eq(aiProposals.id, id),
-            inArray(aiProposals.status, ["pending", "rejected"]),
-            eq(aiProposals.status, options.expectedStatus),
-          )
-        : and(
-            eq(aiProposals.workspaceId, scope.workspaceId),
-            eq(aiProposals.id, id),
-            inArray(aiProposals.status, ["pending", "rejected"]),
-          );
-      const [proposal] = await database
-        .update(aiProposals)
-        .set({
-          appliedMode: null,
-          status,
-          updatedAt: new Date(),
-        })
-        .where(whereClause)
-        .returning();
+      return database.transaction(async (transaction) => {
+        const whereClause = options.expectedStatus
+          ? and(
+              eq(aiProposals.workspaceId, scope.workspaceId),
+              eq(aiProposals.id, id),
+              inArray(aiProposals.status, ["pending", "rejected"]),
+              eq(aiProposals.status, options.expectedStatus),
+            )
+          : and(
+              eq(aiProposals.workspaceId, scope.workspaceId),
+              eq(aiProposals.id, id),
+              inArray(aiProposals.status, ["pending", "rejected"]),
+            );
+        const [candidate] = await transaction
+          .select({ documentId: aiProposals.documentId, status: aiProposals.status })
+          .from(aiProposals)
+          .where(whereClause)
+          .limit(1);
+        if (!candidate) return null;
 
-      return proposal ?? null;
+        if (candidate.status === "rejected" && status === "pending") {
+          const [currentCollaboration] = await transaction
+            .select({ generation: collaborationDocuments.generation })
+            .from(collaborationDocuments)
+            .where(and(
+              eq(collaborationDocuments.workspaceId, scope.workspaceId),
+              eq(collaborationDocuments.documentId, candidate.documentId),
+              eq(collaborationDocuments.isCurrent, true),
+            ))
+            .limit(1);
+          if (currentCollaboration) {
+            const [exactAnchor] = await transaction
+              .select({ proposalId: collaborationProposalAnchors.proposalId })
+              .from(collaborationProposalAnchors)
+              .where(and(
+                eq(collaborationProposalAnchors.workspaceId, scope.workspaceId),
+                eq(collaborationProposalAnchors.proposalId, id),
+                eq(collaborationProposalAnchors.documentId, candidate.documentId),
+                eq(collaborationProposalAnchors.generation, currentCollaboration.generation),
+              ))
+              .limit(1);
+            if (!exactAnchor) throw new ProposalStatusUpdateConflictError();
+          }
+        }
+
+        const [proposal] = await transaction
+          .update(aiProposals)
+          .set({
+            appliedMode: null,
+            status,
+            updatedAt: new Date(),
+          })
+          .where(whereClause)
+          .returning();
+
+        return proposal ?? null;
+      });
     },
   };
 }

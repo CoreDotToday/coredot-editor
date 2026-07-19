@@ -1,11 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AiProposalRecord, DocumentChangeRecord, DocumentRecord } from "@/db/schema";
 import { applyProposal } from "@/features/documents/document-change-service";
+import { applyCollaborativeProposalCommand } from "@/features/collaboration/proposal-command-service";
 import { DOCUMENT_REQUEST_BODY_BYTES } from "@/features/security/resource-policy";
 import { TEST_REQUEST_CONTEXT } from "@/test/auth-context";
 import { POST } from "./route";
 
 vi.mock("@/features/documents/document-change-service", () => ({ applyProposal: vi.fn() }));
+vi.mock("@/features/collaboration/proposal-command-service", () => ({
+  applyCollaborativeProposalCommand: vi.fn(),
+}));
 
 const createdAt = new Date("2026-01-01T00:00:00.000Z");
 
@@ -94,6 +98,78 @@ function createContext(id = "proposal_1") {
 
 describe("POST /api/proposals/[id]/apply", () => {
   beforeEach(() => vi.clearAllMocks());
+
+  it("accepts only the semantic collaborative command payload without a draft or readiness", async () => {
+    vi.mocked(applyCollaborativeProposalCommand).mockResolvedValueOnce({
+      ...createCollaborativeSuccess(),
+      proposals: [createProposalRecord()],
+    });
+
+    const response = await POST(createJsonRequest({
+      commandId: "command-1",
+      mode: "replace",
+      observedHeadSeq: 7,
+      proposalId: "proposal_1",
+    }), createContext());
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      collaboration: { generation: 2, headSeq: 8 },
+      proposal: { id: "proposal_1" },
+      replayed: false,
+    });
+    expect(applyCollaborativeProposalCommand).toHaveBeenCalledWith(TEST_REQUEST_CONTEXT, {
+      commandId: "command-1",
+      items: [{ mode: "replace", proposalId: "proposal_1" }],
+      observedHeadSeq: 7,
+    });
+    expect(applyProposal).not.toHaveBeenCalled();
+  });
+
+  it("maps stable collaborative target conflicts and rejects semantic draft smuggling", async () => {
+    vi.mocked(applyCollaborativeProposalCommand).mockResolvedValueOnce({
+      ok: false,
+      reason: "proposal_target_conflict",
+    });
+    const conflict = await POST(createJsonRequest({
+      commandId: "command-1",
+      mode: "replace",
+      observedHeadSeq: 7,
+      proposalId: "proposal_1",
+    }), createContext());
+    expect(conflict.status).toBe(409);
+    await expect(conflict.json()).resolves.toMatchObject({ reason: "proposal_target_conflict" });
+
+    const smuggled = await POST(createJsonRequest({
+      commandId: "command-2",
+      document: createValidPayload().document,
+      mode: "replace",
+      observedHeadSeq: 7,
+      proposalId: "proposal_1",
+    }), createContext());
+    expect(smuggled.status).toBe(400);
+    expect(applyCollaborativeProposalCommand).toHaveBeenCalledOnce();
+  });
+
+  it("maps a Workspace-global command identity collision to a stable 409", async () => {
+    vi.mocked(applyCollaborativeProposalCommand).mockResolvedValueOnce({
+      ok: false,
+      reason: "idempotency_conflict",
+    });
+
+    const response = await POST(createJsonRequest({
+      commandId: "command-used-by-another-document",
+      mode: "replace",
+      observedHeadSeq: 0,
+      proposalId: "proposal_1",
+    }), createContext());
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: "Proposal command conflict",
+      reason: "idempotency_conflict",
+    });
+  });
 
   it("rejects readiness smuggling before proposal service access", async () => {
     const base = createValidPayload();
@@ -241,3 +317,14 @@ describe("POST /api/proposals/[id]/apply", () => {
     expect(applyProposal).not.toHaveBeenCalled();
   });
 });
+
+function createCollaborativeSuccess() {
+  return {
+    change: createChangeRecord(),
+    collaboration: { generation: 2, headSeq: 8 },
+    document: createDocumentRecord(),
+    ok: true as const,
+    proposals: [createProposalRecord()],
+    replayed: false,
+  };
+}

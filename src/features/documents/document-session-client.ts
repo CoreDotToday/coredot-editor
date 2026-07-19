@@ -4,6 +4,7 @@ import type {
   DocumentReadiness,
   TiptapJson,
 } from "@/db/schema";
+import { z } from "zod";
 import type { ProposalApplyMode } from "@/features/proposals/proposal-transaction";
 import type { ProjectProfileViolation } from "@/features/projects/project-profile";
 
@@ -100,6 +101,11 @@ export type DocumentSessionChangeResponse = {
   proposals: DocumentSessionProposal[];
 };
 
+export type DocumentSessionCollaborativeChangeResponse = DocumentSessionChangeResponse & {
+  collaboration: { generation: number; headSeq: number };
+  replayed: boolean;
+};
+
 export type DocumentSessionHistoryChange = DocumentSessionChange & {
   proposals: Array<{
     id: string;
@@ -131,6 +137,41 @@ export type ProposalBatchApplyPayload = {
   expectedRevision: number;
   proposals: Array<{ appliedMode: ProposalApplyMode; id: string }>;
 };
+
+export type CollaborativeProposalApplyPayload = {
+  commandId: string;
+  mode: ProposalApplyMode;
+  observedHeadSeq: number;
+};
+
+export type CollaborativeProposalBatchApplyPayload = {
+  commandId: string;
+  items: Array<{ mode: ProposalApplyMode; proposalId: string }>;
+  observedHeadSeq: number;
+};
+
+export type CollaborativeProposalRequestOptions = Readonly<{
+  expectedDocumentId: string;
+  expectedGeneration: number;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}>;
+
+export type CollaborativeProposalErrorReason =
+  | "aborted"
+  | "idempotency_conflict"
+  | "invalid_request"
+  | "malformed_response"
+  | "network_error"
+  | "not_found"
+  | "proposal_overlap_conflict"
+  | "proposal_status_conflict"
+  | "proposal_target_conflict"
+  | "timeout"
+  | "unavailable"
+  | "unknown";
+
+export const COLLABORATIVE_PROPOSAL_CLIENT_TIMEOUT_MS = 15_000;
 
 type RequestFunction = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
@@ -166,6 +207,17 @@ export class DocumentSessionInvalidProfileError extends DocumentSessionRequestEr
   }
 }
 
+export class DocumentCollaborativeProposalRequestError extends DocumentSessionRequestError {
+  constructor(
+    status: number,
+    body: Record<string, unknown>,
+    readonly reason: CollaborativeProposalErrorReason,
+  ) {
+    super(status, body);
+    this.name = "DocumentCollaborativeProposalRequestError";
+  }
+}
+
 export class DocumentWorkflowRequestError extends DocumentSessionRequestError {
   constructor(
     status: number,
@@ -185,6 +237,93 @@ class DocumentWorkflowTimeoutError extends Error {
     this.name = "DocumentWorkflowTimeoutError";
   }
 }
+
+const documentReadinessSchema = z.enum(["draft", "needs_review", "ready", "approved"]);
+const proposalApplyModeSchema = z.enum(["replace", "insert_below"]);
+const tiptapJsonSchema = z.object({
+  content: z.array(z.unknown()).optional(),
+  type: z.literal("doc"),
+}).strict();
+const documentMetadataValueSchema = z.union([
+  z.boolean(),
+  z.number(),
+  z.string(),
+  z.array(z.string()),
+  z.null(),
+]);
+const collaborativeDocumentSchema = z.object({
+  contentJson: tiptapJsonSchema,
+  createdAt: z.string().optional(),
+  id: z.string().min(1),
+  metadataJson: z.record(z.string(), documentMetadataValueSchema),
+  plainText: z.string().optional(),
+  readiness: documentReadinessSchema,
+  revision: z.number().int().nonnegative(),
+  status: z.enum(["draft", "archived"]).optional(),
+  title: z.string(),
+  updatedAt: z.string().optional(),
+  workspaceId: z.string().optional(),
+}).strict();
+const collaborativeChangeSchema = z.object({
+  afterRevision: z.number().int().nonnegative(),
+  batchId: z.string().nullable(),
+  createdAt: z.string(),
+  documentId: z.string().min(1),
+  id: z.string().min(1),
+  kind: z.enum(["single", "batch"]),
+  undoneAt: z.string().nullable(),
+}).strict();
+const collaborativeProposalSchema = z.object({
+  aiRunId: z.string().optional(),
+  appliedMode: proposalApplyModeSchema.nullable(),
+  command: z.string().nullable(),
+  createdAt: z.string().optional(),
+  defaultApplyMode: proposalApplyModeSchema,
+  documentId: z.string().min(1),
+  explanation: z.string(),
+  id: z.string().min(1),
+  occurrenceIndex: z.number().int().nullable(),
+  replacementText: z.string(),
+  resultOrdinal: z.number().int().nonnegative().nullable().optional(),
+  source: z.enum(["review", "selection"]),
+  status: z.enum(["pending", "accepted", "rejected"]),
+  targetFrom: z.number().int().nullable(),
+  targetText: z.string(),
+  targetTo: z.number().int().nullable(),
+  updatedAt: z.string().optional(),
+  workspaceId: z.string().optional(),
+}).strict();
+const collaborationPositionSchema = z.object({
+  generation: z.number().int().positive(),
+  headSeq: z.number().int().nonnegative(),
+}).strict();
+const collaborativeSingleResponseSchema = z.object({
+  change: collaborativeChangeSchema,
+  collaboration: collaborationPositionSchema,
+  document: collaborativeDocumentSchema,
+  proposal: collaborativeProposalSchema,
+  replayed: z.boolean(),
+}).strict();
+const collaborativeBatchResponseSchema = z.object({
+  change: collaborativeChangeSchema,
+  collaboration: collaborationPositionSchema,
+  document: collaborativeDocumentSchema,
+  proposals: z.array(collaborativeProposalSchema),
+  replayed: z.boolean(),
+}).strict();
+const collaborativeProposalServerReasonSchema = z.enum([
+  "idempotency_conflict",
+  "invalid_request",
+  "not_found",
+  "proposal_overlap_conflict",
+  "proposal_status_conflict",
+  "proposal_target_conflict",
+  "unavailable",
+]);
+const collaborativeProposalErrorBodySchema = z.object({
+  error: z.string(),
+  reason: collaborativeProposalServerReasonSchema,
+}).strict();
 
 export function createDocumentSessionClient(request: RequestFunction = fetch) {
   async function readBody(response: Response): Promise<Record<string, unknown>> {
@@ -228,6 +367,87 @@ export function createDocumentSessionClient(request: RequestFunction = fetch) {
       change,
       document,
       proposals: proposals as DocumentSessionProposal[],
+    };
+  }
+
+  async function requestCollaborativeChange(
+    url: string,
+    payload: unknown,
+    proposalShape: "single" | "plural",
+    expectedProposals: ReadonlyArray<{ mode: ProposalApplyMode; proposalId: string }>,
+    observedHeadSeq: number,
+    options: CollaborativeProposalRequestOptions,
+  ): Promise<DocumentSessionCollaborativeChangeResponse> {
+    let exchange: { body: Record<string, unknown>; response: Response };
+    try {
+      exchange = await requestWithWorkflowDeadline(request, url, {
+        body: JSON.stringify(payload),
+        headers: { "Content-Type": "application/json" },
+        method: "POST",
+        signal: options.signal,
+      }, async (response) => ({ body: await readBody(response), response }),
+      options.timeoutMs ?? COLLABORATIVE_PROPOSAL_CLIENT_TIMEOUT_MS);
+    } catch (error) {
+      if (error instanceof DocumentWorkflowTimeoutError) {
+        throw new DocumentCollaborativeProposalRequestError(0, {}, "timeout");
+      }
+      if (options.signal?.aborted) {
+        throw new DocumentCollaborativeProposalRequestError(0, {}, "aborted");
+      }
+      throw new DocumentCollaborativeProposalRequestError(0, {}, "network_error");
+    }
+
+    const { body, response } = exchange;
+    if (!response.ok) {
+      const parsedError = collaborativeProposalErrorBodySchema.safeParse(body);
+      throw new DocumentCollaborativeProposalRequestError(
+        response.status,
+        body,
+        parsedError.success ? parsedError.data.reason : "unknown",
+      );
+    }
+
+    const parsed = proposalShape === "single"
+      ? collaborativeSingleResponseSchema.safeParse(body)
+      : collaborativeBatchResponseSchema.safeParse(body);
+    if (!parsed.success) {
+      throw new DocumentCollaborativeProposalRequestError(response.status, body, "malformed_response");
+    }
+    const parsedBody = parsed.data;
+    const proposals = "proposal" in parsedBody ? [parsedBody.proposal] : parsedBody.proposals;
+    const expectedKind = expectedProposals.length === 1 ? "single" : "batch";
+    const expectedBatchIdentity = expectedKind === "batch"
+      ? parsedBody.change.batchId !== null
+      : parsedBody.change.batchId === null;
+    const collaborationPositionIsValid = parsedBody.collaboration.generation === options.expectedGeneration
+      ? parsedBody.collaboration.headSeq >= observedHeadSeq
+      : parsedBody.collaboration.generation === options.expectedGeneration + 1;
+    if (
+      parsedBody.document.id !== options.expectedDocumentId
+      || parsedBody.change.documentId !== options.expectedDocumentId
+      || parsedBody.change.kind !== expectedKind
+      || !expectedBatchIdentity
+      || parsedBody.change.afterRevision !== parsedBody.document.revision
+      || !collaborationPositionIsValid
+      || proposals.length !== expectedProposals.length
+      || proposals.some((proposal, index) => {
+        const expected = expectedProposals[index];
+        return !expected
+          || proposal.id !== expected.proposalId
+          || proposal.status !== "accepted"
+          || proposal.appliedMode !== expected.mode
+          || proposal.documentId !== options.expectedDocumentId;
+      })
+    ) {
+      throw new DocumentCollaborativeProposalRequestError(response.status, body, "malformed_response");
+    }
+
+    return {
+      change: parsedBody.change,
+      collaboration: parsedBody.collaboration,
+      document: parsedBody.document,
+      proposals,
+      replayed: parsedBody.replayed,
     };
   }
 
@@ -284,6 +504,35 @@ export function createDocumentSessionClient(request: RequestFunction = fetch) {
         "/api/proposals/bulk-apply",
         { ...payload, document: legacyWriterDocument(payload.document) },
         "plural",
+      );
+    },
+
+    applyCollaborativeProposal(
+      proposalId: string,
+      payload: CollaborativeProposalApplyPayload,
+      options: CollaborativeProposalRequestOptions,
+    ) {
+      return requestCollaborativeChange(
+        `/api/proposals/${encodeURIComponent(proposalId)}/apply`,
+        { ...payload, proposalId },
+        "single",
+        [{ mode: payload.mode, proposalId }],
+        payload.observedHeadSeq,
+        options,
+      );
+    },
+
+    applyCollaborativeProposalBatch(
+      payload: CollaborativeProposalBatchApplyPayload,
+      options: CollaborativeProposalRequestOptions,
+    ) {
+      return requestCollaborativeChange(
+        "/api/proposals/bulk-apply",
+        payload,
+        "plural",
+        payload.items,
+        payload.observedHeadSeq,
+        options,
       );
     },
 

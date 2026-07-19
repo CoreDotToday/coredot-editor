@@ -12,6 +12,8 @@ import * as Y from "yjs";
 
 import * as schema from "@/db/schema";
 import {
+  aiProposals,
+  aiRuns,
   collaborationDocuments,
   collaborationNoopReceipts,
   collaborationUpdates,
@@ -42,6 +44,201 @@ afterEach(async () => {
 });
 
 describe("CollaborationPersistence", () => {
+  it("expires pending legacy Proposals atomically when collaboration is initialized", async () => {
+    const harness = await createHarness("legacy-proposal-expiry");
+    const timestamp = new Date(1_000);
+    await harness.database.insert(aiRuns).values({
+      commandType: "document_review",
+      createdAt: timestamp,
+      documentId: harness.documentId,
+      errorMessage: null,
+      executionToken: null,
+      id: "legacy-run",
+      idempotencyKey: "legacy-run-key",
+      inputSummaryJson: {},
+      model: "stub",
+      operationFingerprint: "a".repeat(64),
+      outputText: "review",
+      provider: "stub",
+      retryNotBeforeAt: null,
+      status: "completed",
+      updatedAt: timestamp,
+      wasApplied: false,
+      workspaceId: scope.workspaceId,
+    });
+    await harness.database.insert(aiProposals).values([
+      {
+        aiRunId: "legacy-run",
+        createdAt: timestamp,
+        documentId: harness.documentId,
+        explanation: "Pending legacy proposal",
+        id: "legacy-pending",
+        replacementText: "replacement",
+        resultOrdinal: 0,
+        status: "pending",
+        targetText: "Legacy body",
+        updatedAt: timestamp,
+        workspaceId: scope.workspaceId,
+      },
+      {
+        aiRunId: "legacy-run",
+        appliedMode: "replace",
+        createdAt: timestamp,
+        documentId: harness.documentId,
+        explanation: "Already accepted",
+        id: "legacy-accepted",
+        replacementText: "accepted",
+        resultOrdinal: 1,
+        status: "accepted",
+        targetText: "Legacy body",
+        updatedAt: timestamp,
+        workspaceId: scope.workspaceId,
+      },
+    ]);
+
+    await harness.persistence.initialize(scope, harness.documentId);
+
+    await expect(harness.database.select({
+      id: aiProposals.id,
+      status: aiProposals.status,
+    }).from(aiProposals).orderBy(aiProposals.id)).resolves.toEqual([
+      { id: "legacy-accepted", status: "accepted" },
+      { id: "legacy-pending", status: "rejected" },
+    ]);
+  });
+
+  it("plans and commits a server command against one current snapshot in one SQL transaction", async () => {
+    const harness = await createHarness("server-command-transaction");
+    const snapshot = await harness.persistence.initialize(scope, harness.documentId);
+    const plan = vi.fn((_transaction: unknown, current: CollaborationSnapshot) => Promise.resolve({
+      plan: { baseHeadSeq: current.headSeq },
+      update: mutateSnapshot(current, (document) => replaceTitle(document, "Command title")),
+    }));
+    const prepare = vi.fn(async () => undefined);
+    const commit = vi.fn(async (transaction: typeof harness.database, input: {
+      receipt: { headSeq: number };
+    }) => {
+      await transaction.update(documents).set({ plainText: "semantic-commit" }).where(and(
+        eq(documents.workspaceId, scope.workspaceId),
+        eq(documents.id, harness.documentId),
+      ));
+      return { headSeq: input.receipt.headSeq };
+    });
+    const transaction = vi.spyOn(harness.database.$client, "transaction");
+
+    const result = await harness.persistence.commitServerCommand(scope, {
+      documentId: harness.documentId,
+      expectedGeneration: snapshot.generation,
+      idempotencyKey: "command-transaction",
+      originKind: "proposal_command",
+      principalId: "principal-command",
+      requestId: "request-command",
+    }, {
+      commit,
+      plan,
+      prepare,
+      async replay() {
+        throw new Error("unexpected replay");
+      },
+    });
+
+    expect(transaction.mock.calls as unknown as Array<[unknown]>).toEqual([["write"]]);
+    expect(plan).toHaveBeenCalledOnce();
+    expect(prepare).toHaveBeenCalledOnce();
+    expect(commit).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({
+      receipt: { generation: 1, headSeq: 1 },
+      replayed: false,
+      result: { headSeq: 1 },
+    });
+    expect(result.update?.byteLength).toBeGreaterThan(0);
+    await expect(readLegacyDocument(harness.database, harness.documentId)).resolves.toMatchObject({
+      plainText: "semantic-commit",
+    });
+  });
+
+  it("rolls back the canonical update when semantic command finalization fails", async () => {
+    const harness = await createHarness("server-command-rollback");
+    const snapshot = await harness.persistence.initialize(scope, harness.documentId);
+
+    await expect(harness.persistence.commitServerCommand(scope, {
+      documentId: harness.documentId,
+      expectedGeneration: snapshot.generation,
+      idempotencyKey: "command-rollback",
+      originKind: "proposal_command",
+      principalId: "principal-command",
+      requestId: "request-command",
+    }, {
+      async commit(transaction) {
+        await transaction.update(documents).set({ plainText: "must-roll-back" }).where(and(
+          eq(documents.workspaceId, scope.workspaceId),
+          eq(documents.id, harness.documentId),
+        ));
+        throw new Error("semantic finalization failed");
+      },
+      async plan(_transaction, current) {
+        return {
+          plan: null,
+          update: mutateSnapshot(current, (document) => replaceTitle(document, "Must roll back")),
+        };
+      },
+      async prepare() {},
+      async replay() {
+        throw new Error("unexpected replay");
+      },
+    })).rejects.toMatchObject({ category: "internal" });
+
+    await expect(harness.database.select().from(collaborationUpdates)).resolves.toHaveLength(0);
+    await expect(harness.persistence.load(scope, harness.documentId)).resolves.toMatchObject({ headSeq: 0 });
+    await expect(readLegacyDocument(harness.database, harness.documentId)).resolves.toMatchObject({
+      plainText: "Legacy body",
+    });
+  });
+
+  it("fails closed when a server-command replay receipt has a different audit identity", async () => {
+    const harness = await createHarness("server-command-replay-audit-identity");
+    const snapshot = await harness.persistence.initialize(scope, harness.documentId);
+    const command = {
+      documentId: harness.documentId,
+      expectedGeneration: snapshot.generation,
+      idempotencyKey: "command-audit-identity",
+      originKind: "proposal_command" as const,
+      principalId: "principal-command",
+      requestId: "request-command",
+    };
+    const operations = {
+      async commit() {
+        return { committed: true };
+      },
+      async plan(_transaction: unknown, current: CollaborationSnapshot) {
+        return {
+          plan: null,
+          update: mutateSnapshot(current, (document) => replaceTitle(document, "Command title")),
+        };
+      },
+      async prepare() {},
+      replay: vi.fn(async () => ({ committed: true })),
+    };
+    await harness.persistence.commitServerCommand(scope, command, operations);
+    await harness.database.update(collaborationUpdates).set({
+      originKind: "undo_command",
+      principalId: "principal-other",
+    }).where(and(
+      eq(collaborationUpdates.workspaceId, scope.workspaceId),
+      eq(collaborationUpdates.documentId, harness.documentId),
+      eq(collaborationUpdates.idempotencyKey, command.idempotencyKey),
+    ));
+
+    await expect(harness.persistence.commitServerCommand(scope, {
+      ...command,
+      requestId: "request-retry",
+    }, operations)).rejects.toMatchObject({
+      category: "idempotency_conflict",
+      retryable: false,
+    });
+    expect(operations.replay).not.toHaveBeenCalled();
+  });
+
   it("bootstraps exactly once from the legacy materialization and never falls back to JSON", async () => {
     const harness = await createHarness("bootstrap-once");
 

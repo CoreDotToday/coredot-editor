@@ -1,12 +1,17 @@
 import { pathToFileURL } from "node:url";
 
 import { createCollaborationAuthorizationRepository } from "../authorization-repository";
+import { createCollaborationCommandDeliveryOutbox } from "../command-delivery-outbox";
 import { createCollaborationPersistence } from "../persistence";
 import { createDocumentArchiveService } from "@/features/documents/document-archive-service";
 import { createDocumentWorkflowNotificationOutbox } from "@/features/documents/document-workflow-notification-outbox";
 import { createCollaborationSidecar } from "./create-server";
 import { readCollaborationServerConfig } from "./config";
 import type { CollaborationReadinessChecks } from "./health-server";
+import {
+  createCollaborationCommandDeliveryWorker,
+  createSidecarCommandDeliveryGateway,
+} from "./command-delivery-worker";
 import {
   createCollaborationRoomClosureWorker,
   createSidecarArchiveRoomGateway,
@@ -20,6 +25,7 @@ export const COLLABORATION_MIGRATION_TABLES = [
   "collaboration_documents",
   "collaboration_updates",
   "collaboration_noop_receipts",
+  "collaboration_command_delivery_jobs",
   "collaboration_room_closure_jobs",
   "collaboration_workflow_notification_jobs",
   "collaboration_actions",
@@ -141,6 +147,9 @@ export async function startCollaborationSidecar(
   const workflowNotificationWorkerRef: {
     current?: ReturnType<typeof createCollaborationWorkflowNotificationWorker>;
   } = {};
+  const commandDeliveryWorkerRef: {
+    current?: ReturnType<typeof createCollaborationCommandDeliveryWorker>;
+  } = {};
   const sidecar = createCollaborationSidecar({
     authorization,
     config,
@@ -150,6 +159,7 @@ export async function startCollaborationSidecar(
       workersReady: () => Boolean(
         roomClosureWorkerRef.current?.isReady()
         && workflowNotificationWorkerRef.current?.isReady()
+        && commandDeliveryWorkerRef.current?.isReady()
       ),
     }),
   });
@@ -178,6 +188,19 @@ export async function startCollaborationSidecar(
     },
   });
   workflowNotificationWorkerRef.current = workflowNotificationWorker;
+  const commandDeliveryOutbox = createCollaborationCommandDeliveryOutbox({
+    database: db,
+    gateway: createSidecarCommandDeliveryGateway({
+      publishDurableUpdate: (scope, documentId, generation, update) =>
+        sidecar.publishDurableUpdate(scope, documentId, generation, update),
+    }),
+  });
+  const commandDeliveryWorker = createCollaborationCommandDeliveryWorker({
+    async reconcile() {
+      await commandDeliveryOutbox.reconcileDue();
+    },
+  });
+  commandDeliveryWorkerRef.current = commandDeliveryWorker;
 
   const shutdown = createCollaborationShutdown({
     closeDatabase: () => sqliteClient.close(),
@@ -185,6 +208,7 @@ export async function startCollaborationSidecar(
     stopWorkers: () => Promise.all([
       roomClosureWorker.stop(),
       workflowNotificationWorker.stop(),
+      commandDeliveryWorker.stop(),
     ]).then(() => undefined),
   });
   const removeSignalHandlers = installCollaborationSignalHandlers({
@@ -200,11 +224,13 @@ export async function startCollaborationSidecar(
     await sidecar.listen();
     roomClosureWorker.start();
     workflowNotificationWorker.start();
+    commandDeliveryWorker.start();
   } catch (error) {
     removeSignalHandlers();
     await Promise.all([
       roomClosureWorker.stop(),
       workflowNotificationWorker.stop(),
+      commandDeliveryWorker.stop(),
     ]);
     sqliteClient.close();
     throw error;

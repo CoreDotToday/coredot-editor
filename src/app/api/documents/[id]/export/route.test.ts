@@ -1,4 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  ExactCollaborationMaterializationError,
+  loadExactCollaborationMaterialization,
+} from "@/features/collaboration/exact-document-materialization";
 import { getDocumentById } from "@/features/documents/document-repository";
 import { tiptapJsonToDocxBuffer } from "@/features/documents/docx-conversion";
 import { RESOURCE_LIMITS } from "@/features/security/resource-policy";
@@ -8,6 +12,14 @@ import { POST } from "./route";
 vi.mock("@/features/documents/document-repository", () => ({
   getDocumentById: vi.fn(),
 }));
+
+vi.mock("@/features/collaboration/exact-document-materialization", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@/features/collaboration/exact-document-materialization")>();
+  return {
+    ...original,
+    loadExactCollaborationMaterialization: vi.fn(),
+  };
+});
 
 vi.mock("@/features/documents/docx-conversion", () => ({
   docxBufferToTiptapJson: vi.fn(),
@@ -65,6 +77,7 @@ function mockDocument() {
 describe("POST /api/documents/[id]/export", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(loadExactCollaborationMaterialization).mockResolvedValue({ kind: "legacy" });
   });
 
   it("returns 429 before lookup or body parsing when the budget is exhausted", async () => {
@@ -307,6 +320,81 @@ describe("POST /api/documents/[id]/export", () => {
     );
     expect(response.headers.get("Content-Disposition")).toContain('filename="Unsaved title.docx"');
     expect(tiptapJsonToDocxBuffer).toHaveBeenCalledWith(contentJson, "Unsaved title", expect.any(AbortSignal));
+    expect(response.headers.get("X-CoreDot-Collaboration-Generation")).toBeNull();
     await expect(response.arrayBuffer()).resolves.toEqual(Buffer.from("docx bytes").buffer);
+  });
+
+  it("exports the exact collaboration snapshot instead of stale SQL and submitted drafts", async () => {
+    const canonicalContent = {
+      type: "doc" as const,
+      content: [{ type: "paragraph", content: [{ type: "text", text: "Canonical live body" }] }],
+    };
+    vi.mocked(getDocumentById).mockResolvedValueOnce({
+      id: "doc_1",
+      workspaceId: "vitest-workspace",
+      creationKey: null,
+      title: "Stale SQL title",
+      contentJson: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "Stale SQL" }] }] },
+      metadataJson: {},
+      plainText: "Stale SQL",
+      readiness: "draft",
+      revision: 0,
+      status: "draft",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    vi.mocked(loadExactCollaborationMaterialization).mockResolvedValueOnce({
+      diagnostics: {
+        contentHash: "a".repeat(64),
+        generation: 3,
+        headSeq: 17,
+        schemaFingerprint: "b".repeat(64),
+      },
+      kind: "collaboration",
+      materialization: {
+        contentJson: canonicalContent,
+        metadataJson: {},
+        plainText: "Canonical live body",
+        title: "Canonical live title",
+      },
+    });
+    vi.mocked(tiptapJsonToDocxBuffer).mockResolvedValueOnce(Buffer.from("canonical docx"));
+
+    const response = await POST(createJsonRequest({
+      acknowledgedLoss: true,
+      contentJson: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "Stale browser" }] }] },
+      title: "Stale browser title",
+    }), createContext());
+
+    expect(response.status).toBe(200);
+    expect(tiptapJsonToDocxBuffer).toHaveBeenCalledWith(
+      canonicalContent,
+      "Canonical live title",
+      expect.any(AbortSignal),
+    );
+    expect(response.headers.get("Content-Disposition")).toContain('filename="Canonical live title.docx"');
+    expect(response.headers.get("X-CoreDot-Collaboration-Generation")).toBe("3");
+    expect(response.headers.get("X-CoreDot-Collaboration-Head-Seq")).toBe("17");
+    expect(response.headers.get("X-CoreDot-Collaboration-Schema-Fingerprint")).toBe("b".repeat(64));
+    expect(response.headers.get("X-CoreDot-Collaboration-Content-Hash")).toBe("a".repeat(64));
+  });
+
+  it("fails closed when initialized collaboration state cannot be loaded", async () => {
+    mockDocument();
+    vi.mocked(loadExactCollaborationMaterialization).mockRejectedValueOnce(
+      new ExactCollaborationMaterializationError("unavailable"),
+    );
+
+    const response = await POST(
+      createJsonRequest({ title: "Stale browser", contentJson: { type: "doc" } }),
+      createContext(),
+    );
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({
+      code: "collaboration_state_unavailable",
+      error: "Collaboration state is temporarily unavailable",
+    });
+    expect(tiptapJsonToDocxBuffer).not.toHaveBeenCalled();
   });
 });

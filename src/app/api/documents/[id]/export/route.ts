@@ -1,5 +1,10 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
+import {
+  loadExactCollaborationMaterialization,
+  toExactCollaborationHttpFailure,
+  type ExactCollaborationDiagnostics,
+} from "@/features/collaboration/exact-document-materialization";
 import { getDocumentById } from "@/features/documents/document-repository";
 import { documentInterchange } from "@/features/documents/document-interchange";
 import { createProtectedOptionsHandler, createProtectedRouteHandler } from "@/features/auth/route-context";
@@ -56,10 +61,28 @@ const postHandler = createProtectedRouteHandler(async (context, request: Request
     return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
   }
 
+  let exactMaterialization: Awaited<ReturnType<typeof loadExactCollaborationMaterialization>>;
+  try {
+    exactMaterialization = await loadExactCollaborationMaterialization(context, id);
+  } catch (error) {
+    const failure = toExactCollaborationHttpFailure(error);
+    if (failure) {
+      return NextResponse.json({ code: failure.code, error: failure.error }, { status: failure.status });
+    }
+    throw error;
+  }
+  const exportInput = exactMaterialization.kind === "collaboration"
+    ? {
+        acknowledgedLoss: result.data.acknowledgedLoss,
+        contentJson: exactMaterialization.materialization.contentJson,
+        title: exactMaterialization.materialization.title,
+      }
+    : result.data;
+
   let exportResult: Awaited<ReturnType<typeof documentInterchange.export>>;
   try {
     exportResult = await documentInterchange.export({
-      ...result.data,
+      ...exportInput,
       signal: request.signal,
       timeoutMs: remainingDeadlineMs(deadline),
     });
@@ -70,14 +93,20 @@ const postHandler = createProtectedRouteHandler(async (context, request: Request
     if (exportResult.reason === "resource_limit") return documentResourceLimitResponse();
     return NextResponse.json({
       code: "fidelity_acknowledgement_required",
+      ...(exactMaterialization.kind === "collaboration"
+        ? { collaboration: exactMaterialization.diagnostics }
+        : {}),
       error: "Export requires loss acknowledgement",
       fidelity: exportResult.fidelity,
     }, { status: 409 });
   }
   return new Response(new Uint8Array(exportResult.buffer), {
     headers: {
-      "Content-Disposition": `attachment; filename="${sanitizeFileName(result.data.title)}.docx"`,
+      "Content-Disposition": `attachment; filename="${sanitizeFileName(exportInput.title)}.docx"`,
       "Content-Type": DOCX_MIME_TYPE,
+      ...(exactMaterialization.kind === "collaboration"
+        ? collaborationDiagnosticHeaders(exactMaterialization.diagnostics)
+        : {}),
     },
   });
 }, { beforeWorkspaceBootstrap: (context) => enforceRequestBudget(context, "documents.export") });
@@ -96,4 +125,13 @@ function sanitizeFileName(value: string) {
 
 function remainingDeadlineMs(deadline: number) {
   return Math.max(0, deadline - Date.now());
+}
+
+function collaborationDiagnosticHeaders(diagnostics: ExactCollaborationDiagnostics) {
+  return {
+    "X-CoreDot-Collaboration-Content-Hash": diagnostics.contentHash,
+    "X-CoreDot-Collaboration-Generation": String(diagnostics.generation),
+    "X-CoreDot-Collaboration-Head-Seq": String(diagnostics.headSeq),
+    "X-CoreDot-Collaboration-Schema-Fingerprint": diagnostics.schemaFingerprint,
+  };
 }

@@ -10,6 +10,7 @@ import {
 } from "@/features/ai/ai-run-repository";
 import {
   createAiProviderForCommand,
+  createAiCollaborativeProposalAnchor,
   prepareAiCommandRequest,
   type PreparedAiCommandContext,
 } from "@/features/ai/ai-command-service";
@@ -125,6 +126,16 @@ const postHandler = createProtectedRouteHandler(async (context, request: Request
         : providerResult;
     },
     runInput: (prepared: PreparedAiCommandContext) => ({
+      ...(prepared.collaborationSnapshot ? {
+        collaborationSnapshot: {
+          contentHash: prepared.collaborationSnapshot.contentHash,
+          documentId: prepared.document.id,
+          generation: prepared.collaborationSnapshot.generation,
+          headSeq: prepared.collaborationSnapshot.headSeq,
+          schemaFingerprint: prepared.collaborationSnapshot.schemaFingerprint,
+          stateVector: prepared.collaborationSnapshot.stateVector,
+        },
+      } : {}),
       commandType: "document_review" as const,
       documentId: prepared.document.id,
       inputSummaryJson: {
@@ -175,6 +186,11 @@ function prepareReviewFinalization(review: ReviewResult, prepared: PreparedAiCom
   return {
     outputText: JSON.stringify(review),
     proposals: validFindings.map(({ finding, occurrenceIndex }) => ({
+      ...(prepared.collaborationSnapshot ? {
+        anchor: createAiCollaborativeProposalAnchor(prepared.collaborationSnapshot, {
+          targetText: finding.targetText,
+        }),
+      } : {}),
       documentId: prepared.document.id,
       occurrenceIndex,
       targetText: finding.targetText,

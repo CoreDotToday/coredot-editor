@@ -77,12 +77,12 @@ function getKoreanStatusMessage(
       return "연결이 끊겨 다시 연결하는 중입니다.";
     case "storage_delayed":
       return pendingCount > 0
-        ? `저장소 응답이 지연되고 있습니다. 변경 ${pendingCount}건의 영구 저장을 기다리는 중입니다.`
-        : "저장소 응답이 지연되고 있습니다. 영구 저장을 확인하는 중입니다.";
+        ? `공동 편집 동기화가 지연되고 있습니다. 변경 ${pendingCount}건을 서버에 반영하는 중입니다.`
+        : "공동 편집 동기화가 지연되고 있습니다. 최신 상태를 확인하는 중입니다.";
     case "synced":
       return pendingCount > 0
-        ? `동기화되었습니다. 변경 ${pendingCount}건의 영구 저장을 확인하는 중입니다.`
-        : "동기화 및 영구 저장이 완료되었습니다.";
+        ? `공동 편집에 연결되었습니다. 변경 ${pendingCount}건을 서버에 반영하는 중입니다.`
+        : "공동 편집 내용이 모두 동기화되었습니다.";
   }
 }
 
@@ -108,11 +108,11 @@ function getEnglishStatusMessage(
       return "The connection was interrupted. Reconnecting.";
     case "storage_delayed":
       return pendingCount > 0
-        ? `Storage is delayed. Waiting to durably save ${changes}.`
-        : "Storage is delayed. Confirming durable storage.";
+        ? `Shared editing sync is delayed. Sending ${changes} to the server.`
+        : "Shared editing sync is delayed. Checking the latest version.";
     case "synced":
       return pendingCount > 0
-        ? `Synchronized. Confirming durable storage for ${changes}.`
-        : "Synchronized and durably saved.";
+        ? `Connected to shared editing. Sending ${changes} to the server.`
+        : "All shared edits are synchronized.";
   }
 }

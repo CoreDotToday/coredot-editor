@@ -1,5 +1,6 @@
 import type { WorkspaceScope } from "@/features/auth/request-context";
 import { isAiProviderName } from "@/features/ai/provider-catalog";
+import { AiRunCollaborationFenceError } from "@/features/ai/ai-collaboration-fence";
 import {
   emitAiExecutionTelemetry,
   normalizeAiExecutionErrorClass,
@@ -192,11 +193,27 @@ export type AiExecutionOptions<TContext, TProvider, TOutput, TResult> = {
   requestSignal?: AbortSignal;
   resolveProvider: (context: TContext) => Promise<ProviderReadiness<TProvider>>;
   runInput: {
+    collaborationSnapshot?: {
+      contentHash: string;
+      documentId: string;
+      generation: number;
+      headSeq: number;
+      schemaFingerprint: string;
+      stateVector: Uint8Array;
+    };
     commandType: "document_review" | "selection_rewrite";
     documentId: string;
     inputSummaryJson: Record<string, unknown>;
     promptTemplateId: string | null;
   } | ((context: TContext) => {
+    collaborationSnapshot?: {
+      contentHash: string;
+      documentId: string;
+      generation: number;
+      headSeq: number;
+      schemaFingerprint: string;
+      stateVector: Uint8Array;
+    };
     commandType: "document_review" | "selection_rewrite";
     documentId: string;
     inputSummaryJson: Record<string, unknown>;
@@ -320,7 +337,9 @@ export async function executeAiOperation<TContext, TProvider, TOutput, TResult>(
       }));
       claim = await lifecycle.run(() => claimPromise!);
     } catch (error) {
-      const failure = classifyLifecycleOr(error, executionUnavailableFailure());
+      const failure = error instanceof AiRunCollaborationFenceError
+        ? collaborationSnapshotConflictFailure()
+        : classifyLifecycleOr(error, executionUnavailableFailure());
       if (claimPromise && isLifecycleError(error)) {
         void claimPromise.then((lateClaim) => {
           if (lateClaim.kind === "claimed") {
@@ -508,6 +527,15 @@ function inProgressFailure(): AiExecutionStepFailure {
   };
 }
 
+function collaborationSnapshotConflictFailure(): AiExecutionStepFailure {
+  return {
+    code: "collaboration_snapshot_conflict",
+    error: "Collaboration snapshot is not available for this request",
+    ok: false,
+    status: 409,
+  };
+}
+
 function createAiExecutionLifecycle(
   deadlineMs: number,
   requestSignal?: AbortSignal,
@@ -572,6 +600,9 @@ function classifyLifecycleOr(
 }
 
 function classifyExecutionError(error: unknown): AiExecutionStepFailure {
+  if (error instanceof AiRunCollaborationFenceError) {
+    return collaborationSnapshotConflictFailure();
+  }
   if (error instanceof AiOperationTimeoutError) {
     return {
       code: "operation_timed_out",

@@ -8,6 +8,10 @@ export const aiCommandPayloadSchema = z.object({
   documentId: z.string().min(1),
   templateId: z.string().min(1),
   command: z.string().min(1).max(AI_CONTEXT_LIMITS.commandMaxCharacters),
+  collaborationBarrier: z.object({
+    generation: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+    stateVector: z.string().min(1).max(1_398_102).regex(/^[A-Za-z0-9_-]+$/u),
+  }).strict().optional(),
   defaultApplyMode: aiProposalApplyModeSchema.optional(),
   references: z
     .object({
