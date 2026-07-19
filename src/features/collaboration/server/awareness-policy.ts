@@ -128,10 +128,6 @@ export function createAwarenessPolicy(options: { now?: () => number } = {}) {
       }
       const room = inbound.room === "__test__" ? inbound.room : context.room;
       let roomOwners = ownerByRoom.get(room);
-      if (!roomOwners) {
-        roomOwners = new Map();
-        ownerByRoom.set(room, roomOwners);
-      }
       for (const entry of inbound.entries) {
         if (inbound.ignoredClientIds.has(entry.clientId)) {
           states.delete(entry.clientId);
@@ -139,7 +135,11 @@ export function createAwarenessPolicy(options: { now?: () => number } = {}) {
         }
         if (entry.state === null) {
           states.set(entry.clientId, null as unknown as AwarenessState);
-          roomOwners.delete(entry.clientId);
+          roomOwners?.delete(entry.clientId);
+          if (roomOwners?.size === 0) {
+            ownerByRoom.delete(room);
+            roomOwners = undefined;
+          }
           activeClientByConnection.delete(connection);
           activeClockByConnection.delete(connection);
           continue;
@@ -165,6 +165,10 @@ export function createAwarenessPolicy(options: { now?: () => number } = {}) {
         }
         for (const key of Object.keys(existing)) delete existing[key];
         Object.assign(existing, sanitized);
+        if (!roomOwners) {
+          roomOwners = new Map();
+          ownerByRoom.set(room, roomOwners);
+        }
         roomOwners.set(entry.clientId, {
           clock: entry.clock,
           connection,
@@ -181,6 +185,10 @@ export function createAwarenessPolicy(options: { now?: () => number } = {}) {
 
     finish(connection: object) {
       pending.delete(connection);
+    },
+
+    trackedRoomCount() {
+      return ownerByRoom.size;
     },
 
     release(connection: object, exactRoom?: string) {

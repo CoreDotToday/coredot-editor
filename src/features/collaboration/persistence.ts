@@ -80,6 +80,22 @@ export type DurableUpdateReceipt = {
   seq: number;
 };
 
+export type DurableUpdateReplayIdentity = {
+  documentId: string;
+  idempotencyKey: string;
+  originKind: CollaborationUpdateOriginKind;
+  principalId: string;
+  requestId?: string;
+  semanticActionId?: string;
+  sessionId?: string;
+};
+
+export type DurableUpdateReplay = {
+  receipt: DurableUpdateReceipt;
+  /** Null means the durable command was a canonical Yjs no-op. */
+  update: Uint8Array | null;
+};
+
 export type CheckpointReceipt = {
   checkpointSeq: number;
   checksum: string;
@@ -149,6 +165,10 @@ export interface CollaborationPersistence {
     documentId: string,
     generation: number,
   ): Promise<CheckpointReceipt>;
+  findDurableUpdateReplay(
+    scope: WorkspaceScope,
+    identity: DurableUpdateReplayIdentity,
+  ): Promise<DurableUpdateReplay | null>;
   initialize(scope: WorkspaceScope, documentId: string): Promise<CollaborationSnapshot>;
   load(scope: WorkspaceScope, documentId: string): Promise<CollaborationSnapshot | null>;
   project(
@@ -498,6 +518,32 @@ export function createCollaborationPersistence(
           generation,
           projectedSeq: loaded.headSeq,
         };
+        });
+      });
+    },
+
+    findDurableUpdateReplay(scope, identity) {
+      return executePersistenceOperation(() => {
+        validateScopeAndDocument(scope, identity.documentId);
+        validateReplayIdentity(identity);
+        return repository.read(async (transaction) => {
+          const stored = await findIdempotentReceipt(transaction, scope, identity);
+          if (!stored) return null;
+          if (!matchesDurableReplayIdentity(stored, identity)) {
+            throw persistenceError("idempotency_conflict", false);
+          }
+          if (
+            stored.kind === "update"
+            && checksum(stored.stored.updateBlob) !== stored.stored.checksum
+          ) {
+            throw persistenceError("corrupt_state", false);
+          }
+          return {
+            receipt: durableReceipt(stored),
+            update: stored.kind === "update"
+              ? Uint8Array.from(stored.stored.updateBlob)
+              : null,
+          };
         });
       });
     },
@@ -952,6 +998,17 @@ function validateAppendInput(input: AppendCollaborationUpdate) {
   if (input.diagnosticJson !== undefined) validateDiagnosticJson(input.diagnosticJson);
 }
 
+function validateReplayIdentity(identity: DurableUpdateReplayIdentity) {
+  validateBoundedText(identity.idempotencyKey);
+  validateBoundedText(identity.principalId);
+  validateOptionalBoundedText(identity.requestId);
+  validateOptionalBoundedText(identity.sessionId);
+  validateOptionalBoundedText(identity.semanticActionId);
+  if (!COLLABORATION_ORIGIN_KINDS.has(identity.originKind)) {
+    throw persistenceError("invalid_input", false);
+  }
+}
+
 function validateScopeAndDocument(scope: WorkspaceScope, documentId: string) {
   validateBoundedText(scope.workspaceId);
   validateBoundedText(documentId);
@@ -1038,7 +1095,7 @@ type StoredIdempotentReceipt =
 async function findIdempotentReceipt(
   transaction: CollaborationTransaction,
   scope: WorkspaceScope,
-  input: AppendCollaborationUpdate,
+  input: Pick<AppendCollaborationUpdate, "documentId" | "idempotencyKey">,
 ): Promise<StoredIdempotentReceipt | null> {
   // 0016 deliberately has no synthetic backfill: pre-0016 changed appends keep
   // replaying from collaboration_updates, while new no-op appends use receipts.
@@ -1103,6 +1160,18 @@ function matchesIdempotentReceipt(
     && stored.originKind === input.originKind
     && stored.principalId === input.principalId
     && stored.requestId === (input.requestId ?? null)
+    && stored.sessionId === (input.sessionId ?? null)
+    && stored.semanticActionId === (input.semanticActionId ?? null);
+}
+
+function matchesDurableReplayIdentity(
+  receipt: StoredIdempotentReceipt,
+  input: DurableUpdateReplayIdentity,
+) {
+  const { stored } = receipt;
+  return stored.originKind === input.originKind
+    && stored.principalId === input.principalId
+    && (input.requestId === undefined || stored.requestId === input.requestId)
     && stored.sessionId === (input.sessionId ?? null)
     && stored.semanticActionId === (input.semanticActionId ?? null);
 }

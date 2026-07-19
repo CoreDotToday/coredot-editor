@@ -122,6 +122,58 @@ describe("server-owned Awareness policy", () => {
     expect(states).toEqual(new Map());
   });
 
+  it("does not retain room owner maps during unknown tombstone churn", () => {
+    const policy = createAwarenessPolicy({ now: () => 1_000 });
+
+    for (let index = 0; index < 100; index += 1) {
+      const connection = {};
+      const room = `${context.room}:unknown-${index}`;
+      policy.validateFrame(connection, awarenessPayload(index + 1, null, 2), room);
+      const states = new Map([
+        [index + 1, null as unknown as Record<string, unknown>],
+      ]);
+      policy.sanitizeStates(connection, { ...context, room }, states);
+      expect(states).toEqual(new Map());
+    }
+
+    expect(policy.trackedRoomCount()).toBe(0);
+  });
+
+  it("deletes the room owner map after the final explicit removal", () => {
+    const policy = createAwarenessPolicy({ now: () => 1_000 });
+    const connection = {};
+    const state = { cursor: cursor(7, 1) };
+    policy.validateFrame(connection, awarenessPayload(7, state), context.room);
+    policy.sanitizeStates(connection, context, new Map([[7, state]]));
+    expect(policy.trackedRoomCount()).toBe(1);
+
+    policy.validateFrame(connection, awarenessPayload(7, null, 2), context.room);
+    policy.sanitizeStates(
+      connection,
+      context,
+      new Map([[7, null as unknown as Record<string, unknown>]]),
+    );
+
+    expect(policy.trackedRoomCount()).toBe(0);
+  });
+
+  it("deletes each room owner map when its final connection is released", () => {
+    const policy = createAwarenessPolicy({ now: () => 1_000 });
+
+    for (let index = 0; index < 100; index += 1) {
+      const connection = {};
+      const clientId = index + 1;
+      const room = `${context.room}:owner-${index}`;
+      const state = { cursor: cursor(clientId, 1) };
+      policy.validateFrame(connection, awarenessPayload(clientId, state), room);
+      policy.sanitizeStates(connection, { ...context, room }, new Map([[clientId, state]]));
+      expect(policy.trackedRoomCount()).toBe(1);
+
+      policy.release(connection, room);
+      expect(policy.trackedRoomCount()).toBe(0);
+    }
+  });
+
   it("applies a separate total-frame ceiling to rate-free canonical echoes", () => {
     const owner = {};
     const echoer = {};

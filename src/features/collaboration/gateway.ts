@@ -7,6 +7,8 @@ import type {
   AppendCollaborationUpdate,
   CollaborationPersistence,
   CollaborationSnapshot,
+  DurableUpdateReplay,
+  DurableUpdateReplayIdentity,
   DurableUpdateReceipt,
 } from "./persistence";
 import { createCollaborationRoomName } from "./room-name";
@@ -102,7 +104,10 @@ export function createCollaborativeDocumentGateway(options: {
     room: string,
     reason: "archived" | "revoked" | "room_rotated" | "schema_changed",
   ): void | Promise<void>;
-  persistence: Pick<CollaborationPersistence, "appendValidatedUpdate" | "load">;
+  persistence: Pick<
+    CollaborationPersistence,
+    "appendValidatedUpdate" | "findDurableUpdateReplay" | "load"
+  >;
   planners: {
     proposal: CommandPlanner<CollaborativeProposalCommand>;
     proposalBatch: CommandPlanner<CollaborativeProposalBatchCommand>;
@@ -133,6 +138,32 @@ export function createCollaborativeDocumentGateway(options: {
   ): Promise<CollaborativeCommandResult> => {
     validateContextAndCommand(context, command);
     const scope = { workspaceId: context.workspaceId };
+    const replayIdentity: DurableUpdateReplayIdentity = {
+      documentId: command.documentId,
+      idempotencyKey: command.commandId,
+      originKind,
+      principalId: context.principalId,
+      semanticActionId: command.commandId,
+    };
+    let durableReplay: DurableUpdateReplay | null;
+    try {
+      durableReplay = await options.persistence.findDurableUpdateReplay(
+        scope,
+        replayIdentity,
+      );
+    } catch {
+      throw new CollaborationGatewayError("unavailable");
+    }
+    if (durableReplay) {
+      await deliverDurableUpdate({
+        closeRoom: options.closeRoom,
+        command,
+        publish: options.publish,
+        replay: durableReplay,
+        scope,
+      });
+      return commandResult(durableReplay.receipt);
+    }
     const snapshot = await load(options.persistence, scope, command.documentId);
     if (snapshot.generation !== command.generation) {
       snapshot.document.destroy();
@@ -166,42 +197,14 @@ export function createCollaborativeDocumentGateway(options: {
     } catch {
       throw new CollaborationGatewayError("unavailable");
     }
-    const sourceRoom = createCollaborationRoomName({
-      documentId: command.documentId,
-      generation: command.generation,
-      workspaceId: scope.workspaceId,
+    await deliverDurableUpdate({
+      closeRoom: options.closeRoom,
+      command,
+      publish: options.publish,
+      replay: { receipt, update },
+      scope,
     });
-    const targetRoom = createCollaborationRoomName({
-      documentId: command.documentId,
-      generation: receipt.generation,
-      workspaceId: scope.workspaceId,
-    });
-    let sourceClosed = sourceRoom === targetRoom;
-    try {
-      if (!sourceClosed) {
-        await options.closeRoom(sourceRoom, "room_rotated");
-        sourceClosed = true;
-      }
-      await options.publish(
-        scope,
-        command.documentId,
-        receipt.generation,
-        update,
-      );
-    } catch {
-      const roomsToClose = sourceClosed ? [targetRoom] : [sourceRoom, targetRoom];
-      await Promise.allSettled(
-        [...new Set(roomsToClose)].map((room) => options.closeRoom(room, "room_rotated")),
-      );
-      throw new CollaborationGatewayError("live_apply_failed");
-    }
-    return {
-      checksum: receipt.checksum,
-      documentId: receipt.documentId,
-      generation: receipt.generation,
-      headSeq: receipt.headSeq,
-      status: "applied",
-    };
+    return commandResult(receipt);
   };
 
   return {
@@ -272,6 +275,66 @@ export function createCollaborativeDocumentGateway(options: {
     undoChange(context, command) {
       return applyCommand(context, command, "undo_command", options.planners.undo);
     },
+  };
+}
+
+async function deliverDurableUpdate(options: {
+  closeRoom(
+    room: string,
+    reason: "archived" | "revoked" | "room_rotated" | "schema_changed",
+  ): void | Promise<void>;
+  command: CollaborationCommandIdentity;
+  publish(
+    scope: WorkspaceScope,
+    documentId: string,
+    generation: number,
+    update: Uint8Array,
+  ): void | Promise<void>;
+  replay: DurableUpdateReplay;
+  scope: WorkspaceScope;
+}) {
+  const { command, replay, scope } = options;
+  const sourceRoom = createCollaborationRoomName({
+    documentId: command.documentId,
+    generation: command.generation,
+    workspaceId: scope.workspaceId,
+  });
+  const targetRoom = createCollaborationRoomName({
+    documentId: command.documentId,
+    generation: replay.receipt.generation,
+    workspaceId: scope.workspaceId,
+  });
+  let sourceClosed = sourceRoom === targetRoom;
+  try {
+    if (!sourceClosed) {
+      await options.closeRoom(sourceRoom, "room_rotated");
+      sourceClosed = true;
+    }
+    // A durable no-op has no missing canonical state to reconcile live.
+    if (replay.update) {
+      await options.publish(
+        scope,
+        command.documentId,
+        replay.receipt.generation,
+        replay.update,
+      );
+    }
+  } catch {
+    const roomsToClose = sourceClosed ? [targetRoom] : [sourceRoom, targetRoom];
+    await Promise.allSettled(
+      [...new Set(roomsToClose)].map((room) => options.closeRoom(room, "room_rotated")),
+    );
+    throw new CollaborationGatewayError("live_apply_failed");
+  }
+}
+
+function commandResult(receipt: DurableUpdateReceipt): CollaborativeCommandResult {
+  return {
+    checksum: receipt.checksum,
+    documentId: receipt.documentId,
+    generation: receipt.generation,
+    headSeq: receipt.headSeq,
+    status: "applied",
   };
 }
 

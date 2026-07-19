@@ -109,6 +109,41 @@ describe("the pinned Hocuspocus durable message lifecycle", () => {
     }
   });
 
+  it("releases every concurrent reservation exactly once when a shared room load fails", async () => {
+    const load = deferred<void>();
+    const resources = createCollaborationResourceRegistry();
+    const reserveConnection = vi.spyOn(resources, "reserveConnection");
+    const releaseConnection = vi.spyOn(resources, "releaseConnection");
+    const beforeLoad = vi.fn(() => load.promise);
+    const fixture = await createFixture({
+      append: async (input) => receipt(input),
+      beforeLoad,
+      resourceRegistry: resources,
+    });
+    try {
+      const attempts = [
+        fixture.connect("principal:load-failure-a"),
+        fixture.connect("principal:load-failure-b"),
+      ];
+      await eventually(() => {
+        expect(reserveConnection).toHaveBeenCalledTimes(2);
+        expect(beforeLoad).toHaveBeenCalledTimes(1);
+      });
+
+      load.reject(new Error("shared load failed"));
+      const outcomes = await Promise.allSettled(attempts);
+      expect(outcomes.map(({ status }) => status)).toEqual(["rejected", "rejected"]);
+      await eventually(() => expect(releaseConnection).toHaveBeenCalledTimes(2));
+
+      await fixture.destroy();
+      expect(reserveConnection).toHaveBeenCalledTimes(2);
+      expect(releaseConnection).toHaveBeenCalledTimes(2);
+    } finally {
+      load.reject(new Error("shared load failed"));
+      await fixture.destroy();
+    }
+  });
+
   it("marks readiness down, rejects upgrades, closes rooms, and checkpoints before drain completes", async () => {
     const checkpoint = deferred<void>();
     const fixture = await createFixture({
@@ -222,6 +257,40 @@ describe("the pinned Hocuspocus durable message lifecycle", () => {
     }
   });
 
+  it("covers beginDrain sync work, checkpoint, and destroy with one shutdown grace", async () => {
+    const lifecycle: string[] = [];
+    let elapsed = 0;
+    const shutdownNow = vi.fn(() => {
+      lifecycle.push("clock");
+      return elapsed;
+    });
+    const fixture = await createFixture({
+      append: async (input) => receipt(input),
+      async checkpoint() {
+        lifecycle.push("checkpoint");
+        elapsed = 1_001;
+      },
+      onDocumentKeys() {
+        lifecycle.push("beginDrain");
+        if (elapsed === 0) elapsed = 250;
+      },
+      shutdownGraceMs: 1_000,
+      shutdownNow,
+    });
+    try {
+      await fixture.connect("principal:whole-shutdown-grace");
+      await expect(fixture.destroySidecar()).rejects.toMatchObject({
+        category: "grace_exceeded",
+        message: "Collaboration sidecar shutdown failed",
+      });
+      expect(shutdownNow).toHaveBeenCalledTimes(3);
+      expect(lifecycle.slice(0, 2)).toEqual(["clock", "beginDrain"]);
+      expect(lifecycle).toContain("checkpoint");
+    } finally {
+      await fixture.destroy();
+    }
+  });
+
   it("releases the exact loaded-document reservation after the last disconnect unloads it", async () => {
     const resources = createCollaborationResourceRegistry();
     const releaseDocument = vi.spyOn(resources, "releaseDocument");
@@ -318,9 +387,12 @@ describe("the pinned Hocuspocus durable message lifecycle", () => {
 
 async function createFixture(options: {
   append(input: AppendCollaborationUpdate): Promise<DurableUpdateReceipt>;
+  beforeLoad?: () => Promise<void>;
   checkpoint?: () => Promise<void>;
+  onDocumentKeys?: () => void;
   resourceRegistry?: ReturnType<typeof createCollaborationResourceRegistry>;
   shutdownGraceMs?: number;
+  shutdownNow?: () => number;
 }) {
   const { signing, verification } = await createKeyRings();
   const now = () => new Date("2026-07-19T09:00:00.000Z");
@@ -357,10 +429,14 @@ async function createFixture(options: {
         projectedSeq: 0,
       };
     },
+    async findDurableUpdateReplay() {
+      return null;
+    },
     async initialize() {
       return snapshot;
     },
     async load() {
+      await options.beforeLoad?.();
       const document = new Y.Doc();
       Y.applyUpdate(document, Y.encodeStateAsUpdate(baseDocument));
       return { ...snapshot, document };
@@ -399,8 +475,16 @@ async function createFixture(options: {
       workers: async () => true,
     },
     resourceRegistry: options.resourceRegistry,
+    shutdownNow: options.shutdownNow,
   });
   await sidecar.listen();
+  const documentKeys = sidecar.hocuspocus.documents.keys.bind(
+    sidecar.hocuspocus.documents,
+  );
+  sidecar.hocuspocus.documents.keys = () => {
+    options.onDocumentKeys?.();
+    return documentKeys();
+  };
 
   const providers: HocuspocusProvider[] = [];
   return {

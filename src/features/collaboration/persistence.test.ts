@@ -243,6 +243,51 @@ describe("CollaborationPersistence", () => {
     ]);
   });
 
+  it("returns the exact durable update for an authorized idempotent live replay", async () => {
+    const harness = await createHarness("durable-update-replay");
+    const snapshot = await harness.persistence.initialize(scope, harness.documentId);
+    const update = mutateSnapshot(snapshot, (document) => {
+      replaceTitle(document, "Replay this exact update");
+    });
+    const command = appendCommand(harness.documentId, snapshot.generation, update, {
+      idempotencyKey: "durable-replay-key",
+    });
+    const receipt = await harness.persistence.appendValidatedUpdate(scope, command);
+
+    const replay = await harness.persistence.findDurableUpdateReplay(scope, command);
+
+    expect(replay?.receipt).toEqual(receipt);
+    expect(replay?.update).toEqual(update);
+    await expect(harness.persistence.findDurableUpdateReplay(scope, {
+      documentId: command.documentId,
+      idempotencyKey: command.idempotencyKey,
+      originKind: command.originKind,
+      principalId: command.principalId,
+      sessionId: command.sessionId,
+    })).resolves.toEqual(replay);
+    await expect(harness.persistence.findDurableUpdateReplay(scope, {
+      ...command,
+      principalId: "different-principal",
+    })).rejects.toMatchObject({ category: "idempotency_conflict", retryable: false });
+  });
+
+  it("returns a receipt without a live payload for a durable no-op", async () => {
+    const harness = await createHarness("durable-noop-replay");
+    const snapshot = await harness.persistence.initialize(scope, harness.documentId);
+    const command = appendCommand(
+      harness.documentId,
+      snapshot.generation,
+      Y.encodeStateAsUpdate(snapshot.document),
+      { idempotencyKey: "durable-noop-replay-key" },
+    );
+    const receipt = await harness.persistence.appendValidatedUpdate(scope, command);
+
+    await expect(harness.persistence.findDurableUpdateReplay(scope, command)).resolves.toEqual({
+      receipt,
+      update: null,
+    });
+  });
+
   it("does not persist a duplicate delete-only Yjs update", async () => {
     const harness = await createHarness("noop-delete-only");
     const snapshot = await harness.persistence.initialize(scope, harness.documentId);
@@ -975,12 +1020,16 @@ describe("CollaborationPersistence", () => {
       },
     });
 
-    const receipt = await rotating.appendValidatedUpdate(
-      scope,
-      appendCommand(harness.documentId, 1, update, { idempotencyKey: "rotate-update" }),
-    );
+    const rotateCommand = appendCommand(harness.documentId, 1, update, {
+      idempotencyKey: "rotate-update",
+    });
+    const receipt = await rotating.appendValidatedUpdate(scope, rotateCommand);
 
     expect(receipt).toMatchObject({ generation: 2, headSeq: 2, seq: 2 });
+    await expect(rotating.findDurableUpdateReplay(scope, rotateCommand)).resolves.toEqual({
+      receipt,
+      update,
+    });
     const generationRows = await harness.database.select().from(collaborationDocuments)
       .orderBy(asc(collaborationDocuments.generation));
     expect(generationRows.map(({ generation, headSeq, isCurrent }) => ({ generation, headSeq, isCurrent }))).toEqual([

@@ -95,6 +95,31 @@ Rotate without interrupting active clients:
 
 Unknown `kid`, wrong algorithms, malformed claims, expired tokens, and missing signing configuration fail closed with bounded errors. Raw JWTs and JWK material must never be logged.
 
+### Collaboration resource limits
+
+The collaboration sidecar uses the following hard-coded, code-owned defaults. They are not environment-variable overrides or cluster-wide quotas: each sidecar process enforces them against its own live connections and resident documents. The last value within a limit is allowed and the next value is rejected. If you change these defaults in `src/features/collaboration/server/config.ts`, review the memory and traffic impact and deploy the same build to every sidecar instance.
+
+| Scope | Hard-coded default | Operational meaning |
+| --- | ---: | --- |
+| Connections per Workspace | 200 | Concurrent authenticated connections for one Workspace in one sidecar process. |
+| Connections per Principal | 5 | Concurrent connections for one Principal within one Workspace in one sidecar process. |
+| Connections per room | 50 | Concurrent connections to one exact generation-qualified collaboration room. |
+| Loaded documents | 64 | Maximum resident generation-qualified documents in one sidecar process. An unload releases the slot. |
+| Aggregate loaded-document bytes | 64 MiB | Process-wide resident-document accounting. Initial load uses the exact encoded snapshot size; accepted Yjs updates add their raw update bytes as a conservative upper bound until unload/reload resets the room to its exact snapshot size. |
+| Update messages | 120 per 1 second | Per authenticated connection. The one-second window begins with that connection's first counted update. |
+| Update bytes | 2 MiB per 1 second | Per authenticated connection and the same update window. Both the message and byte limits must remain within bounds. |
+| Awareness payload | 4 KiB | Maximum raw Awareness update payload passed to the server policy. The policy accepts one state entry per frame. |
+| Pending unauthenticated documents | 4 | Maximum document handshakes awaiting authentication on one WebSocket. |
+| Unauthenticated queue messages | 32 | Maximum queued non-auth messages across one WebSocket while document authentication is pending. |
+| Unauthenticated queue bytes | 256 KiB | Maximum aggregate queued bytes across that unauthenticated WebSocket. |
+| WebSocket payload | 512 KiB | Maximum inbound WebSocket message size enforced before collaboration protocol handling. |
+
+Awareness also has code-owned per-connection rate ceilings: 20 owned state changes per one-second window and 256 total Awareness frames per one-second window. The higher total ceiling includes canonical peer echoes and safe tombstones that are otherwise treated as no-ops, preventing no-op traffic from becoming unbounded.
+
+Limits fail closed and do not evict unrelated active rooms to make space. A connection-cap overflow denies the new authentication attempt; a loaded-document overflow rejects the new load while existing rooms remain resident. A client update that exceeds its rate/byte budget or the resident-byte budget is rejected as `update_rejected` before live broadcast. If a durable gateway update cannot fit the resident-byte budget, the exact loaded room is closed with `resource_limit`; clients reconnect and reload canonical durable state. Invalid or over-limit Awareness is rejected before broadcast. Pending-document, unauthenticated-queue, and WebSocket-payload overflows terminate the affected socket before it becomes a usable document connection. Connection counters are released on disconnect, document counters are released on unload, and the in-memory update windows reset after their one-second interval.
+
+These limits are protective process boundaries, not sizing recommendations or durable billing quotas. Capacity planning must account for the number of sidecar replicas, routing strategy, typical encoded snapshot size, update distribution, and reconnect behavior. Raise a limit only after load testing and memory-observability review; lower it only after validating that normal reconnect and multi-tab use remain usable.
+
 ## Project Profiles
 
 `PROJECT_PROFILE_ID` is resolved only on the server and applies consistently to every workspace served by that deployment. It is not a per-workspace administrative setting. A Profile defines metadata fields and field types, readiness states and allowed transitions, filterable fields, localized labels, and stable built-in template references. The same Profile drives document creation/update validation, proposal application, metadata controls, list filters, readiness badges, and default-template selection.

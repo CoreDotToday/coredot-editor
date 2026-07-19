@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Socket } from "node:net";
+import { performance } from "node:perf_hooks";
 
 import {
   Server,
@@ -70,6 +71,7 @@ export function createCollaborationSidecar(options: {
   persistence: CollaborationPersistence;
   readinessChecks?: CollaborationReadinessChecks;
   resourceRegistry?: ReturnType<typeof createCollaborationResourceRegistry>;
+  shutdownNow?: () => number;
 }) {
   const now = options.now ?? (() => new Date());
   const authority = createCollaborationCapabilityAuthority({
@@ -80,6 +82,32 @@ export function createCollaborationSidecar(options: {
   const blocked = new WeakSet<object>();
   const refreshes = new WeakMap<object, Promise<SidecarContext>>();
   const resources = options.resourceRegistry ?? createCollaborationResourceRegistry();
+  const reservationRooms = new Map<string, string>();
+  const pendingReservationsByRoom = new Map<string, Set<string>>();
+  const trackReservation = (key: string, room: string) => {
+    reservationRooms.set(key, room);
+    const pending = pendingReservationsByRoom.get(room) ?? new Set<string>();
+    pending.add(key);
+    pendingReservationsByRoom.set(room, pending);
+  };
+  const removePendingReservation = (key: string) => {
+    const room = reservationRooms.get(key);
+    if (!room) return;
+    const pending = pendingReservationsByRoom.get(room);
+    pending?.delete(key);
+    if (pending?.size === 0) pendingReservationsByRoom.delete(room);
+  };
+  const releaseReservation = (key: string) => {
+    if (!reservationRooms.has(key)) return;
+    removePendingReservation(key);
+    reservationRooms.delete(key);
+    return resources.releaseConnection(key);
+  };
+  const releasePendingRoomReservations = (room: string) => {
+    const pending = [...(pendingReservationsByRoom.get(room) ?? [])];
+    for (const key of pending) releaseReservation(key);
+  };
+  const shutdownNow = options.shutdownNow ?? (() => performance.now());
   const health = createCollaborationHealthController({
     checks: options.readinessChecks ?? {
       database: async () => false,
@@ -154,6 +182,7 @@ export function createCollaborationSidecar(options: {
           payload.socketId,
           verified,
         );
+        trackReservation(reservationKey, payload.documentName);
         payload.connectionConfig.readOnly = verified.permission === "read";
         return { ...verified, reservationKey };
       } catch (error) {
@@ -238,7 +267,10 @@ export function createCollaborationSidecar(options: {
           snapshot.document.destroy();
         }
       } catch (error) {
-        resources.releaseConnection(context.reservationKey);
+        // Hocuspocus shares one onLoadDocument Promise for concurrent clients.
+        // Release every reservation waiting on that room, not only the context
+        // of the client that created the shared Promise.
+        releasePendingRoomReservations(documentName);
         if (error instanceof CollaborationConnectionError) throw error;
         throw new CollaborationConnectionError("storage_unavailable");
       }
@@ -246,10 +278,11 @@ export function createCollaborationSidecar(options: {
 
     async connected({ connection, context }) {
       if (health.isDraining) {
-        resources.releaseConnection(context.reservationKey);
+        releaseReservation(context.reservationKey);
         throw new CollaborationConnectionError("server_draining");
       }
       resources.attachConnection(context.reservationKey, connection);
+      removePendingReservation(context.reservationKey);
     },
 
     beforeHandleMessage({ connection, update }) {
@@ -267,7 +300,7 @@ export function createCollaborationSidecar(options: {
 
     async onDisconnect({ context, documentName }) {
       const connection = context?.reservationKey
-        ? resources.releaseConnection(context.reservationKey) as Connection<SidecarContext>
+        ? releaseReservation(context.reservationKey) as Connection<SidecarContext>
         : undefined;
       if (connection) {
         blocked.add(connection);
@@ -345,15 +378,14 @@ export function createCollaborationSidecar(options: {
     closeRoom: closeRoomByName,
     async destroy() {
       destroyPromise ??= (async () => {
-        const graceful = (async () => {
+        const outcome = await settleWithin(async () => {
           await beginDrain();
           try {
             await server.destroy();
           } catch {
             throw new CollaborationShutdownError("destroy_failed");
           }
-        })();
-        const outcome = await settleWithin(graceful, options.config.shutdownGraceMs);
+        }, options.config.shutdownGraceMs, shutdownNow);
         if (outcome.status === "fulfilled") return;
         forceCloseServer(server);
         if (outcome.status === "rejected") {
@@ -467,20 +499,46 @@ function rejectUpgrade(socket: Socket) {
   socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
 }
 
-async function settleWithin(operation: Promise<unknown>, milliseconds: number): Promise<
+async function settleWithin(
+  operation: () => Promise<unknown>,
+  milliseconds: number,
+  now: () => number,
+): Promise<
   | { status: "fulfilled" }
   | { reason: unknown; status: "rejected" }
   | { status: "timeout" }
 > {
+  const startedAt = now();
+  let running: Promise<unknown>;
+  try {
+    running = operation();
+  } catch (reason) {
+    return now() - startedAt >= milliseconds
+      ? { status: "timeout" }
+      : { reason, status: "rejected" };
+  }
+  const elapsed = Math.max(0, now() - startedAt);
+  if (elapsed >= milliseconds) {
+    void running.catch(() => undefined);
+    return { status: "timeout" };
+  }
+
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
-      operation.then(
-        () => ({ status: "fulfilled" as const }),
-        (reason: unknown) => ({ reason, status: "rejected" as const }),
+      running.then(
+        () => now() - startedAt >= milliseconds
+          ? ({ status: "timeout" as const })
+          : ({ status: "fulfilled" as const }),
+        (reason: unknown) => now() - startedAt >= milliseconds
+          ? ({ status: "timeout" as const })
+          : ({ reason, status: "rejected" as const }),
       ),
       new Promise<{ status: "timeout" }>((resolve) => {
-        timer = setTimeout(() => resolve({ status: "timeout" }), milliseconds);
+        timer = setTimeout(
+          () => resolve({ status: "timeout" }),
+          milliseconds - elapsed,
+        );
       }),
     ]);
   } finally {

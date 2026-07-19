@@ -148,6 +148,47 @@ describe("CollaborativeDocumentGateway", () => {
     );
   });
 
+  it("replays the exact durable update after live delivery fails without replanning", async () => {
+    const published: Uint8Array[] = [];
+    let publishAttempts = 0;
+    const fixture = createFixture({
+      persistReplay: true,
+      publish: async (_scope, _documentId, _generation, update) => {
+        published.push(Uint8Array.from(update));
+        publishAttempts += 1;
+        if (publishAttempts === 1) throw new Error("temporary live failure");
+      },
+      receiptGeneration: 2,
+    });
+    const command = {
+      commandId: "proposal-command-durable-replay",
+      documentId: "document-a",
+      generation: 1,
+    };
+
+    await expect(fixture.gateway.applyProposal(context, command)).rejects.toMatchObject({
+      category: "live_apply_failed",
+    });
+    const result = await fixture.gateway.applyProposal(context, command);
+
+    expect(result).toMatchObject({
+      checksum: "b".repeat(64),
+      generation: 2,
+      headSeq: 1,
+      status: "applied",
+    });
+    expect(fixture.planProposal).toHaveBeenCalledTimes(1);
+    expect(fixture.appendValidatedUpdate).toHaveBeenCalledTimes(1);
+    expect(fixture.durableApplications).toBe(1);
+    expect(fixture.canonical.getText("test").toString()).toBe("base proposal");
+    expect(published).toHaveLength(2);
+    expect(published[1]).toEqual(published[0]);
+    expect(fixture.closeRoom).toHaveBeenCalledWith(
+      "collab:v1:workspace-a:document-a:g1",
+      "room_rotated",
+    );
+  });
+
   it("closes the exact current room through the sidecar adapter", async () => {
     const fixture = createFixture();
 
@@ -169,6 +210,7 @@ function createFixture(options: {
     generation: number,
     update: Uint8Array,
   ) => void | Promise<void>;
+  persistReplay?: boolean;
   receiptGeneration?: number;
 } = {}) {
   const canonical = new Y.Doc();
@@ -184,37 +226,59 @@ function createFixture(options: {
     schemaFingerprint: "a".repeat(64),
     schemaVersion: 1,
   });
-  const persistence = {
-    async appendValidatedUpdate(_scope, input) {
+  let replay: {
+    receipt: {
+      checksum: string;
+      documentId: string;
+      generation: number;
+      headSeq: number;
+      seq: number;
+    };
+    update: Uint8Array;
+  } | null = null;
+  let durableApplications = 0;
+  const appendValidatedUpdate = vi.fn(async (_scope: WorkspaceScope, input: Parameters<CollaborationPersistence["appendValidatedUpdate"]>[1]) => {
       options.events?.push("append");
       appended.push(input);
       if (options.appendFailure) throw options.appendFailure;
-      return {
+      const receipt = {
         checksum: "b".repeat(64),
         documentId: input.documentId,
         generation: options.receiptGeneration ?? input.generation,
         headSeq: 1,
         seq: 1,
       };
+      if (options.persistReplay) {
+        replay = { receipt, update: Uint8Array.from(input.update) };
+        Y.applyUpdate(canonical, input.update);
+        durableApplications += 1;
+      }
+      return receipt;
+    });
+  const persistence = {
+    appendValidatedUpdate,
+    async findDurableUpdateReplay() {
+      return replay;
     },
     async load() {
       return snapshot();
     },
-  } satisfies Pick<CollaborationPersistence, "appendValidatedUpdate" | "load">;
+  };
   const publish: NonNullable<typeof options.publish> = options.publish ?? vi.fn(async () => {
     options.events?.push("publish");
   });
   const closeRoom = vi.fn(async (room: string) => {
     options.events?.push(`close:${room}`);
   });
+  const planProposal = vi.fn(async (document: Y.Doc) => {
+    options.events?.push("plan");
+    document.getText("test").insert(document.getText("test").length, " proposal");
+  });
   const gateway = createCollaborativeDocumentGateway({
     closeRoom,
     persistence,
     planners: {
-      async proposal(document) {
-        options.events?.push("plan");
-        document.getText("test").insert(document.getText("test").length, " proposal");
-      },
+      proposal: planProposal,
       async proposalBatch(document) {
         document.getText("test").insert(document.getText("test").length, " batch");
       },
@@ -224,7 +288,18 @@ function createFixture(options: {
     },
     publish,
   });
-  return { appended, canonical, closeRoom, gateway, publish };
+  return {
+    appendValidatedUpdate,
+    appended,
+    canonical,
+    closeRoom,
+    get durableApplications() {
+      return durableApplications;
+    },
+    gateway,
+    planProposal,
+    publish,
+  };
 }
 
 function clone(document: Y.Doc) {
