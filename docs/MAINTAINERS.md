@@ -10,12 +10,10 @@ This guide is for people maintaining a public fork of Coredot Editor.
 4. Run:
 
 ```bash
-pnpm lint
-pnpm typecheck
-pnpm test
-pnpm e2e
-pnpm build
-pnpm security:audit
+pnpm release:check
+pnpm e2e:production
+pnpm docs:build
+pnpm docs:check-links
 git diff --check
 ```
 
