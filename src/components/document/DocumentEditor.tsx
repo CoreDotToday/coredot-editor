@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type FocusEvent, type MouseEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type DragEvent, type FocusEvent, type MouseEvent } from "react";
 import CharacterCount from "@tiptap/extension-character-count";
 import Placeholder from "@tiptap/extension-placeholder";
 import { EditorContent, useEditor } from "@tiptap/react";
@@ -101,6 +101,8 @@ import {
   prepareBaseExtensionsForCollaboration,
   type CollaborationEditorBinding,
 } from "@/features/collaboration/client/collaboration-editor-extensions";
+import type { YjsFieldStore } from "@/features/collaboration/client/yjs-field-store";
+import { COLLABORATION_TITLE_MAX_LENGTH } from "@/features/collaboration/contracts";
 
 type DocumentEditorCommonProps = {
   isFindOpen?: boolean;
@@ -139,8 +141,7 @@ export type DocumentEditorMode =
     }
   | {
       kind: "collaboration";
-      session: CollaborationEditorBinding & { writable: boolean };
-      title: string;
+      session: CollaborationEditorBinding & { fields: YjsFieldStore; writable: boolean };
     };
 
 type DocumentEditorProps = DocumentEditorCommonProps & (
@@ -195,6 +196,7 @@ type SelectionMenuPositionInput = {
 
 const SELECTION_MENU_GAP = 8;
 const SELECTION_MENU_HEIGHT = 84;
+const subscribeToNothing = () => () => undefined;
 
 export function DocumentEditor(props: DocumentEditorProps) {
   const {
@@ -232,7 +234,22 @@ export function DocumentEditor(props: DocumentEditorProps) {
   const contentJson = isLegacyMode
     ? mode.contentJson
     : ({ type: "doc", content: [{ type: "paragraph" }] } satisfies TiptapJson);
-  const title = mode.title;
+  const collaborationFields = collaborationSession?.fields ?? null;
+  const title = useSyncExternalStore(
+    collaborationFields?.subscribeTitle ?? subscribeToNothing,
+    collaborationFields?.getTitleSnapshot ?? (() => mode.kind === "legacy" ? mode.title : ""),
+    collaborationFields?.getTitleSnapshot ?? (() => mode.kind === "legacy" ? mode.title : ""),
+  );
+  const [collaborationTitleDraft, setCollaborationTitleDraft] = useState<{
+    baseTitle: string;
+    fields: YjsFieldStore | null;
+    value: string;
+  }>({ baseTitle: "", fields: null, value: "" });
+  const displayedTitle = collaborationFields
+    && collaborationTitleDraft.fields === collaborationFields
+    && collaborationTitleDraft.baseTitle === title
+    ? collaborationTitleDraft.value
+    : title;
   const isWritable = isLegacyMode || mode.session.writable;
   const canRunAiCommands = onSelectionCommand !== undefined;
   const [selectionMenu, setSelectionMenu] = useState<SelectionMenuState | null>(null);
@@ -429,14 +446,40 @@ export function DocumentEditor(props: DocumentEditorProps) {
 
   const handleTitleChange = useCallback(
     (value: string) => {
-      if (!isLegacyMode) return;
+      if (!isLegacyMode) {
+        if (isWritable) {
+          setCollaborationTitleDraft({
+            baseTitle: title,
+            fields: collaborationFields,
+            value,
+          });
+          try {
+            if (collaborationFields?.setTitle(value) === false) {
+              setCollaborationTitleDraft({
+                baseTitle: title,
+                fields: collaborationFields,
+                value: title,
+              });
+            }
+          } catch {
+            if (value.trim().length > 0) {
+              setCollaborationTitleDraft({
+                baseTitle: title,
+                fields: collaborationFields,
+                value: title,
+              });
+            }
+          }
+        }
+        return;
+      }
       titleRef.current = value;
       onChangeRef.current?.({
         title: value,
         contentJson: (editor?.getJSON() as TiptapJson | undefined) ?? contentJson,
       });
     },
-    [contentJson, editor, isLegacyMode],
+    [collaborationFields, contentJson, editor, isLegacyMode, isWritable, title],
   );
 
   const handleCommand = useCallback(
@@ -793,9 +836,19 @@ export function DocumentEditor(props: DocumentEditorProps) {
           <input
             aria-label={messages.titleLabel}
             className="w-full bg-transparent text-2xl font-semibold leading-tight tracking-normal text-zinc-950 outline-none placeholder:text-zinc-400 sm:text-3xl"
+            maxLength={isLegacyMode ? undefined : COLLABORATION_TITLE_MAX_LENGTH}
+            onBlur={() => {
+              if (collaborationFields && displayedTitle.trim().length === 0) {
+                setCollaborationTitleDraft({
+                  baseTitle: title,
+                  fields: collaborationFields,
+                  value: title,
+                });
+              }
+            }}
             onChange={(event) => handleTitleChange(event.target.value)}
-            readOnly={!isLegacyMode}
-            value={title}
+            readOnly={!isWritable}
+            value={displayedTitle}
           />
         </div>
       </div>

@@ -108,6 +108,8 @@ import { DocumentMetadataPanel } from "./DocumentMetadataPanel";
 import { DocumentOutlinePanel } from "./DocumentOutlinePanel";
 import { DocumentSourceView } from "./DocumentSourceView";
 import { DocumentInterchangeDialog } from "./DocumentInterchangeDialog";
+import { CollaborationParticipants } from "./CollaborationParticipants";
+import { CollaborationStatus } from "./CollaborationStatus";
 import { buildDocumentCommandRegistry } from "./commands/document-command-registry";
 import type { DocumentCommandAction } from "./commands/document-command-types";
 import type { SelectionAiResultPreview } from "./SelectionAiResultPopover";
@@ -122,6 +124,10 @@ import {
   type CollaborationNavigationController,
 } from "@/features/collaboration/client/navigation-controller";
 import { hasPendingCollaborationUpdates } from "@/features/collaboration/client/durability-state";
+import {
+  createYjsFieldStore,
+  type YjsFieldStore,
+} from "@/features/collaboration/client/yjs-field-store";
 import {
   PROJECT_METADATA_LIMITS,
   type ProjectProfile,
@@ -175,6 +181,7 @@ type DocumentShellProps = {
 };
 
 type CollaborationRuntime = {
+  fields: YjsFieldStore | null;
   session: CollaborationSession | null;
   snapshot: CollaborationSessionSnapshot;
 };
@@ -249,6 +256,7 @@ const MAX_CONCURRENT_SELECTION_COMMANDS = 5;
 const AUTOSAVE_DEBOUNCE_MS = 1000;
 const COMPACT_WORKSPACE_MEDIA_QUERY = "(max-width: 1279px)";
 const COMPACT_SIDEBAR_MEDIA_QUERY = "(max-width: 1023px)";
+const subscribeToNothing = () => () => undefined;
 
 function resolveServerRevision(
   currentRevision: number,
@@ -409,17 +417,75 @@ function CollaborativeDocumentShellContent(
     collaboration: Extract<CollaborationClientConfiguration, { kind: "collaboration" }>;
   },
 ) {
+  const projectProfile = props.projectProfile ?? getProjectProfile("default");
   const { session, snapshot } = useCollaborationSession({
     ...props.collaboration,
-    projectProfile: props.projectProfile ?? getProjectProfile("default"),
+    projectProfile,
   });
+  const [fieldResource, setFieldResource] = useState<{
+    fields: YjsFieldStore;
+    session: CollaborationSession;
+  } | null>(null);
+  const fieldsReady = Boolean(
+    session
+    && snapshot.hasCompletedInitialSync
+    && snapshot.status !== "fatal",
+  );
+
+  useEffect(() => {
+    if (!session || !fieldsReady) return;
+    let active = true;
+    let nextFields: YjsFieldStore | null = null;
+    void Promise.resolve().then(() => {
+      if (!active) return;
+      try {
+        nextFields = createYjsFieldStore({
+          document: session.document,
+          onInvalid: () => failCollaborationSession(session),
+          projectProfile,
+          writable: () => session.store.getSnapshot().writable,
+        });
+      } catch {
+        failCollaborationSession(session);
+        return;
+      }
+      if (!active) {
+        nextFields.destroy();
+        nextFields = null;
+        return;
+      }
+      setFieldResource({ fields: nextFields, session });
+    });
+    return () => {
+      active = false;
+      nextFields?.destroy();
+      nextFields = null;
+    };
+  }, [fieldsReady, projectProfile, session]);
 
   return (
     <DocumentShellContent
       {...props}
-      collaborationRuntime={{ session, snapshot }}
+      collaborationRuntime={{
+        fields: fieldsReady && fieldResource?.session === session ? fieldResource.fields : null,
+        session,
+        snapshot,
+      }}
     />
   );
+}
+
+function failCollaborationSession(session: CollaborationSession) {
+  try {
+    session.store.markFatal();
+  } catch {
+    // A broken store must not prevent transport teardown.
+  }
+  try {
+    session.destroy();
+  } catch {
+    // Teardown is best effort; the UI still fails closed via the store.
+  }
 }
 
 function DocumentShellContent({
@@ -470,6 +536,22 @@ function DocumentShellContent({
     [document.metadataJson, document.readiness, incomingDocument],
   );
   const [draft, setDraft] = useState<DraftState>(initialDraft);
+  const activeCollaborationFields = collaborationRuntime?.session
+    && collaborationRuntime.fields
+    && collaborationRuntime.snapshot.hasCompletedInitialSync
+    && collaborationRuntime.snapshot.status !== "fatal"
+    ? collaborationRuntime.fields
+    : null;
+  const collaborationTitle = useSyncExternalStore(
+    activeCollaborationFields?.subscribeTitle ?? subscribeToNothing,
+    activeCollaborationFields?.getTitleSnapshot ?? (() => initialDraft.title),
+    activeCollaborationFields?.getTitleSnapshot ?? (() => initialDraft.title),
+  );
+  const collaborationMetadata = useSyncExternalStore(
+    activeCollaborationFields?.subscribeMetadata ?? subscribeToNothing,
+    activeCollaborationFields?.getMetadataSnapshot ?? (() => initialDraft.metadataJson),
+    activeCollaborationFields?.getMetadataSnapshot ?? (() => initialDraft.metadataJson),
+  );
   const draftRef = useRef<DraftState>(initialDraft);
   const draftVersionRef = useRef(0);
   const persistedDraftVersionRef = useRef(0);
@@ -846,7 +928,7 @@ function DocumentShellContent({
     setProjectProfileViolation(null);
     setSaveState("dirty");
   }, []);
-  const handleMetadataChange = useCallback((change: { metadataJson?: DocumentMetadata; readiness?: DocumentReadiness }) => {
+  const handleLegacyMetadataChange = useCallback((change: { metadataJson?: DocumentMetadata; readiness?: DocumentReadiness }) => {
     draftVersionRef.current += 1;
     setDraft((currentDraft) => {
       const updatedDraft = { ...currentDraft, ...change };
@@ -860,6 +942,26 @@ function DocumentShellContent({
     setProjectProfileViolation(null);
     setSaveState("dirty");
   }, []);
+  const handleMetadataFieldChange = useCallback((key: string, value: DocumentMetadata[string] | undefined) => {
+    if (activeCollaborationFields) {
+      try {
+        activeCollaborationFields.setMetadataField(key, value);
+      } catch {
+        // The field store reports only bounded validation categories. The
+        // controlled input remains on the last canonical snapshot.
+      }
+      return;
+    }
+    if (isCollaborationMode) return;
+    const nextMetadata = { ...draftRef.current.metadataJson };
+    if (value === undefined) delete nextMetadata[key];
+    else nextMetadata[key] = Array.isArray(value) ? [...value] : value;
+    handleLegacyMetadataChange({ metadataJson: nextMetadata });
+  }, [activeCollaborationFields, handleLegacyMetadataChange, isCollaborationMode]);
+  const handleReadinessChange = useCallback((next: DocumentReadiness) => {
+    if (isCollaborationMode) return;
+    handleLegacyMetadataChange({ readiness: next });
+  }, [handleLegacyMetadataChange, isCollaborationMode]);
 
   const handleLanguageChange = useCallback((nextLanguage: string) => {
     if (!isEditorLanguage(nextLanguage)) {
@@ -2267,16 +2369,22 @@ function DocumentShellContent({
           />
         ) : null}
 
-        <fieldset className="m-0 min-w-0 border-0 p-0" disabled={isCollaborationMode}>
-          <DocumentMetadataPanel
-            language={language}
-            metadata={draft.metadataJson}
-            messages={messages.metadataPanel}
-            onChange={handleMetadataChange}
-            profile={projectProfile}
-            readiness={draft.readiness}
-          />
-        </fieldset>
+        <DocumentMetadataPanel
+          language={language}
+          metadata={activeCollaborationFields ? collaborationMetadata : draft.metadataJson}
+          metadataDisabled={isCollaborationMode && (
+            !activeCollaborationFields || !collaborationRuntime?.snapshot.writable
+          )}
+          messages={messages.metadataPanel}
+          onMetadataFieldChange={handleMetadataFieldChange}
+          onReadinessChange={handleReadinessChange}
+          profile={projectProfile}
+          readiness={draft.readiness}
+          readinessDescription={isCollaborationMode
+            ? messages.metadataPanel.readinessServerAuthority
+            : undefined}
+          readinessDisabled={isCollaborationMode}
+        />
 
         <PromptTemplatePanel
           messages={messages.templates}
@@ -2400,9 +2508,11 @@ function DocumentShellContent({
   const collaborationEditorSession = useMemo(() => (
     collaborationRuntime?.snapshot.hasCompletedInitialSync
     && collaborationRuntime.session
+    && activeCollaborationFields
     && hasCollaborationAwareness(collaborationProvider)
       ? {
           document: collaborationRuntime.session.document,
+          fields: activeCollaborationFields,
           provider: collaborationProvider,
           writable: collaborationRuntime.snapshot.writable,
         }
@@ -2410,6 +2520,7 @@ function DocumentShellContent({
   ), [
     collaborationProvider,
     collaborationRuntime,
+    activeCollaborationFields,
   ]);
 
   return (
@@ -2444,16 +2555,30 @@ function DocumentShellContent({
               <PanelLeftOpen aria-hidden="true" className="size-4" />
             </button>
             <p className="max-w-[34rem] truncate text-sm font-medium text-zinc-800">
-              {draft.title || messages.shell.untitledDocument}
+              {(activeCollaborationFields ? collaborationTitle : draft.title) || messages.shell.untitledDocument}
             </p>
-            <div
-              aria-label={messages.header.saveStatus}
-              aria-live="polite"
-              className="shrink-0 text-xs font-medium text-zinc-500"
-              role="status"
-            >
-              {isCollaborationMode ? collaborationRuntime.snapshot.status : messages.saveState[saveState]}
-            </div>
+            {isCollaborationMode ? (
+              <CollaborationStatus
+                className="shrink-0 font-medium"
+                language={language}
+                snapshot={collaborationRuntime.snapshot}
+              />
+            ) : (
+              <div
+                aria-label={messages.header.saveStatus}
+                aria-live="polite"
+                className="shrink-0 text-xs font-medium text-zinc-500"
+                role="status"
+              >
+                {messages.saveState[saveState]}
+              </div>
+            )}
+            {isCollaborationMode ? (
+              <CollaborationParticipants
+                awareness={collaborationProvider?.awareness ?? null}
+                language={language}
+              />
+            ) : null}
           </div>
           <div className="flex w-full min-w-0 items-center gap-2 overflow-x-auto pb-1 sm:w-auto sm:overflow-visible sm:pb-0">
             <button
@@ -2666,7 +2791,6 @@ function DocumentShellContent({
               mode={{
                 kind: "collaboration",
                 session: collaborationEditorSession,
-                title: draft.title,
               }}
               onFindOpenChange={setIsFindOpen}
               outlineFocusRequest={outlineFocusRequest}

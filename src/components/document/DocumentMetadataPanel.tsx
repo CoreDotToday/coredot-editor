@@ -1,5 +1,6 @@
 "use client";
 
+import { useId } from "react";
 import type { DocumentMetadata, DocumentMetadataValue, DocumentReadiness } from "@/db/schema";
 import { getProjectProfile } from "@/features/projects/default-project-profiles";
 import {
@@ -13,10 +14,14 @@ import {
 type DocumentMetadataPanelProps = {
   language?: ProjectLocale;
   metadata: DocumentMetadata;
+  metadataDisabled?: boolean;
   messages?: DocumentMetadataPanelMessages;
-  onChange: (change: { metadataJson?: DocumentMetadata; readiness?: DocumentReadiness }) => void;
+  onMetadataFieldChange: (key: string, value: DocumentMetadataValue | undefined) => void;
+  onReadinessChange: (next: DocumentReadiness) => void;
   profile?: ProjectProfile;
   readiness: DocumentReadiness;
+  readinessDescription?: string;
+  readinessDisabled?: boolean;
 };
 
 export type DocumentMetadataPanelMessages = {
@@ -24,6 +29,7 @@ export type DocumentMetadataPanelMessages = {
   dueDate: string;
   owner: string;
   readiness: string;
+  readinessServerAuthority: string;
   readinessLabels: Record<DocumentReadiness, string>;
   tags: string;
   title: string;
@@ -34,6 +40,7 @@ const defaultMessages: DocumentMetadataPanelMessages = {
   dueDate: "기한",
   owner: "소유자",
   readiness: "준비 상태",
+  readinessServerAuthority: "준비 상태와 승인은 서버에서 검증되며 공동 편집 문서에 기록되지 않습니다.",
   readinessLabels: {
     approved: "승인됨",
     draft: "초안",
@@ -47,21 +54,24 @@ const defaultMessages: DocumentMetadataPanelMessages = {
 export function DocumentMetadataPanel({
   language = "ko",
   metadata,
+  metadataDisabled = false,
   messages = defaultMessages,
-  onChange,
+  onMetadataFieldChange,
+  onReadinessChange,
   profile = getProjectProfile("default"),
   readiness,
+  readinessDescription,
+  readinessDisabled = false,
 }: DocumentMetadataPanelProps) {
+  const readinessDescriptionId = useId();
   const readinessOptions = getProjectReadinessOptions(profile, readiness);
 
   const updateMetadata = (key: string, value: DocumentMetadataValue | undefined) => {
-    const nextMetadata = { ...metadata };
     if (value === undefined || value === null || value === "" || (Array.isArray(value) && value.length === 0)) {
-      delete nextMetadata[key];
+      onMetadataFieldChange(key, undefined);
     } else {
-      nextMetadata[key] = value;
+      onMetadataFieldChange(key, value);
     }
-    onChange({ metadataJson: nextMetadata });
   };
 
   return (
@@ -72,8 +82,10 @@ export function DocumentMetadataPanel({
           <span className="text-xs font-medium text-zinc-500">{messages.readiness}</span>
           <select
             aria-label={messages.readiness}
-            className="mt-1 h-9 w-full rounded-md border border-zinc-200 bg-white px-2 text-sm text-zinc-800 outline-none focus:border-zinc-500"
-            onChange={(event) => onChange({ readiness: event.currentTarget.value as DocumentReadiness })}
+            aria-describedby={readinessDescription ? readinessDescriptionId : undefined}
+            className="mt-1 h-9 w-full rounded-md border border-zinc-200 bg-white px-2 text-sm text-zinc-800 outline-none focus:border-zinc-500 disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-400"
+            disabled={readinessDisabled}
+            onChange={(event) => onReadinessChange(event.currentTarget.value as DocumentReadiness)}
             value={readiness}
           >
             {readinessOptions.map((state) => (
@@ -82,10 +94,16 @@ export function DocumentMetadataPanel({
               </option>
             ))}
           </select>
+          {readinessDescription ? (
+            <span className="mt-1 block text-xs leading-5 text-zinc-500" id={readinessDescriptionId}>
+              {readinessDescription}
+            </span>
+          ) : null}
         </label>
         {profile.metadataFields.map((field) => (
           <MetadataFieldInput
             field={field}
+            disabled={metadataDisabled}
             key={field.id}
             label={field.labels[language]}
             language={language}
@@ -99,12 +117,14 @@ export function DocumentMetadataPanel({
 }
 
 function MetadataFieldInput({
+  disabled,
   field,
   label,
   language,
   onChange,
   value,
 }: {
+  disabled: boolean;
   field: ProjectMetadataField;
   label: string;
   language: ProjectLocale;
@@ -121,7 +141,8 @@ function MetadataFieldInput({
           aria-label={label}
           aria-describedby={hintId}
           aria-required={field.required || undefined}
-          className="mt-1 h-9 w-full rounded-md border border-zinc-200 bg-white px-2 text-sm text-zinc-800 outline-none focus:border-zinc-500"
+          className="mt-1 h-9 w-full rounded-md border border-zinc-200 bg-white px-2 text-sm text-zinc-800 outline-none focus:border-zinc-500 disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-400"
+          disabled={disabled}
           onChange={(event) => onChange(
             event.currentTarget.value === ""
               ? undefined
@@ -146,7 +167,8 @@ function MetadataFieldInput({
           aria-label={label}
           aria-describedby={hintId}
           aria-required={field.required || undefined}
-          className="mt-1 h-9 w-full rounded-md border border-zinc-200 bg-white px-2 text-sm text-zinc-800 outline-none focus:border-zinc-500"
+          className="mt-1 h-9 w-full rounded-md border border-zinc-200 bg-white px-2 text-sm text-zinc-800 outline-none focus:border-zinc-500 disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-400"
+          disabled={disabled}
           onChange={(event) => onChange(
             event.currentTarget.value === "" || !Number.isFinite(event.currentTarget.valueAsNumber)
               ? undefined
@@ -171,7 +193,8 @@ function MetadataFieldInput({
           aria-label={label}
           aria-describedby={hintId}
           aria-required={field.required || undefined}
-          className="mt-1 h-9 w-full rounded-md border border-zinc-200 bg-white px-2 text-sm text-zinc-800 outline-none focus:border-zinc-500"
+          className="mt-1 h-9 w-full rounded-md border border-zinc-200 bg-white px-2 text-sm text-zinc-800 outline-none focus:border-zinc-500 disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-400"
+          disabled={disabled}
           onChange={(event) => onChange(event.currentTarget.value)}
           required={field.required}
           value={stringValue}
@@ -190,7 +213,8 @@ function MetadataFieldInput({
         aria-label={label}
         aria-describedby={hintId}
         aria-required={field.required || undefined}
-        className="mt-1 h-9 w-full rounded-md border border-zinc-200 bg-white px-2 text-sm text-zinc-800 outline-none focus:border-zinc-500"
+        className="mt-1 h-9 w-full rounded-md border border-zinc-200 bg-white px-2 text-sm text-zinc-800 outline-none focus:border-zinc-500 disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-400"
+        disabled={disabled}
         maxLength={getMetadataInputMaxLength(field)}
         onChange={(event) => onChange(
           field.type === "tags"

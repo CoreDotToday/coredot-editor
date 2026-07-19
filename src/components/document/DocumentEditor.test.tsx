@@ -10,6 +10,7 @@ import type { TiptapJson } from "@/db/schema";
 import { createDocumentSchemaExtensions } from "@/features/documents/tiptap-extensions";
 import { createCollaborationDocumentCodec } from "@/features/collaboration/document-codec";
 import { prepareBaseExtensionsForCollaboration } from "@/features/collaboration/client/collaboration-editor-extensions";
+import { createYjsFieldStore } from "@/features/collaboration/client/yjs-field-store";
 import { getProjectProfile } from "@/features/projects/default-project-profiles";
 import {
   getBlockActionRangeAtPosition,
@@ -78,6 +79,7 @@ describe("DocumentEditor", () => {
   });
 
   it("renders collaboration body only from Yjs and never resynchronizes it when projected props change", async () => {
+    const user = userEvent.setup();
     const codec = createCollaborationDocumentCodec(getProjectProfile("default"));
     const sharedDocument = codec.bootstrap({
       contentJson: {
@@ -89,7 +91,12 @@ describe("DocumentEditor", () => {
       title: "Canonical title",
     });
     const provider = { awareness: new Awareness(sharedDocument) };
-    const session = { document: sharedDocument, provider, writable: true };
+    const fields = createYjsFieldStore({
+      document: sharedDocument,
+      projectProfile: getProjectProfile("default"),
+      writable: () => true,
+    });
+    const session = { document: sharedDocument, fields, provider, writable: true };
     const update = vi.fn();
     const mountDynamicSchemaExtension = vi.fn();
     sharedDocument.on("update", update);
@@ -97,7 +104,7 @@ describe("DocumentEditor", () => {
     const runPluginCommand = vi.fn();
     const { rerender, unmount } = render(
       <DocumentEditor
-        mode={{ kind: "collaboration", session, title: "SQL projection title" }}
+        mode={{ kind: "collaboration", session }}
         pluginContributions={{
           tiptapExtensions: [Extension.create({
             name: "dynamicSchemaExtension",
@@ -121,16 +128,44 @@ describe("DocumentEditor", () => {
     expect(runPluginCommand).not.toHaveBeenCalled();
     expect(mountDynamicSchemaExtension).not.toHaveBeenCalled();
     update.mockClear();
-    rerender(
-      <DocumentEditor mode={{ kind: "collaboration", session, title: "Changed SQL projection title" }} />,
-    );
+    rerender(<DocumentEditor mode={{ kind: "collaboration", session }} />);
 
-    expect(screen.getByRole("textbox", { name: "문서 제목" })).toHaveValue("Changed SQL projection title");
+    expect(screen.getByRole("textbox", { name: "문서 제목" })).toHaveValue("Canonical title");
+    expect(update).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByRole("textbox", { name: "문서 제목" }), {
+      target: { value: "Collaborative title" },
+    });
+    expect(sharedDocument.getText("title").toString()).toBe("Collaborative title");
+    act(() => {
+      sharedDocument.transact(() => {
+        const title = sharedDocument.getText("title");
+        title.delete(0, title.length);
+        title.insert(0, "Remote title");
+      }, "remote-title-test");
+    });
+    expect(screen.getByRole("textbox", { name: "문서 제목" })).toHaveValue("Remote title");
+    const titleInput = screen.getByRole("textbox", { name: "문서 제목" });
+    await user.clear(titleInput);
+    expect(titleInput).toHaveValue("");
+    expect(sharedDocument.getText("title").toString()).toBe("Remote title");
+    act(() => {
+      const remoteTitle = sharedDocument.getText("title");
+      sharedDocument.transact(() => {
+        remoteTitle.delete(0, remoteTitle.length);
+        remoteTitle.insert(0, "Remote override");
+      }, "remote-title-while-local-empty");
+    });
+    expect(titleInput).toHaveValue("Remote override");
+    await user.clear(titleInput);
+    await user.type(titleInput, "Replacement title");
+    expect(titleInput).toHaveValue("Replacement title");
+    expect(sharedDocument.getText("title").toString()).toBe("Replacement title");
     expect(screen.getByRole("combobox", { name: /AI.*명령/ })).toBeDisabled();
     expect(screen.getByText("Canonical Yjs body")).toBeInTheDocument();
-    expect(update).not.toHaveBeenCalled();
+    expect(update).toHaveBeenCalled();
 
     unmount();
+    fields.destroy();
     sharedDocument.destroy();
   });
 
@@ -156,14 +191,18 @@ describe("DocumentEditor", () => {
     });
     editors.push(remoteEditor);
     const provider = { awareness: new Awareness(sharedDocument) };
+    const fields = createYjsFieldStore({
+      document: sharedDocument,
+      projectProfile: getProjectProfile("default"),
+      writable: () => true,
+    });
 
     render(
       <DocumentEditor
         isFindOpen
         mode={{
           kind: "collaboration",
-          session: { document: sharedDocument, provider, writable: true },
-          title: "Derived UI",
+          session: { document: sharedDocument, fields, provider, writable: true },
         }}
       />,
     );
@@ -188,6 +227,7 @@ describe("DocumentEditor", () => {
     });
 
     provider.awareness.destroy();
+    fields.destroy();
     sharedDocument.destroy();
     remoteDocument.destroy();
   });
@@ -203,14 +243,18 @@ describe("DocumentEditor", () => {
       title: "Read-only projection",
     });
     const provider = { awareness: new Awareness(sharedDocument) };
+    const fields = createYjsFieldStore({
+      document: sharedDocument,
+      projectProfile: getProjectProfile("default"),
+      writable: () => false,
+    });
     const runPluginAction = vi.fn();
 
     render(
       <DocumentEditor
         mode={{
           kind: "collaboration",
-          session: { document: sharedDocument, provider, writable: false },
-          title: "Read-only projection",
+          session: { document: sharedDocument, fields, provider, writable: false },
         }}
         pluginContributions={{
           toolbarItems: [{ id: "write-bypass", label: "Plugin write", run: runPluginAction }],
@@ -226,6 +270,7 @@ describe("DocumentEditor", () => {
     fireEvent.keyDown(editorBody, { key: "Enter" });
     expect(screen.queryByRole("listbox", { name: "슬래시 명령" })).not.toBeInTheDocument();
     expect(screen.getByText("/")).toBeInTheDocument();
+    fields.destroy();
     sharedDocument.destroy();
   });
 

@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
@@ -10,7 +10,8 @@ import { defineProjectProfile } from "@/features/projects/project-profile";
 describe("DocumentMetadataPanel", () => {
   it("edits readiness and common metadata fields", async () => {
     const user = userEvent.setup();
-    const handleChange = vi.fn();
+    const handleMetadataFieldChange = vi.fn();
+    const handleReadinessChange = vi.fn();
 
     function Harness() {
       const [readiness, setReadiness] = useState<DocumentReadiness>("draft");
@@ -19,10 +20,18 @@ describe("DocumentMetadataPanel", () => {
       return (
         <DocumentMetadataPanel
           metadata={metadata}
-          onChange={(change) => {
-            handleChange(change);
-            if (change.readiness) setReadiness(change.readiness);
-            if (change.metadataJson) setMetadata(change.metadataJson);
+          onMetadataFieldChange={(key, value) => {
+            handleMetadataFieldChange(key, value);
+            setMetadata((current) => {
+              const next = { ...current };
+              if (value === undefined) delete next[key];
+              else next[key] = value;
+              return next;
+            });
+          }}
+          onReadinessChange={(next) => {
+            handleReadinessChange(next);
+            setReadiness(next);
           }}
           readiness={readiness}
         />
@@ -35,15 +44,16 @@ describe("DocumentMetadataPanel", () => {
     await user.clear(screen.getByRole("textbox", { name: "소유자" }));
     await user.type(screen.getByRole("textbox", { name: "소유자" }), "Finance");
 
-    expect(handleChange).toHaveBeenCalledWith({ readiness: "ready" });
-    expect(handleChange).toHaveBeenLastCalledWith({ metadataJson: { owner: "Finance" } });
+    expect(handleReadinessChange).toHaveBeenCalledWith("ready");
+    expect(handleMetadataFieldChange).toHaveBeenLastCalledWith("owner", "Finance");
   });
 
   it("renders fields and allowed readiness transitions from a Project Profile", () => {
     render(
       <DocumentMetadataPanel
         metadata={{}}
-        onChange={vi.fn()}
+        onMetadataFieldChange={vi.fn()}
+        onReadinessChange={vi.fn()}
         profile={getProjectProfile("legal-review")}
         readiness="draft"
       />,
@@ -60,7 +70,8 @@ describe("DocumentMetadataPanel", () => {
     render(
       <DocumentMetadataPanel
         metadata={{ evidenceStatus: "partial" }}
-        onChange={vi.fn()}
+        onMetadataFieldChange={vi.fn()}
+        onReadinessChange={vi.fn()}
         profile={getProjectProfile("research-writing")}
         readiness="draft"
       />,
@@ -91,10 +102,16 @@ describe("DocumentMetadataPanel", () => {
       return (
         <DocumentMetadataPanel
           metadata={metadata}
-          onChange={(change) => {
-            handleChange(change);
-            if (change.metadataJson) setMetadata(change.metadataJson);
+          onMetadataFieldChange={(key, value) => {
+            handleChange(key, value);
+            setMetadata((current) => {
+              const next = { ...current };
+              if (value === undefined) delete next[key];
+              else next[key] = value;
+              return next;
+            });
           }}
+          onReadinessChange={vi.fn()}
           profile={profile}
           readiness="draft"
         />
@@ -105,9 +122,7 @@ describe("DocumentMetadataPanel", () => {
     await user.selectOptions(screen.getByRole("combobox", { name: "청구 가능" }), "true");
     await user.type(screen.getByRole("spinbutton", { name: "예상치" }), "12.5");
 
-    expect(handleChange).toHaveBeenLastCalledWith({
-      metadataJson: { billable: true, estimate: 12.5 },
-    });
+    expect(handleChange).toHaveBeenLastCalledWith("estimate", 12.5);
   });
 
   it("renders unset and explicit false boolean metadata as distinct values", () => {
@@ -121,7 +136,13 @@ describe("DocumentMetadataPanel", () => {
       readiness: [{ id: "draft", labels: { en: "Draft", ko: "초안" }, transitions: [] }],
     });
     const { rerender } = render(
-      <DocumentMetadataPanel metadata={{}} onChange={vi.fn()} profile={profile} readiness="draft" />,
+      <DocumentMetadataPanel
+        metadata={{}}
+        onMetadataFieldChange={vi.fn()}
+        onReadinessChange={vi.fn()}
+        profile={profile}
+        readiness="draft"
+      />,
     );
     const input = screen.getByRole("combobox", { name: "청구 가능" });
 
@@ -130,7 +151,13 @@ describe("DocumentMetadataPanel", () => {
     expect(input).toHaveAttribute("aria-required", "true");
 
     rerender(
-      <DocumentMetadataPanel metadata={{ billable: false }} onChange={vi.fn()} profile={profile} readiness="draft" />,
+      <DocumentMetadataPanel
+        metadata={{ billable: false }}
+        onMetadataFieldChange={vi.fn()}
+        onReadinessChange={vi.fn()}
+        profile={profile}
+        readiness="draft"
+      />,
     );
     expect(screen.getByRole("combobox", { name: "청구 가능" })).toHaveValue("false");
   });
@@ -149,23 +176,30 @@ describe("DocumentMetadataPanel", () => {
     });
 
     const { rerender } = render(
-      <DocumentMetadataPanel metadata={{}} onChange={handleChange} profile={profile} readiness="draft" />,
+      <DocumentMetadataPanel
+        metadata={{}}
+        onMetadataFieldChange={handleChange}
+        onReadinessChange={vi.fn()}
+        profile={profile}
+        readiness="draft"
+      />,
     );
     await user.selectOptions(screen.getByRole("combobox", { name: "청구 가능" }), "false");
 
-    expect(handleChange).toHaveBeenLastCalledWith({ metadataJson: { billable: false } });
+    expect(handleChange).toHaveBeenLastCalledWith("billable", false);
     expect(screen.getByRole("option", { name: "아니요" })).toHaveValue("false");
 
     rerender(
       <DocumentMetadataPanel
         metadata={{ billable: false }}
-        onChange={handleChange}
+        onMetadataFieldChange={handleChange}
+        onReadinessChange={vi.fn()}
         profile={profile}
         readiness="draft"
       />,
     );
     await user.selectOptions(screen.getByRole("combobox", { name: "청구 가능" }), "");
-    expect(handleChange).toHaveBeenLastCalledWith({ metadataJson: {} });
+    expect(handleChange).toHaveBeenLastCalledWith("billable", undefined);
   });
 
   it("renders required state and declarative text or tag caps from the profile", () => {
@@ -181,7 +215,13 @@ describe("DocumentMetadataPanel", () => {
     });
 
     render(
-      <DocumentMetadataPanel metadata={{}} onChange={vi.fn()} profile={profile} readiness="draft" />,
+      <DocumentMetadataPanel
+        metadata={{}}
+        onMetadataFieldChange={vi.fn()}
+        onReadinessChange={vi.fn()}
+        profile={profile}
+        readiness="draft"
+      />,
     );
 
     expect(screen.getByRole("textbox", { name: "요약" })).toBeRequired();
@@ -190,5 +230,33 @@ describe("DocumentMetadataPanel", () => {
     expect(screen.getByText("필수 · 최대 12자")).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "주제" })).toHaveAttribute("maxlength", "12");
     expect(screen.getByText("최대 2개 · 항목당 5자")).toBeInTheDocument();
+  });
+
+  it("disables readiness independently with an accessible server-authority explanation", () => {
+    const handleMetadataFieldChange = vi.fn();
+    const handleReadinessChange = vi.fn();
+
+    render(
+      <DocumentMetadataPanel
+        metadata={{ owner: "Legal" }}
+        metadataDisabled={false}
+        onMetadataFieldChange={handleMetadataFieldChange}
+        onReadinessChange={handleReadinessChange}
+        readiness="draft"
+        readinessDescription="준비 상태는 서버에서 승인됩니다."
+        readinessDisabled
+      />,
+    );
+
+    const readiness = screen.getByRole("combobox", { name: "준비 상태" });
+    expect(readiness).toBeDisabled();
+    expect(readiness).toHaveAccessibleDescription("준비 상태는 서버에서 승인됩니다.");
+
+    const owner = screen.getByRole("textbox", { name: "소유자" });
+    expect(owner).toBeEnabled();
+    fireEvent.change(owner, { target: { value: "Finance" } });
+
+    expect(handleMetadataFieldChange).toHaveBeenLastCalledWith("owner", "Finance");
+    expect(handleReadinessChange).not.toHaveBeenCalled();
   });
 });

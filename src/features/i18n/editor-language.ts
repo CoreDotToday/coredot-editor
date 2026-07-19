@@ -98,6 +98,7 @@ export const editorMessages = {
       dueDate: "Due date",
       owner: "Owner",
       readiness: "Readiness",
+      readinessServerAuthority: "Readiness and approvals are validated by the server and are not stored in the collaborative document.",
       readinessLabels: {
         approved: "Approved",
         draft: "Draft",
@@ -529,6 +530,7 @@ export const editorMessages = {
       dueDate: "기한",
       owner: "소유자",
       readiness: "준비 상태",
+      readinessServerAuthority: "준비 상태와 승인은 서버에서 검증되며 공동 편집 문서에 기록되지 않습니다.",
       readinessLabels: {
         approved: "승인됨",
         draft: "초안",
