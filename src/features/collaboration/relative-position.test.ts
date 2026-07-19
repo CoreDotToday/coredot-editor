@@ -52,9 +52,41 @@ describe("collaboration relative ranges", () => {
     firstXmlText(document).delete(6, 4);
 
     const result = resolveEncodedRelativeRange(document, range);
+    expectEncodedAssociations(range);
     expect(result).toMatchObject({ ok: true });
     if (!result.ok) throw new Error("expected a resolved range");
     expect(result.from).toBe(result.to);
+    expect(textForRange(document, range)).toBe("");
+  });
+
+  it("tracks the same target when content before it is deleted", () => {
+    const document = createDocument("alpha beta gamma");
+    const range = createEncodedRelativeRange(document, { from: 7, to: 11 });
+    firstXmlText(document).delete(0, 6);
+
+    expectEncodedAssociations(range);
+    expect(resolveEncodedRelativeRange(document, range)).toEqual({ from: 1, ok: true, to: 5 });
+    expect(textForRange(document, range)).toBe("beta");
+  });
+
+  it("shrinks to the surviving target text when content inside it is partially deleted", () => {
+    const document = createDocument("alpha beta gamma");
+    const range = createEncodedRelativeRange(document, { from: 7, to: 11 });
+    firstXmlText(document).delete(7, 2);
+
+    expectEncodedAssociations(range);
+    expect(resolveEncodedRelativeRange(document, range)).toEqual({ from: 7, ok: true, to: 9 });
+    expect(textForRange(document, range)).toBe("ba");
+  });
+
+  it("keeps the target unchanged when content after it is deleted", () => {
+    const document = createDocument("alpha beta gamma");
+    const range = createEncodedRelativeRange(document, { from: 7, to: 11 });
+    firstXmlText(document).delete(10, 6);
+
+    expectEncodedAssociations(range);
+    expect(resolveEncodedRelativeRange(document, range)).toEqual({ from: 7, ok: true, to: 11 });
+    expect(textForRange(document, range)).toBe("beta");
   });
 
   it("returns missing when an anchor does not exist in the target document", () => {
@@ -156,4 +188,10 @@ function textForRange(document: Y.Doc, range: EncodedRelativeRange) {
   const body = document.getXmlFragment(COLLABORATION_BODY_NAME);
   const { doc } = initProseMirrorDoc(body, schema);
   return doc.textBetween(resolution.from, resolution.to);
+}
+
+function expectEncodedAssociations(range: EncodedRelativeRange) {
+  expect(range).toMatchObject({ endAssoc: 1, startAssoc: -1 });
+  expect(Y.decodeRelativePosition(range.start).assoc).toBe(-1);
+  expect(Y.decodeRelativePosition(range.end).assoc).toBe(1);
 }

@@ -7,11 +7,18 @@ import { createServerSchemaExtensions } from "@/plugins/document-schema-profile"
 
 import {
   COLLABORATION_BODY_NAME,
+  COLLABORATION_DOCUMENT_SCHEMA_VERSION,
   COLLABORATION_METADATA_NAME,
   COLLABORATION_TITLE_NAME,
+  type CollaborationDocumentIdentity,
   type CollaborationTiptapJson,
 } from "./contracts";
-import { CollaborationCodecError, createCollaborationDocumentCodec } from "./document-codec";
+import {
+  COLLABORATION_SCHEMA_EXTENSION_DESCRIPTORS,
+  CollaborationCodecError,
+  createCollaborationDocumentCodec,
+  createCollaborationSchemaFingerprint,
+} from "./document-codec";
 import { createCollaborationRoomName, parseCollaborationRoomName } from "./room-name";
 
 const contentJson = {
@@ -73,6 +80,17 @@ describe("collaboration room names", () => {
 });
 
 describe("CollaborationDocumentCodec", () => {
+  it("uses a numeric collaboration document schema version distinct from the layout id", () => {
+    const identity: CollaborationDocumentIdentity = {
+      generation: 1,
+      schemaFingerprint: "a".repeat(64),
+      schemaVersion: COLLABORATION_DOCUMENT_SCHEMA_VERSION,
+    };
+
+    expect(COLLABORATION_DOCUMENT_SCHEMA_VERSION).toBe(1);
+    expect(identity.schemaVersion).toBeTypeOf("number");
+  });
+
   it("bootstraps the canonical Yjs layout and materializes normalized SQL fields", () => {
     const codec = createCollaborationDocumentCodec(getProjectProfile("default"));
     const document = codec.bootstrap(snapshot);
@@ -142,15 +160,23 @@ describe("CollaborationDocumentCodec", () => {
     const document = codec.bootstrap(snapshot);
     document.getMap(COLLABORATION_METADATA_NAME).set("owner", "  Grace  ");
 
-    expect(codec.validate(document)).toEqual({
-      ok: true,
-      value: {
-        contentJson,
-        metadataJson: { owner: "Grace", tags: ["one", "two"] },
-        plainText: "Alpha beta",
-        title: "Shared document",
-      },
+    expect(codec.validate(document, getProjectProfile("default"))).toEqual({
+      contentJson,
+      metadataJson: { owner: "Grace", tags: ["one", "two"] },
+      plainText: "Alpha beta",
+      title: "Shared document",
     });
+  });
+
+  it("rejects validation with a profile different from the fingerprint profile", () => {
+    const codec = createCollaborationDocumentCodec(getProjectProfile("default"));
+    const document = codec.bootstrap(snapshot);
+
+    const failure = captureCodecFailure(() => {
+      codec.validate(document, getProjectProfile("legal-review"));
+    });
+    expect(failure).toEqual({ ok: false, reason: "profile_mismatch" });
+    expect(JSON.stringify(failure)).not.toContain("legal-review");
   });
 
   it.each([
@@ -161,7 +187,8 @@ describe("CollaborationDocumentCodec", () => {
     const document = codec.bootstrap(snapshot);
     replaceTitle(document, title);
 
-    expect(codec.validate(document)).toEqual({ ok: false, reason: expected });
+    expect(captureCodecFailure(() => codec.validate(document, getProjectProfile("default"))))
+      .toEqual({ ok: false, reason: expected });
   });
 
   it("rejects structurally unsafe and unknown metadata without returning raw values", () => {
@@ -169,22 +196,24 @@ describe("CollaborationDocumentCodec", () => {
     const unsafe = codec.bootstrap(snapshot);
     unsafe.getMap(COLLABORATION_METADATA_NAME).set("owner", { secret: "do-not-return" });
 
-    expect(codec.validate(unsafe)).toEqual({
+    expect(captureCodecFailure(() => codec.validate(unsafe, getProjectProfile("default")))).toEqual({
       fieldId: "owner",
       ok: false,
       reason: "metadata_structure",
     });
-    expect(JSON.stringify(codec.validate(unsafe))).not.toContain("do-not-return");
+    expect(JSON.stringify(captureCodecFailure(() => codec.validate(unsafe, getProjectProfile("default")))))
+      .not.toContain("do-not-return");
 
     const unknown = codec.bootstrap(snapshot);
     unknown.getMap(COLLABORATION_METADATA_NAME).set("privateNotes", "do-not-return");
-    expect(codec.validate(unknown)).toEqual({
+    expect(captureCodecFailure(() => codec.validate(unknown, getProjectProfile("default")))).toEqual({
       fieldId: "privateNotes",
       metadataReason: "unknown_field",
       ok: false,
       reason: "metadata_invalid",
     });
-    expect(JSON.stringify(codec.validate(unknown))).not.toContain("do-not-return");
+    expect(JSON.stringify(captureCodecFailure(() => codec.validate(unknown, getProjectProfile("default")))))
+      .not.toContain("do-not-return");
   });
 
   it("converts malformed collaborative body state into a stable typed validation failure", () => {
@@ -194,9 +223,9 @@ describe("CollaborationDocumentCodec", () => {
     body.delete(0, body.length);
     body.insert(0, [new Y.XmlElement("not-in-the-schema")]);
 
-    const result = codec.validate(document);
-    expect(result).toEqual({ ok: false, reason: "content_schema" });
-    expect(JSON.stringify(result).length).toBeLessThan(200);
+    const failure = captureCodecFailure(() => codec.validate(document, getProjectProfile("default")));
+    expect(failure).toEqual({ ok: false, reason: "content_schema" });
+    expect(JSON.stringify(failure).length).toBeLessThan(200);
   });
 
   it("enforces the shared Tiptap resource policy before schema import", () => {
@@ -235,10 +264,49 @@ describe("CollaborationDocumentCodec", () => {
     expect(extensionNames).toEqual(["starterKit", "link", "taskList", "taskItem", "tableKit", "typography"]);
     expect(getSchema(createServerSchemaExtensions()).topNodeType.name).toBe("doc");
   });
+
+  it("fingerprints the numeric schema version and every ordered extension version", () => {
+    expect(COLLABORATION_SCHEMA_EXTENSION_DESCRIPTORS).toEqual([
+      { name: "starterKit", version: "3.27.4" },
+      { name: "link", version: "3.27.4" },
+      { name: "taskList", version: "3.27.4" },
+      { name: "taskItem", version: "3.27.4" },
+      { name: "tableKit", version: "3.27.4" },
+      { name: "typography", version: "3.27.4" },
+    ]);
+
+    const baseline = createCollaborationSchemaFingerprint({ projectProfileId: "default" });
+    const changedExtensions = COLLABORATION_SCHEMA_EXTENSION_DESCRIPTORS.map((descriptor) => (
+      descriptor.name === "link" ? { ...descriptor, version: "3.27.5" } : descriptor
+    ));
+
+    expect(createCollaborationSchemaFingerprint({
+      extensionDescriptors: changedExtensions,
+      projectProfileId: "default",
+    })).not.toBe(baseline);
+    expect(createCollaborationSchemaFingerprint({
+      projectProfileId: "default",
+      schemaVersion: COLLABORATION_DOCUMENT_SCHEMA_VERSION + 1,
+    })).not.toBe(baseline);
+  });
 });
 
 function replaceTitle(document: Y.Doc, title: string) {
   const sharedTitle = document.getText(COLLABORATION_TITLE_NAME);
   sharedTitle.delete(0, sharedTitle.length);
   sharedTitle.insert(0, title);
+}
+
+function captureCodecFailure(operation: () => unknown) {
+  let thrown: unknown;
+  try {
+    operation();
+  } catch (error) {
+    thrown = error;
+  }
+  if (!(thrown instanceof CollaborationCodecError)) {
+    throw new Error("Expected CollaborationCodecError");
+  }
+  expect(thrown.message).toBe("Collaboration document is invalid");
+  return thrown.failure;
 }

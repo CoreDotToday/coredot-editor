@@ -1,3 +1,5 @@
+import "server-only";
+
 import { createHash } from "node:crypto";
 
 import { getSchema } from "@tiptap/core";
@@ -16,6 +18,7 @@ import {
 import {
   COLLABORATION_BODY_NAME,
   COLLABORATION_DOCUMENT_LAYOUT_VERSION,
+  COLLABORATION_DOCUMENT_SCHEMA_VERSION,
   COLLABORATION_METADATA_NAME,
   COLLABORATION_TIPTAP_SCHEMA_VERSION,
   COLLABORATION_TITLE_MAX_LENGTH,
@@ -26,12 +29,29 @@ import {
   type CollaborationMetadataValue,
   type CollaborationTiptapJson,
   type CollaborationValidationFailure,
-  type CollaborationValidationResult,
 } from "./contracts";
 
 type MetadataDecodeResult =
   | { ok: true; value: CollaborationMetadata }
   | { fieldId: string; ok: false };
+
+type CollaborationValidationResult =
+  | { ok: true; value: CollaborationMaterialization }
+  | CollaborationValidationFailure;
+
+export type CollaborationSchemaExtensionDescriptor = {
+  name: string;
+  version: string;
+};
+
+export const COLLABORATION_SCHEMA_EXTENSION_DESCRIPTORS = [
+  { name: "starterKit", version: COLLABORATION_TIPTAP_SCHEMA_VERSION },
+  { name: "link", version: COLLABORATION_TIPTAP_SCHEMA_VERSION },
+  { name: "taskList", version: COLLABORATION_TIPTAP_SCHEMA_VERSION },
+  { name: "taskItem", version: COLLABORATION_TIPTAP_SCHEMA_VERSION },
+  { name: "tableKit", version: COLLABORATION_TIPTAP_SCHEMA_VERSION },
+  { name: "typography", version: COLLABORATION_TIPTAP_SCHEMA_VERSION },
+] as const satisfies readonly CollaborationSchemaExtensionDescriptor[];
 
 export class CollaborationCodecError extends Error {
   override readonly name = "CollaborationCodecError";
@@ -46,10 +66,10 @@ export function createCollaborationDocumentCodec(
 ): CollaborationDocumentCodec {
   const extensions = createServerSchemaExtensions();
   const schema = getSchema(extensions);
-  const schemaFingerprint = createSchemaFingerprint(
-    projectProfile,
-    extensions.map((extension) => extension.name),
-  );
+  assertSchemaExtensionDescriptors(extensions.map((extension) => extension.name));
+  const schemaFingerprint = createCollaborationSchemaFingerprint({
+    projectProfileId: projectProfile.id,
+  });
 
   const codec: CollaborationDocumentCodec = {
     bootstrap(snapshot) {
@@ -93,28 +113,51 @@ export function createCollaborationDocumentCodec(
       return result.value;
     },
 
-    validate(document, profile = projectProfile) {
-      return validateDocument(document, profile, schema);
+    validate(document, profile) {
+      if (profile.id !== projectProfile.id) {
+        throw new CollaborationCodecError({ ok: false, reason: "profile_mismatch" });
+      }
+      const result = validateDocument(document, profile, schema);
+      if (!result.ok) throw new CollaborationCodecError(result);
+      return result.value;
     },
   };
 
   return codec;
 }
 
-function createSchemaFingerprint(projectProfile: ProjectProfile, extensionNames: string[]) {
+export function createCollaborationSchemaFingerprint({
+  extensionDescriptors = COLLABORATION_SCHEMA_EXTENSION_DESCRIPTORS,
+  projectProfileId,
+  schemaVersion = COLLABORATION_DOCUMENT_SCHEMA_VERSION,
+}: {
+  extensionDescriptors?: readonly CollaborationSchemaExtensionDescriptor[];
+  projectProfileId: string;
+  schemaVersion?: number;
+}) {
   const descriptor = {
     defaultSchemaProfileId: defaultDocumentSchemaProfile.id,
+    extensionDescriptors,
     layout: {
       body: COLLABORATION_BODY_NAME,
       metadata: COLLABORATION_METADATA_NAME,
       title: COLLABORATION_TITLE_NAME,
     },
     layoutVersion: COLLABORATION_DOCUMENT_LAYOUT_VERSION,
-    orderedExtensionNames: extensionNames,
-    projectProfileId: projectProfile.id,
-    tiptapSchemaVersion: COLLABORATION_TIPTAP_SCHEMA_VERSION,
+    projectProfileId,
+    schemaVersion,
   };
   return createHash("sha256").update(JSON.stringify(descriptor), "utf8").digest("hex");
+}
+
+function assertSchemaExtensionDescriptors(actualNames: readonly string[]) {
+  const describedNames = COLLABORATION_SCHEMA_EXTENSION_DESCRIPTORS.map(({ name }) => name);
+  if (
+    actualNames.length !== describedNames.length
+    || actualNames.some((name, index) => name !== describedNames[index])
+  ) {
+    throw new Error("Collaboration schema extension descriptors do not match the server schema");
+  }
 }
 
 function validateSnapshot(
