@@ -1,6 +1,6 @@
 import { createClient, type Client } from "@libsql/client";
 import { pathToFileURL } from "node:url";
-import { getDatabaseUrl } from "../../src/db/url";
+import { resolveDatabaseCredentials } from "../../src/db/url";
 
 const SOURCE_WORKSPACE_ID = "local";
 const TABLES = [
@@ -40,6 +40,10 @@ const COLLABORATION_TABLE_KEYS = [
 export type ClaimLocalWorkspaceSummary = Record<WorkspaceTableKey, number> & {
   targetWorkspaceId: string;
 };
+
+export function createClaimDatabaseClient(clientFactory: typeof createClient = createClient) {
+  return clientFactory(resolveDatabaseCredentials());
+}
 
 export async function claimLocalWorkspace(
   client: Pick<Client, "transaction">,
@@ -86,8 +90,22 @@ export async function claimLocalWorkspace(
     return summary;
   } catch (error) {
     if (!completed) {
-      await transaction.rollback().catch(() => undefined);
-      completed = true;
+      try {
+        await transaction.rollback();
+        completed = true;
+      } catch (rollbackError) {
+        const failures: unknown[] = [error, rollbackError];
+        try {
+          transaction.close();
+        } catch (closeError) {
+          failures.push(closeError);
+        }
+        completed = true;
+        throw new AggregateError(
+          failures,
+          "Workspace claim failed and rollback could not be completed",
+        );
+      }
     }
     throw error;
   } finally {
@@ -273,6 +291,26 @@ async function assertNoConflicts(
       throw new Error(`Authorization epoch ${principals} conflict in target workspace ${target}. Resolve it before retrying.`);
     }
   }
+
+  if (summary.collaborationActions > 0) {
+    const conflicts = await transaction.execute({
+      sql: `
+        SELECT source.command_id
+        FROM collaboration_actions source
+        JOIN collaboration_actions target
+          ON target.workspace_id = ? AND target.command_id = source.command_id
+        WHERE source.workspace_id = ?
+        ORDER BY source.command_id
+      `,
+      args: [target, SOURCE_WORKSPACE_ID],
+    });
+    if (conflicts.rows.length > 0) {
+      const commandIds = conflicts.rows.map((row) => row.command_id).join(", ");
+      throw new Error(
+        `Collaboration action command ${commandIds} conflict in target workspace ${target}. Resolve it before retrying.`,
+      );
+    }
+  }
 }
 
 async function tableHasColumn(
@@ -292,7 +330,7 @@ function parseArguments(argv: string[]) {
 
 async function main() {
   const { dryRun, targetWorkspaceId } = parseArguments(process.argv.slice(2));
-  const client = createClient({ url: getDatabaseUrl() });
+  const client = createClaimDatabaseClient();
   try {
     const summary = await claimLocalWorkspace(client, targetWorkspaceId, { dryRun });
     console.log(JSON.stringify({ dryRun, ...summary }, null, 2));

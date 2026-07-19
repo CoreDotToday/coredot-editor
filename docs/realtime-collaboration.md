@@ -105,9 +105,10 @@ Yjs binary state is canonical for collaborative body, title, and metadata. The `
 
 ### Collaboration Document
 
-A `collaboration_documents` record is scoped by Workspace and document and contains:
+A `collaboration_documents` record is scoped by Workspace, document, and generation and contains:
 
 - `generation`: changes only after an explicit destructive collaboration reset.
+- `isCurrent`: exactly one generation per Workspace/document may be current.
 - `schemaVersion` and `schemaFingerprint`.
 - `checkpointBlob` and `checkpointChecksum`.
 - `headSeq`: last durably appended Yjs update.
@@ -122,6 +123,10 @@ The required invariant is:
 ```
 
 Projection may temporarily lag the live document, but every interactive snapshot consumer uses the collaborative gateway rather than assuming that the SQL projection is current.
+
+Generation rotation retires generation N and inserts generation N+1 in one transaction. Retired generations and their child rows remain available for audit. Current reads use the partial current-generation index; history reads filter by Workspace/document and order the generation index by `generation DESC`.
+
+Canonical persistence limits are deliberately below the general SQLite value boundary: checkpoints, updates, and inverse updates are at most 10 MiB; state vectors are at most 1 MiB; relative positions are at most 64 KiB; diagnostic JSON objects are at most 4 KiB; target previews are at most 1 KiB; failure categories are at most 128 bytes; and command/idempotency keys are at most 256 bytes. Binary values must use SQLite BLOB storage and be non-empty. Hashes must use TEXT storage and contain exactly 64 lowercase hexadecimal characters. Text limits are measured as UTF-8 bytes.
 
 ### Collaboration Update
 

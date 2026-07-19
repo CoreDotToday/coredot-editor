@@ -13,6 +13,18 @@ export type DocumentMetadata = Record<string, DocumentMetadataValue>;
 export type CollaborationUpdateOriginKind = "client" | "migration" | "proposal_command" | "repair" | "undo_command";
 export type CollaborationActionType = "proposal_apply" | "proposal_batch_apply" | "repair" | "selective_undo";
 export type CollaborationActionStatus = "applied" | "failed" | "pending";
+export const COLLABORATION_STORAGE_LIMITS = {
+  codecBytes: 10 * 1024 * 1024,
+  correctnessKeyBytes: 256,
+  diagnosticJsonBytes: 4 * 1024,
+  failureCategoryBytes: 128,
+  relativePositionBytes: 64 * 1024,
+  stateVectorBytes: 1024 * 1024,
+  targetPreviewBytes: 1024,
+} as const;
+const COLLABORATION_STORAGE_LIMIT_SQL = Object.fromEntries(
+  Object.entries(COLLABORATION_STORAGE_LIMITS).map(([key, value]) => [key, sql.raw(String(value))]),
+) as Record<keyof typeof COLLABORATION_STORAGE_LIMITS, ReturnType<typeof sql.raw>>;
 export type DocumentChangeSnapshot = {
   title: string;
   contentJson: TiptapJson;
@@ -360,6 +372,7 @@ export const collaborationDocuments = sqliteTable(
     workspaceId: text("workspace_id").notNull(),
     documentId: text("document_id").notNull(),
     generation: integer("generation").notNull(),
+    isCurrent: integer("is_current", { mode: "boolean" }).notNull().default(true),
     schemaVersion: integer("schema_version").notNull(),
     schemaFingerprint: text("schema_fingerprint").notNull(),
     checkpointBlob: blob("checkpoint_blob", { mode: "buffer" }).notNull(),
@@ -373,10 +386,13 @@ export const collaborationDocuments = sqliteTable(
   },
   (table) => [
     primaryKey({
-      columns: [table.workspaceId, table.documentId],
+      columns: [table.workspaceId, table.documentId, table.generation],
       name: "collaboration_documents_pk",
     }),
-    uniqueIndex("collaboration_documents_workspace_document_generation_unique").on(
+    uniqueIndex("collaboration_documents_current_unique")
+      .on(table.workspaceId, table.documentId)
+      .where(sql`${table.isCurrent} = 1`),
+    index("collaboration_documents_workspace_document_generation_idx").on(
       table.workspaceId,
       table.documentId,
       table.generation,
@@ -389,6 +405,10 @@ export const collaborationDocuments = sqliteTable(
     check(
       "collaboration_documents_generation_check",
       sql`typeof(${table.generation}) = 'integer' and ${table.generation} between 1 and 9007199254740991`,
+    ),
+    check(
+      "collaboration_documents_is_current_check",
+      sql`typeof(${table.isCurrent}) = 'integer' and ${table.isCurrent} in (0, 1)`,
     ),
     check(
       "collaboration_documents_schema_version_check",
@@ -404,11 +424,20 @@ export const collaborationDocuments = sqliteTable(
     ),
     check(
       "collaboration_documents_schema_fingerprint_check",
-      sql`length(${table.schemaFingerprint}) = 64 and ${table.schemaFingerprint} not glob '*[^0-9a-f]*'`,
+      sql`typeof(${table.schemaFingerprint}) = 'text'
+        and length(${table.schemaFingerprint}) = 64
+        and ${table.schemaFingerprint} not glob '*[^0-9a-f]*'`,
     ),
     check(
       "collaboration_documents_checkpoint_checksum_check",
-      sql`length(${table.checkpointChecksum}) = 64 and ${table.checkpointChecksum} not glob '*[^0-9a-f]*'`,
+      sql`typeof(${table.checkpointChecksum}) = 'text'
+        and length(${table.checkpointChecksum}) = 64
+        and ${table.checkpointChecksum} not glob '*[^0-9a-f]*'`,
+    ),
+    check(
+      "collaboration_documents_checkpoint_blob_check",
+      sql`typeof(${table.checkpointBlob}) = 'blob'
+        and length(${table.checkpointBlob}) between 1 and ${COLLABORATION_STORAGE_LIMIT_SQL.codecBytes}`,
     ),
   ],
 );
@@ -493,6 +522,20 @@ export const collaborationActions = sqliteTable(
         or (${table.status} = 'applied' and ${table.appliedHeadSeq} is not null and ${table.failureCategory} is null)
         or (${table.status} = 'failed' and ${table.appliedHeadSeq} is null and ${table.failureCategory} is not null)`,
     ),
+    check(
+      "collaboration_actions_command_id_check",
+      sql`typeof(${table.commandId}) = 'text'
+        and ${table.commandId} = trim(${table.commandId}, char(9) || char(10) || char(13) || ' ')
+        and length(cast(${table.commandId} as blob)) between 1 and ${COLLABORATION_STORAGE_LIMIT_SQL.correctnessKeyBytes}`,
+    ),
+    check(
+      "collaboration_actions_failure_category_check",
+      sql`${table.failureCategory} is null or (
+        typeof(${table.failureCategory}) = 'text'
+        and ${table.failureCategory} = trim(${table.failureCategory}, char(9) || char(10) || char(13) || ' ')
+        and length(cast(${table.failureCategory} as blob)) between 1 and ${COLLABORATION_STORAGE_LIMIT_SQL.failureCategoryBytes}
+      )`,
+    ),
   ],
 );
 
@@ -553,11 +596,35 @@ export const collaborationUpdates = sqliteTable(
     ),
     check(
       "collaboration_updates_checksum_check",
-      sql`length(${table.checksum}) = 64 and ${table.checksum} not glob '*[^0-9a-f]*'`,
+      sql`typeof(${table.checksum}) = 'text'
+        and length(${table.checksum}) = 64
+        and ${table.checksum} not glob '*[^0-9a-f]*'`,
     ),
     check(
       "collaboration_updates_origin_check",
       sql`${table.originKind} in ('client', 'proposal_command', 'undo_command', 'migration', 'repair')`,
+    ),
+    check(
+      "collaboration_updates_update_blob_check",
+      sql`typeof(${table.updateBlob}) = 'blob'
+        and length(${table.updateBlob}) between 1 and ${COLLABORATION_STORAGE_LIMIT_SQL.codecBytes}`,
+    ),
+    check(
+      "collaboration_updates_idempotency_key_check",
+      sql`typeof(${table.idempotencyKey}) = 'text'
+        and ${table.idempotencyKey} = trim(${table.idempotencyKey}, char(9) || char(10) || char(13) || ' ')
+        and length(cast(${table.idempotencyKey} as blob)) between 1 and ${COLLABORATION_STORAGE_LIMIT_SQL.correctnessKeyBytes}`,
+    ),
+    check(
+      "collaboration_updates_diagnostic_json_check",
+      sql`${table.diagnosticJson} is null or (
+        typeof(${table.diagnosticJson}) = 'text'
+        and length(cast(${table.diagnosticJson} as blob)) between 2 and ${COLLABORATION_STORAGE_LIMIT_SQL.diagnosticJsonBytes}
+        and case when json_valid(${table.diagnosticJson})
+          then json_type(${table.diagnosticJson}) = 'object'
+          else 0
+        end
+      )`,
     ),
   ],
 );
@@ -627,7 +694,14 @@ export const documentApprovals = sqliteTable(
     ),
     check(
       "document_approvals_content_hash_check",
-      sql`length(${table.approvedContentHash}) = 64 and ${table.approvedContentHash} not glob '*[^0-9a-f]*'`,
+      sql`typeof(${table.approvedContentHash}) = 'text'
+        and length(${table.approvedContentHash}) = 64
+        and ${table.approvedContentHash} not glob '*[^0-9a-f]*'`,
+    ),
+    check(
+      "document_approvals_state_vector_check",
+      sql`typeof(${table.approvedStateVector}) = 'blob'
+        and length(${table.approvedStateVector}) between 1 and ${COLLABORATION_STORAGE_LIMIT_SQL.stateVectorBytes}`,
     ),
     check(
       "document_approvals_invalidation_check",
@@ -664,6 +738,13 @@ export const collaborationProposalAnchors = sqliteTable(
       columns: [table.workspaceId, table.proposalId],
       name: "collaboration_proposal_anchors_pk",
     }),
+    index("collaboration_proposal_anchors_document_generation_history_idx").on(
+      table.workspaceId,
+      table.documentId,
+      table.generation,
+      table.createdAt,
+      table.proposalId,
+    ),
     foreignKey({
       columns: [table.workspaceId, table.documentId, table.generation],
       foreignColumns: [
@@ -686,15 +767,36 @@ export const collaborationProposalAnchors = sqliteTable(
     ),
     check(
       "collaboration_proposal_anchors_schema_fingerprint_check",
-      sql`length(${table.schemaFingerprint}) = 64 and ${table.schemaFingerprint} not glob '*[^0-9a-f]*'`,
+      sql`typeof(${table.schemaFingerprint}) = 'text'
+        and length(${table.schemaFingerprint}) = 64
+        and ${table.schemaFingerprint} not glob '*[^0-9a-f]*'`,
     ),
     check(
       "collaboration_proposal_anchors_target_hash_check",
-      sql`length(${table.targetHash}) = 64 and ${table.targetHash} not glob '*[^0-9a-f]*'`,
+      sql`typeof(${table.targetHash}) = 'text'
+        and length(${table.targetHash}) = 64
+        and ${table.targetHash} not glob '*[^0-9a-f]*'`,
     ),
     check(
       "collaboration_proposal_anchors_association_check",
       sql`${table.startAssoc} = -1 and ${table.endAssoc} = 1`,
+    ),
+    check(
+      "collaboration_proposal_anchors_state_vector_check",
+      sql`typeof(${table.baseStateVector}) = 'blob'
+        and length(${table.baseStateVector}) between 1 and ${COLLABORATION_STORAGE_LIMIT_SQL.stateVectorBytes}`,
+    ),
+    check(
+      "collaboration_proposal_anchors_relative_positions_check",
+      sql`typeof(${table.startRelative}) = 'blob'
+        and length(${table.startRelative}) between 1 and ${COLLABORATION_STORAGE_LIMIT_SQL.relativePositionBytes}
+        and typeof(${table.endRelative}) = 'blob'
+        and length(${table.endRelative}) between 1 and ${COLLABORATION_STORAGE_LIMIT_SQL.relativePositionBytes}`,
+    ),
+    check(
+      "collaboration_proposal_anchors_target_preview_check",
+      sql`typeof(${table.targetPreview}) = 'text'
+        and length(cast(${table.targetPreview} as blob)) between 0 and ${COLLABORATION_STORAGE_LIMIT_SQL.targetPreviewBytes}`,
     ),
   ],
 );
@@ -723,6 +825,13 @@ export const collaborationDocumentChanges = sqliteTable(
     uniqueIndex("collaboration_document_changes_workspace_action_unique").on(
       table.workspaceId,
       table.actionId,
+    ),
+    index("collaboration_document_changes_document_generation_history_idx").on(
+      table.workspaceId,
+      table.documentId,
+      table.generation,
+      table.resultingHeadSeq,
+      table.changeId,
     ),
     foreignKey({
       columns: [table.workspaceId, table.documentId, table.generation],
@@ -760,8 +869,21 @@ export const collaborationDocumentChanges = sqliteTable(
     ),
     check(
       "collaboration_document_changes_postcondition_check",
-      sql`length(${table.postconditionFingerprint}) = 64
+      sql`typeof(${table.postconditionFingerprint}) = 'text'
+        and length(${table.postconditionFingerprint}) = 64
         and ${table.postconditionFingerprint} not glob '*[^0-9a-f]*'`,
+    ),
+    check(
+      "collaboration_document_changes_inverse_update_check",
+      sql`typeof(${table.inverseUpdate}) = 'blob'
+        and length(${table.inverseUpdate}) between 1 and ${COLLABORATION_STORAGE_LIMIT_SQL.codecBytes}`,
+    ),
+    check(
+      "collaboration_document_changes_relative_positions_check",
+      sql`typeof(${table.affectedStartRelative}) = 'blob'
+        and length(${table.affectedStartRelative}) between 1 and ${COLLABORATION_STORAGE_LIMIT_SQL.relativePositionBytes}
+        and typeof(${table.affectedEndRelative}) = 'blob'
+        and length(${table.affectedEndRelative}) between 1 and ${COLLABORATION_STORAGE_LIMIT_SQL.relativePositionBytes}`,
     ),
   ],
 );
@@ -784,6 +906,13 @@ export const collaborationAiRunSnapshots = sqliteTable(
       columns: [table.workspaceId, table.aiRunId],
       name: "collaboration_ai_run_snapshots_pk",
     }),
+    index("collaboration_ai_run_snapshots_document_generation_history_idx").on(
+      table.workspaceId,
+      table.documentId,
+      table.generation,
+      table.createdAt,
+      table.aiRunId,
+    ),
     foreignKey({
       columns: [table.workspaceId, table.documentId, table.generation],
       foreignColumns: [
@@ -805,11 +934,20 @@ export const collaborationAiRunSnapshots = sqliteTable(
     ),
     check(
       "collaboration_ai_run_snapshots_schema_fingerprint_check",
-      sql`length(${table.schemaFingerprint}) = 64 and ${table.schemaFingerprint} not glob '*[^0-9a-f]*'`,
+      sql`typeof(${table.schemaFingerprint}) = 'text'
+        and length(${table.schemaFingerprint}) = 64
+        and ${table.schemaFingerprint} not glob '*[^0-9a-f]*'`,
     ),
     check(
       "collaboration_ai_run_snapshots_content_hash_check",
-      sql`length(${table.contentHash}) = 64 and ${table.contentHash} not glob '*[^0-9a-f]*'`,
+      sql`typeof(${table.contentHash}) = 'text'
+        and length(${table.contentHash}) = 64
+        and ${table.contentHash} not glob '*[^0-9a-f]*'`,
+    ),
+    check(
+      "collaboration_ai_run_snapshots_state_vector_check",
+      sql`typeof(${table.stateVector}) = 'blob'
+        and length(${table.stateVector}) between 1 and ${COLLABORATION_STORAGE_LIMIT_SQL.stateVectorBytes}`,
     ),
   ],
 );

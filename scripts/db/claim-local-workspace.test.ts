@@ -4,8 +4,8 @@ import { migrate } from "drizzle-orm/libsql/migrator";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import { claimLocalWorkspace } from "./claim-local-workspace";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { claimLocalWorkspace, createClaimDatabaseClient } from "./claim-local-workspace";
 
 const tempDirs: string[] = [];
 const clients: Client[] = [];
@@ -55,6 +55,7 @@ const HASH_B = "b".repeat(64);
 afterEach(async () => {
   clients.splice(0).forEach((client) => client.close());
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  vi.unstubAllEnvs();
 });
 
 async function createClaimDatabase() {
@@ -207,10 +208,10 @@ async function createFullClaimDatabase() {
     ) VALUES ('full_message', 'local', 'full_conversation', 'full_doc', 'full-message-key',
       'full-message-fingerprint', 0, 'assistant', 'Answer', 'full_run', 'full_proposal', 5000);
     INSERT INTO collaboration_documents (
-      workspace_id, document_id, generation, schema_version, schema_fingerprint,
+      workspace_id, document_id, generation, is_current, schema_version, schema_fingerprint,
       checkpoint_blob, checkpoint_checksum, head_seq, checkpoint_seq, projected_seq,
       last_checkpoint_at, created_at, updated_at
-    ) VALUES ('local', 'full_doc', 1, 1, '${HASH_A}', X'0102', '${HASH_B}', 1, 0, 0,
+    ) VALUES ('local', 'full_doc', 1, 1, 1, '${HASH_A}', X'0102', '${HASH_B}', 1, 0, 0,
       6000, 6000, 6000);
     INSERT INTO collaboration_actions (
       id, workspace_id, document_id, generation, command_id, action_type, principal_id,
@@ -257,6 +258,52 @@ async function createFullClaimDatabase() {
 }
 
 describe("claimLocalWorkspace", () => {
+  it("passes hosted libSQL credentials, including the auth token, to the client factory", () => {
+    const authToken = "test-token-not-a-secret";
+    vi.stubEnv("DATABASE_URL", "libsql://workspace.example.test");
+    vi.stubEnv("DATABASE_AUTH_TOKEN", authToken);
+    const close = vi.fn();
+    const inputs: unknown[] = [];
+
+    const client = createClaimDatabaseClient(((input: unknown) => {
+      inputs.push(input);
+      return { close } as unknown as Client;
+    }) as typeof createClient);
+
+    expect(inputs).toEqual([{
+      authToken,
+      url: "libsql://workspace.example.test",
+    }]);
+    expect(close).not.toHaveBeenCalled();
+    client.close();
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("closes the transaction and surfaces both failures when rollback rejects", async () => {
+    const operationError = new Error("private operation detail");
+    const rollbackError = new Error("private rollback detail");
+    const close = vi.fn();
+    const transaction = {
+      close,
+      commit: vi.fn(),
+      execute: vi.fn().mockRejectedValue(operationError),
+      rollback: vi.fn().mockRejectedValue(rollbackError),
+    };
+    const client = {
+      transaction: vi.fn().mockResolvedValue(transaction),
+    } as unknown as Pick<Client, "transaction">;
+
+    const error = await claimLocalWorkspace(client, "workspace-acme").catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(AggregateError);
+    expect(error).toMatchObject({
+      errors: [operationError, rollbackError],
+      message: "Workspace claim failed and rollback could not be completed",
+    });
+    expect(transaction.rollback).toHaveBeenCalledOnce();
+    expect(close).toHaveBeenCalledOnce();
+  });
+
   it("moves the complete current Workspace graph atomically", async () => {
     const client = await createFullClaimDatabase();
 
@@ -369,6 +416,33 @@ describe("claimLocalWorkspace", () => {
           workspace_id, principal_id, policy_id, window_start, request_count, expires_at
         ) VALUES ('workspace-full', 'full_principal', 'ai', 1000, 2, 9000)
       `),
+    },
+    {
+      label: "collaboration action command",
+      prepare: async (client: Client) => {
+        await client.execute(`
+          INSERT INTO documents (
+            id, workspace_id, title, content_json, plain_text, status, readiness,
+            metadata_json, revision, created_at, updated_at
+          ) VALUES ('target-action-doc', 'workspace-full', 'Target', '{"type":"doc"}', '',
+            'draft', 'draft', '{}', 0, 1, 1)
+        `);
+        await client.execute(`
+          INSERT INTO collaboration_documents (
+            workspace_id, document_id, generation, is_current, schema_version, schema_fingerprint,
+            checkpoint_blob, checkpoint_checksum, head_seq, checkpoint_seq, projected_seq,
+            last_checkpoint_at, created_at, updated_at
+          ) VALUES ('workspace-full', 'target-action-doc', 1, 1, 1, '${HASH_A}', X'0102',
+            '${HASH_B}', 0, 0, 0, 1, 1, 1)
+        `);
+        await client.execute(`
+          INSERT INTO collaboration_actions (
+            id, workspace_id, document_id, generation, command_id, action_type, principal_id,
+            request_id, base_head_seq, applied_head_seq, status, failure_category, created_at, updated_at
+          ) VALUES ('target-action', 'workspace-full', 'target-action-doc', 1, 'full-command', 'repair',
+            'target-principal', 'target-request', 0, NULL, 'pending', NULL, 1, 1)
+        `);
+      },
     },
   ])("preflights $label conflicts without moving local rows", async ({ label, prepare }) => {
     const client = await createFullClaimDatabase();

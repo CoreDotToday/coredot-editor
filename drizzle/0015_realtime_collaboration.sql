@@ -2,6 +2,7 @@ CREATE TABLE `collaboration_documents` (
 	`workspace_id` text NOT NULL,
 	`document_id` text NOT NULL,
 	`generation` integer NOT NULL,
+	`is_current` integer DEFAULT 1 NOT NULL,
 	`schema_version` integer NOT NULL,
 	`schema_fingerprint` text NOT NULL,
 	`checkpoint_blob` blob NOT NULL,
@@ -12,12 +13,14 @@ CREATE TABLE `collaboration_documents` (
 	`last_checkpoint_at` integer NOT NULL,
 	`created_at` integer NOT NULL,
 	`updated_at` integer NOT NULL,
-	CONSTRAINT `collaboration_documents_pk` PRIMARY KEY (`workspace_id`, `document_id`),
+	CONSTRAINT `collaboration_documents_pk` PRIMARY KEY (`workspace_id`, `document_id`, `generation`),
 	CONSTRAINT `collaboration_documents_workspace_document_fk`
 		FOREIGN KEY (`workspace_id`, `document_id`)
 		REFERENCES `documents` (`workspace_id`, `id`) ON DELETE cascade,
 	CONSTRAINT `collaboration_documents_generation_check`
 		CHECK (typeof(`generation`) = 'integer' and `generation` between 1 and 9007199254740991),
+	CONSTRAINT `collaboration_documents_is_current_check`
+		CHECK (typeof(`is_current`) = 'integer' and `is_current` in (0, 1)),
 	CONSTRAINT `collaboration_documents_schema_version_check`
 		CHECK (typeof(`schema_version`) = 'integer' and `schema_version` between 1 and 9007199254740991),
 	CONSTRAINT `collaboration_documents_sequence_check`
@@ -27,12 +30,22 @@ CREATE TABLE `collaboration_documents` (
 			and `checkpoint_seq` <= `projected_seq`
 			and `projected_seq` <= `head_seq`),
 	CONSTRAINT `collaboration_documents_schema_fingerprint_check`
-		CHECK (length(`schema_fingerprint`) = 64 and `schema_fingerprint` not glob '*[^0-9a-f]*'),
+		CHECK (typeof(`schema_fingerprint`) = 'text'
+			and length(`schema_fingerprint`) = 64
+			and `schema_fingerprint` not glob '*[^0-9a-f]*'),
 	CONSTRAINT `collaboration_documents_checkpoint_checksum_check`
-		CHECK (length(`checkpoint_checksum`) = 64 and `checkpoint_checksum` not glob '*[^0-9a-f]*')
+		CHECK (typeof(`checkpoint_checksum`) = 'text'
+			and length(`checkpoint_checksum`) = 64
+			and `checkpoint_checksum` not glob '*[^0-9a-f]*'),
+	CONSTRAINT `collaboration_documents_checkpoint_blob_check`
+		CHECK (typeof(`checkpoint_blob`) = 'blob'
+			and length(`checkpoint_blob`) between 1 and 10485760)
 );
 --> statement-breakpoint
-CREATE UNIQUE INDEX `collaboration_documents_workspace_document_generation_unique`
+CREATE UNIQUE INDEX `collaboration_documents_current_unique`
+ON `collaboration_documents` (`workspace_id`, `document_id`) WHERE `is_current` = 1;
+--> statement-breakpoint
+CREATE INDEX `collaboration_documents_workspace_document_generation_idx`
 ON `collaboration_documents` (`workspace_id`, `document_id`, `generation`);
 --> statement-breakpoint
 CREATE TABLE `collaboration_actions` (
@@ -77,7 +90,17 @@ CREATE TABLE `collaboration_actions` (
 	CONSTRAINT `collaboration_actions_state_check`
 		CHECK ((`status` = 'pending' and `applied_head_seq` is null and `failure_category` is null)
 			or (`status` = 'applied' and `applied_head_seq` is not null and `failure_category` is null)
-			or (`status` = 'failed' and `applied_head_seq` is null and `failure_category` is not null))
+			or (`status` = 'failed' and `applied_head_seq` is null and `failure_category` is not null)),
+	CONSTRAINT `collaboration_actions_command_id_check`
+		CHECK (typeof(`command_id`) = 'text'
+			and `command_id` = trim(`command_id`, char(9) || char(10) || char(13) || ' ')
+			and length(cast(`command_id` as blob)) between 1 and 256),
+	CONSTRAINT `collaboration_actions_failure_category_check`
+		CHECK (`failure_category` is null or (
+			typeof(`failure_category`) = 'text'
+			and `failure_category` = trim(`failure_category`, char(9) || char(10) || char(13) || ' ')
+			and length(cast(`failure_category` as blob)) between 1 and 128
+		))
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `collaboration_actions_workspace_id_document_generation_unique`
@@ -116,9 +139,27 @@ CREATE TABLE `collaboration_updates` (
 		CHECK (typeof(`generation`) = 'integer' and `generation` between 1 and 9007199254740991
 			and typeof(`seq`) = 'integer' and `seq` between 1 and 9007199254740991),
 	CONSTRAINT `collaboration_updates_checksum_check`
-		CHECK (length(`checksum`) = 64 and `checksum` not glob '*[^0-9a-f]*'),
+		CHECK (typeof(`checksum`) = 'text'
+			and length(`checksum`) = 64
+			and `checksum` not glob '*[^0-9a-f]*'),
 	CONSTRAINT `collaboration_updates_origin_check`
-		CHECK (`origin_kind` in ('client', 'proposal_command', 'undo_command', 'migration', 'repair'))
+		CHECK (`origin_kind` in ('client', 'proposal_command', 'undo_command', 'migration', 'repair')),
+	CONSTRAINT `collaboration_updates_update_blob_check`
+		CHECK (typeof(`update_blob`) = 'blob'
+			and length(`update_blob`) between 1 and 10485760),
+	CONSTRAINT `collaboration_updates_idempotency_key_check`
+		CHECK (typeof(`idempotency_key`) = 'text'
+			and `idempotency_key` = trim(`idempotency_key`, char(9) || char(10) || char(13) || ' ')
+			and length(cast(`idempotency_key` as blob)) between 1 and 256),
+	CONSTRAINT `collaboration_updates_diagnostic_json_check`
+		CHECK (`diagnostic_json` is null or (
+			typeof(`diagnostic_json`) = 'text'
+			and length(cast(`diagnostic_json` as blob)) between 2 and 4096
+			and case when json_valid(`diagnostic_json`)
+				then json_type(`diagnostic_json`) = 'object'
+				else 0
+			end
+		))
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `collaboration_updates_document_generation_idempotency_unique`
@@ -156,7 +197,12 @@ CREATE TABLE `document_approvals` (
 			and typeof(`approved_head_seq`) = 'integer'
 			and `approved_head_seq` between 0 and 9007199254740991),
 	CONSTRAINT `document_approvals_content_hash_check`
-		CHECK (length(`approved_content_hash`) = 64 and `approved_content_hash` not glob '*[^0-9a-f]*'),
+		CHECK (typeof(`approved_content_hash`) = 'text'
+			and length(`approved_content_hash`) = 64
+			and `approved_content_hash` not glob '*[^0-9a-f]*'),
+	CONSTRAINT `document_approvals_state_vector_check`
+		CHECK (typeof(`approved_state_vector`) = 'blob'
+			and length(`approved_state_vector`) between 1 and 1048576),
 	CONSTRAINT `document_approvals_invalidation_check`
 		CHECK ((`invalidated_seq` is null and `invalidated_principal_id` is null and `invalidated_at` is null)
 			or (`invalidated_seq` is not null and `invalidated_principal_id` is not null
@@ -199,12 +245,30 @@ CREATE TABLE `collaboration_proposal_anchors` (
 			and typeof(`base_head_seq`) = 'integer'
 			and `base_head_seq` between 0 and 9007199254740991),
 	CONSTRAINT `collaboration_proposal_anchors_schema_fingerprint_check`
-		CHECK (length(`schema_fingerprint`) = 64 and `schema_fingerprint` not glob '*[^0-9a-f]*'),
+		CHECK (typeof(`schema_fingerprint`) = 'text'
+			and length(`schema_fingerprint`) = 64
+			and `schema_fingerprint` not glob '*[^0-9a-f]*'),
 	CONSTRAINT `collaboration_proposal_anchors_target_hash_check`
-		CHECK (length(`target_hash`) = 64 and `target_hash` not glob '*[^0-9a-f]*'),
+		CHECK (typeof(`target_hash`) = 'text'
+			and length(`target_hash`) = 64
+			and `target_hash` not glob '*[^0-9a-f]*'),
 	CONSTRAINT `collaboration_proposal_anchors_association_check`
-		CHECK (`start_assoc` = -1 and `end_assoc` = 1)
+		CHECK (`start_assoc` = -1 and `end_assoc` = 1),
+	CONSTRAINT `collaboration_proposal_anchors_state_vector_check`
+		CHECK (typeof(`base_state_vector`) = 'blob'
+			and length(`base_state_vector`) between 1 and 1048576),
+	CONSTRAINT `collaboration_proposal_anchors_relative_positions_check`
+		CHECK (typeof(`start_relative`) = 'blob'
+			and length(`start_relative`) between 1 and 65536
+			and typeof(`end_relative`) = 'blob'
+			and length(`end_relative`) between 1 and 65536),
+	CONSTRAINT `collaboration_proposal_anchors_target_preview_check`
+		CHECK (typeof(`target_preview`) = 'text'
+			and length(cast(`target_preview` as blob)) between 0 and 1024)
 );
+--> statement-breakpoint
+CREATE INDEX `collaboration_proposal_anchors_document_generation_history_idx`
+ON `collaboration_proposal_anchors` (`workspace_id`, `document_id`, `generation`, `created_at`, `proposal_id`);
 --> statement-breakpoint
 CREATE TABLE `collaboration_document_changes` (
 	`workspace_id` text NOT NULL,
@@ -238,12 +302,24 @@ CREATE TABLE `collaboration_document_changes` (
 			and `forward_seq` > `base_head_seq`
 			and `resulting_head_seq` >= `forward_seq`),
 	CONSTRAINT `collaboration_document_changes_postcondition_check`
-		CHECK (length(`postcondition_fingerprint`) = 64
-			and `postcondition_fingerprint` not glob '*[^0-9a-f]*')
+		CHECK (typeof(`postcondition_fingerprint`) = 'text'
+			and length(`postcondition_fingerprint`) = 64
+			and `postcondition_fingerprint` not glob '*[^0-9a-f]*'),
+	CONSTRAINT `collaboration_document_changes_inverse_update_check`
+		CHECK (typeof(`inverse_update`) = 'blob'
+			and length(`inverse_update`) between 1 and 10485760),
+	CONSTRAINT `collaboration_document_changes_relative_positions_check`
+		CHECK (typeof(`affected_start_relative`) = 'blob'
+			and length(`affected_start_relative`) between 1 and 65536
+			and typeof(`affected_end_relative`) = 'blob'
+			and length(`affected_end_relative`) between 1 and 65536)
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `collaboration_document_changes_workspace_action_unique`
 ON `collaboration_document_changes` (`workspace_id`, `action_id`);
+--> statement-breakpoint
+CREATE INDEX `collaboration_document_changes_document_generation_history_idx`
+ON `collaboration_document_changes` (`workspace_id`, `document_id`, `generation`, `resulting_head_seq`, `change_id`);
 --> statement-breakpoint
 CREATE TABLE `collaboration_ai_run_snapshots` (
 	`workspace_id` text NOT NULL,
@@ -266,7 +342,17 @@ CREATE TABLE `collaboration_ai_run_snapshots` (
 		CHECK (typeof(`generation`) = 'integer' and `generation` between 1 and 9007199254740991
 			and typeof(`head_seq`) = 'integer' and `head_seq` between 0 and 9007199254740991),
 	CONSTRAINT `collaboration_ai_run_snapshots_schema_fingerprint_check`
-		CHECK (length(`schema_fingerprint`) = 64 and `schema_fingerprint` not glob '*[^0-9a-f]*'),
+		CHECK (typeof(`schema_fingerprint`) = 'text'
+			and length(`schema_fingerprint`) = 64
+			and `schema_fingerprint` not glob '*[^0-9a-f]*'),
 	CONSTRAINT `collaboration_ai_run_snapshots_content_hash_check`
-		CHECK (length(`content_hash`) = 64 and `content_hash` not glob '*[^0-9a-f]*')
+		CHECK (typeof(`content_hash`) = 'text'
+			and length(`content_hash`) = 64
+			and `content_hash` not glob '*[^0-9a-f]*'),
+	CONSTRAINT `collaboration_ai_run_snapshots_state_vector_check`
+		CHECK (typeof(`state_vector`) = 'blob'
+			and length(`state_vector`) between 1 and 1048576)
 );
+--> statement-breakpoint
+CREATE INDEX `collaboration_ai_run_snapshots_document_generation_history_idx`
+ON `collaboration_ai_run_snapshots` (`workspace_id`, `document_id`, `generation`, `created_at`, `ai_run_id`);

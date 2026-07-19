@@ -1,10 +1,22 @@
 import { createClient, type Client } from "@libsql/client";
+import { getTableName, type SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/libsql";
 import { migrate } from "drizzle-orm/libsql/migrator";
+import { getTableConfig, SQLiteSyncDialect, type AnySQLiteTable } from "drizzle-orm/sqlite-core";
 import { copyFile, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import {
+  collaborationActions,
+  collaborationAiRunSnapshots,
+  collaborationAuthorizationEpochs,
+  collaborationDocumentChanges,
+  collaborationDocuments,
+  collaborationProposalAnchors,
+  collaborationUpdates,
+  documentApprovals,
+} from "./schema";
 
 const COLLABORATION_TABLES = [
   "collaboration_documents",
@@ -17,8 +29,24 @@ const COLLABORATION_TABLES = [
   "collaboration_ai_run_snapshots",
 ] as const;
 const MAX_SAFE_INTEGER = 9_007_199_254_740_991;
+const CODEC_BYTES = 10 * 1024 * 1024;
+const STATE_VECTOR_BYTES = 1024 * 1024;
+const RELATIVE_POSITION_BYTES = 64 * 1024;
+const DIAGNOSTIC_JSON_BYTES = 4 * 1024;
+const TARGET_PREVIEW_BYTES = 1024;
+const CORRECTNESS_KEY_BYTES = 256;
 const HASH_A = "a".repeat(64);
 const HASH_B = "b".repeat(64);
+const COLLABORATION_SCHEMA_TABLES = [
+  collaborationDocuments,
+  collaborationUpdates,
+  collaborationActions,
+  collaborationAuthorizationEpochs,
+  documentApprovals,
+  collaborationProposalAnchors,
+  collaborationDocumentChanges,
+  collaborationAiRunSnapshots,
+] as const satisfies readonly AnySQLiteTable[];
 const migrationsFolder = resolve(process.cwd(), "drizzle");
 const tempDirs: string[] = [];
 const clients: Client[] = [];
@@ -44,6 +72,187 @@ describe("collaboration migration", () => {
     ]) {
       expect(schema[exportName as keyof typeof schema], exportName).toBeDefined();
     }
+  });
+
+  it("keeps handwritten collaboration SQL structurally aligned with every Drizzle table", async () => {
+    const client = await createDatabase("parity");
+    await migrate(drizzle(client), { migrationsFolder });
+
+    for (const table of COLLABORATION_SCHEMA_TABLES) {
+      await expectTableParity(client, table);
+    }
+  });
+
+  it("retains retired generations and permits exactly one current generation", async () => {
+    const client = await createDatabase("generations");
+    await migrate(drizzle(client), { migrationsFolder });
+    await client.execute("PRAGMA foreign_keys=ON");
+    await seedLegacyGraph(client, "generation");
+    await insertCollaborationDocument(client, "generation");
+    await insertFullCollaborationGraph(client, "generation");
+
+    const columns = await client.execute("PRAGMA table_info(collaboration_documents)");
+    expect(columns.rows.map((row) => String(row.name))).toContain("is_current");
+
+    await client.execute(`UPDATE collaboration_documents
+      SET is_current = 0
+      WHERE workspace_id = 'workspace-generation' AND document_id = 'doc-generation' AND generation = 1`);
+    await client.execute(collaborationDocumentInsert("generation", "doc-generation", 2, 1));
+
+    expect((await client.execute(`SELECT generation, is_current
+      FROM collaboration_documents
+      WHERE workspace_id = 'workspace-generation' AND document_id = 'doc-generation'
+      ORDER BY generation`)).rows).toEqual([
+      expect.objectContaining({ generation: 1, is_current: 0 }),
+      expect.objectContaining({ generation: 2, is_current: 1 }),
+    ]);
+    expect(await rowCount(client, "collaboration_updates", "workspace-generation")).toBe(1);
+    await expectReject(client, collaborationDocumentInsert("generation", "doc-generation", 3, 1));
+    await expectReject(client, "UPDATE collaboration_documents SET is_current = 2 WHERE generation = 2");
+    await expectReject(client, "UPDATE collaboration_documents SET is_current = 0.5 WHERE generation = 2");
+    expect((await client.execute("PRAGMA foreign_key_check")).rows).toEqual([]);
+  });
+
+  it("indexes current generation and every generation-scoped child lookup", async () => {
+    const client = await createDatabase("indexes");
+    await migrate(drizzle(client), { migrationsFolder });
+
+    await expectIndex(client, "collaboration_documents", {
+      columns: ["workspace_id", "document_id"],
+      name: "collaboration_documents_current_unique",
+      partial: true,
+      predicate: "where `is_current` = 1",
+      unique: true,
+    });
+    await expectIndex(client, "collaboration_documents", {
+      columns: ["workspace_id", "document_id", "generation"],
+      name: "collaboration_documents_workspace_document_generation_idx",
+      partial: false,
+      unique: false,
+    });
+    await expectIndex(client, "collaboration_proposal_anchors", {
+      columns: ["workspace_id", "document_id", "generation", "created_at", "proposal_id"],
+      name: "collaboration_proposal_anchors_document_generation_history_idx",
+      partial: false,
+      unique: false,
+    });
+    await expectIndex(client, "collaboration_document_changes", {
+      columns: ["workspace_id", "document_id", "generation", "resulting_head_seq", "change_id"],
+      name: "collaboration_document_changes_document_generation_history_idx",
+      partial: false,
+      unique: false,
+    });
+    await expectIndex(client, "collaboration_ai_run_snapshots", {
+      columns: ["workspace_id", "document_id", "generation", "created_at", "ai_run_id"],
+      name: "collaboration_ai_run_snapshots_document_generation_history_idx",
+      partial: false,
+      unique: false,
+    });
+  });
+
+  it("rejects non-canonical or oversized collaboration storage values", async () => {
+    const client = await createDatabase("storage");
+    await migrate(drizzle(client), { migrationsFolder });
+    await client.execute("PRAGMA foreign_keys=ON");
+    await seedLegacyGraph(client, "a");
+    await seedLegacyGraph(client, "b");
+    await insertCollaborationDocument(client, "a");
+    await insertCollaborationDocument(client, "b");
+    await insertFullCollaborationGraph(client, "a");
+    await client.execute(collaborationActionInsert({
+      command: "failed-command-b",
+      document: "doc-b",
+      id: "failed-action-b",
+      status: "failed",
+      workspace: "b",
+    }));
+
+    const binaryFields = [
+      { column: "checkpoint_blob", maxBytes: CODEC_BYTES, table: "collaboration_documents" },
+      { column: "update_blob", maxBytes: CODEC_BYTES, table: "collaboration_updates" },
+      { column: "approved_state_vector", maxBytes: STATE_VECTOR_BYTES, table: "document_approvals" },
+      { column: "base_state_vector", maxBytes: STATE_VECTOR_BYTES, table: "collaboration_proposal_anchors" },
+      { column: "start_relative", maxBytes: RELATIVE_POSITION_BYTES, table: "collaboration_proposal_anchors" },
+      { column: "end_relative", maxBytes: RELATIVE_POSITION_BYTES, table: "collaboration_proposal_anchors" },
+      { column: "inverse_update", maxBytes: CODEC_BYTES, table: "collaboration_document_changes" },
+      { column: "affected_start_relative", maxBytes: RELATIVE_POSITION_BYTES, table: "collaboration_document_changes" },
+      { column: "affected_end_relative", maxBytes: RELATIVE_POSITION_BYTES, table: "collaboration_document_changes" },
+      { column: "state_vector", maxBytes: STATE_VECTOR_BYTES, table: "collaboration_ai_run_snapshots" },
+    ];
+    const hashFields = [
+      { column: "schema_fingerprint", table: "collaboration_documents" },
+      { column: "checkpoint_checksum", table: "collaboration_documents" },
+      { column: "checksum", table: "collaboration_updates" },
+      { column: "approved_content_hash", table: "document_approvals" },
+      { column: "schema_fingerprint", table: "collaboration_proposal_anchors" },
+      { column: "target_hash", table: "collaboration_proposal_anchors" },
+      { column: "postcondition_fingerprint", table: "collaboration_document_changes" },
+      { column: "schema_fingerprint", table: "collaboration_ai_run_snapshots" },
+      { column: "content_hash", table: "collaboration_ai_run_snapshots" },
+    ];
+    const cases = [
+      ...binaryFields.flatMap(({ column, maxBytes, table }) => [
+        { label: `${table}.${column} text`, statement: `UPDATE ${table} SET ${column} = 'text'` },
+        { label: `${table}.${column} empty`, statement: `UPDATE ${table} SET ${column} = X''` },
+        {
+          label: `${table}.${column} oversized`,
+          statement: `UPDATE ${table} SET ${column} = zeroblob(${String(maxBytes + 1)})`,
+        },
+      ]),
+      ...hashFields.map(({ column, table }) => ({
+        label: `${table}.${column} blob hash`,
+        statement: `UPDATE ${table} SET ${column} = CAST('${HASH_A}' AS BLOB)`,
+      })),
+      {
+        label: "diagnostic_json blob",
+        statement: "UPDATE collaboration_updates SET diagnostic_json = CAST('{}' AS BLOB)",
+      },
+      {
+        label: "diagnostic_json array",
+        statement: "UPDATE collaboration_updates SET diagnostic_json = '[]'",
+      },
+      {
+        label: "diagnostic_json malformed",
+        statement: "UPDATE collaboration_updates SET diagnostic_json = '{'",
+      },
+      {
+        label: "diagnostic_json oversized",
+        statement: {
+          sql: "UPDATE collaboration_updates SET diagnostic_json = ?",
+          args: [JSON.stringify({ value: "x".repeat(DIAGNOSTIC_JSON_BYTES) })],
+        },
+      },
+      {
+        label: "target_preview blob",
+        statement: "UPDATE collaboration_proposal_anchors SET target_preview = CAST('preview' AS BLOB)",
+      },
+      {
+        label: "target_preview oversized UTF-8",
+        statement: {
+          sql: "UPDATE collaboration_proposal_anchors SET target_preview = ?",
+          args: ["한".repeat(Math.ceil(TARGET_PREVIEW_BYTES / 3) + 1)],
+        },
+      },
+      {
+        label: "failure_category blank",
+        statement: "UPDATE collaboration_actions SET failure_category = '   ' WHERE id = 'failed-action-b'",
+      },
+      {
+        label: "failure_category blob",
+        statement: "UPDATE collaboration_actions SET failure_category = CAST('failure' AS BLOB) WHERE id = 'failed-action-b'",
+      },
+      {
+        label: "failure_category oversized UTF-8",
+        statement: {
+          sql: "UPDATE collaboration_actions SET failure_category = ? WHERE id = 'failed-action-b'",
+          args: ["한".repeat(43)],
+        },
+      },
+      ...correctnessKeyCases("collaboration_actions", "command_id", "id = 'action-a'"),
+      ...correctnessKeyCases("collaboration_updates", "idempotency_key", "seq = 1"),
+    ];
+
+    await expectAllReject(client, cases);
   });
 
   it("applies the fresh migration chain with Workspace-safe collaboration constraints", async () => {
@@ -256,14 +465,19 @@ async function insertCollaborationDocument(client: Client, suffix: string) {
   await client.execute(collaborationDocumentInsert(suffix, `doc-${suffix}`));
 }
 
-function collaborationDocumentInsert(workspaceSuffix: string, document: string) {
+function collaborationDocumentInsert(
+  workspaceSuffix: string,
+  document: string,
+  generation = 1,
+  isCurrent = 1,
+) {
   return {
     sql: `INSERT INTO collaboration_documents (
-      workspace_id, document_id, generation, schema_version, schema_fingerprint,
+      workspace_id, document_id, generation, is_current, schema_version, schema_fingerprint,
       checkpoint_blob, checkpoint_checksum, head_seq, checkpoint_seq, projected_seq,
       last_checkpoint_at, created_at, updated_at
-    ) VALUES (?, ?, 1, 1, ?, X'0102', ?, 1, 0, 0, 6000, 6000, 6000)`,
-    args: [`workspace-${workspaceSuffix}`, document, HASH_A, HASH_B],
+    ) VALUES (?, ?, ?, ?, 1, ?, X'0102', ?, 1, 0, 0, 6000, 6000, 6000)`,
+    args: [`workspace-${workspaceSuffix}`, document, generation, isCurrent, HASH_A, HASH_B],
   };
 }
 
@@ -473,6 +687,200 @@ async function rowCount(client: Client, table: string, workspace?: string) {
     args: workspace ? [workspace] : [],
   });
   return Number(result.rows[0]?.count ?? 0);
+}
+
+async function expectTableParity(client: Client, table: AnySQLiteTable) {
+  const config = getTableConfig(table);
+  const dialect = new SQLiteSyncDialect();
+  const primaryColumns = config.primaryKeys[0]?.columns ?? config.columns.filter((column) => column.primary);
+  const primaryOrder = new Map(primaryColumns.map((column, index) => [column.name, index + 1]));
+  const expectedColumns = config.columns.map((column) => ({
+    defaultValue: normalizeDrizzleDefault(column.default, dialect),
+    name: column.name,
+    notNull: column.notNull,
+    primaryOrder: primaryOrder.get(column.name) ?? 0,
+  }));
+  const tableInfo = await client.execute(`PRAGMA table_info(${config.name})`);
+  const actualColumns = tableInfo.rows.map((row) => ({
+    defaultValue: normalizeDefaultValue(row.dflt_value),
+    name: String(row.name),
+    notNull: Boolean(row.notnull),
+    primaryOrder: Number(row.pk),
+  }));
+  expect(actualColumns, `${config.name} columns`).toEqual(expectedColumns);
+
+  const expectedForeignKeys = config.foreignKeys.map((foreignKey) => {
+    const reference = foreignKey.reference();
+    return {
+      columns: reference.columns.map((column) => column.name),
+      foreignColumns: reference.foreignColumns.map((column) => column.name),
+      foreignTable: getTableName(reference.foreignTable),
+      onDelete: (foreignKey.onDelete ?? "no action").toUpperCase(),
+    };
+  });
+  const foreignKeyRows = (await client.execute(`PRAGMA foreign_key_list(${config.name})`)).rows;
+  const foreignKeyGroups = new Map<number, typeof foreignKeyRows>();
+  for (const row of foreignKeyRows) {
+    const id = Number(row.id);
+    const group = foreignKeyGroups.get(id) ?? [];
+    group.push(row);
+    foreignKeyGroups.set(id, group);
+  }
+  const actualForeignKeys = [...foreignKeyGroups.values()].map((rows) => {
+    const ordered = [...rows].sort((left, right) => Number(left.seq) - Number(right.seq));
+    return {
+      columns: ordered.map((row) => String(row.from)),
+      foreignColumns: ordered.map((row) => String(row.to)),
+      foreignTable: String(ordered[0]?.table),
+      onDelete: String(ordered[0]?.on_delete).toUpperCase(),
+    };
+  });
+  expect(sortMetadata(actualForeignKeys), `${config.name} foreign keys`).toEqual(
+    sortMetadata(expectedForeignKeys),
+  );
+
+  const indexList = (await client.execute(`PRAGMA index_list(${config.name})`)).rows;
+  const actualIndexes = [];
+  for (const index of indexList.filter((row) => !String(row.name).startsWith("sqlite_autoindex_"))) {
+    const name = String(index.name);
+    const columns = (await client.execute(`PRAGMA index_info(${name})`)).rows
+      .sort((left, right) => Number(left.seqno) - Number(right.seqno))
+      .map((row) => String(row.name));
+    actualIndexes.push({
+      columns,
+      name,
+      partial: Boolean(index.partial),
+      unique: Boolean(index.unique),
+    });
+  }
+  const expectedIndexes = config.indexes.map((index) => ({
+    columns: index.config.columns.map((column) => {
+      if (!("name" in column)) throw new Error(`Unexpected SQL index expression in ${config.name}`);
+      return column.name;
+    }),
+    name: index.config.name,
+    partial: index.config.where !== undefined,
+    unique: index.config.unique,
+  }));
+  expect(sortMetadata(actualIndexes), `${config.name} indexes`).toEqual(sortMetadata(expectedIndexes));
+
+  const createSql = String((await client.execute({
+    sql: "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?",
+    args: [config.name],
+  })).rows[0]?.sql ?? "");
+  const actualChecks = [...createSql.matchAll(/CONSTRAINT\s+[`"]([^`"]+)[`"]\s+CHECK/giu)]
+    .map((match) => match[1])
+    .sort();
+  expect(actualChecks, `${config.name} named checks`).toEqual(config.checks.map((check) => check.name).sort());
+  const normalizedCreateSql = normalizeSql(createSql);
+  for (const check of config.checks) {
+    const predicate = normalizeSql(dialect.sqlToQuery(check.value).sql)
+      .replaceAll(`${config.name}.`, "");
+    expect(normalizedCreateSql, `${config.name}.${check.name} predicate`).toContain(predicate);
+  }
+  for (const index of config.indexes) {
+    if (!index.config.where) continue;
+    const predicate = normalizeSql(dialect.sqlToQuery(index.config.where).sql)
+      .replaceAll(`${config.name}.`, "");
+    const indexSql = String((await client.execute({
+      sql: "SELECT sql FROM sqlite_schema WHERE type = 'index' AND name = ?",
+      args: [index.config.name],
+    })).rows[0]?.sql ?? "");
+    expect(normalizeSql(indexSql), `${index.config.name} predicate`).toContain(`where ${predicate}`);
+  }
+}
+
+function sortMetadata<T>(records: T[]) {
+  return [...records].sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+}
+
+function normalizeSql(value: string) {
+  return value.replace(/[`"]/gu, "").replace(/\s+/gu, " ").trim().toLowerCase();
+}
+
+function normalizeDrizzleDefault(value: unknown, dialect: SQLiteSyncDialect) {
+  if (value === undefined) return null;
+  if (typeof value === "boolean") return value ? "1" : "0";
+  if (typeof value === "number" || typeof value === "string") {
+    return normalizeDefaultValue(value);
+  }
+  return normalizeDefaultValue(dialect.sqlToQuery(value as SQL).sql);
+}
+
+function normalizeDefaultValue(value: unknown) {
+  if (value === null || value === undefined) return null;
+  return String(value).trim().replace(/^\((.*)\)$/u, "$1");
+}
+
+function correctnessKeyCases(table: string, column: string, where: string) {
+  return [
+    { label: `${table}.${column} empty`, statement: `UPDATE ${table} SET ${column} = '' WHERE ${where}` },
+    { label: `${table}.${column} blank`, statement: `UPDATE ${table} SET ${column} = '   ' WHERE ${where}` },
+    { label: `${table}.${column} surrounding whitespace`, statement: `UPDATE ${table} SET ${column} = ' key ' WHERE ${where}` },
+    {
+      label: `${table}.${column} blob`,
+      statement: `UPDATE ${table} SET ${column} = CAST('key' AS BLOB) WHERE ${where}`,
+    },
+    {
+      label: `${table}.${column} oversized`,
+      statement: {
+        sql: `UPDATE ${table} SET ${column} = ? WHERE ${where}`,
+        args: ["k".repeat(CORRECTNESS_KEY_BYTES + 1)],
+      },
+    },
+  ];
+}
+
+async function expectAllReject(
+  client: Client,
+  cases: Array<{
+    label: string;
+    statement: string | { args: unknown[]; sql: string };
+  }>,
+) {
+  const accepted: string[] = [];
+  for (const testCase of cases) {
+    await client.execute("SAVEPOINT collaboration_constraint_case");
+    try {
+      await client.execute(testCase.statement as Parameters<Client["execute"]>[0]);
+      accepted.push(testCase.label);
+    } catch {
+      // Expected constraint rejection. Roll back the savepoint below in both paths.
+    } finally {
+      await client.execute("ROLLBACK TO collaboration_constraint_case");
+      await client.execute("RELEASE collaboration_constraint_case");
+    }
+  }
+  expect(accepted, "statements accepted without the required constraint").toEqual([]);
+}
+
+async function expectIndex(
+  client: Client,
+  table: string,
+  expected: {
+    columns: string[];
+    name: string;
+    partial: boolean;
+    predicate?: string;
+    unique: boolean;
+  },
+) {
+  const index = (await client.execute(`PRAGMA index_list(${table})`)).rows
+    .find((row) => row.name === expected.name);
+  expect(index, expected.name).toBeDefined();
+  expect(Boolean(index?.unique), `${expected.name} uniqueness`).toBe(expected.unique);
+  expect(Boolean(index?.partial), `${expected.name} partial`).toBe(expected.partial);
+  const columns = (await client.execute(`PRAGMA index_info(${expected.name})`)).rows
+    .sort((left, right) => Number(left.seqno) - Number(right.seqno))
+    .map((row) => String(row.name));
+  expect(columns, `${expected.name} columns`).toEqual(expected.columns);
+  if (expected.predicate) {
+    const sql = String((await client.execute({
+      sql: "SELECT sql FROM sqlite_schema WHERE type = 'index' AND name = ?",
+      args: [expected.name],
+    })).rows[0]?.sql ?? "").replace(/\s+/gu, " ").toLowerCase();
+    expect(sql).toContain(expected.predicate);
+  }
 }
 
 async function expectReject(client: Client, statement: string | { sql: string; args: unknown[] }) {
