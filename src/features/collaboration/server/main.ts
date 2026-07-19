@@ -95,6 +95,23 @@ export function installCollaborationSignalHandlers(options: {
   };
 }
 
+export function createCollaborationShutdown(options: {
+  closeDatabase(): void;
+  destroySidecar(): Promise<void>;
+  stopWorkers(): void;
+}) {
+  let shutdownPromise: Promise<void> | undefined;
+  return () => {
+    if (!shutdownPromise) {
+      options.stopWorkers();
+      shutdownPromise = options.destroySidecar().finally(() => {
+        options.closeDatabase();
+      });
+    }
+    return shutdownPromise;
+  };
+}
+
 export async function startCollaborationSidecar(
   env: Record<string, string | undefined> = process.env,
 ) {
@@ -117,16 +134,13 @@ export async function startCollaborationSidecar(
     }),
   });
 
-  let shutdownPromise: Promise<void> | undefined;
-  const shutdown = () => {
-    workersRunning = false;
-    shutdownPromise ??= (async () => {
-      await sidecar.beginDrain();
-      await sidecar.destroy();
-      sqliteClient.close();
-    })();
-    return shutdownPromise;
-  };
+  const shutdown = createCollaborationShutdown({
+    closeDatabase: () => sqliteClient.close(),
+    destroySidecar: () => sidecar.destroy(),
+    stopWorkers: () => {
+      workersRunning = false;
+    },
+  });
   const removeSignalHandlers = installCollaborationSignalHandlers({
     onFailure() {
       console.error("Collaboration sidecar shutdown failed");

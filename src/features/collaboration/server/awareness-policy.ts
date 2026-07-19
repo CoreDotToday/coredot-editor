@@ -1,8 +1,11 @@
+import { isDeepStrictEqual } from "node:util";
+
 import * as decoding from "lib0/decoding";
 
 import { COLLABORATION_LIMITS } from "./config";
 
 export const AWARENESS_RATE_LIMIT = Object.freeze({ messages: 20, windowMs: 1_000 });
+export const AWARENESS_TOTAL_RATE_LIMIT = Object.freeze({ messages: 256, windowMs: 1_000 });
 
 export type VerifiedCollaborationContext = {
   authorizationEpoch: number;
@@ -20,7 +23,12 @@ export type VerifiedCollaborationContext = {
 
 type AwarenessState = Record<string, unknown>;
 type ParsedAwarenessEntry = { clientId: number; clock: number; state: AwarenessState | null };
-type PendingAwareness = { entries: ParsedAwarenessEntry[]; room: string };
+type AwarenessOwner = { clock: number; connection: object; state: AwarenessState };
+type PendingAwareness = {
+  entries: ParsedAwarenessEntry[];
+  ignoredClientIds: Set<number>;
+  room: string;
+};
 
 const MAX_STATE_KEYS = 2;
 const MAX_STRING_CODE_UNITS = 128;
@@ -41,9 +49,10 @@ export function createAwarenessPolicy(options: { now?: () => number } = {}) {
   const now = options.now ?? Date.now;
   const pending = new WeakMap<object, PendingAwareness>();
   const rates = new WeakMap<object, { count: number; windowStartedAt: number }>();
+  const totalRates = new WeakMap<object, { count: number; windowStartedAt: number }>();
   const activeClientByConnection = new WeakMap<object, number>();
   const activeClockByConnection = new WeakMap<object, number>();
-  const ownerByRoom = new Map<string, Map<number, object>>();
+  const ownerByRoom = new Map<string, Map<number, AwarenessOwner>>();
 
   return {
     validateFrame(connection: object, payload: Uint8Array, exactRoom = "__test__") {
@@ -55,18 +64,39 @@ export function createAwarenessPolicy(options: { now?: () => number } = {}) {
         ) {
           throw rejected();
         }
-        consumeRate(rates, connection, now());
         const entries = parseAwarenessPayload(payload);
         if (entries.length !== 1) throw rejected();
-        const roomOwners = ownerByRoom.get(exactRoom) ?? new Map<number, object>();
+        consumeRate(totalRates, connection, now(), AWARENESS_TOTAL_RATE_LIMIT);
+        const roomOwners = ownerByRoom.get(exactRoom) ?? new Map<number, AwarenessOwner>();
         const activeClient = activeClientByConnection.get(connection);
+        const ignoredClientIds = new Set<number>();
         for (const entry of entries) {
           const owner = roomOwners.get(entry.clientId);
-          if (owner && owner !== connection) throw rejected();
+          if (owner && owner.connection !== connection) {
+            // HocuspocusProvider echoes remote Awareness updates back to the
+            // server. Only the exact canonical clock/state is a rate-free
+            // no-op; any attempted foreign mutation remains a rejection.
+            if (
+              entry.state !== null
+              && entry.clock === owner.clock
+              && isDeepStrictEqual(entry.state, owner.state)
+            ) {
+              ignoredClientIds.add(entry.clientId);
+              continue;
+            }
+            consumeRate(rates, connection, now());
+            throw rejected();
+          }
+          if (!owner && entry.state === null) {
+            // A provider may echo a removal after the owner was already
+            // released. The tombstone cannot remove any live state.
+            ignoredClientIds.add(entry.clientId);
+            continue;
+          }
           if (activeClient !== undefined && activeClient !== entry.clientId) throw rejected();
           if (entry.state === null) {
             if (
-              owner !== connection
+              owner?.connection !== connection
               || entry.clock <= (activeClockByConnection.get(connection) ?? 0)
             ) {
               throw rejected();
@@ -74,8 +104,9 @@ export function createAwarenessPolicy(options: { now?: () => number } = {}) {
           } else {
             validateState(entry.state);
           }
+          consumeRate(rates, connection, now());
         }
-        pending.set(connection, { entries, room: exactRoom });
+        pending.set(connection, { entries, ignoredClientIds, room: exactRoom });
       } catch (error) {
         if (error instanceof AwarenessPolicyError) throw error;
         throw rejected();
@@ -102,6 +133,10 @@ export function createAwarenessPolicy(options: { now?: () => number } = {}) {
         ownerByRoom.set(room, roomOwners);
       }
       for (const entry of inbound.entries) {
+        if (inbound.ignoredClientIds.has(entry.clientId)) {
+          states.delete(entry.clientId);
+          continue;
+        }
         if (entry.state === null) {
           states.set(entry.clientId, null as unknown as AwarenessState);
           roomOwners.delete(entry.clientId);
@@ -130,7 +165,11 @@ export function createAwarenessPolicy(options: { now?: () => number } = {}) {
         }
         for (const key of Object.keys(existing)) delete existing[key];
         Object.assign(existing, sanitized);
-        roomOwners.set(entry.clientId, connection);
+        roomOwners.set(entry.clientId, {
+          clock: entry.clock,
+          connection,
+          state: structuredClone(sanitized),
+        });
         activeClientByConnection.set(connection, entry.clientId);
         activeClockByConnection.set(
           connection,
@@ -147,18 +186,19 @@ export function createAwarenessPolicy(options: { now?: () => number } = {}) {
     release(connection: object, exactRoom?: string) {
       pending.delete(connection);
       rates.delete(connection);
+      totalRates.delete(connection);
       const clientId = activeClientByConnection.get(connection);
       activeClientByConnection.delete(connection);
       activeClockByConnection.delete(connection);
       if (clientId === undefined) return;
       if (exactRoom) {
         const owners = ownerByRoom.get(exactRoom);
-        if (owners?.get(clientId) === connection) owners.delete(clientId);
+        if (owners?.get(clientId)?.connection === connection) owners.delete(clientId);
         if (owners?.size === 0) ownerByRoom.delete(exactRoom);
         return;
       }
       for (const [room, owners] of ownerByRoom) {
-        if (owners.get(clientId) === connection) owners.delete(clientId);
+        if (owners.get(clientId)?.connection === connection) owners.delete(clientId);
         if (owners.size === 0) ownerByRoom.delete(room);
       }
     },
@@ -264,13 +304,14 @@ function consumeRate(
   rates: WeakMap<object, { count: number; windowStartedAt: number }>,
   connection: object,
   timestamp: number,
+  limit: { messages: number; windowMs: number } = AWARENESS_RATE_LIMIT,
 ) {
   const current = rates.get(connection);
-  if (!current || timestamp - current.windowStartedAt >= AWARENESS_RATE_LIMIT.windowMs) {
+  if (!current || timestamp - current.windowStartedAt >= limit.windowMs) {
     rates.set(connection, { count: 1, windowStartedAt: timestamp });
     return;
   }
-  if (current.count >= AWARENESS_RATE_LIMIT.messages) throw rejected();
+  if (current.count >= limit.messages) throw rejected();
   current.count += 1;
 }
 

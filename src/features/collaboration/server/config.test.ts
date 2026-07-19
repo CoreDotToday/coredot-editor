@@ -13,9 +13,15 @@ describe("collaboration sidecar configuration", () => {
       awarenessBytes: 4 * 1024,
       maxConnectionsPerPrincipal: 5,
       maxConnectionsPerRoom: 50,
+      maxConnectionsPerWorkspace: 200,
+      maxLoadedDocumentBytes: 64 * 1024 * 1024,
+      maxLoadedDocuments: 64,
       maxPendingDocuments: 4,
       maxUnauthenticatedQueueMessages: 32,
       maxUnauthenticatedQueueSize: 256 * 1024,
+      updateBytesPerWindow: 2 * 1024 * 1024,
+      updateMessagesPerWindow: 120,
+      updateWindowMs: 1_000,
       websocketPayloadBytes: 512 * 1024,
     });
   });

@@ -166,7 +166,22 @@ export function createCollaborativeDocumentGateway(options: {
     } catch {
       throw new CollaborationGatewayError("unavailable");
     }
+    const sourceRoom = createCollaborationRoomName({
+      documentId: command.documentId,
+      generation: command.generation,
+      workspaceId: scope.workspaceId,
+    });
+    const targetRoom = createCollaborationRoomName({
+      documentId: command.documentId,
+      generation: receipt.generation,
+      workspaceId: scope.workspaceId,
+    });
+    let sourceClosed = sourceRoom === targetRoom;
     try {
+      if (!sourceClosed) {
+        await options.closeRoom(sourceRoom, "room_rotated");
+        sourceClosed = true;
+      }
       await options.publish(
         scope,
         command.documentId,
@@ -174,16 +189,10 @@ export function createCollaborativeDocumentGateway(options: {
         update,
       );
     } catch {
-      try {
-        await options.closeRoom(createCollaborationRoomName({
-          documentId: command.documentId,
-          generation: receipt.generation,
-          workspaceId: scope.workspaceId,
-        }), "room_rotated");
-      } catch {
-        // Durability remains authoritative. A failed close is intentionally not
-        // allowed to mask the live-apply category returned to the caller.
-      }
+      const roomsToClose = sourceClosed ? [targetRoom] : [sourceRoom, targetRoom];
+      await Promise.allSettled(
+        [...new Set(roomsToClose)].map((room) => options.closeRoom(room, "room_rotated")),
+      );
       throw new CollaborationGatewayError("live_apply_failed");
     }
     return {

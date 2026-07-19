@@ -9,7 +9,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 
 import * as schema from "@/db/schema";
-import { collaborationNoopReceipts, collaborationUpdates, documents } from "@/db/schema";
+import {
+  collaborationAuthorizationEpochs,
+  collaborationNoopReceipts,
+  collaborationUpdates,
+  documents,
+} from "@/db/schema";
 import { getProjectProfile } from "@/features/projects/default-project-profiles";
 
 import { COLLABORATION_METADATA_NAME } from "./contracts";
@@ -172,6 +177,42 @@ describe("CollaborationPersistence cross-client contention", () => {
     await expect(append).rejects.toMatchObject({ category: "not_found", retryable: false });
     await expect(harness.databaseA.select().from(collaborationUpdates)).resolves.toHaveLength(0);
     await expect(harness.persistenceA.load(scope, harness.documentId)).resolves.toMatchObject({ headSeq: 0 });
+  });
+
+  it("commits revocation before an authorized client append and writes no update", async () => {
+    const harness = await createTwoClientHarness("authorization-epoch-race");
+    const snapshot = await harness.persistenceA.initialize(scope, harness.documentId);
+    const update = metadataUpdate(snapshot, "owner", "Revoked writer");
+    const revoke = await harness.clientB.transaction("write");
+    await revoke.execute({
+      args: [scope.workspaceId, "principal-a", 1, 2_000],
+      sql: `INSERT INTO collaboration_authorization_epochs
+        (workspace_id, principal_id, epoch, updated_at) VALUES (?, ?, ?, ?)`,
+    });
+    const transactions = vi.spyOn(harness.clientA, "transaction");
+
+    const append = harness.persistenceA.appendAuthorizedClientUpdate(scope, {
+      ...command(harness.documentId, update, "revoked-race", "principal-a"),
+      authorizationEpoch: 0,
+      originKind: "client" as const,
+    });
+    await vi.waitFor(() => expect(transactions).toHaveBeenCalledWith("write"));
+    await revoke.commit();
+    revoke.close();
+
+    await expect(append).rejects.toMatchObject({
+      category: "authorization_revoked",
+      retryable: false,
+    });
+    await expect(harness.databaseA.select().from(collaborationUpdates)).resolves.toHaveLength(0);
+    await expect(harness.databaseA.select().from(collaborationNoopReceipts)).resolves.toHaveLength(0);
+    await expect(harness.databaseA.select().from(collaborationAuthorizationEpochs)).resolves.toEqual([
+      expect.objectContaining({ epoch: 1, principalId: "principal-a" }),
+    ]);
+    await expect(harness.persistenceA.load(scope, harness.documentId)).resolves.toMatchObject({
+      generation: 1,
+      headSeq: 0,
+    });
   });
 });
 

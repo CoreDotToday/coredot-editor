@@ -19,6 +19,11 @@ Coredot Editor keeps runtime configuration explicit. Server-side secrets live in
 | `TEST_IDENTITY_SIGNING_SECRET` | empty | At least 32-byte HMAC secret enabling signed multi-identity test requests only when `AUTH_MODE=test` and `NODE_ENV` is not `production`. Keep it out of deployed environments. |
 | `COLLABORATION_CAPABILITY_SIGNING_KEY_RING` | empty | Server-only JSON containing exactly one active ES256 or EdDSA private JWK used by Next.js to issue 60-second collaboration capabilities. Missing or invalid configuration fails closed before collaboration initialization. |
 | `COLLABORATION_CAPABILITY_VERIFICATION_KEY_RING` | empty | Public-only JSON key ring distributed to the collaboration sidecar. It may contain the current and previous public JWK during a bounded rotation overlap. |
+| `COLLABORATION_SERVER_ADDRESS` | `127.0.0.1` | Collaboration sidecar listener address. Use an explicit IP address or `localhost`; bind a non-loopback address only behind the deployment's trusted network boundary. |
+| `COLLABORATION_SERVER_PORT` | `1234` | Collaboration sidecar HTTP/WebSocket port from `0` through `65535`. Port `0` is intended for bounded tests that need an ephemeral port, not a stable production endpoint. |
+| `COLLABORATION_SHUTDOWN_GRACE_MS` | `10000` | Grace period for drain, checkpoint, connection close, and shutdown. Accepted values are 1,000 through 60,000 milliseconds. |
+| `COLLABORATION_ALLOWED_HOSTS` | none; required | Comma-separated exact HTTP `Host` allowlist for sidecar upgrades. Wildcards, whitespace, credentials, paths, query strings, and fragments are rejected; configure the externally routed sidecar hosts explicitly. |
+| `COLLABORATION_ALLOWED_ORIGINS` | none; required | Comma-separated exact `http://` or `https://` browser Origin allowlist. Entries must be origins only, without credentials, paths, query strings, or fragments. |
 | `AI_PROVIDER` | derived | Initial provider seed before `app_settings` exists: an explicit valid value wins, otherwise `COREDOT_API_KEY` selects `coredot`, then `OPENAI_API_KEY` selects `openai`, and otherwise the app uses `stub`. |
 | `OPENAI_API_KEY` | empty | Required for direct OpenAI calls. |
 | `OPENAI_MODEL` | `gpt-4.1-mini` | Initial direct OpenAI model. |
@@ -46,6 +51,13 @@ Members may work with documents, DOCX interchange, AI Runs, Proposals, Document 
 ### Collaboration capability keys
 
 The Next.js signer and collaboration-sidecar verifier use separate environment payloads. Never copy a private JWK into the verifier ring, a `NEXT_PUBLIC_*` variable, a client bundle, logs, or source control.
+
+Use separate deployment environment allowlists for the two processes:
+
+- The Next.js Web process receives `COLLABORATION_CAPABILITY_SIGNING_KEY_RING`. It issues capabilities and must not expose that private ring to the collaboration runtime or browser.
+- The collaboration sidecar receives `COLLABORATION_CAPABILITY_VERIFICATION_KEY_RING`, the five `COLLABORATION_SERVER_*`/allowlist settings above, and its database credentials. It never needs the private signing ring and intentionally refuses to start when `COLLABORATION_CAPABILITY_SIGNING_KEY_RING` is non-blank.
+
+This is a process boundary, not merely a naming convention: configure two separate service definitions or secret allowlists so the sidecar cannot read the Web process's signer secret.
 
 The signing value contains one active private key:
 
@@ -198,6 +210,6 @@ pnpm e2e:production
 git diff --check
 ```
 
-`release:check` runs lint, TypeScript checks, the Vitest suite, development Playwright E2E, production-auth startup validation, the production build, and `pnpm security:audit`. The audit queries npm's public bulk advisory endpoint without credentials, reports every advisory severity, and blocks findings at the configured moderate-or-higher threshold. Lockfile, network, HTTP, or response-validation failures also block the release rather than passing without a result.
+`release:check` runs lint, TypeScript checks, the Vitest suite, development Playwright E2E, production-auth startup validation, the production Web build, the collaboration runtime manifest check, the Node 22 sidecar build, a bounded sidecar artifact startup smoke, and `pnpm security:audit`. The sidecar smoke uses the already-installed Node executable; it does not download a runtime. It migrates an isolated temporary database, generates an ephemeral public verifier, starts the built artifact, checks exact `/live` and `/ready` responses, sends `SIGTERM`, requires a clean exit, and removes its temporary data. The audit queries npm's public bulk advisory endpoint without credentials, reports every advisory severity, and blocks findings at the configured moderate-or-higher threshold. Lockfile, network, HTTP, or response-validation failures also block the release rather than passing without a result.
 
 `e2e:production` creates and migrates an isolated temporary database, builds the app, starts the built artifact through `pnpm start` with Clerk mode and test-format smoke credentials, and verifies bounded health/readiness responses, public redirects, protected-page redirects, and protected API rejection. Cleanup is bounded even after failures. The strict MkDocs build and `git diff --check` finish documentation and patch hygiene verification.

@@ -35,6 +35,7 @@ import {
   createCollaborationHealthController,
   type CollaborationReadinessChecks,
 } from "./health-server";
+import { createCollaborationResourceRegistry } from "./resource-limits";
 
 type CurrentAuthority = { authorizationEpoch: number; generation: number };
 type CollaborationAuthorizationReader = {
@@ -49,12 +50,26 @@ type SidecarContext = VerifiedCollaborationContext & { reservationKey: string };
 
 const COLORS = ["#1D4ED8", "#047857", "#7C3AED", "#B45309", "#BE123C"] as const;
 
+export type CollaborationShutdownCategory =
+  | "checkpoint_failed"
+  | "destroy_failed"
+  | "grace_exceeded";
+
+export class CollaborationShutdownError extends Error {
+  override readonly name = "CollaborationShutdownError";
+
+  constructor(readonly category: CollaborationShutdownCategory) {
+    super("Collaboration sidecar shutdown failed");
+  }
+}
+
 export function createCollaborationSidecar(options: {
   authorization: CollaborationAuthorizationReader;
   config: CollaborationServerConfig;
   now?: () => Date;
   persistence: CollaborationPersistence;
   readinessChecks?: CollaborationReadinessChecks;
+  resourceRegistry?: ReturnType<typeof createCollaborationResourceRegistry>;
 }) {
   const now = options.now ?? (() => new Date());
   const authority = createCollaborationCapabilityAuthority({
@@ -64,7 +79,7 @@ export function createCollaborationSidecar(options: {
   const awareness = createAwarenessPolicy({ now: () => now().getTime() });
   const blocked = new WeakSet<object>();
   const refreshes = new WeakMap<object, Promise<SidecarContext>>();
-  const connections = createConnectionRegistry();
+  const resources = options.resourceRegistry ?? createCollaborationResourceRegistry();
   const health = createCollaborationHealthController({
     checks: options.readinessChecks ?? {
       database: async () => false,
@@ -75,7 +90,7 @@ export function createCollaborationSidecar(options: {
 
   const closeRoomByName = (
     exactRoom: string,
-    reason: "archived" | "revoked" | "room_rotated" | "schema_changed" | "server_draining",
+    reason: "archived" | "resource_limit" | "revoked" | "room_rotated" | "schema_changed" | "server_draining",
   ) => {
     const document = server.hocuspocus.documents.get(exactRoom);
     if (!document) return;
@@ -87,11 +102,15 @@ export function createCollaborationSidecar(options: {
   const durable = createDurableUpdateHooks({
     authorization: options.authorization,
     blocked,
+    consumeUpdate: resources.consumeUpdate,
     finishAwareness: awareness.finish,
+    isDraining: () => health.isDraining,
     now,
+    onDurableApplyInterrupted: (room) => closeRoomByName(room, "room_rotated"),
     onRoomRotated: (room) => closeRoomByName(room, "room_rotated"),
     persistence: options.persistence,
     refreshes,
+    reserveDocumentGrowth: resources.reserveDocumentGrowth,
     validateAwareness: awareness.validateFrame,
   });
 
@@ -119,13 +138,19 @@ export function createCollaborationSidecar(options: {
 
     async onAuthenticate(payload) {
       try {
+        if (health.isDraining) {
+          throw new CollaborationConnectionError("server_draining");
+        }
         const verified = await verifyCurrentContext(
           authority,
           options.authorization,
           payload.token,
           payload.documentName,
         );
-        const reservationKey = connections.reserve(
+        if (health.isDraining) {
+          throw new CollaborationConnectionError("server_draining");
+        }
+        const reservationKey = resources.reserveConnection(
           payload.socketId,
           verified,
         );
@@ -140,12 +165,18 @@ export function createCollaborationSidecar(options: {
     onTokenSync(payload) {
       const refresh = (async () => {
         try {
+          if (health.isDraining) {
+            throw new CollaborationConnectionError("server_draining");
+          }
           const verified = await verifyCurrentContext(
             authority,
             options.authorization,
             payload.token,
             payload.documentName,
           );
+          if (health.isDraining) {
+            throw new CollaborationConnectionError("server_draining");
+          }
           const previous = payload.connection.context;
           if (
             verified.documentId !== previous.documentId
@@ -178,6 +209,9 @@ export function createCollaborationSidecar(options: {
 
     async onLoadDocument({ context, documentName }) {
       try {
+        if (health.isDraining) {
+          throw new CollaborationConnectionError("server_draining");
+        }
         const identity = parseCollaborationRoomName(documentName);
         if (
           identity.documentId !== context.documentId
@@ -190,23 +224,32 @@ export function createCollaborationSidecar(options: {
           { workspaceId: context.workspaceId },
           context.documentId,
         );
+        if (health.isDraining) {
+          throw new CollaborationConnectionError("server_draining");
+        }
         if (!snapshot || snapshot.generation !== context.generation) {
           throw new CollaborationConnectionError("room_rotated");
         }
         try {
-          return Y.encodeStateAsUpdate(snapshot.document);
+          const encoded = Y.encodeStateAsUpdate(snapshot.document);
+          resources.reserveDocument(documentName, encoded.byteLength);
+          return encoded;
         } finally {
           snapshot.document.destroy();
         }
       } catch (error) {
-        connections.release(context.reservationKey);
+        resources.releaseConnection(context.reservationKey);
         if (error instanceof CollaborationConnectionError) throw error;
         throw new CollaborationConnectionError("storage_unavailable");
       }
     },
 
     async connected({ connection, context }) {
-      connections.attach(context.reservationKey, connection);
+      if (health.isDraining) {
+        resources.releaseConnection(context.reservationKey);
+        throw new CollaborationConnectionError("server_draining");
+      }
+      resources.attachConnection(context.reservationKey, connection);
     },
 
     beforeHandleMessage({ connection, update }) {
@@ -224,12 +267,16 @@ export function createCollaborationSidecar(options: {
 
     async onDisconnect({ context, documentName }) {
       const connection = context?.reservationKey
-        ? connections.release(context.reservationKey)
+        ? resources.releaseConnection(context.reservationKey) as Connection<SidecarContext>
         : undefined;
       if (connection) {
         blocked.add(connection);
         awareness.release(connection, documentName);
       }
+    },
+
+    async afterUnloadDocument({ documentName }) {
+      resources.releaseDocument(documentName);
     },
   });
 
@@ -237,22 +284,47 @@ export function createCollaborationSidecar(options: {
   const beginDrain = () => {
     drainPromise ??= (async () => {
       health.beginDrain();
-      const rooms = [...server.hocuspocus.documents.keys()];
-      for (const room of rooms) closeRoomByName(room, "server_draining");
-      await Promise.allSettled(rooms.map(async (room) => {
+      const documents = new Map<string, { documentId: string; workspaceId: string }>();
+      const captureRoom = (room: string) => {
         const identity = parseCollaborationRoomName(room);
-        await options.persistence.checkpoint(
-          { workspaceId: identity.workspaceId },
-          identity.documentId,
-          identity.generation,
+        documents.set(
+          `${identity.workspaceId}\0${identity.documentId}`,
+          { documentId: identity.documentId, workspaceId: identity.workspaceId },
         );
-      }));
-      server.hocuspocus.flushPendingStores();
-      for (const document of server.hocuspocus.documents.values()) {
-        for (const connection of document.getConnections()) {
-          blocked.add(connection);
-          connection.webSocket.close(1012, "server_draining");
+      };
+      for (const room of server.hocuspocus.documents.keys()) {
+        captureRoom(room);
+        closeRoomByName(room, "server_draining");
+      }
+      try {
+        await durable.whenIdle();
+        for (const room of server.hocuspocus.documents.keys()) {
+          captureRoom(room);
+          closeRoomByName(room, "server_draining");
         }
+        await Promise.all([...documents.values()].map(async (identity) => {
+          const scope = { workspaceId: identity.workspaceId };
+          const snapshot = await options.persistence.load(scope, identity.documentId);
+          if (!snapshot) throw new Error("collaboration document unavailable");
+          try {
+            await options.persistence.checkpoint(
+              scope,
+              identity.documentId,
+              snapshot.generation,
+            );
+          } finally {
+            snapshot.document.destroy();
+          }
+        }));
+        server.hocuspocus.flushPendingStores();
+        for (const document of server.hocuspocus.documents.values()) {
+          for (const connection of document.getConnections()) {
+            blocked.add(connection);
+            connection.webSocket.close(1012, "server_draining");
+          }
+        }
+      } catch {
+        throw new CollaborationShutdownError("checkpoint_failed");
       }
     })();
     return drainPromise;
@@ -273,13 +345,23 @@ export function createCollaborationSidecar(options: {
     closeRoom: closeRoomByName,
     async destroy() {
       destroyPromise ??= (async () => {
-        await beginDrain();
-        const destroyed = server.destroy();
-        const completed = await withDeadline(destroyed, options.config.shutdownGraceMs);
-        if (!completed) {
-          server.httpServer.closeAllConnections?.();
-          await withDeadline(destroyed, 250);
+        const graceful = (async () => {
+          await beginDrain();
+          try {
+            await server.destroy();
+          } catch {
+            throw new CollaborationShutdownError("destroy_failed");
+          }
+        })();
+        const outcome = await settleWithin(graceful, options.config.shutdownGraceMs);
+        if (outcome.status === "fulfilled") return;
+        forceCloseServer(server);
+        if (outcome.status === "rejected") {
+          throw outcome.reason instanceof CollaborationShutdownError
+            ? outcome.reason
+            : new CollaborationShutdownError("destroy_failed");
         }
+        throw new CollaborationShutdownError("grace_exceeded");
       })();
       return destroyPromise;
     },
@@ -300,10 +382,24 @@ export function createCollaborationSidecar(options: {
       });
       const document = server.hocuspocus.documents.get(room);
       if (!document) return;
-      Y.applyUpdate(document, update, {
-        context: { durable: true },
-        source: "local",
-      });
+      let growth: ReturnType<typeof resources.reserveDocumentGrowth>;
+      try {
+        growth = resources.reserveDocumentGrowth(room, update.byteLength);
+      } catch {
+        closeRoomByName(room, "resource_limit");
+        throw new CollaborationConnectionError("update_rejected");
+      }
+      try {
+        Y.applyUpdate(document, update, {
+          context: { durable: true },
+          source: "local",
+        });
+        growth.commit();
+      } catch (error) {
+        growth.rollback();
+        closeRoomByName(room, "room_rotated");
+        throw error;
+      }
     },
   };
 }
@@ -351,56 +447,6 @@ function contextFromClaims(
   };
 }
 
-function createConnectionRegistry() {
-  const reservations = new Map<string, {
-    connection?: Connection<SidecarContext>;
-    principal: string;
-    room: string;
-  }>();
-  const principalCounts = new Map<string, number>();
-  const roomCounts = new Map<string, number>();
-  return {
-    reserve(
-      socketId: string,
-      context: VerifiedCollaborationContext,
-    ) {
-      const key = `${socketId}\0${context.room}`;
-      if (reservations.has(key)) throw new CollaborationConnectionError("authorization_revoked");
-      const principal = `${context.workspaceId}\0${context.principalId}`;
-      const principalCount = principalCounts.get(principal) ?? 0;
-      const roomCount = roomCounts.get(context.room) ?? 0;
-      if (
-        principalCount >= COLLABORATION_LIMITS.maxConnectionsPerPrincipal
-        || roomCount >= COLLABORATION_LIMITS.maxConnectionsPerRoom
-      ) {
-        throw new CollaborationConnectionError("authorization_revoked");
-      }
-      reservations.set(key, { principal, room: context.room });
-      principalCounts.set(principal, principalCount + 1);
-      roomCounts.set(context.room, roomCount + 1);
-      return key;
-    },
-    attach(key: string, connection: Connection<SidecarContext>) {
-      const reservation = reservations.get(key);
-      if (reservation) reservation.connection = connection;
-    },
-    release(key: string) {
-      const reservation = reservations.get(key);
-      if (!reservation) return;
-      reservations.delete(key);
-      decrement(principalCounts, reservation.principal);
-      decrement(roomCounts, reservation.room);
-      return reservation.connection;
-    },
-  };
-}
-
-function decrement(counts: Map<string, number>, key: string) {
-  const next = (counts.get(key) ?? 1) - 1;
-  if (next <= 0) counts.delete(key);
-  else counts.set(key, next);
-}
-
 function isAllowedUpgrade(
   { request }: onUpgradePayload,
   config: CollaborationServerConfig,
@@ -421,16 +467,40 @@ function rejectUpgrade(socket: Socket) {
   socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
 }
 
-async function withDeadline(operation: Promise<unknown>, milliseconds: number) {
+async function settleWithin(operation: Promise<unknown>, milliseconds: number): Promise<
+  | { status: "fulfilled" }
+  | { reason: unknown; status: "rejected" }
+  | { status: "timeout" }
+> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
-      operation.then(() => true, () => true),
-      new Promise<false>((resolve) => {
-        timer = setTimeout(() => resolve(false), milliseconds);
+      operation.then(
+        () => ({ status: "fulfilled" as const }),
+        (reason: unknown) => ({ reason, status: "rejected" as const }),
+      ),
+      new Promise<{ status: "timeout" }>((resolve) => {
+        timer = setTimeout(() => resolve({ status: "timeout" }), milliseconds);
       }),
     ]);
   } finally {
     if (timer) clearTimeout(timer);
+  }
+}
+
+function forceCloseServer(server: Server<SidecarContext>) {
+  try {
+    server.hocuspocus.closeConnections();
+    server.hocuspocus.flushPendingStores();
+    server.httpServer.closeAllConnections?.();
+  } catch {
+    // The bounded shutdown error below remains the public failure category.
+  }
+  try {
+    // Cleanup continues in the background, but can no longer extend the public
+    // shutdown deadline beyond the configured grace period.
+    void server.destroy().catch(() => undefined);
+  } catch {
+    // The public failure category was already selected by the grace outcome.
   }
 }

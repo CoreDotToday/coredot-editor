@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   AWARENESS_RATE_LIMIT,
+  AWARENESS_TOTAL_RATE_LIMIT,
   AwarenessPolicyError,
   createAwarenessPolicy,
 } from "./awareness-policy";
@@ -87,7 +88,7 @@ describe("server-owned Awareness policy", () => {
       .toThrow(AwarenessPolicyError);
   });
 
-  it("prevents one connection from updating or removing another connection's client id", () => {
+  it("drops exact canonical echoes without rate amplification and rejects foreign mutation", () => {
     const first = {};
     const second = {};
     const policy = createAwarenessPolicy({ now: () => 1_000 });
@@ -95,11 +96,45 @@ describe("server-owned Awareness policy", () => {
     policy.validateFrame(first, awarenessPayload(7, firstState));
     policy.sanitizeStates(first, context, new Map([[7, firstState]]));
 
-    expect(() => policy.validateFrame(second, awarenessPayload(7, null)))
-      .toThrow(AwarenessPolicyError);
-    expect(() => policy.validateFrame(second, awarenessPayload(7, { cursor: cursor(7, 2) })))
-      .toThrow(AwarenessPolicyError);
+    const canonical = firstState as Record<string, unknown>;
+    for (let index = 0; index < AWARENESS_RATE_LIMIT.messages + 5; index += 1) {
+      policy.validateFrame(second, awarenessPayload(7, canonical));
+      const echoedStates = new Map([[7, structuredClone(canonical)]]);
+      policy.sanitizeStates(second, context, echoedStates);
+      expect(echoedStates).toEqual(new Map());
+    }
+
+    expect(() => policy.validateFrame(
+      second,
+      awarenessPayload(7, { cursor: cursor(7, 3) }),
+    )).toThrow(AwarenessPolicyError);
+
     expect(() => policy.validateFrame(first, awarenessPayload(8, { cursor: cursor(8, 2) })))
+      .toThrow(AwarenessPolicyError);
+  });
+
+  it("treats an unknown removal tombstone as a no-op", () => {
+    const policy = createAwarenessPolicy({ now: () => 1_000 });
+    const connection = {};
+    policy.validateFrame(connection, awarenessPayload(99, null, 2));
+    const states = new Map([[99, null as unknown as Record<string, unknown>]]);
+    policy.sanitizeStates(connection, context, states);
+    expect(states).toEqual(new Map());
+  });
+
+  it("applies a separate total-frame ceiling to rate-free canonical echoes", () => {
+    const owner = {};
+    const echoer = {};
+    const policy = createAwarenessPolicy({ now: () => 1_000 });
+    const state = { cursor: cursor(7, 1) };
+    policy.validateFrame(owner, awarenessPayload(7, state));
+    policy.sanitizeStates(owner, context, new Map([[7, state]]));
+
+    for (let index = 0; index < AWARENESS_TOTAL_RATE_LIMIT.messages; index += 1) {
+      policy.validateFrame(echoer, awarenessPayload(7, state));
+      policy.sanitizeStates(echoer, context, new Map([[7, structuredClone(state)]]));
+    }
+    expect(() => policy.validateFrame(echoer, awarenessPayload(7, state)))
       .toThrow(AwarenessPolicyError);
   });
 

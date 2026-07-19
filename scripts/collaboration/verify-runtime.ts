@@ -7,6 +7,14 @@ const MINIMUM_NODE_MAJOR = 22 as const;
 const EXPECTED_NODE_ENGINE = ">=22.13.0";
 const EXPECTED_COLLABORATION_BUILD = "tsx scripts/collaboration/build-server.ts";
 const EXPECTED_COLLABORATION_DEV = "tsx watch src/features/collaboration/server/main.ts";
+const EXPECTED_COLLABORATION_SMOKE = "tsx scripts/collaboration/smoke-server.ts";
+const EXPECTED_COLLABORATION_VERIFY_RUNTIME =
+  "tsx scripts/collaboration/verify-runtime.ts";
+const EXPECTED_RELEASE_COMMANDS = [
+  "pnpm collaboration:verify-runtime",
+  "pnpm collaboration:build",
+  "pnpm collaboration:smoke",
+] as const;
 const MAX_ERRORS = 8;
 const WORKFLOW_PATHS = [
   ".github/workflows/ci.yml",
@@ -19,6 +27,9 @@ type PackageManifest = {
     "build:docx-worker"?: unknown;
     "collaboration:build"?: unknown;
     "collaboration:dev"?: unknown;
+    "collaboration:smoke"?: unknown;
+    "collaboration:verify-runtime"?: unknown;
+    "release:check"?: unknown;
   };
 };
 
@@ -59,8 +70,17 @@ export async function verifyRuntimeConfiguration(
     if (
       manifest.scripts?.["collaboration:build"] !== EXPECTED_COLLABORATION_BUILD
       || manifest.scripts?.["collaboration:dev"] !== EXPECTED_COLLABORATION_DEV
+      || manifest.scripts?.["collaboration:smoke"] !== EXPECTED_COLLABORATION_SMOKE
+      || manifest.scripts?.["collaboration:verify-runtime"]
+        !== EXPECTED_COLLABORATION_VERIFY_RUNTIME
     ) {
       addError("package.json: collaboration scripts must match the approved server contract");
+    }
+    if (
+      typeof manifest.scripts?.["release:check"] !== "string"
+      || !hasReleaseSequence(manifest.scripts["release:check"])
+    ) {
+      addError("package.json: release:check must build and smoke the collaboration sidecar");
     }
   }
 
@@ -80,6 +100,14 @@ export async function verifyRuntimeConfiguration(
   return errors.length === 0
     ? { minimumMajor: MINIMUM_NODE_MAJOR, ok: true }
     : { errors, ok: false };
+}
+
+function hasReleaseSequence(script: string) {
+  const commands = script.split("&&").map((command) => command.trim());
+  return commands.some((_command, index) =>
+    EXPECTED_RELEASE_COMMANDS.every(
+      (expected, offset) => commands[index + offset] === expected,
+    ));
 }
 
 function everySetupNodeStepUsesNode22(value: unknown) {

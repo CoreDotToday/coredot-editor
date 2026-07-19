@@ -25,6 +25,7 @@
     "build:docx-worker": "esbuild src/features/documents/docx-conversion-worker.mjs --bundle --platform=node --format=cjs --target=node22 --outfile=src/features/documents/.generated/docx-conversion-worker.cjs",
     "collaboration:build": "tsx scripts/collaboration/build-server.ts",
     "collaboration:dev": "tsx watch src/features/collaboration/server/main.ts",
+    "collaboration:smoke": "tsx scripts/collaboration/smoke-server.ts",
     "collaboration:verify-runtime": "tsx scripts/collaboration/verify-runtime.ts",
     "start": "node scripts/validate-production-auth.mjs --production && next start",
     "check": "pnpm lint && pnpm typecheck && pnpm test && pnpm build",
@@ -53,7 +54,7 @@
     "e2e:production": "tsx scripts/e2e/run-production-smoke.ts",
     "security:audit": "tsx scripts/security/audit-dependencies.ts",
     "security:verify-auth-startup": "pnpm build:docx-worker && node scripts/security/verify-production-auth-startup.mjs",
-    "release:check": "pnpm lint && pnpm typecheck && pnpm test && pnpm e2e && pnpm security:verify-auth-startup && pnpm build && pnpm security:audit"
+    "release:check": "pnpm lint && pnpm typecheck && pnpm test && pnpm e2e && pnpm security:verify-auth-startup && pnpm build && pnpm collaboration:verify-runtime && pnpm collaboration:build && pnpm collaboration:smoke && pnpm security:audit"
   },
   "dependencies": {
     "@ai-sdk/openai": "^3.0.85",

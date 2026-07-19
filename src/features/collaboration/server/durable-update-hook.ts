@@ -67,10 +67,25 @@ export function parseInboundCollaborationFrame(
     if (documentName !== exactRoom) throw invalidMessage();
     const outerType = decoding.readVarUint(decoder);
 
-    // Token-sync frames legitimately contain a provider-version suffix and are
-    // parsed by Hocuspocus after this hook. They must bypass the old context's
-    // expiry check so a connection can refresh itself.
-    if (outerType === 2) return { kind: "auth" };
+    // Only the pinned client-to-server token refresh shape may bypass the old
+    // context's expiry check. Hocuspocus parses the same fields after this hook.
+    if (outerType === 2) {
+      const authSubtype = decoding.readVarUint(decoder);
+      const token = decoding.readVarString(decoder);
+      const providerVersion = decoding.readVarString(decoder);
+      if (
+        authSubtype !== 0
+        || Buffer.byteLength(token, "utf8") < 1
+        || Buffer.byteLength(token, "utf8") > 16 * 1024
+        || Buffer.byteLength(providerVersion, "utf8") < 1
+        || Buffer.byteLength(providerVersion, "utf8") > 128
+        || /[\u0000-\u001f\u007f-\u009f]/.test(providerVersion)
+        || decoding.hasContent(decoder)
+      ) {
+        throw invalidMessage();
+      }
+      return { kind: "auth" };
+    }
     if (outerType === 0 || outerType === 4) {
       const syncSubtype = decoding.readVarUint(decoder);
       const payload = decoding.readVarUint8Array(decoder);
@@ -105,11 +120,18 @@ export function parseInboundCollaborationFrame(
 export function createDurableUpdateHooks(options: {
   authorization: AuthorizationReader;
   blocked: WeakSet<object>;
+  consumeUpdate(connection: object, bytes: number): void;
   finishAwareness(connection: object): void;
+  isDraining(): boolean;
   now?: () => Date;
+  onDurableApplyInterrupted?(room: string): ReturnTypeOrPromise<void>;
   onRoomRotated?(room: string): ReturnTypeOrPromise<void>;
-  persistence: Pick<CollaborationPersistence, "appendValidatedUpdate">;
+  persistence: Pick<CollaborationPersistence, "appendAuthorizedClientUpdate">;
   refreshes: WeakMap<object, Promise<VerifiedCollaborationContext>>;
+  reserveDocumentGrowth(
+    room: string,
+    bytes: number,
+  ): { commit(): void; rollback(): void };
   validateAwareness(
     connection: object,
     payload: Uint8Array,
@@ -120,6 +142,7 @@ export function createDurableUpdateHooks(options: {
   const sequencer = createRoomSequencer();
   const heldReleases = new WeakMap<object, Array<() => void>>();
   const rotatedAfterApply = new WeakSet<object>();
+  const inFlightAppends = new Set<Promise<unknown>>();
 
   const rejectConnection = (connection: object, reason: CollaborationCloseReason): never => {
     options.blocked.add(connection);
@@ -128,6 +151,9 @@ export function createDurableUpdateHooks(options: {
 
   return {
     async before(connection: ConnectionLike, rawFrame: Uint8Array) {
+      if (options.isDraining()) {
+        rejectConnection(connection, "server_draining");
+      }
       if (options.blocked.has(connection)) {
         throw new CollaborationConnectionError("authorization_revoked");
       }
@@ -142,45 +168,67 @@ export function createDurableUpdateHooks(options: {
           rejectConnection(connection, "authorization_revoked");
         }
       }
+      assertAvailable(connection, options, rejectConnection);
       const context = connection.context;
       if (!context || context.room !== connection.document.name) {
         rejectConnection(connection, "authorization_revoked");
       }
       assertNotExpired(connection, context, now, rejectConnection);
 
+      if (parsed.kind === "update") {
+        try {
+          options.consumeUpdate(connection, parsed.payload.byteLength);
+        } catch {
+          rejectConnection(connection, "update_rejected");
+        }
+      }
+
       if (parsed.kind === "update" && context.permission === "write") {
         const release = await sequencer.acquire(context.room);
+        let growth: { commit(): void; rollback(): void } | undefined;
         try {
-          if (options.blocked.has(connection)) {
-            rejectConnection(connection, "authorization_revoked");
-          }
+          assertAvailable(connection, options, rejectConnection);
           assertNotExpired(connection, context, now, rejectConnection);
 
-          // This is the authorization linearization point for Task 6. There is
-          // deliberately no unrelated await between this current epoch/status/
-          // generation read and invoking the durable append.
-          const current = await options.authorization.readCapabilityAuthority(
-            { workspaceId: context.workspaceId },
-            { documentId: context.documentId, principalId: context.principalId },
+          const reservedGrowth = reserveGrowthOrReject(
+            connection,
+            context.room,
+            parsed.payload.byteLength,
+            options.reserveDocumentGrowth,
+            rejectConnection,
           );
-          assertCurrentAuthority(connection, context, current, rejectConnection);
-          const receipt = await options.persistence.appendValidatedUpdate(
-            { workspaceId: context.workspaceId },
-            {
-              documentId: context.documentId,
-              generation: context.generation,
-              idempotencyKey: createProviderIdempotencyKey(context, parsed.payload),
-              originKind: "client",
-              principalId: context.principalId,
-              requestId: `ws:${context.sessionId}`,
-              sessionId: context.sessionId,
-              update: parsed.payload,
-            },
+          growth = reservedGrowth;
+
+          const receipt = await trackInFlight(
+            inFlightAppends,
+            options.persistence.appendAuthorizedClientUpdate(
+              { workspaceId: context.workspaceId },
+              {
+                authorizationEpoch: context.authorizationEpoch,
+                documentId: context.documentId,
+                generation: context.generation,
+                idempotencyKey: createProviderIdempotencyKey(context, parsed.payload),
+                originKind: "client",
+                principalId: context.principalId,
+                requestId: `ws:${context.sessionId}`,
+                sessionId: context.sessionId,
+                update: parsed.payload,
+              },
+            ),
           );
+          reservedGrowth.commit();
+          try {
+            assertAvailable(connection, options, rejectConnection);
+          } catch (error) {
+            await Promise.resolve(options.onDurableApplyInterrupted?.(context.room))
+              .catch(() => undefined);
+            throw error;
+          }
           retainRelease(heldReleases, connection, release);
           if (receipt.generation !== context.generation) rotatedAfterApply.add(connection);
           return receipt;
         } catch (error) {
+          growth?.rollback();
           release();
           if (error instanceof CollaborationConnectionError) throw error;
           rejectConnection(connection, mapPersistenceFailure(error));
@@ -191,6 +239,7 @@ export function createDurableUpdateHooks(options: {
         { workspaceId: context.workspaceId },
         { documentId: context.documentId, principalId: context.principalId },
       );
+      assertAvailable(connection, options, rejectConnection);
       assertCurrentAuthority(connection, context, current, rejectConnection);
       if (parsed.kind === "awareness") {
         try {
@@ -210,7 +259,48 @@ export function createDurableUpdateHooks(options: {
         await options.onRoomRotated?.(connection.document.name);
       }
     },
+
+    async whenIdle() {
+      while (inFlightAppends.size > 0) {
+        await Promise.allSettled([...inFlightAppends]);
+      }
+    },
   };
+}
+
+function reserveGrowthOrReject(
+  connection: object,
+  room: string,
+  bytes: number,
+  reserve: (
+    room: string,
+    bytes: number,
+  ) => { commit(): void; rollback(): void },
+  reject: (connection: object, reason: CollaborationCloseReason) => never,
+) {
+  try {
+    return reserve(room, bytes);
+  } catch {
+    return reject(connection, "update_rejected");
+  }
+}
+
+function assertAvailable(
+  connection: object,
+  options: { blocked: WeakSet<object>; isDraining(): boolean },
+  reject: (connection: object, reason: CollaborationCloseReason) => never,
+) {
+  if (options.isDraining()) reject(connection, "server_draining");
+  if (options.blocked.has(connection)) reject(connection, "authorization_revoked");
+}
+
+async function trackInFlight<T>(inFlight: Set<Promise<unknown>>, operation: Promise<T>) {
+  inFlight.add(operation);
+  try {
+    return await operation;
+  } finally {
+    inFlight.delete(operation);
+  }
 }
 
 function assertNotExpired(
@@ -254,6 +344,7 @@ function createProviderIdempotencyKey(
 
 function mapPersistenceFailure(error: unknown): CollaborationCloseReason {
   if (!(error instanceof CollaborationPersistenceError)) return "storage_unavailable";
+  if (error.category === "authorization_revoked") return "authorization_revoked";
   if (error.category === "stale_generation") return "room_rotated";
   if (
     error.category === "invalid_input"

@@ -1,3 +1,7 @@
+// @vitest-environment node
+
+import { createHash, randomUUID } from "node:crypto";
+
 import { generateKeyPair, exportJWK } from "jose";
 import {
   HocuspocusProvider,
@@ -5,6 +9,7 @@ import {
 } from "@hocuspocus/provider";
 import { describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
+import { Awareness } from "y-protocols/awareness";
 import * as Y from "yjs";
 
 import {
@@ -20,6 +25,7 @@ import type {
 } from "../persistence";
 import { createCollaborationRoomName } from "../room-name";
 import { createCollaborationSidecar } from "./create-server";
+import { createCollaborationResourceRegistry } from "./resource-limits";
 
 class OriginWebSocket extends WebSocket {
   constructor(address: string | URL, protocols?: string | string[]) {
@@ -135,11 +141,186 @@ describe("the pinned Hocuspocus durable message lifecycle", () => {
       await fixture.destroy();
     }
   });
+
+  it("waits for an in-flight durable append before checkpointing during drain", async () => {
+    const append = deferred<DurableUpdateReceipt>();
+    const fixture = await createFixture({
+      append: (input) => hasYjsChanges(input.update)
+        ? append.promise
+        : Promise.resolve(receipt(input, 0)),
+    });
+    try {
+      const writer = await fixture.connect("principal:in-flight-drain");
+      writer.document.getText("test").insert(0, "finish before checkpoint");
+      await eventually(() => expect(fixture.changedAppendInputs).toHaveLength(1));
+
+      const draining = fixture.beginDrain();
+      await Promise.resolve();
+      expect(fixture.checkpointInputs).toEqual([]);
+
+      append.resolve(receipt(fixture.changedAppendInputs[0]!));
+      await draining;
+      expect(fixture.checkpointInputs).toEqual([{
+        documentId,
+        generation: 1,
+        workspaceId,
+      }]);
+    } finally {
+      append.resolve(receipt({ generation: 1 } as AppendCollaborationUpdate));
+      await fixture.destroy();
+    }
+  });
+
+  it("bounds destroy across a stuck checkpoint and surfaces checkpoint rejection", async () => {
+    const checkpoint = deferred<void>();
+    const stuck = await createFixture({
+      append: async (input) => receipt(input),
+      checkpoint: () => checkpoint.promise,
+      shutdownGraceMs: 25,
+    });
+    try {
+      await stuck.connect("principal:stuck-checkpoint");
+      const startedAt = performance.now();
+      const destroyed = stuck.destroySidecar().then(
+        () => ({ status: "resolved" as const }),
+        (error: unknown) => ({ error, status: "rejected" as const }),
+      );
+      const outcome = await Promise.race([
+        destroyed,
+        new Promise<{ status: "timeout" }>((resolve) => setTimeout(
+          () => resolve({ status: "timeout" }),
+          250,
+        )),
+      ]);
+      expect(outcome).toMatchObject({
+        error: expect.objectContaining({ category: "grace_exceeded" }),
+        status: "rejected",
+      });
+      expect(performance.now() - startedAt).toBeLessThan(100);
+    } finally {
+      checkpoint.resolve();
+      await stuck.destroy();
+    }
+
+    const failure = new Error("checkpoint failed");
+    const rejected = await createFixture({
+      append: async (input) => receipt(input),
+      checkpoint: async () => {
+        throw failure;
+      },
+      shutdownGraceMs: 100,
+    });
+    try {
+      await rejected.connect("principal:rejected-checkpoint");
+      await expect(rejected.destroySidecar()).rejects.toMatchObject({
+        category: "checkpoint_failed",
+        message: "Collaboration sidecar shutdown failed",
+      });
+      await expect(rejected.destroySidecar()).rejects.not.toThrow("checkpoint failed");
+    } finally {
+      await rejected.destroy();
+    }
+  });
+
+  it("releases the exact loaded-document reservation after the last disconnect unloads it", async () => {
+    const resources = createCollaborationResourceRegistry();
+    const releaseDocument = vi.spyOn(resources, "releaseDocument");
+    const fixture = await createFixture({
+      append: async (input) => receipt(input),
+      resourceRegistry: resources,
+    });
+    try {
+      const connected = await fixture.connect("principal:resource-release");
+      connected.provider.destroy();
+
+      await eventually(() => expect(releaseDocument).toHaveBeenCalledWith(room));
+    } finally {
+      await fixture.destroy();
+    }
+  });
+
+  it("closes the exact room when a durable gateway update exceeds resident growth", async () => {
+    const resources = createCollaborationResourceRegistry();
+    const fixture = await createFixture({
+      append: async (input) => receipt(input),
+      resourceRegistry: resources,
+    });
+    try {
+      const connected = await fixture.connect("principal:gateway-growth");
+      const closed = vi.fn();
+      connected.provider.on("close", closed);
+      vi.spyOn(resources, "reserveDocumentGrowth").mockImplementationOnce(() => {
+        throw new Error("limit detail");
+      });
+
+      expect(() => fixture.publishDurableUpdate(createUpdate("durable gateway")))
+        .toThrowError(expect.objectContaining({ reason: "update_rejected" }));
+      await eventually(() => expect(closed).toHaveBeenCalledWith({
+        event: { code: 1000, reason: "resource_limit" },
+      }));
+    } finally {
+      await fixture.destroy();
+    }
+  });
+
+  it("keeps clock-zero awareness a no-op and broadcasts only canonical owned presence", async () => {
+    const fixture = await createFixture({
+      append: async (input) => receipt(input),
+    });
+    try {
+      const writer = await fixture.connect("principal:awareness-writer", { awareness: true });
+      const peer = await fixture.connect("principal:awareness-peer", { awareness: true });
+      if (!writer.awareness || !peer.awareness) throw new Error("awareness fixture unavailable");
+
+      // Awareness starts at clock zero. The server must keep that protocol
+      // no-op as a no-op without creating a ghost participant or closing it.
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      expect([...peer.awareness.getStates().keys()]).toEqual([peer.document.clientID]);
+
+      const cursor = {
+        anchor: { assoc: 0, tname: "body" },
+        head: { assoc: 0, tname: "body" },
+      };
+      writer.awareness.setLocalState({
+        cursor,
+        user: { displayName: "Administrator", principalId: "principal:spoof" },
+      });
+      await eventually(() => expect(peer.awareness?.getStates().get(writer.document.clientID))
+        .toEqual({
+          cursor,
+          user: expectedAwarenessUser("principal:awareness-writer", writer.sessionId),
+        }));
+      expect([...peer.awareness.getStates().keys()].toSorted((a, b) => a - b)).toEqual(
+        [peer.document.clientID, writer.document.clientID].toSorted((a, b) => a - b),
+      );
+
+      writer.awareness.setLocalState(null);
+      await eventually(() => expect([...peer.awareness!.getStates().keys()])
+        .toEqual([peer.document.clientID]));
+
+      writer.awareness.setLocalState({ user: { principalId: "principal:spoof-again" } });
+      await eventually(() => expect(
+        peer.awareness?.getStates().has(writer.document.clientID),
+      ).toBe(true));
+      writer.provider.destroy();
+      writer.websocketProvider.destroy();
+      await eventually(() => expect([...peer.awareness!.getStates().keys()])
+        .toEqual([peer.document.clientID]));
+
+      peer.document.getText("test").insert(0, "peer stayed connected");
+      await eventually(() => expect(peer.provider.hasUnsyncedChanges).toBe(false));
+    } finally {
+      await fixture.destroy();
+    }
+  });
+
 });
 
 async function createFixture(options: {
   append(input: AppendCollaborationUpdate): Promise<DurableUpdateReceipt>;
   checkpoint?: () => Promise<void>;
+  resourceRegistry?: ReturnType<typeof createCollaborationResourceRegistry>;
+  shutdownGraceMs?: number;
 }) {
   const { signing, verification } = await createKeyRings();
   const now = () => new Date("2026-07-19T09:00:00.000Z");
@@ -153,6 +334,10 @@ async function createFixture(options: {
   const baseDocument = new Y.Doc();
   const snapshot = createSnapshot(baseDocument);
   const persistence: CollaborationPersistence = {
+    async appendAuthorizedClientUpdate(_scope, input) {
+      appendInputs.push(input);
+      return options.append(input);
+    },
     async appendValidatedUpdate(_scope, input) {
       appendInputs.push(input);
       return options.append(input);
@@ -203,7 +388,7 @@ async function createFixture(options: {
       allowedHosts: ["127.0.0.1"],
       allowedOrigins: ["http://127.0.0.1"],
       port: 0,
-      shutdownGraceMs: 1_000,
+      shutdownGraceMs: options.shutdownGraceMs ?? 1_000,
       verificationKeyRing: verification,
     },
     now,
@@ -213,6 +398,7 @@ async function createFixture(options: {
       migration: async () => true,
       workers: async () => true,
     },
+    resourceRegistry: options.resourceRegistry,
   });
   await sidecar.listen();
 
@@ -224,7 +410,7 @@ async function createFixture(options: {
     get changedAppendInputs() {
       return appendInputs.filter((input) => hasYjsChanges(input.update));
     },
-    async connect(principalId: string) {
+    async connect(principalId: string, connectOptions: { awareness?: boolean } = {}) {
       const sessionId = randomUUID();
       const token = await issuer.issue({
         authorizationEpoch: 0,
@@ -236,13 +422,14 @@ async function createFixture(options: {
         workspaceId,
       });
       const document = new Y.Doc();
+      const awareness = connectOptions.awareness ? new Awareness(document) : null;
       const websocketProvider = new HocuspocusProviderWebsocket({
         WebSocketPolyfill: OriginWebSocket,
         url: sidecar.webSocketUrl,
       });
       const events: string[] = [];
       const provider = new HocuspocusProvider({
-        awareness: null,
+        awareness,
         document,
         name: room,
         onAuthenticated: () => events.push("authenticated"),
@@ -268,13 +455,17 @@ async function createFixture(options: {
           reject(new Error(`authentication failed: ${reason}`));
         });
       });
-      return { document, provider };
+      return { awareness, document, provider, sessionId, websocketProvider };
     },
     async destroy() {
       for (const provider of providers) provider.destroy();
-      await sidecar.destroy();
+      await sidecar.destroy().catch(() => undefined);
     },
+    destroySidecar: sidecar.destroy,
     httpUrl: sidecar.httpUrl,
+    publishDurableUpdate(update: Uint8Array) {
+      return sidecar.publishDurableUpdate({ workspaceId }, documentId, 1, update);
+    },
     webSocketUrl: sidecar.webSocketUrl,
   };
 }
@@ -305,6 +496,12 @@ function receipt(input: AppendCollaborationUpdate, headSeq = 1): DurableUpdateRe
 function hasYjsChanges(update: Uint8Array) {
   const decoded = Y.decodeUpdate(update);
   return decoded.structs.length > 0 || decoded.ds.clients.size > 0;
+}
+
+function createUpdate(value: string) {
+  const document = new Y.Doc();
+  document.getText("test").insert(0, value);
+  return Y.encodeStateAsUpdate(document);
 }
 
 async function createKeyRings(): Promise<{
@@ -375,6 +572,13 @@ async function expectUpgradeRejected(url: string) {
     socket.once("error", () => undefined);
   });
 }
-// @vitest-environment node
-
-import { randomUUID } from "node:crypto";
+function expectedAwarenessUser(principalId: string, sessionId: string) {
+  const digest = createHash("sha256").update(principalId).digest();
+  const colors = ["#1D4ED8", "#047857", "#7C3AED", "#B45309", "#BE123C"] as const;
+  return {
+    color: colors[digest[2]! % colors.length],
+    displayName: `Participant ${digest.subarray(0, 2).toString("hex").toUpperCase()}`,
+    principalId,
+    sessionId,
+  };
+}

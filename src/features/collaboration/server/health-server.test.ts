@@ -45,6 +45,23 @@ describe("collaboration sidecar health", () => {
     expect((await fetch(`${fixture.url}/live`)).status).toBe(200);
   });
 
+  it("rechecks draining after an in-flight readiness probe resolves", async () => {
+    const probe = deferred<boolean>();
+    const database = vi.fn(() => probe.promise);
+    const fixture = await listenHealth({
+      database,
+      migration: async () => true,
+      workers: async () => true,
+    });
+
+    const readiness = fetch(`${fixture.url}/ready`);
+    await vi.waitFor(() => expect(database).toHaveBeenCalledOnce());
+    fixture.controller.beginDrain();
+    probe.resolve(true);
+
+    expect((await readiness).status).toBe(503);
+  });
+
   it("fails readiness closed for false, rejection, or a timed-out probe without details", async () => {
     const fixture = await listenHealth({
       database: async () => new Promise<boolean>(() => undefined),
@@ -79,4 +96,12 @@ async function listenHealth(
 
 async function responseShape(response: Response) {
   return { body: await response.json(), status: response.status };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
 }

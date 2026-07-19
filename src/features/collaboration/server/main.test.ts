@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   COLLABORATION_MIGRATION_TABLES,
   createCollaborationReadinessChecks,
+  createCollaborationShutdown,
   installCollaborationSignalHandlers,
 } from "./main";
 
@@ -70,5 +71,28 @@ describe("collaboration sidecar production wiring", () => {
     remove();
     expect(signals.listenerCount("SIGINT")).toBe(0);
     expect(signals.listenerCount("SIGTERM")).toBe(0);
+  });
+
+  it("delegates the whole grace period to sidecar destroy and always closes storage", async () => {
+    const failure = new Error("generic sidecar shutdown failure");
+    const destroySidecar = vi.fn(async () => {
+      throw failure;
+    });
+    const closeDatabase = vi.fn();
+    const stopWorkers = vi.fn();
+    const shutdown = createCollaborationShutdown({
+      closeDatabase,
+      destroySidecar,
+      stopWorkers,
+    });
+
+    const first = shutdown();
+    const second = shutdown();
+
+    expect(first).toBe(second);
+    await expect(first).rejects.toBe(failure);
+    expect(stopWorkers).toHaveBeenCalledOnce();
+    expect(destroySidecar).toHaveBeenCalledOnce();
+    expect(closeDatabase).toHaveBeenCalledOnce();
   });
 });

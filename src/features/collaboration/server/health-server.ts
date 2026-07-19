@@ -34,7 +34,9 @@ export function createCollaborationHealthController(options: {
         writeJson(response, 200, { status: "live" }, request.method === "HEAD");
         return true;
       }
-      const ready = !draining && await checksPass(options.checks, timeoutMs);
+      const ready = !draining
+        && await checksPass(options.checks, timeoutMs)
+        && !draining;
       writeJson(
         response,
         ready ? 200 : 503,

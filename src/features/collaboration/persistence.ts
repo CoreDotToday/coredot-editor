@@ -5,6 +5,7 @@ import * as Y from "yjs";
 
 import {
   COLLABORATION_STORAGE_LIMITS,
+  collaborationAuthorizationEpochs,
   collaborationDocuments,
   collaborationNoopReceipts,
   collaborationUpdates,
@@ -61,6 +62,11 @@ export type AppendCollaborationUpdate = {
   update: Uint8Array;
 };
 
+export type AppendAuthorizedClientUpdate = AppendCollaborationUpdate & {
+  authorizationEpoch: number;
+  originKind: "client";
+};
+
 /**
  * Changed updates return their durable update-row sequence. A Yjs no-op stores
  * a durable receipt and returns its captured generation/head with
@@ -90,6 +96,7 @@ export type ProjectionReceipt = {
 };
 
 export type CollaborationPersistenceCategory =
+  | "authorization_revoked"
   | "checksum_mismatch"
   | "contention"
   | "corrupt_state"
@@ -103,6 +110,7 @@ export type CollaborationPersistenceCategory =
   | "storage_budget";
 
 const ERROR_MESSAGES: Record<CollaborationPersistenceCategory, string> = {
+  authorization_revoked: "Collaboration authorization is no longer current",
   checksum_mismatch: "Collaboration state checksum validation failed",
   contention: "Collaboration persistence is temporarily busy",
   corrupt_state: "Collaboration state recovery failed",
@@ -128,6 +136,10 @@ export class CollaborationPersistenceError extends Error {
 }
 
 export interface CollaborationPersistence {
+  appendAuthorizedClientUpdate(
+    scope: WorkspaceScope,
+    input: AppendAuthorizedClientUpdate,
+  ): Promise<DurableUpdateReceipt>;
   appendValidatedUpdate(
     scope: WorkspaceScope,
     input: AppendCollaborationUpdate,
@@ -192,9 +204,11 @@ export function createCollaborationPersistence(
       )));
   });
 
-  return {
-    appendValidatedUpdate(scope, input) {
-      return executePersistenceOperation(() => {
+  const append = (
+    scope: WorkspaceScope,
+    input: AppendCollaborationUpdate,
+    authorizationEpoch?: number,
+  ) => executePersistenceOperation(() => {
         validateScopeAndDocument(scope, input.documentId);
         validateAppendInput(input);
         return withSerializedDocumentWrite(scope, input.documentId, () => repository.write(async (transaction) => {
@@ -208,6 +222,14 @@ export function createCollaborationPersistence(
           now,
         );
         await assertAppendableDocument(transaction, scope, input.documentId);
+        if (authorizationEpoch !== undefined) {
+          await assertAuthorizedClientAppend(
+            transaction,
+            scope,
+            input,
+            authorizationEpoch,
+          );
+        }
         const updateChecksum = checksum(input.update);
         const replay = await findIdempotentReceipt(transaction, scope, input);
         if (replay) {
@@ -396,6 +418,18 @@ export function createCollaborationPersistence(
         };
         }));
       });
+
+  return {
+    appendAuthorizedClientUpdate(scope, input) {
+      if (input.originKind !== "client") {
+        throw persistenceError("invalid_input", false);
+      }
+      validateAuthorizationEpoch(input.authorizationEpoch);
+      return append(scope, input, input.authorizationEpoch);
+    },
+
+    appendValidatedUpdate(scope, input) {
+      return append(scope, input);
     },
 
     checkpoint(scope, documentId, generation) {
@@ -719,6 +753,49 @@ async function assertAppendableDocument(
   if (!draft) throw persistenceError("not_found", false);
 }
 
+async function assertAuthorizedClientAppend(
+  transaction: CollaborationTransaction,
+  scope: WorkspaceScope,
+  input: AppendCollaborationUpdate,
+  expectedAuthorizationEpoch: number,
+) {
+  const current = await transaction
+    .select({
+      authorizationEpoch: sql<number>`coalesce(${collaborationAuthorizationEpochs.epoch}, 0)`,
+      generation: collaborationDocuments.generation,
+    })
+    .from(documents)
+    .innerJoin(
+      collaborationDocuments,
+      and(
+        eq(collaborationDocuments.workspaceId, documents.workspaceId),
+        eq(collaborationDocuments.documentId, documents.id),
+        eq(collaborationDocuments.isCurrent, true),
+      ),
+    )
+    .leftJoin(
+      collaborationAuthorizationEpochs,
+      and(
+        eq(collaborationAuthorizationEpochs.workspaceId, documents.workspaceId),
+        eq(collaborationAuthorizationEpochs.principalId, input.principalId),
+      ),
+    )
+    .where(and(
+      eq(documents.workspaceId, scope.workspaceId),
+      eq(documents.id, input.documentId),
+      eq(documents.status, "draft"),
+      eq(collaborationDocuments.generation, input.generation),
+    ))
+    .limit(2);
+  if (
+    current.length !== 1
+    || Number(current[0]!.authorizationEpoch) !== expectedAuthorizationEpoch
+    || current[0]!.generation !== input.generation
+  ) {
+    throw persistenceError("authorization_revoked", false);
+  }
+}
+
 async function loadSnapshot(
   transaction: CollaborationTransaction,
   scope: WorkspaceScope,
@@ -882,6 +959,12 @@ function validateScopeAndDocument(scope: WorkspaceScope, documentId: string) {
 
 function validateGeneration(generation: number) {
   if (!Number.isSafeInteger(generation) || generation < 1) {
+    throw persistenceError("invalid_input", false);
+  }
+}
+
+function validateAuthorizationEpoch(epoch: number) {
+  if (!Number.isSafeInteger(epoch) || epoch < 0) {
     throw persistenceError("invalid_input", false);
   }
 }

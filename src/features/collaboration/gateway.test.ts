@@ -63,6 +63,38 @@ describe("CollaborativeDocumentGateway", () => {
     expect(fixture.appended[0]?.originKind).toBe("proposal_command");
   });
 
+  it("closes the source room before publishing to a rotated generation", async () => {
+    const events: string[] = [];
+    const publish = vi.fn(async () => {
+      events.push("publish");
+    });
+    const fixture = createFixture({ events, publish, receiptGeneration: 2 });
+
+    const result = await fixture.gateway.applyProposal(context, {
+      commandId: "proposal-command-rotation",
+      documentId: "document-a",
+      generation: 1,
+    });
+
+    expect(events).toEqual([
+      "plan",
+      "append",
+      "close:collab:v1:workspace-a:document-a:g1",
+      "publish",
+    ]);
+    expect(fixture.closeRoom).toHaveBeenCalledWith(
+      "collab:v1:workspace-a:document-a:g1",
+      "room_rotated",
+    );
+    expect(publish).toHaveBeenCalledWith(
+      scope,
+      "document-a",
+      2,
+      expect.any(Uint8Array),
+    );
+    expect(result.generation).toBe(2);
+  });
+
   it("never publishes when durable append fails", async () => {
     const publish = vi.fn();
     const fixture = createFixture({ appendFailure: new Error("storage"), publish });
@@ -93,6 +125,29 @@ describe("CollaborativeDocumentGateway", () => {
     );
   });
 
+  it("closes both source and target rooms when rotated-generation publish fails", async () => {
+    const fixture = createFixture({
+      publish: async () => {
+        throw new Error("live apply failed");
+      },
+      receiptGeneration: 2,
+    });
+
+    await expect(fixture.gateway.applyProposal(context, {
+      commandId: "proposal-command-rotated-live-failure",
+      documentId: "document-a",
+      generation: 1,
+    })).rejects.toMatchObject({ category: "live_apply_failed" });
+    expect(fixture.closeRoom).toHaveBeenCalledWith(
+      "collab:v1:workspace-a:document-a:g1",
+      "room_rotated",
+    );
+    expect(fixture.closeRoom).toHaveBeenCalledWith(
+      "collab:v1:workspace-a:document-a:g2",
+      "room_rotated",
+    );
+  });
+
   it("closes the exact current room through the sidecar adapter", async () => {
     const fixture = createFixture();
 
@@ -114,6 +169,7 @@ function createFixture(options: {
     generation: number,
     update: Uint8Array,
   ) => void | Promise<void>;
+  receiptGeneration?: number;
 } = {}) {
   const canonical = new Y.Doc();
   canonical.getText("test").insert(0, "base");
@@ -136,7 +192,7 @@ function createFixture(options: {
       return {
         checksum: "b".repeat(64),
         documentId: input.documentId,
-        generation: input.generation,
+        generation: options.receiptGeneration ?? input.generation,
         headSeq: 1,
         seq: 1,
       };
@@ -148,7 +204,9 @@ function createFixture(options: {
   const publish: NonNullable<typeof options.publish> = options.publish ?? vi.fn(async () => {
     options.events?.push("publish");
   });
-  const closeRoom = vi.fn(async () => undefined);
+  const closeRoom = vi.fn(async (room: string) => {
+    options.events?.push(`close:${room}`);
+  });
   const gateway = createCollaborativeDocumentGateway({
     closeRoom,
     persistence,
@@ -166,7 +224,7 @@ function createFixture(options: {
     },
     publish,
   });
-  return { appended, canonical, closeRoom, gateway };
+  return { appended, canonical, closeRoom, gateway, publish };
 }
 
 function clone(document: Y.Doc) {
