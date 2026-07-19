@@ -104,7 +104,7 @@ export function createHocuspocusProviderAdapter(options: {
   assertWebSocketUrl(options.url);
 
   const checksum = options.checksum ?? sha256;
-  const providerFactory = options.providerFactory ?? createProvider;
+  const providerFactory = options.providerFactory ?? createHocuspocusProviderHandle;
   const timers = options.timers ?? browserTimers;
   const pendingUpdates: PendingUpdate[] = [];
   const reconnectBarrierUpdates: PendingUpdate[] = [];
@@ -415,6 +415,10 @@ export function createHocuspocusProviderAdapter(options: {
     reauthenticationPending = true;
     reauthenticationSawDisconnect = false;
     reauthenticationSynced = false;
+    // A Hocuspocus reconnect timer may already be queued before reauthentication
+    // starts. Remove the old credential synchronously so that attempt can only
+    // fail closed while the replacement capability is in flight.
+    capability = undefined;
     refreshPromise = (async () => {
       try {
         let next: CollaborationCapability | undefined;
@@ -507,7 +511,9 @@ export function createHocuspocusProviderAdapter(options: {
   };
 }
 
-function createProvider(options: CollaborationProviderFactoryOptions): CollaborationProviderHandle {
+export function createHocuspocusProviderHandle(
+  options: CollaborationProviderFactoryOptions,
+): CollaborationProviderHandle {
   const websocketProvider = new HocuspocusProviderWebsocket({
     autoConnect: false,
     url: options.url,
@@ -542,6 +548,39 @@ function createProvider(options: CollaborationProviderFactoryOptions): Collabora
   const collaborationProvider = provider as CollaborationHocuspocusProvider;
   let destroyed = false;
   let rejectDisconnectWait: ((error: CollaborationSessionError) => void) | undefined;
+  const quiesceTransport = async () => {
+    if (destroyed) throw new CollaborationSessionError("destroyed");
+    if (websocketProvider.status === WebSocketStatus.Disconnected) {
+      websocketProvider.disconnect();
+      return;
+    }
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const cleanup = () => {
+        websocketProvider.off("status", onStatus);
+        rejectDisconnectWait = undefined;
+      };
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve();
+      };
+      const onStatus = ({ status }: { status: WebSocketStatus }) => {
+        if (status === WebSocketStatus.Disconnected) finish();
+      };
+      rejectDisconnectWait = (error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      };
+      websocketProvider.on("status", onStatus);
+      websocketProvider.disconnect();
+      if (websocketProvider.status === WebSocketStatus.Disconnected) finish();
+    });
+    if (destroyed) throw new CollaborationSessionError("destroyed");
+  };
   provider.attach();
   return {
     async connect() {
@@ -561,30 +600,16 @@ function createProvider(options: CollaborationProviderFactoryOptions): Collabora
     provider: collaborationProvider,
     async reauthenticate(prepareToken, onTransportReset) {
       if (destroyed) throw new CollaborationSessionError("destroyed");
-      if (websocketProvider.status !== WebSocketStatus.Disconnected) {
-        await new Promise<void>((resolve, reject) => {
-          const finish = () => {
-            websocketProvider.off("status", onStatus);
-            rejectDisconnectWait = undefined;
-            resolve();
-          };
-          const onStatus = ({ status }: { status: WebSocketStatus }) => {
-            if (status === WebSocketStatus.Disconnected) finish();
-          };
-          rejectDisconnectWait = (error) => {
-            websocketProvider.off("status", onStatus);
-            rejectDisconnectWait = undefined;
-            reject(error);
-          };
-          websocketProvider.on("status", onStatus);
-          websocketProvider.disconnect();
-          if (websocketProvider.status === WebSocketStatus.Disconnected) finish();
-        });
+      await quiesceTransport();
+      try {
+        await prepareToken();
+      } finally {
+        // A delayed Hocuspocus auto-retry may have started while the issuer was
+        // pending. Stop and close it before accepting fresh transport events.
+        await quiesceTransport();
       }
       if (destroyed) throw new CollaborationSessionError("destroyed");
       onTransportReset();
-      await prepareToken();
-      if (destroyed) throw new CollaborationSessionError("destroyed");
       await websocketProvider.connect();
     },
   };

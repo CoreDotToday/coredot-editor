@@ -445,6 +445,82 @@ describe("the pinned Hocuspocus durable message lifecycle", () => {
     }
   });
 
+  it("does not let a disconnected auto-retry regain old write authority during slow refresh", async () => {
+    const authorityReads: string[] = [];
+    const fixture = await createFixture({
+      append: async (input) => receipt(input),
+      onCapabilityAuthorityRead: (principalId) => authorityReads.push(principalId),
+    });
+    const principalId = "principal:adapter-disconnected-refresh";
+    const sessionId = randomUUID();
+    const initial = await fixture.issueCapability(principalId, "write", sessionId);
+    const readCapability = await fixture.issueCapability(principalId, "read", sessionId);
+    const refreshed = deferred<Awaited<ReturnType<typeof fixture.issueCapability>>>();
+    try {
+      await withOriginWebSocket(async () => {
+        const issueCapability = vi.fn(async () => (
+          issueCapability.mock.calls.length === 1 ? initial : refreshed.promise
+        ));
+        const store = createCollaborationSessionStore();
+        const session = createHocuspocusProviderAdapter({
+          document: new Y.Doc(),
+          issueCapability,
+          room,
+          store,
+          url: fixture.webSocketUrl,
+        });
+        try {
+          await session.connect();
+          await eventually(() => expect(store.getSnapshot()).toMatchObject({
+            permission: "write",
+            status: "synced",
+            writable: true,
+          }));
+          const initialAuthorityReadCount = authorityReads.length;
+          expect(initialAuthorityReadCount).toBeGreaterThan(0);
+
+          const websocketProvider = session.provider?.configuration.websocketProvider;
+          if (!websocketProvider?.webSocket) throw new Error("real websocket unavailable");
+          websocketProvider.webSocket.close();
+          await eventually(() => expect(websocketProvider.status).toBe("disconnected"));
+
+          const refreshing = session.refreshCapability();
+          void refreshing.catch(() => undefined);
+          await eventually(() => expect(issueCapability).toHaveBeenCalledTimes(2));
+          expect(store.getSnapshot()).toMatchObject({
+            permission: null,
+            status: "reconnecting",
+            writable: false,
+          });
+
+          await new Promise((resolve) => setTimeout(resolve, 1_250));
+
+          expect(store.getSnapshot()).toMatchObject({
+            permission: null,
+            writable: false,
+          });
+          expect(authorityReads).toHaveLength(initialAuthorityReadCount);
+          expect(fixture.changedAppendInputs).toEqual([]);
+
+          refreshed.resolve(readCapability);
+          await refreshing;
+          await eventually(() => expect(store.getSnapshot()).toMatchObject({
+            permission: "read",
+            status: "read_only",
+            writable: false,
+          }));
+          expect(authorityReads.length).toBeGreaterThan(initialAuthorityReadCount);
+          expect(authorityReads).toEqual(authorityReads.map(() => principalId));
+        } finally {
+          session.destroy();
+        }
+      });
+    } finally {
+      refreshed.resolve(readCapability);
+      await fixture.destroy();
+    }
+  });
+
   it("keeps real pending state behind the reconnect SyncStep2 durable barrier", async () => {
     const append = deferred<DurableUpdateReceipt>();
     let changedAttempt = 0;
@@ -562,6 +638,7 @@ async function createFixture(options: {
   append(input: AppendCollaborationUpdate): Promise<DurableUpdateReceipt>;
   beforeLoad?: () => Promise<void>;
   checkpoint?: () => Promise<void>;
+  onCapabilityAuthorityRead?: (principalId: string) => void;
   onDocumentKeys?: () => void;
   resourceRegistry?: ReturnType<typeof createCollaborationResourceRegistry>;
   shutdownGraceMs?: number;
@@ -624,6 +701,7 @@ async function createFixture(options: {
   const sidecar = createCollaborationSidecar({
     authorization: {
       async readCapabilityAuthority(_scope, input) {
+        options.onCapabilityAuthorityRead?.(input.principalId);
         return input.documentId === documentId
           ? { authorizationEpoch: 0, generation: 1 }
           : null;

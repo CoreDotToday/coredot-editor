@@ -4,6 +4,7 @@ import * as Y from "yjs";
 import { createCollaborationSessionStore } from "./session-store";
 import {
   CollaborationSessionError,
+  createHocuspocusProviderHandle,
   createHocuspocusProviderAdapter,
   type CollaborationProviderFactory,
   type CollaborationProviderFactoryOptions,
@@ -234,6 +235,7 @@ describe("Hocuspocus provider adapter", () => {
     events.synced(true);
 
     const refreshing = fixture.session.refreshCapability();
+    expect(fixture.providers[0]?.options.getToken()).toBe("");
     events.synced(true);
     expect(fixture.store.getSnapshot()).toMatchObject({
       permission: null,
@@ -477,6 +479,107 @@ describe("Hocuspocus provider adapter", () => {
   });
 });
 
+describe("Hocuspocus transport reauthentication", () => {
+  it("quiesces an already disconnected transport before and after fast token preparation", async () => {
+    const fixture = createRealProviderHandleFixture();
+    const order: string[] = [];
+
+    await fixture.handle.reauthenticate(
+      async () => { order.push("prepare"); },
+      () => { order.push("reset"); },
+    );
+
+    expect(fixture.disconnect).toHaveBeenCalledTimes(2);
+    expect(fixture.connect).toHaveBeenCalledOnce();
+    expect(order).toEqual(["prepare", "reset"]);
+    fixture.handle.destroy();
+  });
+
+  it("waits for a connected transport to become disconnected without leaking its status listener", async () => {
+    const fixture = createRealProviderHandleFixture();
+    fixture.websocket.status = "connected" as never;
+    const baselineStatusListeners = fixture.statusListenerCount();
+    fixture.disconnect.mockImplementation(() => {
+      queueMicrotask(() => fixture.emitStatus("disconnected"));
+    });
+
+    await fixture.handle.reauthenticate(async () => undefined, vi.fn());
+
+    expect(fixture.statusListenerCount()).toBe(baselineStatusListeners);
+    expect(fixture.connect).toHaveBeenCalledOnce();
+    fixture.handle.destroy();
+  });
+
+  it("rejects and cleans the first disconnect wait when destroyed", async () => {
+    const fixture = createRealProviderHandleFixture();
+    fixture.websocket.status = "connected" as never;
+    fixture.disconnect.mockImplementation(() => undefined);
+    const baselineStatusListeners = fixture.statusListenerCount();
+    const refreshing = fixture.handle.reauthenticate(async () => undefined, vi.fn());
+    void refreshing.catch(() => undefined);
+    await settleMicrotasks();
+    expect(fixture.statusListenerCount()).toBe(baselineStatusListeners + 1);
+
+    fixture.handle.destroy();
+
+    await expect(refreshing).rejects.toEqual(new CollaborationSessionError("destroyed"));
+    expect(fixture.off).toHaveBeenCalledWith("status", expect.any(Function));
+  });
+
+  it("rejects without reset or connect when destroyed during token preparation", async () => {
+    const fixture = createRealProviderHandleFixture();
+    const preparation = deferred<void>();
+    const reset = vi.fn();
+    const refreshing = fixture.handle.reauthenticate(() => preparation.promise, reset);
+    void refreshing.catch(() => undefined);
+    await settleMicrotasks();
+
+    fixture.handle.destroy();
+    preparation.resolve();
+
+    await expect(refreshing).rejects.toEqual(new CollaborationSessionError("destroyed"));
+    expect(reset).not.toHaveBeenCalled();
+    expect(fixture.connect).not.toHaveBeenCalled();
+  });
+
+  it("rejects and cleans the second disconnect wait when destroyed", async () => {
+    const fixture = createRealProviderHandleFixture();
+    const reset = vi.fn();
+    fixture.disconnect.mockImplementation(() => undefined);
+    const baselineStatusListeners = fixture.statusListenerCount();
+    const refreshing = fixture.handle.reauthenticate(async () => {
+      fixture.websocket.status = "connected" as never;
+    }, reset);
+    void refreshing.catch(() => undefined);
+    await vi.waitFor(() => {
+      expect(fixture.statusListenerCount()).toBe(baselineStatusListeners + 1);
+    });
+
+    fixture.handle.destroy();
+
+    await expect(refreshing).rejects.toEqual(new CollaborationSessionError("destroyed"));
+    expect(fixture.off).toHaveBeenCalledWith("status", expect.any(Function));
+    expect(reset).not.toHaveBeenCalled();
+    expect(fixture.connect).not.toHaveBeenCalled();
+  });
+
+  it("quiesces again and preserves an issuance rejection without reset or connect", async () => {
+    const fixture = createRealProviderHandleFixture();
+    const issuerFailure = new Error("issuer unavailable");
+    const reset = vi.fn();
+
+    await expect(fixture.handle.reauthenticate(
+      async () => { throw issuerFailure; },
+      reset,
+    )).rejects.toBe(issuerFailure);
+
+    expect(fixture.disconnect).toHaveBeenCalledTimes(2);
+    expect(reset).not.toHaveBeenCalled();
+    expect(fixture.connect).not.toHaveBeenCalled();
+    fixture.handle.destroy();
+  });
+});
+
 function createFixture(options: {
   capabilities?: Array<{ expiresInSeconds: number; room: string; token: string }>;
   checksums?: string[];
@@ -547,6 +650,45 @@ function createFixture(options: {
   };
 }
 
+function createRealProviderHandleFixture() {
+  const events: CollaborationProviderFactoryOptions["events"] = {
+    authenticated: vi.fn(),
+    authenticationFailed: vi.fn(),
+    closed: vi.fn(),
+    durableAcknowledged: vi.fn(),
+    outgoingUpdate: vi.fn(),
+    status: vi.fn(),
+    synced: vi.fn(),
+    unsyncedChanges: vi.fn(),
+  };
+  const handle = createHocuspocusProviderHandle({
+    document: new Y.Doc(),
+    events,
+    getToken: () => "signed-token",
+    room: ROOM,
+    url: "ws://localhost:1234",
+  });
+  const websocket = handle.provider.configuration.websocketProvider;
+  const disconnect = vi.spyOn(websocket, "disconnect");
+  const connect = vi.spyOn(websocket, "connect").mockResolvedValue(undefined);
+  const off = vi.spyOn(websocket, "off");
+  const emitStatus = (status: "connected" | "connecting" | "disconnected") => {
+    websocket.status = status as never;
+    for (const callback of [...(websocket.callbacks.status ?? [])]) {
+      callback({ status });
+    }
+  };
+  return {
+    connect,
+    disconnect,
+    emitStatus,
+    handle,
+    off,
+    statusListenerCount: () => websocket.callbacks.status?.length ?? 0,
+    websocket,
+  };
+}
+
 function createFakeProvider(
   options: CollaborationProviderFactoryOptions,
   connectFailure?: unknown,
@@ -567,8 +709,9 @@ function createFakeProvider(
       onTransportReset: () => void,
     ) => {
       options.events.status("disconnected");
-      onTransportReset();
       await prepareToken();
+      options.events.status("disconnected");
+      onTransportReset();
       options.events.status("connecting");
     }),
   };
