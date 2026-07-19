@@ -123,15 +123,13 @@ describe("document repository", () => {
     const repository = createDocumentRepository(db, { projectProfile: profile });
     await repository.createDocumentFromDraft(workspaceA, {
       title: "Matching",
-      contentJson: { type: "doc", content: [{ type: "paragraph" }] },
+      contentJson: { type: "doc" as const, content: [{ type: "paragraph" }] },
       metadataJson: { billable: false, owner: "123", score: 1.5, stage: "open", tags: ["risk", "msa"] },
-      readiness: "draft",
     });
     await repository.createDocumentFromDraft(workspaceA, {
       title: "Other",
       contentJson: { type: "doc", content: [{ type: "paragraph" }] },
       metadataJson: { billable: true, score: 2, stage: "closed", tags: ["brisk"] },
-      readiness: "draft",
     });
 
     await expect(repository.listDocumentSummaries(workspaceA, { metadataKey: "billable", metadataValue: "false" }))
@@ -165,13 +163,11 @@ describe("document repository", () => {
       title: "Valid metadata",
       contentJson: { type: "doc", content: [{ type: "paragraph" }] },
       metadataJson: { owner: "Legal" },
-      readiness: "draft",
     });
     const corrupt = await repository.createDocumentFromDraft(workspaceA, {
       title: "Corrupt metadata",
       contentJson: { type: "doc", content: [{ type: "paragraph" }] },
       metadataJson: { owner: "Legal" },
-      readiness: "draft",
     });
     await db.run(sql`update documents set metadata_json = '{' where id = ${corrupt.id}`);
 
@@ -257,7 +253,7 @@ describe("document repository", () => {
     expect(documents.some((item) => item.id === document.id)).toBe(true);
   });
 
-  it("allows an incomplete required-field draft and blocks readiness until it is completed", async () => {
+  it("allows incomplete draft metadata while enforcing field constraints without changing readiness", async () => {
     const db = await createIsolatedDocumentDb();
     const profile = defineProjectProfile({
       defaultTemplateIds: [],
@@ -274,61 +270,29 @@ describe("document repository", () => {
     const repository = createDocumentRepository(db, { projectProfile: profile });
 
     const document = await repository.createDocumentDraft(workspaceA, "Incomplete draft");
-    const blocked = await repository.saveDocumentDraft(workspaceA, document.id, {
-      title: document.title,
-      contentJson: document.contentJson,
-      expectedRevision: 0,
-      readiness: "needs_review",
-    });
     const saved = await repository.saveDocumentDraft(workspaceA, document.id, {
       title: document.title,
       contentJson: document.contentJson,
       expectedRevision: 0,
       metadataJson: { owner: "Legal" },
-      readiness: "needs_review",
     });
 
-    expect(blocked).toEqual({
-      status: "invalid_profile",
-      violation: { fieldId: "owner", ok: false, reason: "required" },
-    });
-    expect(saved).toMatchObject({ status: "success", document: { metadataJson: { owner: "Legal" }, readiness: "needs_review" } });
-    if (saved.status !== "success") throw new Error("Expected required metadata transition to succeed");
-    const returnedToDraft = await repository.saveDocumentDraft(workspaceA, document.id, {
+    expect(saved).toMatchObject({ status: "success", document: { metadataJson: { owner: "Legal" }, readiness: "draft" } });
+    if (saved.status !== "success") throw new Error("Expected draft metadata save to succeed");
+    const incompleteDraftSave = await repository.saveDocumentDraft(workspaceA, document.id, {
       title: document.title,
       contentJson: document.contentJson,
       expectedRevision: 1,
       metadataJson: {},
-      readiness: "draft",
-    });
-    expect(returnedToDraft).toMatchObject({
-      status: "success",
-      document: { metadataJson: {}, readiness: "draft", revision: 2 },
-    });
-    const incompleteDraftSave = await repository.saveDocumentDraft(workspaceA, document.id, {
-      title: "Still incomplete",
-      contentJson: document.contentJson,
-      expectedRevision: 2,
     });
     expect(incompleteDraftSave).toMatchObject({
       status: "success",
-      document: { metadataJson: {}, readiness: "draft", revision: 3 },
-    });
-    const blockedAgain = await repository.saveDocumentDraft(workspaceA, document.id, {
-      title: "Cannot leave draft",
-      contentJson: document.contentJson,
-      expectedRevision: 3,
-      readiness: "needs_review",
-    });
-    expect(blockedAgain).toEqual({
-      status: "invalid_profile",
-      violation: { fieldId: "owner", ok: false, reason: "required" },
+      document: { metadataJson: {}, readiness: "draft", revision: 2 },
     });
     await expect(repository.createDocumentFromDraft(workspaceA, {
       title: "Oversized",
       contentJson: { type: "doc", content: [{ type: "paragraph" }] },
       metadataJson: { owner: "x".repeat(11) },
-      readiness: "draft",
     })).rejects.toMatchObject({
       name: "ProjectProfileViolationError",
       violation: { fieldId: "owner", ok: false, reason: "invalid_length" },
@@ -360,28 +324,42 @@ describe("document repository", () => {
     expect(document.revision).toBe(0);
   });
 
-  it("creates a complete draft atomically with metadata and readiness", async () => {
+  it("creates a complete draft atomically with metadata and server-owned initial readiness", async () => {
     const db = await createIsolatedDocumentDb();
     const { createDocumentFromDraft } = createDocumentRepository(db);
 
     const document = await createDocumentFromDraft(workspaceA, {
       title: "Recovered local draft",
       contentJson: {
-        type: "doc",
+        type: "doc" as const,
         content: [{ type: "paragraph", content: [{ type: "text", text: "Unsaved local work" }] }],
       },
       metadataJson: { owner: "Legal", tags: ["recovered"] },
-      readiness: "needs_review",
     });
 
     expect(document).toMatchObject({
       title: "Recovered local draft",
       plainText: "Unsaved local work",
       metadataJson: { owner: "Legal", tags: ["recovered"] },
-      readiness: "needs_review",
+      readiness: "draft",
       revision: 0,
       status: "draft",
     });
+  });
+
+  it("forces direct full-draft creation to the Project Profile initial readiness", async () => {
+    const db = await createIsolatedDocumentDb();
+    const { createDocumentFromDraft } = createDocumentRepository(db);
+
+    const untrustedDraft = {
+      title: "Untrusted recovery payload",
+      contentJson: { type: "doc" as const, content: [{ type: "paragraph" }] },
+      metadataJson: {},
+      readiness: "approved" as const,
+    };
+    const document = await createDocumentFromDraft(workspaceA, untrustedDraft);
+
+    expect(document.readiness).toBe("draft");
   });
 
   it("replays an idempotent recovery create without mutating its original payload", async () => {
@@ -394,7 +372,6 @@ describe("document repository", () => {
         content: [{ type: "paragraph", content: [{ type: "text", text: "Original local work" }] }],
       },
       metadataJson: { owner: "Legal" },
-      readiness: "needs_review" as const,
     };
 
     const created = await createDocumentFromDraftIdempotently(workspaceA, firstDraft, "recovery-key-123456");
@@ -421,7 +398,6 @@ describe("document repository", () => {
       title: "Recovery copy",
       contentJson: { type: "doc" as const, content: [{ type: "paragraph" }] },
       metadataJson: {},
-      readiness: "draft" as const,
     };
 
     const workspaceACopy = await createDocumentFromDraftIdempotently(
@@ -447,7 +423,6 @@ describe("document repository", () => {
       title: "Concurrent recovery copy",
       contentJson: { type: "doc" as const, content: [{ type: "paragraph" }] },
       metadataJson: {},
-      readiness: "draft" as const,
     };
 
     const results = await Promise.all([
@@ -467,7 +442,6 @@ describe("document repository", () => {
       title: "Recovery copy",
       contentJson: { type: "doc" as const, content: [{ type: "paragraph" }] },
       metadataJson: {},
-      readiness: "draft" as const,
     };
 
     const first = await createDocumentFromDraftIdempotently(
@@ -536,7 +510,6 @@ describe("document repository", () => {
       title: "Updated Memo",
       contentJson: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "Updated" }] }] },
       metadataJson: { owner: "Legal", tags: ["risk"] },
-      readiness: "needs_review",
       expectedRevision: 0,
     });
 
@@ -545,7 +518,7 @@ describe("document repository", () => {
       document: {
         metadataJson: { owner: "Legal", tags: ["risk"] },
         plainText: "Updated",
-        readiness: "needs_review",
+        readiness: "draft",
         revision: 1,
       },
     });
@@ -559,6 +532,28 @@ describe("document repository", () => {
     expect(stale).toMatchObject({
       status: "revision_conflict",
       latest: { title: "Updated Memo", plainText: "Updated", revision: 1 },
+    });
+  });
+
+  it("preserves server readiness when a direct legacy save attempts to smuggle approval", async () => {
+    const db = await createIsolatedDocumentDb();
+    const repository = createDocumentRepository(db);
+    const document = await repository.createDocumentDraft(workspaceA, "Server workflow");
+
+    const untrustedSave = {
+      title: "Body-only update",
+      contentJson: {
+        type: "doc" as const,
+        content: [{ type: "paragraph", content: [{ type: "text", text: "Body-only update" }] }],
+      },
+      expectedRevision: 0,
+      readiness: "approved" as const,
+    };
+    const saved = await repository.saveDocumentDraft(workspaceA, document.id, untrustedSave);
+
+    expect(saved).toMatchObject({
+      status: "success",
+      document: { readiness: "draft", revision: 1 },
     });
   });
 
@@ -578,7 +573,6 @@ describe("document repository", () => {
       },
       expectedRevision: 0,
       metadataJson: { owner: "Legacy writer" },
-      readiness: "approved",
       title: "Legacy overwrite",
     });
 
@@ -602,18 +596,21 @@ describe("document repository", () => {
       title: "Contract",
       contentJson: { type: "doc", content: [{ type: "paragraph" }] },
       metadataJson: { researchQuestion: "Out of profile" },
-      readiness: "draft",
     })).rejects.toMatchObject({
       name: "ProjectProfileViolationError",
       violation: { fieldId: "researchQuestion", reason: "unknown_field" },
     });
   });
 
-  it("preserves unknown legacy metadata while enforcing legal readiness transitions", async () => {
+  it("preserves unknown legacy metadata and server readiness across direct saves", async () => {
     const db = await createIsolatedDocumentDb();
     const defaultRepository = createDocumentRepository(db);
     const document = await defaultRepository.createDocumentDraft(workspaceA, "Legacy contract");
-    await db.run(sql`UPDATE documents SET metadata_json = '{"legacyWorkflow":"keep-me"}' WHERE id = ${document.id}`);
+    await db.run(sql`
+      UPDATE documents
+      SET metadata_json = '{"legacyWorkflow":"keep-me"}', readiness = 'needs_review'
+      WHERE id = ${document.id}
+    `);
     const legalRepository = createDocumentRepository(db, {
       projectProfile: getProjectProfile("legal-review"),
     });
@@ -622,7 +619,6 @@ describe("document repository", () => {
       title: "Reviewed contract",
       contentJson: { type: "doc", content: [{ type: "paragraph" }] },
       metadataJson: { counterparty: "Core Dot" },
-      readiness: "needs_review",
       expectedRevision: 0,
     });
     expect(saved).toMatchObject({
@@ -634,24 +630,21 @@ describe("document repository", () => {
       },
     });
 
-    const rejected = await legalRepository.saveDocumentDraft(workspaceA, document.id, {
+    const untrustedSave = {
       title: "Illegally approved contract",
-      contentJson: { type: "doc", content: [{ type: "paragraph" }] },
-      readiness: "approved",
+      contentJson: { type: "doc" as const, content: [{ type: "paragraph" }] },
+      readiness: "approved" as const,
       expectedRevision: 1,
-    });
-    expect(rejected).toEqual({
-      status: "invalid_profile",
-      violation: {
-        current: "needs_review",
-        next: "approved",
-        reason: "invalid_readiness_transition",
-      },
+    };
+    const secondSave = await legalRepository.saveDocumentDraft(workspaceA, document.id, untrustedSave);
+    expect(secondSave).toMatchObject({
+      status: "success",
+      document: { readiness: "needs_review", revision: 2 },
     });
     await expect(legalRepository.getDocumentById(workspaceA, document.id)).resolves.toMatchObject({
       readiness: "needs_review",
-      revision: 1,
-      title: "Reviewed contract",
+      revision: 2,
+      title: "Illegally approved contract",
     });
   });
 

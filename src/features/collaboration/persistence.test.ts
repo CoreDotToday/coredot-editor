@@ -351,6 +351,7 @@ describe("CollaborationPersistence", () => {
       generation: 1,
       headSeq: 0,
       seq: 0,
+      workflowChanged: false,
     });
     await expect(harness.database.select().from(collaborationUpdates)).resolves.toHaveLength(0);
     await expect(harness.database.select().from(collaborationNoopReceipts)).resolves.toEqual([
@@ -942,7 +943,7 @@ describe("CollaborationPersistence", () => {
       replaceTitle(document, "Needs another review");
     });
 
-    await harness.persistence.appendValidatedUpdate(
+    const receipt = await harness.persistence.appendValidatedUpdate(
       scope,
       appendCommand(harness.documentId, 1, update, {
         idempotencyKey: "approval-invalidating-update",
@@ -958,6 +959,55 @@ describe("CollaborationPersistence", () => {
     });
     expect(approval?.invalidatedAt).toBeInstanceOf(Date);
     expect(currentDocument.readiness).toBe("needs_review");
+    expect(receipt.workflowChanged).toBe(true);
+  });
+
+  it("never invalidates an approval that was already revoked by a workflow command", async () => {
+    const harness = await createHarness("revoked-approval");
+    const snapshot = await harness.persistence.initialize(scope, harness.documentId);
+    await harness.database.update(documents).set({ readiness: "ready" }).where(and(
+      eq(documents.workspaceId, scope.workspaceId),
+      eq(documents.id, harness.documentId),
+    ));
+    await harness.database.insert(documentApprovals).values({
+      approvedAt: new Date(1_000),
+      approvedContentHash: "a".repeat(64),
+      approvedHeadSeq: 0,
+      approvedStateVector: Buffer.from(Y.encodeStateVector(snapshot.document)),
+      documentId: harness.documentId,
+      generation: 1,
+      id: "approval-revoked",
+      principalId: "approver",
+      requestId: "approval-request",
+      revokedAt: new Date(2_000),
+      revokedPrincipalId: "workflow-principal",
+      revokedRequestId: "workflow-request",
+      workspaceId: scope.workspaceId,
+    });
+    const update = mutateSnapshot(snapshot, (document) => {
+      replaceTitle(document, "Edited after explicit revocation");
+    });
+
+    await harness.persistence.appendValidatedUpdate(
+      scope,
+      appendCommand(harness.documentId, 1, update, {
+        idempotencyKey: "post-revocation-update",
+        principalId: "editing-principal",
+      }),
+    );
+
+    const [approval] = await harness.database.select().from(documentApprovals);
+    expect(approval).toMatchObject({
+      invalidatedAt: null,
+      invalidatedPrincipalId: null,
+      invalidatedSeq: null,
+      revokedAt: new Date(2_000),
+      revokedPrincipalId: "workflow-principal",
+      revokedRequestId: "workflow-request",
+    });
+    await expect(readLegacyDocument(harness.database, harness.documentId)).resolves.toMatchObject({
+      readiness: "ready",
+    });
   });
 
   it("downgrades legacy approved readiness without inventing an approval record", async () => {

@@ -38,7 +38,7 @@ function content(text: string): TiptapJson {
 }
 
 function draft(text: string) {
-  return { title: "Concurrent draft", contentJson: content(text), metadataJson: {}, readiness: "draft" as const };
+  return { title: "Concurrent draft", contentJson: content(text), metadataJson: {} };
 }
 
 async function createConcurrencyDatabase(options: { wal?: boolean } = {}) {

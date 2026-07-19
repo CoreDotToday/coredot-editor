@@ -8,6 +8,7 @@ import type { Awareness } from "y-protocols/awareness";
 import type * as Y from "yjs";
 
 import { parseCollaborationRoomName } from "../room-name";
+import { isCollaborationWorkflowChangedPayload } from "../workflow-notification";
 import type { CollaborationSessionStore } from "./session-store";
 
 export type CollaborationCapability = {
@@ -27,6 +28,7 @@ export type CollaborationProviderFactoryOptions = {
     status(status: "connected" | "connecting" | "disconnected"): void;
     synced(state: boolean): void;
     unsyncedChanges(number: number): void;
+    workflowChanged(): void;
   };
   getToken(): string;
   room: string;
@@ -73,6 +75,7 @@ export type CollaborationSession = {
   refreshCapability(): Promise<void>;
   readonly room: string;
   readonly store: CollaborationSessionStore;
+  subscribeWorkflowChanged(listener: () => void): () => void;
 };
 
 type TimerApi = {
@@ -108,6 +111,7 @@ export function createHocuspocusProviderAdapter(options: {
   const timers = options.timers ?? browserTimers;
   const pendingUpdates: PendingUpdate[] = [];
   const reconnectBarrierUpdates: PendingUpdate[] = [];
+  const workflowChangedListeners = new Set<() => void>();
   let capability: CollaborationCapability | undefined;
   let connectPromise: Promise<void> | undefined;
   let destroyed = false;
@@ -302,6 +306,16 @@ export function createHocuspocusProviderAdapter(options: {
       }
       if (number > 0) scheduleStorageDelay(id);
       else if (!hasPendingUpdateFrames()) clearStorageDelayTimer();
+    },
+    workflowChanged() {
+      if (!isCurrent(id)) return;
+      for (const listener of workflowChangedListeners) {
+        try {
+          listener();
+        } catch {
+          // A view listener must not interrupt the provider transport.
+        }
+      }
     },
   });
 
@@ -499,6 +513,7 @@ export function createHocuspocusProviderAdapter(options: {
       capability = undefined;
       pendingUpdates.length = 0;
       reconnectBarrierUpdates.length = 0;
+      workflowChangedListeners.clear();
     },
     get provider() {
       return providerHandle?.provider ?? null;
@@ -508,6 +523,11 @@ export function createHocuspocusProviderAdapter(options: {
     },
     room: options.room,
     store: options.store,
+    subscribeWorkflowChanged(listener) {
+      if (destroyed) return () => undefined;
+      workflowChangedListeners.add(listener);
+      return () => workflowChangedListeners.delete(listener);
+    },
   };
 }
 
@@ -533,6 +553,9 @@ export function createHocuspocusProviderHandle(
     onOutgoingMessage: ({ message }) => {
       const outgoing = readOutgoingUpdate(message.toUint8Array(), options.room);
       if (outgoing) options.events.outgoingUpdate(outgoing.update, outgoing.kind);
+    },
+    onStateless: ({ payload }) => {
+      if (isCollaborationWorkflowChangedPayload(payload)) options.events.workflowChanged();
     },
     onStatus: ({ status }) => options.events.status(status),
     onSynced: ({ state }) => options.events.synced(state),

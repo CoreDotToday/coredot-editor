@@ -16,6 +16,7 @@ type DocumentMetadataPanelProps = {
   metadata: DocumentMetadata;
   metadataDisabled?: boolean;
   metadataDraftIdentity?: object;
+  isReadinessOptionDisabled?: (next: DocumentReadiness) => boolean;
   messages?: DocumentMetadataPanelMessages;
   onMetadataFieldChange: (key: string, value: DocumentMetadataValue | undefined) => void;
   onReadinessChange: (next: DocumentReadiness) => void;
@@ -23,6 +24,8 @@ type DocumentMetadataPanelProps = {
   readiness: DocumentReadiness;
   readinessDescription?: string;
   readinessDisabled?: boolean;
+  readinessFeedback?: string;
+  readinessFeedbackKind?: "error" | "status";
 };
 
 export type DocumentMetadataPanelMessages = {
@@ -30,7 +33,16 @@ export type DocumentMetadataPanelMessages = {
   dueDate: string;
   owner: string;
   readiness: string;
+  readinessApprovalDurability: string;
+  readinessApprovalLegacyUnsupported: string;
+  readinessChecking: string;
+  readinessConflict: string;
+  readinessForbidden: string;
+  readinessInvalidProfile: string;
   readinessServerAuthority: string;
+  readinessSaved: string;
+  readinessSaving: string;
+  readinessUnavailable: string;
   readinessLabels: Record<DocumentReadiness, string>;
   tags: string;
   title: string;
@@ -41,7 +53,16 @@ const defaultMessages: DocumentMetadataPanelMessages = {
   dueDate: "기한",
   owner: "소유자",
   readiness: "준비 상태",
+  readinessApprovalDurability: "승인하려면 공동 편집 변경 사항의 내구성 저장 확인이 필요합니다.",
+  readinessApprovalLegacyUnsupported: "이 문서는 현재 서버 승인 워크플로를 지원하지 않습니다.",
+  readinessChecking: "서버 준비 상태를 확인하는 중입니다.",
+  readinessConflict: "다른 사용자가 준비 상태를 변경했습니다. 최신 서버 상태를 불러왔습니다.",
+  readinessForbidden: "준비 상태를 변경할 권한이 없습니다.",
+  readinessInvalidProfile: "프로젝트 프로필 규칙에 따라 이 준비 상태로 변경할 수 없습니다.",
   readinessServerAuthority: "준비 상태와 승인은 서버에서 검증되며 공동 편집 문서에 기록되지 않습니다.",
+  readinessSaved: "준비 상태가 서버에서 업데이트되었습니다.",
+  readinessSaving: "준비 상태를 서버에서 확인하고 있습니다.",
+  readinessUnavailable: "서버 준비 상태를 확인할 수 없습니다. 연결이 복구되면 다시 시도합니다.",
   readinessLabels: {
     approved: "승인됨",
     draft: "초안",
@@ -53,6 +74,7 @@ const defaultMessages: DocumentMetadataPanelMessages = {
 };
 
 export function DocumentMetadataPanel({
+  isReadinessOptionDisabled,
   language = "ko",
   metadata,
   metadataDisabled = false,
@@ -64,6 +86,8 @@ export function DocumentMetadataPanel({
   readiness,
   readinessDescription,
   readinessDisabled = false,
+  readinessFeedback,
+  readinessFeedbackKind = "status",
 }: DocumentMetadataPanelProps) {
   const readinessDescriptionId = useId();
   const readinessOptions = getProjectReadinessOptions(profile, readiness);
@@ -91,7 +115,11 @@ export function DocumentMetadataPanel({
             value={readiness}
           >
             {readinessOptions.map((state) => (
-              <option key={state.id} value={state.id}>
+              <option
+                disabled={isReadinessOptionDisabled?.(state.id) ?? false}
+                key={state.id}
+                value={state.id}
+              >
                 {state.labels[language] ?? messages.readinessLabels[state.id]}
               </option>
             ))}
@@ -99,6 +127,17 @@ export function DocumentMetadataPanel({
           {readinessDescription ? (
             <span className="mt-1 block text-xs leading-5 text-zinc-500" id={readinessDescriptionId}>
               {readinessDescription}
+            </span>
+          ) : null}
+          {readinessFeedback ? (
+            <span
+              aria-live={readinessFeedbackKind === "error" ? "assertive" : "polite"}
+              className={readinessFeedbackKind === "error"
+                ? "mt-1 block text-xs leading-5 text-red-700"
+                : "mt-1 block text-xs leading-5 text-zinc-600"}
+              role={readinessFeedbackKind === "error" ? "alert" : "status"}
+            >
+              {readinessFeedback}
             </span>
           ) : null}
         </label>

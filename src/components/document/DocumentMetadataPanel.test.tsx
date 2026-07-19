@@ -264,6 +264,27 @@ describe("DocumentMetadataPanel", () => {
     expect(handleReadinessChange).not.toHaveBeenCalled();
   });
 
+  it("disables approval independently and announces localized workflow feedback", () => {
+    render(
+      <DocumentMetadataPanel
+        isReadinessOptionDisabled={(next) => next === "approved"}
+        metadata={{}}
+        onMetadataFieldChange={vi.fn()}
+        onReadinessChange={vi.fn()}
+        readiness="ready"
+        readinessFeedback="다른 사용자가 준비 상태를 변경했습니다."
+        readinessFeedbackKind="error"
+      />,
+    );
+
+    const readiness = screen.getByRole("combobox", { name: "준비 상태" });
+    expect(readiness).toBeEnabled();
+    expect(screen.getByRole("option", { name: "승인됨" })).toBeDisabled();
+    expect(screen.getByRole("option", { name: "초안" })).toBeEnabled();
+    expect(screen.getByRole("alert")).toHaveTextContent("다른 사용자가 준비 상태를 변경했습니다.");
+    expect(screen.getByRole("alert")).toHaveAttribute("aria-live", "assertive");
+  });
+
   it("preserves spaces while a controlled text field receives canonical metadata after every keystroke", async () => {
     const user = userEvent.setup();
     const handleChange = vi.fn();

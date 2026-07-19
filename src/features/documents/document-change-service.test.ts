@@ -38,7 +38,6 @@ function draft(text: string) {
     title: "Dirty draft",
     contentJson: content(text),
     metadataJson: { owner: "Principal A" },
-    readiness: "needs_review" as const,
   };
 }
 
@@ -66,6 +65,13 @@ async function createChangeDatabase() {
     );
     CREATE UNIQUE INDEX documents_workspace_id_id_unique ON documents(workspace_id, id);
     CREATE UNIQUE INDEX documents_workspace_creation_key_unique ON documents(workspace_id, creation_key);
+    CREATE TABLE collaboration_documents (
+      workspace_id text NOT NULL,
+      document_id text NOT NULL,
+      generation integer NOT NULL,
+      is_current integer DEFAULT 1 NOT NULL,
+      PRIMARY KEY(workspace_id, document_id, generation)
+    );
     CREATE TABLE ai_proposals (
       id text PRIMARY KEY NOT NULL,
       workspace_id text NOT NULL,
@@ -159,6 +165,13 @@ async function seedProposal(
   });
 }
 
+async function seedCollaboration(db: Awaited<ReturnType<typeof createChangeDatabase>>) {
+  await db.run(sql`
+    INSERT INTO collaboration_documents (workspace_id, document_id, generation, is_current)
+    VALUES (${context.workspaceId}, 'doc_1', 1, 1)
+  `);
+}
+
 describe("document change service", () => {
   it("applies one proposal to the submitted dirty draft and audits its principal and proposal", async () => {
     const db = await createChangeDatabase();
@@ -191,6 +204,48 @@ describe("document change service", () => {
     expect(extractPlainTextFromTiptap(result.document.contentJson)).toBe("local unsaved preface; revenue grew 8%");
     const [link] = await db.select().from(documentChangeProposals);
     expect(link).toMatchObject({ proposalId: "proposal_1", appliedMode: "replace", ordinal: 0 });
+  });
+
+  it("preserves current server readiness when a proposal draft attempts to change it", async () => {
+    const db = await createChangeDatabase();
+    await seedDocument(db);
+    await db.update(documents).set({ readiness: "ready" }).where(eq(documents.id, "doc_1"));
+    await seedProposal(db, { id: "proposal_1", replacement: "new", target: "target" });
+    const changes = createDocumentChangeService(db);
+
+    const untrustedDraft = { ...draft("target"), readiness: "approved" as const };
+    const result = await changes.applyProposal(context, {
+      documentId: "doc_1",
+      draft: untrustedDraft,
+      expectedRevision: 0,
+      proposalId: "proposal_1",
+      mode: "replace",
+    });
+
+    expect(result).toMatchObject({ ok: true, document: { readiness: "ready", revision: 1 } });
+    expect(await db.select().from(documentChanges)).toMatchObject([{
+      beforeSnapshotJson: { readiness: "ready" },
+    }]);
+  });
+
+  it("fences proposal application after collaboration initialization", async () => {
+    const db = await createChangeDatabase();
+    await seedDocument(db);
+    await seedProposal(db, { id: "proposal_1", replacement: "new", target: "target" });
+    await seedCollaboration(db);
+    const changes = createDocumentChangeService(db);
+
+    const result = await changes.applyProposal(context, {
+      documentId: "doc_1",
+      draft: draft("target"),
+      expectedRevision: 0,
+      proposalId: "proposal_1",
+      mode: "replace",
+    });
+
+    expect(result).toEqual({ ok: false, reason: "collaboration_initialized" });
+    expect(await db.select().from(aiProposals)).toMatchObject([{ status: "pending" }]);
+    expect(await db.select().from(documentChanges)).toHaveLength(0);
   });
 
   it("returns the latest document and changes nothing when expected revision is stale", async () => {
@@ -236,33 +291,26 @@ describe("document change service", () => {
       ok: true,
       document: {
         metadataJson: { counterparty: "Core Dot", legacyWorkflow: "keep-me" },
-        readiness: "needs_review",
+        readiness: "draft",
       },
     });
 
     await seedProposal(db, { id: "proposal_2", replacement: "newer", target: "new" });
-    const rejected = await changes.applyProposal(context, {
+    const untrustedDraft = {
+      ...draft("new"),
+      metadataJson: { counterparty: "Core Dot" },
+      readiness: "approved" as const,
+    };
+    const second = await changes.applyProposal(context, {
       documentId: "doc_1",
-      draft: {
-        ...draft("new"),
-        metadataJson: { counterparty: "Core Dot" },
-        readiness: "approved",
-      },
+      draft: untrustedDraft,
       expectedRevision: 1,
       proposalId: "proposal_2",
       mode: "replace",
     });
-    expect(rejected).toEqual({
-      ok: false,
-      reason: "invalid_profile",
-      violation: {
-        current: "needs_review",
-        next: "approved",
-        reason: "invalid_readiness_transition",
-      },
-    });
+    expect(second).toMatchObject({ ok: true, document: { readiness: "draft", revision: 2 } });
     expect(await db.select().from(aiProposals).where(eq(aiProposals.id, "proposal_2")))
-      .toMatchObject([{ status: "pending" }]);
+      .toMatchObject([{ status: "accepted" }]);
   });
 
   it("rolls back every proposal when one bulk target is stale", async () => {
@@ -567,13 +615,57 @@ describe("document change service", () => {
       document: {
         contentJson: content("alpha beta"),
         metadataJson: { owner: "Principal A" },
-        readiness: "needs_review",
+        readiness: "draft",
         revision: 2,
         title: "Dirty draft",
       },
       proposals: [{ appliedMode: null, status: "pending" }, { appliedMode: null, status: "pending" }],
     });
     expect(undone.ok && undone.change.undoneAt).toBeInstanceOf(Date);
+  });
+
+  it("preserves current server readiness instead of restoring the audited before snapshot during undo", async () => {
+    const db = await createChangeDatabase();
+    await seedDocument(db);
+    await seedProposal(db, { id: "proposal_1", replacement: "new", target: "target" });
+    const changes = createDocumentChangeService(db);
+    const applied = await changes.applyProposal(context, {
+      documentId: "doc_1",
+      draft: draft("target"),
+      expectedRevision: 0,
+      proposalId: "proposal_1",
+      mode: "replace",
+    });
+    expect(applied.ok).toBe(true);
+    if (!applied.ok) return;
+    await db.update(documents).set({ readiness: "ready" }).where(eq(documents.id, "doc_1"));
+
+    const undone = await changes.undo(context, { changeId: applied.change.id, expectedRevision: 1 });
+
+    expect(undone).toMatchObject({ ok: true, document: { readiness: "ready", revision: 2 } });
+  });
+
+  it("fences undo after collaboration initialization", async () => {
+    const db = await createChangeDatabase();
+    await seedDocument(db);
+    await seedProposal(db, { id: "proposal_1", replacement: "new", target: "target" });
+    const changes = createDocumentChangeService(db);
+    const applied = await changes.applyProposal(context, {
+      documentId: "doc_1",
+      draft: draft("target"),
+      expectedRevision: 0,
+      proposalId: "proposal_1",
+      mode: "replace",
+    });
+    expect(applied.ok).toBe(true);
+    if (!applied.ok) return;
+    await seedCollaboration(db);
+
+    const undone = await changes.undo(context, { changeId: applied.change.id, expectedRevision: 1 });
+
+    expect(undone).toEqual({ ok: false, reason: "collaboration_initialized" });
+    expect(await db.select().from(aiProposals)).toMatchObject([{ appliedMode: "replace", status: "accepted" }]);
+    expect(await db.select().from(documentChanges)).toMatchObject([{ undoneAt: null }]);
   });
 
   it("does not undo against a stale current revision", async () => {

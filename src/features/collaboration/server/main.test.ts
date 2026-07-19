@@ -95,4 +95,30 @@ describe("collaboration sidecar production wiring", () => {
     expect(destroySidecar).toHaveBeenCalledOnce();
     expect(closeDatabase).toHaveBeenCalledOnce();
   });
+
+  it("waits for workers to stop before destroying the sidecar or closing storage", async () => {
+    let finishWorkerStop!: () => void;
+    const workerStopped = new Promise<void>((resolve) => {
+      finishWorkerStop = resolve;
+    });
+    const events: string[] = [];
+    const shutdown = createCollaborationShutdown({
+      closeDatabase: () => events.push("database"),
+      destroySidecar: async () => {
+        events.push("sidecar");
+      },
+      stopWorkers: async () => {
+        events.push("worker-start");
+        await workerStopped;
+        events.push("worker-stopped");
+      },
+    });
+
+    const stopping = shutdown();
+    await Promise.resolve();
+    expect(events).toEqual(["worker-start"]);
+    finishWorkerStop();
+    await stopping;
+    expect(events).toEqual(["worker-start", "worker-stopped", "sidecar", "database"]);
+  });
 });

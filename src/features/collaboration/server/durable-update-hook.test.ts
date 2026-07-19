@@ -204,6 +204,41 @@ describe("Hocuspocus raw frame durability hook", () => {
     expect(fixture.authorizedAppendInputs).toEqual([]);
   });
 
+  it("broadcasts a bounded workflow signal only after an invalidating update is durably applied", async () => {
+    const onWorkflowChanged = vi.fn();
+    const changed = hookFixture({ onWorkflowChanged, workflowChanged: true });
+
+    await changed.hooks.before(
+      changed.connection,
+      updateFrame(0, createUpdate("invalidates approval")),
+    );
+    expect(onWorkflowChanged).not.toHaveBeenCalled();
+    await changed.hooks.after(changed.connection);
+    expect(onWorkflowChanged).toHaveBeenCalledWith(room);
+
+    const unchanged = hookFixture({ onWorkflowChanged, workflowChanged: false });
+    await unchanged.hooks.before(
+      unchanged.connection,
+      updateFrame(0, createUpdate("ordinary workflow-neutral update")),
+    );
+    await unchanged.hooks.after(unchanged.connection);
+    expect(onWorkflowChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not fail an already applied update when best-effort workflow notification fails", async () => {
+    const fixture = hookFixture({
+      onWorkflowChanged: vi.fn(() => { throw new Error("notification transport failed"); }),
+      workflowChanged: true,
+    });
+
+    await fixture.hooks.before(
+      fixture.connection,
+      updateFrame(0, createUpdate("durable first")),
+    );
+
+    await expect(fixture.hooks.after(fixture.connection)).resolves.toBeUndefined();
+  });
+
   it("rechecks draining after an authority read and after an in-flight append", async () => {
     const authority = deferred<{ authorizationEpoch: number; generation: number }>();
     const readFixture = hookFixture({
@@ -261,6 +296,8 @@ function hookFixture(options: {
     room: string,
     bytes: number,
   ) => { commit(): void; rollback(): void };
+  onWorkflowChanged?: (room: string) => void | Promise<void>;
+  workflowChanged?: boolean;
 } = {}) {
   let draining = false;
   const authorizedAppendInputs: AppendAuthorizedClientUpdate[] = [];
@@ -284,6 +321,7 @@ function hookFixture(options: {
     isDraining: () => draining,
     now: () => new Date("2027-01-15T08:00:00.000Z"),
     onDurableApplyInterrupted,
+    onWorkflowChanged: options.onWorkflowChanged,
     persistence: {
       async appendAuthorizedClientUpdate(_scope, input) {
         authorizedAppendInputs.push(input);
@@ -294,6 +332,7 @@ function hookFixture(options: {
           generation: input.generation,
           headSeq: 1,
           seq: 1,
+          workflowChanged: options.workflowChanged ?? false,
         };
       },
     },

@@ -20,6 +20,7 @@ import {
   createCollaborationRoomName,
   parseCollaborationRoomName,
 } from "../room-name";
+import { COLLABORATION_WORKFLOW_CHANGED_PAYLOAD } from "../workflow-notification";
 import {
   createAwarenessPolicy,
   type VerifiedCollaborationContext,
@@ -127,6 +128,11 @@ export function createCollaborationSidecar(options: {
       connection.close({ code: 4400, reason });
     }
   };
+  const publishWorkflowChangedByRoom = (exactRoom: string) => {
+    server.hocuspocus.documents.get(exactRoom)?.broadcastStateless(
+      COLLABORATION_WORKFLOW_CHANGED_PAYLOAD,
+    );
+  };
   const durable = createDurableUpdateHooks({
     authorization: options.authorization,
     blocked,
@@ -136,6 +142,7 @@ export function createCollaborationSidecar(options: {
     now,
     onDurableApplyInterrupted: (room) => closeRoomByName(room, "room_rotated"),
     onRoomRotated: (room) => closeRoomByName(room, "room_rotated"),
+    onWorkflowChanged: publishWorkflowChangedByRoom,
     persistence: options.persistence,
     refreshes,
     reserveDocumentGrowth: resources.reserveDocumentGrowth,
@@ -298,6 +305,12 @@ export function createCollaborationSidecar(options: {
       awareness.sanitizeStates(connection, context, states);
     },
 
+    async onStateless() {
+      // Stateless workflow notifications are server-owned. A client cannot
+      // turn this transport into an authority signal for its peers.
+      return undefined;
+    },
+
     async onDisconnect({ context, documentName }) {
       const connection = context?.reservationKey
         ? releaseReservation(context.reservationKey) as Connection<SidecarContext>
@@ -432,6 +445,17 @@ export function createCollaborationSidecar(options: {
         closeRoomByName(room, "room_rotated");
         throw error;
       }
+    },
+    publishWorkflowChanged(
+      scope: WorkspaceScope,
+      documentId: string,
+      generation: number,
+    ) {
+      publishWorkflowChangedByRoom(createCollaborationRoomName({
+        documentId,
+        generation,
+        workspaceId: scope.workspaceId,
+      }));
     },
   };
 }

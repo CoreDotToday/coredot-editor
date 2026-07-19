@@ -5,7 +5,6 @@ import {
   collaborationDocuments,
   documents,
   type DocumentMetadata,
-  type DocumentReadiness,
   type TiptapJson,
 } from "@/db/schema";
 import { retrySqliteContention } from "@/db/sqlite-contention";
@@ -40,7 +39,7 @@ export function createDocumentRepository(
 
   return {
     async createDocumentDraft(scope: WorkspaceScope, title: string) {
-      const state = validateNewDocumentState(projectProfile, { metadataJson: {}, readiness: "draft" });
+      const state = validateNewDocumentState(projectProfile, {});
       const now = new Date();
       const rows = await database
         .insert(documents)
@@ -61,7 +60,7 @@ export function createDocumentRepository(
     },
 
     async createDocumentFromContent(scope: WorkspaceScope, title: string, contentJson: TiptapJson) {
-      const state = validateNewDocumentState(projectProfile, { metadataJson: {}, readiness: "draft" });
+      const state = validateNewDocumentState(projectProfile, {});
       const now = new Date();
       const rows = await database
         .insert(documents)
@@ -87,10 +86,9 @@ export function createDocumentRepository(
         title: string;
         contentJson: TiptapJson;
         metadataJson: DocumentMetadata;
-        readiness: DocumentReadiness;
       },
     ) {
-      const state = validateNewDocumentState(projectProfile, input);
+      const state = validateNewDocumentState(projectProfile, input.metadataJson);
       const now = new Date();
       const rows = await database
         .insert(documents)
@@ -116,11 +114,10 @@ export function createDocumentRepository(
         title: string;
         contentJson: TiptapJson;
         metadataJson: DocumentMetadata;
-        readiness: DocumentReadiness;
       },
       creationKey: string,
     ) {
-      const state = validateNewDocumentState(projectProfile, input);
+      const state = validateNewDocumentState(projectProfile, input.metadataJson);
       const now = new Date();
       const rows = await database
         .insert(documents)
@@ -320,7 +317,6 @@ export function createDocumentRepository(
         title: string;
         contentJson: TiptapJson;
         metadataJson?: DocumentMetadata;
-        readiness?: DocumentReadiness;
         expectedRevision: number;
       },
     ) {
@@ -351,7 +347,7 @@ export function createDocumentRepository(
 
         const stateResult = validateProjectDocumentState(projectProfile, {
           metadataJson: input.metadataJson ?? current.metadataJson,
-          readiness: input.readiness ?? current.readiness,
+          readiness: current.readiness,
         }, {
           metadataJson: current.metadataJson,
           readiness: current.readiness,
@@ -367,7 +363,6 @@ export function createDocumentRepository(
             contentJson: input.contentJson,
             metadataJson: normalizeDocumentMetadata(stateResult.value.metadataJson),
             plainText: extractPlainTextFromTiptap(input.contentJson),
-            readiness: normalizeDocumentReadiness(stateResult.value.readiness),
             revision: input.expectedRevision + 1,
             updatedAt: now,
           })
@@ -434,9 +429,12 @@ export function createDocumentRepository(
 
 function validateNewDocumentState(
   projectProfile: ProjectProfile,
-  input: { metadataJson: DocumentMetadata; readiness: DocumentReadiness },
+  metadataJson: DocumentMetadata,
 ) {
-  const result = validateProjectDocumentState(projectProfile, input);
+  const result = validateProjectDocumentState(projectProfile, {
+    metadataJson,
+    readiness: projectProfile.readiness[0]!.id,
+  });
   if (!result.ok) throw new ProjectProfileViolationError(result.violation);
   return result.value;
 }

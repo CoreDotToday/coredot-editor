@@ -4,7 +4,7 @@ import { undoDocumentChange } from "@/features/documents/document-change-service
 import { documentChangeResponse, readDocumentChangeJson } from "@/features/documents/document-change-route";
 import { createProtectedOptionsHandler, createProtectedRouteHandler } from "@/features/auth/route-context";
 
-const undoPayloadSchema = z.object({ expectedRevision: z.number().int().nonnegative() });
+const undoPayloadSchema = z.object({ expectedRevision: z.number().int().nonnegative() }).strict();
 type UndoRouteContext = { params: Promise<{ id: string }> };
 
 const optionsHandler = createProtectedOptionsHandler(["POST"]);

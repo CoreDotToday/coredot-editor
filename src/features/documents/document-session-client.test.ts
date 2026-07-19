@@ -4,6 +4,7 @@ import {
   DocumentSessionConflictError,
   DocumentSessionInvalidProfileError,
   DocumentSessionRequestError,
+  DocumentWorkflowRequestError,
   type DocumentSessionDraft,
 } from "./document-session-client";
 
@@ -41,7 +42,7 @@ function jsonResponse(body: unknown, status = 200) {
 }
 
 describe("document session client", () => {
-  it("returns a parsed saved state and sends the revision precondition", async () => {
+  it("returns a parsed saved state and omits server-owned readiness from the legacy save payload", async () => {
     const request = vi.fn().mockResolvedValue(jsonResponse({ document: serverDocument }));
     const client = createDocumentSessionClient(request);
 
@@ -51,8 +52,245 @@ describe("document session client", () => {
     });
     expect(request).toHaveBeenCalledWith("/api/documents/doc_1", expect.objectContaining({
       method: "PUT",
-      body: JSON.stringify({ ...draft, expectedRevision: 3 }),
+      body: JSON.stringify({
+        contentJson: draft.contentJson,
+        expectedRevision: 3,
+        metadataJson: draft.metadataJson,
+        title: draft.title,
+      }),
     }));
+  });
+
+  it("reads a validated server-authoritative workflow state for legacy and collaboration documents", async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({
+        workflow: {
+          collaboration: null,
+          documentId: "doc/legacy",
+          readiness: "needs_review",
+          revision: 7,
+        },
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        workflow: {
+          collaboration: { generation: 3, headSeq: 11 },
+          documentId: "doc/collaborative",
+          readiness: "ready",
+          revision: 8,
+        },
+      }));
+    const client = createDocumentSessionClient(request);
+
+    await expect(client.readWorkflow("doc/legacy")).resolves.toEqual({
+      workflow: {
+        collaboration: null,
+        documentId: "doc/legacy",
+        readiness: "needs_review",
+        revision: 7,
+      },
+    });
+    await expect(client.readWorkflow("doc/collaborative")).resolves.toEqual({
+      workflow: {
+        collaboration: { generation: 3, headSeq: 11 },
+        documentId: "doc/collaborative",
+        readiness: "ready",
+        revision: 8,
+      },
+    });
+    expect(request).toHaveBeenNthCalledWith(
+      1,
+      "/api/documents/doc%2Flegacy/workflow",
+      expect.objectContaining({ method: "GET", signal: expect.any(AbortSignal) }),
+    );
+  });
+
+  it("posts readiness and approval commands without inventing a collaboration head", async () => {
+    const needsReview = {
+      collaboration: null,
+      documentId: "doc_1",
+      readiness: "needs_review",
+      revision: 4,
+    } as const;
+    const approved = {
+      collaboration: { generation: 2, headSeq: 14 },
+      documentId: "doc_1",
+      readiness: "approved",
+      revision: 5,
+    } as const;
+    const request = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ workflow: needsReview }))
+      .mockResolvedValueOnce(jsonResponse({ workflow: approved }));
+    const client = createDocumentSessionClient(request);
+
+    await expect(client.updateWorkflow("doc_1", {
+      expectedReadiness: "draft",
+      nextReadiness: "needs_review",
+    })).resolves.toEqual({ workflow: needsReview });
+    await expect(client.updateWorkflow("doc_1", {
+      expectedReadiness: "ready",
+      nextReadiness: "approved",
+      observedHeadSeq: 14,
+    })).resolves.toEqual({ workflow: approved });
+
+    expect(request).toHaveBeenNthCalledWith(1, "/api/documents/doc_1/workflow", expect.objectContaining({
+      body: JSON.stringify({ expectedReadiness: "draft", nextReadiness: "needs_review" }),
+      method: "POST",
+      signal: expect.any(AbortSignal),
+    }));
+    expect(request).toHaveBeenNthCalledWith(2, "/api/documents/doc_1/workflow", expect.objectContaining({
+      body: JSON.stringify({
+        expectedReadiness: "ready",
+        nextReadiness: "approved",
+        observedHeadSeq: 14,
+      }),
+      method: "POST",
+      signal: expect.any(AbortSignal),
+    }));
+  });
+
+  it.each([
+    { collaboration: null, documentId: "other", readiness: "draft", revision: 0 },
+    { collaboration: null, documentId: "doc_1", readiness: "invented", revision: 0 },
+    { collaboration: null, documentId: "doc_1", readiness: "draft", revision: -1 },
+    {
+      collaboration: { generation: 0, headSeq: 1 },
+      documentId: "doc_1",
+      readiness: "draft",
+      revision: 0,
+    },
+    {
+      collaboration: { generation: 1, headSeq: Number.MAX_SAFE_INTEGER + 1 },
+      documentId: "doc_1",
+      readiness: "draft",
+      revision: 0,
+    },
+  ])("rejects malformed or cross-document workflow success state: %o", async (workflow) => {
+    const client = createDocumentSessionClient(
+      vi.fn().mockResolvedValue(jsonResponse({ workflow })),
+    );
+
+    await expect(client.readWorkflow("doc_1")).rejects.toMatchObject({
+      name: "DocumentWorkflowRequestError",
+      reason: "malformed_response",
+      status: 200,
+    });
+  });
+
+  it.each([
+    ["expected_readiness_conflict", 409],
+    ["head_conflict", 409],
+    ["forbidden", 403],
+    ["not_found", 404],
+    ["collaboration_unavailable", 503],
+    ["workflow_unavailable", 503],
+    ["legacy_approval_unsupported", 409],
+  ] as const)("preserves the stable %s workflow error and authoritative recovery state", async (reason, status) => {
+    const workflow = {
+      collaboration: { generation: 2, headSeq: 17 },
+      documentId: "doc_1",
+      readiness: "needs_review",
+      revision: 9,
+    } as const;
+    const client = createDocumentSessionClient(vi.fn().mockResolvedValue(jsonResponse({
+      reason,
+      workflow,
+    }, status)));
+
+    const result = client.updateWorkflow("doc_1", {
+      expectedReadiness: "ready",
+      nextReadiness: "approved",
+      observedHeadSeq: 16,
+    });
+    await expect(result).rejects.toBeInstanceOf(DocumentWorkflowRequestError);
+    await expect(result).rejects.toMatchObject({ reason, status, workflow });
+  });
+
+  it("parses a workflow Project Profile violation without coercing unknown values", async () => {
+    const client = createDocumentSessionClient(vi.fn().mockResolvedValue(jsonResponse({
+      reason: "invalid_project_profile",
+      violation: {
+        current: "draft",
+        next: "ready",
+        reason: "invalid_readiness_transition",
+      },
+    }, 400)));
+
+    await expect(client.updateWorkflow("doc_1", {
+      expectedReadiness: "draft",
+      nextReadiness: "ready",
+    })).rejects.toMatchObject({
+      name: "DocumentWorkflowRequestError",
+      reason: "invalid_project_profile",
+      status: 400,
+      violation: {
+        current: "draft",
+        next: "ready",
+        reason: "invalid_readiness_transition",
+      },
+    });
+  });
+
+  it("bounds workflow requests and aborts the transport when the client deadline expires", async () => {
+    vi.useFakeTimers();
+    let observedSignal: AbortSignal | undefined;
+    const request = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+      observedSignal = init?.signal ?? undefined;
+      return new Promise<Response>((_resolve, reject) => {
+        observedSignal?.addEventListener("abort", () => reject(observedSignal?.reason), { once: true });
+      });
+    });
+    const client = createDocumentSessionClient(request);
+
+    const result = expect(client.readWorkflow("doc_1", { timeoutMs: 50 })).rejects.toMatchObject({
+      name: "DocumentWorkflowRequestError",
+      reason: "timeout",
+      status: 0,
+    });
+    await vi.advanceTimersByTimeAsync(50);
+
+    expect(observedSignal?.aborted).toBe(true);
+    await result;
+  });
+
+  it("settles immediately on caller abort even when an injected transport ignores its signal", async () => {
+    vi.useFakeTimers();
+    const caller = new AbortController();
+    let transportSignal: AbortSignal | undefined;
+    const client = createDocumentSessionClient(vi.fn((_input, init) => {
+      transportSignal = init?.signal ?? undefined;
+      return new Promise<Response>(() => undefined);
+    }));
+    const result = expect(client.readWorkflow("doc_1", {
+      signal: caller.signal,
+      timeoutMs: 10_000,
+    })).rejects.toMatchObject({
+      name: "DocumentWorkflowRequestError",
+      reason: "aborted",
+      status: 0,
+    });
+
+    caller.abort();
+
+    expect(transportSignal?.aborted).toBe(true);
+    await result;
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("keeps the workflow deadline active while the response body is being consumed", async () => {
+    vi.useFakeTimers();
+    const response = jsonResponse({ workflow: {} });
+    vi.spyOn(response, "json").mockImplementation(() => new Promise<never>(() => undefined));
+    const client = createDocumentSessionClient(vi.fn().mockResolvedValue(response));
+    const result = expect(client.readWorkflow("doc_1", { timeoutMs: 50 })).rejects.toMatchObject({
+      name: "DocumentWorkflowRequestError",
+      reason: "timeout",
+      status: 0,
+    });
+
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(50);
+
+    await result;
   });
 
   it("preserves both local and server drafts as an explicit save conflict", async () => {
@@ -220,6 +458,8 @@ describe("document session client", () => {
       document: { revision: 5 },
       proposals: [{ status: "pending" }],
     });
+    expect(JSON.parse(String(request.mock.calls[0]?.[1]?.body)).document).not.toHaveProperty("readiness");
+    expect(JSON.parse(String(request.mock.calls[1]?.[1]?.body)).document).not.toHaveProperty("readiness");
   });
 
   it.each([
@@ -294,7 +534,11 @@ describe("document session client", () => {
     expect(request).toHaveBeenNthCalledWith(2, "/api/documents", expect.objectContaining({
       method: "POST",
       headers: expect.objectContaining({ "Idempotency-Key": "recovery-key-123456" }),
-      body: JSON.stringify(draft),
+      body: JSON.stringify({
+        title: draft.title,
+        contentJson: draft.contentJson,
+        metadataJson: draft.metadataJson,
+      }),
     }));
   });
 });

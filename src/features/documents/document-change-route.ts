@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { documentReadinessValues } from "./document-metadata";
 import type { DocumentChangeIdentity, DocumentChangeResult } from "./document-change-service";
 import { toPublicDocument } from "./document-public";
 import {
@@ -22,8 +21,7 @@ export const documentChangeDraftSchema = z.object({
     z.string(),
     z.union([z.string(), z.number().finite(), z.boolean(), z.array(z.string()), z.null()]),
   ),
-  readiness: z.enum(documentReadinessValues),
-});
+}).strict();
 
 export async function readDocumentChangeJson(request: Request) {
   if (requestExceedsDocumentBodyLimit(request)) {
@@ -62,6 +60,12 @@ export function documentChangeResponse(result: DocumentChangeResult, singlePropo
       reason: "invalid_project_profile",
       violation: result.violation,
     }, { status: 400 });
+  }
+  if (result.reason === "collaboration_initialized") {
+    return NextResponse.json({
+      error: "Document collaboration is already initialized",
+      reason: "collaboration_initialized",
+    }, { status: 409 });
   }
   if (result.reason === "not_found") {
     return NextResponse.json({ error: "Document change resource not found" }, { status: 404 });

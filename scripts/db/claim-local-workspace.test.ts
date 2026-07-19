@@ -26,6 +26,8 @@ const FULL_WORKSPACE_TABLES = [
   "ai_workspace_messages",
   "collaboration_updates",
   "collaboration_noop_receipts",
+  "collaboration_room_closure_jobs",
+  "collaboration_workflow_notification_jobs",
   "collaboration_proposal_anchors",
   "collaboration_document_changes",
   "app_settings",
@@ -44,6 +46,8 @@ const FULL_SUMMARY_KEYS = [
   "collaborationProposalAnchors",
   "collaborationUpdates",
   "collaborationNoopReceipts",
+  "collaborationRoomClosureJobs",
+  "collaborationWorkflowNotificationJobs",
   "documentApprovals",
   "documentChangeProposals",
   "documentChanges",
@@ -232,6 +236,20 @@ async function createFullClaimDatabase() {
       origin_kind, principal_id, request_id, session_id, semantic_action_id, created_at
     ) VALUES ('local', 'full_doc', 'full-noop-key', 1, 1, '${HASH_B}', 'proposal_command',
       'full_principal', 'full_request', 'full_session', 'full_action', 6000);
+    INSERT INTO collaboration_room_closure_jobs (
+      workspace_id, document_id, generation, reason, status, attempts,
+      next_attempt_at, failure_category, created_at, updated_at
+    ) VALUES (
+      'local', 'full_doc', 1, 'archived', 'exhausted', 5,
+      NULL, 'delivery_failed', 6000, 6000
+    );
+    INSERT INTO collaboration_workflow_notification_jobs (
+      workspace_id, document_id, generation, workflow_revision, status, attempts,
+      next_attempt_at, failure_category, created_at, updated_at
+    ) VALUES (
+      'local', 'full_doc', 1, 1, 'exhausted', 5,
+      NULL, 'delivery_failed', 6000, 6000
+    );
     INSERT INTO collaboration_authorization_epochs (
       workspace_id, principal_id, epoch, updated_at
     ) VALUES ('local', 'full_principal', 1, 6000);

@@ -168,6 +168,7 @@ describe("useCollaborationSession", () => {
           refreshCapability: vi.fn(async () => undefined),
           room: options.room,
           store: options.store,
+          subscribeWorkflowChanged: vi.fn(() => () => undefined),
         };
       }),
       createStore: createCollaborationSessionStore,
@@ -279,6 +280,7 @@ describe("useCollaborationSession", () => {
           refreshCapability: vi.fn(async () => undefined),
           room: options.room,
           store: options.store,
+          subscribeWorkflowChanged: vi.fn(() => () => undefined),
         };
       }),
       createStore: createCollaborationSessionStore,
@@ -318,6 +320,7 @@ function createHarness(overrides: {
     refreshCapability: vi.fn(async () => undefined),
     room: options.room,
     store: options.store,
+    subscribeWorkflowChanged: vi.fn(() => () => undefined),
   }));
   const dependencies: CollaborationSessionHookDependencies = {
     createDocument: () => document,

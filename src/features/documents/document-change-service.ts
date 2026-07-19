@@ -1,9 +1,10 @@
-import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, lt, notExists, or, sql } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { db } from "@/db/client";
 import { withSerializedDocumentWrite } from "@/db/document-write-queue";
 import {
   aiProposals,
+  collaborationDocuments,
   documentChangeProposals,
   documentChanges,
   documents,
@@ -45,11 +46,10 @@ type DraftValidationLimit =
   | "documentNodes"
   | "malformed"
   | "metadata"
-  | "readiness"
   | "snapshotBytes"
   | "title";
 
-export type DocumentChangeDraft = DocumentChangeSnapshot;
+export type DocumentChangeDraft = Omit<DocumentChangeSnapshot, "readiness">;
 export type ProposalChangeInput = { mode: ProposalApplyMode; proposalId: string };
 export type ApplyProposalInput = {
   documentId: string;
@@ -99,6 +99,7 @@ export type DocumentChangeResult =
       violation?: ProjectProfileViolation;
       reason:
         | "invalid_batch"
+        | "collaboration_initialized"
         | "invalid_draft"
         | "invalid_profile"
         | "invalid_revision"
@@ -160,6 +161,15 @@ export function createDocumentChangeService(
             ))
             .limit(1);
           if (!document) return { ok: false, reason: "not_found" } as const;
+          const [collaboration] = await transaction
+            .select({ generation: collaborationDocuments.generation })
+            .from(collaborationDocuments)
+            .where(and(
+              eq(collaborationDocuments.workspaceId, context.workspaceId),
+              eq(collaborationDocuments.documentId, input.documentId),
+            ))
+            .limit(1);
+          if (collaboration) return { ok: false, reason: "collaboration_initialized" } as const;
 
           const proposalIds = input.proposals.map(({ proposalId }) => proposalId);
           const foundProposals = await transaction
@@ -185,7 +195,7 @@ export function createDocumentChangeService(
 
           const projectState = validateProjectDocumentState(projectProfile, {
             metadataJson: input.draft.metadataJson,
-            readiness: input.draft.readiness,
+            readiness: document.readiness,
           }, {
             metadataJson: document.metadataJson,
             readiness: document.readiness,
@@ -193,11 +203,15 @@ export function createDocumentChangeService(
           if (!projectState.ok) {
             return { ok: false, reason: "invalid_profile", violation: projectState.violation } as const;
           }
-          const validatedDraft = {
-            ...input.draft,
+          const validatedDraft: DocumentChangeSnapshot = {
+            title: input.draft.title,
+            contentJson: input.draft.contentJson,
             metadataJson: projectState.value.metadataJson,
-            readiness: projectState.value.readiness,
+            readiness: document.readiness,
           };
+          if (documentChangeSnapshotExceedsLimit(validatedDraft)) {
+            return { limit: "snapshotBytes", ok: false, reason: "invalid_draft" } as const;
+          }
 
           const ordered = getProposalApplicationOrder(
             requested.map((item) => ({ ...item.proposal, changeItem: item })),
@@ -230,7 +244,6 @@ export function createDocumentChangeService(
               contentJson: nextContentJson,
               metadataJson: validatedDraft.metadataJson,
               plainText: extractPlainTextFromTiptap(nextContentJson),
-              readiness: validatedDraft.readiness,
               revision: input.expectedRevision + 1,
               updatedAt: now,
             })
@@ -239,6 +252,13 @@ export function createDocumentChangeService(
               eq(documents.id, input.documentId),
               eq(documents.status, "draft"),
               eq(documents.revision, input.expectedRevision),
+              notExists(transaction
+                .select({ generation: collaborationDocuments.generation })
+                .from(collaborationDocuments)
+                .where(and(
+                  eq(collaborationDocuments.workspaceId, context.workspaceId),
+                  eq(collaborationDocuments.documentId, input.documentId),
+                ))),
             ))
             .returning();
           if (!updatedDocument) throw new DocumentChangeCasRollback(input.documentId);
@@ -459,6 +479,15 @@ export function createDocumentChangeService(
               ))
               .limit(1);
             if (!document) return { ok: false, reason: "not_found" } as const;
+            const [collaboration] = await transaction
+              .select({ generation: collaborationDocuments.generation })
+              .from(collaborationDocuments)
+              .where(and(
+                eq(collaborationDocuments.workspaceId, context.workspaceId),
+                eq(collaborationDocuments.documentId, change.documentId),
+              ))
+              .limit(1);
+            if (collaboration) return { ok: false, reason: "collaboration_initialized" } as const;
             if (document.revision !== input.expectedRevision || input.expectedRevision !== change.afterRevision) {
               return { document, ok: false, reason: "revision_conflict" } as const;
             }
@@ -491,12 +520,12 @@ export function createDocumentChangeService(
             ) {
               return { ok: false, reason: "status_conflict" } as const;
             }
-            if (!validateDocumentChangeDraft(change.beforeSnapshotJson).ok) {
+            if (!validateStoredDocumentChangeSnapshot(change.beforeSnapshotJson).ok) {
               return { ok: false, reason: "status_conflict" } as const;
             }
             const projectState = validateProjectDocumentState(projectProfile, {
               metadataJson: change.beforeSnapshotJson.metadataJson,
-              readiness: change.beforeSnapshotJson.readiness,
+              readiness: document.readiness,
             }, {
               metadataJson: document.metadataJson,
               readiness: document.readiness,
@@ -513,7 +542,6 @@ export function createDocumentChangeService(
                 contentJson: change.beforeSnapshotJson.contentJson,
                 metadataJson: projectState.value.metadataJson,
                 plainText: extractPlainTextFromTiptap(change.beforeSnapshotJson.contentJson),
-                readiness: projectState.value.readiness,
                 revision: input.expectedRevision + 1,
                 updatedAt: now,
               })
@@ -522,6 +550,13 @@ export function createDocumentChangeService(
                 eq(documents.id, change.documentId),
                 eq(documents.status, "draft"),
                 eq(documents.revision, input.expectedRevision),
+                notExists(transaction
+                  .select({ generation: collaborationDocuments.generation })
+                  .from(collaborationDocuments)
+                  .where(and(
+                    eq(collaborationDocuments.workspaceId, context.workspaceId),
+                    eq(collaborationDocuments.documentId, change.documentId),
+                  ))),
               ))
               .returning();
             if (!restoredDocument) throw new DocumentChangeCasRollback(change.documentId);
@@ -577,6 +612,15 @@ async function latestRevisionConflict(
   context: Pick<RequestContext, "workspaceId">,
   documentId: string,
 ): Promise<DocumentChangeResult> {
+  const [collaboration] = await retrySqliteContention(async () => database
+    .select({ generation: collaborationDocuments.generation })
+    .from(collaborationDocuments)
+    .where(and(
+      eq(collaborationDocuments.workspaceId, context.workspaceId),
+      eq(collaborationDocuments.documentId, documentId),
+    ))
+    .limit(1));
+  if (collaboration) return { ok: false, reason: "collaboration_initialized" };
   const [document] = await retrySqliteContention(async () => database
     .select()
     .from(documents)
@@ -597,9 +641,6 @@ function validateDocumentChangeDraft(
   if (typeof draft.title !== "string" || draft.title.trim().length === 0 || draft.title.length > 500) {
     return { limit: "title", ok: false };
   }
-  if (!documentReadinessValues.includes(draft.readiness as DocumentReadiness)) {
-    return { limit: "readiness", ok: false };
-  }
   if (!isDocumentMetadata(draft.metadataJson)) return { limit: "metadata", ok: false };
   const tiptapValidation = validateTiptapResource(draft.contentJson);
   if (!tiptapValidation.ok) return { limit: tiptapValidation.limit, ok: false };
@@ -611,6 +652,23 @@ function validateDocumentChangeDraft(
     return { limit: "malformed", ok: false };
   }
   return { ok: true };
+}
+
+function validateStoredDocumentChangeSnapshot(
+  snapshot: DocumentChangeSnapshot,
+): { ok: true } | { limit: DraftValidationLimit; ok: false } {
+  if (!documentReadinessValues.includes(snapshot.readiness as DocumentReadiness)) {
+    return { limit: "malformed", ok: false };
+  }
+  return validateDocumentChangeDraft(snapshot);
+}
+
+function documentChangeSnapshotExceedsLimit(snapshot: DocumentChangeSnapshot) {
+  try {
+    return new TextEncoder().encode(JSON.stringify(snapshot)).byteLength > DOCUMENT_REQUEST_BODY_BYTES;
+  } catch {
+    return true;
+  }
 }
 
 function isDocumentMetadata(value: unknown): value is DocumentMetadata {

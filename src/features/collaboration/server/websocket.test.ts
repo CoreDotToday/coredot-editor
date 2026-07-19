@@ -24,6 +24,7 @@ import type {
   DurableUpdateReceipt,
 } from "../persistence";
 import { createCollaborationRoomName } from "../room-name";
+import { COLLABORATION_WORKFLOW_CHANGED_PAYLOAD } from "../workflow-notification";
 import { createHocuspocusProviderAdapter } from "../client/hocuspocus-provider-adapter";
 import { createCollaborationSessionStore } from "../client/session-store";
 import { createCollaborationSidecar } from "./create-server";
@@ -40,6 +41,77 @@ const documentId = "document:sidecar-test";
 const room = createCollaborationRoomName({ documentId, generation: 1, workspaceId });
 
 describe("the pinned Hocuspocus durable message lifecycle", () => {
+  it("lets a durable server command notify the exact loaded room without exposing workflow state", async () => {
+    const fixture = await createFixture({ append: async (input) => receipt(input) });
+    try {
+      const peer = await fixture.connect("principal:command-workflow-peer");
+      const peerStateless = vi.fn();
+      peer.provider.on("stateless", peerStateless);
+
+      fixture.publishWorkflowChanged();
+
+      await eventually(() => expect(peerStateless).toHaveBeenCalledWith({
+        payload: COLLABORATION_WORKFLOW_CHANGED_PAYLOAD,
+      }));
+    } finally {
+      await fixture.destroy();
+    }
+  });
+
+  it("broadcasts only a bounded server-owned workflow notification after durable invalidation", async () => {
+    const fixture = await createFixture({
+      append: async (input) => ({
+        ...receipt(input),
+        workflowChanged: updateContainsText(input.update, "invalidate approval"),
+      }),
+    });
+    try {
+      const writer = await fixture.connect("principal:workflow-writer");
+      const peer = await fixture.connect("principal:workflow-peer");
+      const peerStateless = vi.fn();
+      peer.provider.on("stateless", peerStateless);
+
+      writer.document.getText("test").insert(0, "invalidate approval");
+
+      await eventually(() => expect(peerStateless).toHaveBeenCalledWith({
+        payload: COLLABORATION_WORKFLOW_CHANGED_PAYLOAD,
+      }));
+      expect(COLLABORATION_WORKFLOW_CHANGED_PAYLOAD.length).toBeLessThanOrEqual(64);
+    } finally {
+      await fixture.destroy();
+    }
+  });
+
+  it("rejects client stateless attempts instead of rebroadcasting a spoofed workflow signal", async () => {
+    const fixture = await createFixture({
+      append: async (input) => ({
+        ...receipt(input),
+        workflowChanged: updateContainsText(input.update, "real server notification"),
+      }),
+    });
+    try {
+      const writer = await fixture.connect("principal:stateless-spoofer");
+      const validWriter = await fixture.connect("principal:workflow-writer");
+      const peer = await fixture.connect("principal:stateless-peer");
+      const peerStateless = vi.fn();
+      const writerClosed = vi.fn();
+      peer.provider.on("stateless", peerStateless);
+      writer.provider.on("close", writerClosed);
+
+      writer.provider.sendStateless(COLLABORATION_WORKFLOW_CHANGED_PAYLOAD);
+      await eventually(() => expect(writerClosed).toHaveBeenCalled());
+      expect(peerStateless).not.toHaveBeenCalled();
+
+      validWriter.document.getText("test").insert(0, "real server notification");
+
+      await eventually(() => expect(peerStateless).toHaveBeenCalledOnce());
+      expect(peerStateless).toHaveBeenCalledWith({
+        payload: COLLABORATION_WORKFLOW_CHANGED_PAYLOAD,
+      });
+    } finally {
+      await fixture.destroy();
+    }
+  });
   it("awaits the durable append before a peer can observe the Yjs update", async () => {
     const appendGate = deferred<DurableUpdateReceipt>();
     const fixture = await createFixture({
@@ -811,6 +883,9 @@ async function createFixture(options: {
     publishDurableUpdate(update: Uint8Array) {
       return sidecar.publishDurableUpdate({ workspaceId }, documentId, 1, update);
     },
+    publishWorkflowChanged() {
+      return sidecar.publishWorkflowChanged({ workspaceId }, documentId, 1);
+    },
     webSocketUrl: sidecar.webSocketUrl,
   };
 }
@@ -835,12 +910,23 @@ function receipt(input: AppendCollaborationUpdate, headSeq = 1): DurableUpdateRe
     generation: input.generation,
     headSeq,
     seq: headSeq,
+    workflowChanged: false,
   };
 }
 
 function hasYjsChanges(update: Uint8Array) {
   const decoded = Y.decodeUpdate(update);
   return decoded.structs.length > 0 || decoded.ds.clients.size > 0;
+}
+
+function updateContainsText(update: Uint8Array, expected: string) {
+  const document = new Y.Doc();
+  try {
+    Y.applyUpdate(document, update);
+    return document.getText("test").toString().includes(expected);
+  } finally {
+    document.destroy();
+  }
 }
 
 function createUpdate(value: string) {

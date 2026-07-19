@@ -14,6 +14,7 @@ export const REQUEST_BUDGET_POLICIES = Object.freeze({
   "documents.export-preview": { limit: 20, windowMs: 60_000 },
   "documents.export": { limit: 20, windowMs: 60_000 },
   "documents.import": { limit: 10, windowMs: 60_000 },
+  "documents.workflow": { limit: 60, windowMs: 60_000 },
 });
 export const REQUEST_BUDGET_PRUNE_INTERVAL_MS = 5 * 60_000;
 /** Keep expired buckets for at least five minutes so moderately skewed instances cannot recreate allowance. */

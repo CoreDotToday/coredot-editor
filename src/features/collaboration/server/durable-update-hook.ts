@@ -108,7 +108,9 @@ export function parseInboundCollaborationFrame(
     if (outerType === 5) {
       decoding.readVarString(decoder);
       if (decoding.hasContent(decoder)) throw invalidMessage();
-      return { kind: "other" };
+      // The server owns every stateless workflow notification. Reject all
+      // client-origin stateless frames before Hocuspocus can rebroadcast one.
+      throw invalidMessage();
     }
     throw invalidMessage();
   } catch (error) {
@@ -126,6 +128,7 @@ export function createDurableUpdateHooks(options: {
   now?: () => Date;
   onDurableApplyInterrupted?(room: string): ReturnTypeOrPromise<void>;
   onRoomRotated?(room: string): ReturnTypeOrPromise<void>;
+  onWorkflowChanged?(room: string): ReturnTypeOrPromise<void>;
   persistence: Pick<CollaborationPersistence, "appendAuthorizedClientUpdate">;
   refreshes: WeakMap<object, Promise<VerifiedCollaborationContext>>;
   reserveDocumentGrowth(
@@ -141,6 +144,7 @@ export function createDurableUpdateHooks(options: {
   const now = options.now ?? (() => new Date());
   const sequencer = createRoomSequencer();
   const heldReleases = new WeakMap<object, Array<() => void>>();
+  const heldWorkflowNotifications = new WeakMap<object, boolean[]>();
   const rotatedAfterApply = new WeakSet<object>();
   const inFlightAppends = new Set<Promise<unknown>>();
 
@@ -225,6 +229,11 @@ export function createDurableUpdateHooks(options: {
             throw error;
           }
           retainRelease(heldReleases, connection, release);
+          retainWorkflowNotification(
+            heldWorkflowNotifications,
+            connection,
+            receipt.workflowChanged,
+          );
           if (receipt.generation !== context.generation) rotatedAfterApply.add(connection);
           return receipt;
         } catch (error) {
@@ -253,6 +262,11 @@ export function createDurableUpdateHooks(options: {
     async after(connection: ConnectionLike) {
       options.finishAwareness(connection);
       shiftRelease(heldReleases, connection)?.();
+      if (shiftWorkflowNotification(heldWorkflowNotifications, connection)) {
+        await Promise.resolve()
+          .then(() => options.onWorkflowChanged?.(connection.document.name))
+          .catch(() => undefined);
+      }
       if (rotatedAfterApply.has(connection)) {
         rotatedAfterApply.delete(connection);
         options.blocked.add(connection);
@@ -374,6 +388,26 @@ function shiftRelease(
   const release = queue?.shift();
   if (queue?.length === 0) releases.delete(connection);
   return release;
+}
+
+function retainWorkflowNotification(
+  notifications: WeakMap<object, boolean[]>,
+  connection: object,
+  workflowChanged: boolean,
+) {
+  const queue = notifications.get(connection) ?? [];
+  queue.push(workflowChanged);
+  notifications.set(connection, queue);
+}
+
+function shiftWorkflowNotification(
+  notifications: WeakMap<object, boolean[]>,
+  connection: object,
+) {
+  const queue = notifications.get(connection);
+  const workflowChanged = queue?.shift() ?? false;
+  if (queue?.length === 0) notifications.delete(connection);
+  return workflowChanged;
 }
 
 function createRoomSequencer() {

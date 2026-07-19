@@ -317,9 +317,30 @@ describe("POST /api/documents/import", () => {
     expect(response.status).toBe(201);
     expect(createDocumentFromDraftIdempotently).toHaveBeenCalledWith(
       TEST_REQUEST_CONTEXT,
-      { contentJson, metadataJson: {}, readiness: "draft", title: "Contract Draft" },
+      { contentJson, metadataJson: {}, title: "Contract Draft" },
       "import_1234567890abcdef",
     );
     await expect(response.json()).resolves.toMatchObject({ document: { id: "doc_imported" }, replayed: false });
+  });
+
+  it("rejects readiness smuggling during import confirmation", async () => {
+    const request = new Request("http://localhost/api/documents/import", {
+      body: JSON.stringify({
+        action: "confirm",
+        contentJson: { type: "doc", content: [{ type: "paragraph" }] },
+        readiness: "approved",
+        title: "Smuggled import",
+      }),
+      headers: {
+        "Content-Type": "application/json",
+        "Idempotency-Key": "import_1234567890abcdef",
+      },
+      method: "POST",
+    });
+
+    const response = await POST(request);
+
+    expect(response.status).toBe(400);
+    expect(createDocumentFromDraftIdempotently).not.toHaveBeenCalled();
   });
 });

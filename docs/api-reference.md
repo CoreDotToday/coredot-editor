@@ -11,13 +11,19 @@ Workspace members can work with documents, imports/exports, AI Runs, Proposals, 
 | `/api/documents` | `GET` | List active document summaries with an opaque cursor, bounded limit, and Profile-derived typed filters. |
 | `/api/documents` | `POST` | Create a document; a full-draft request may use `Idempotency-Key` for replay-safe creation. |
 | `/api/documents/:id` | `GET` | Load one document. |
-| `/api/documents/:id` | `PUT` | Save title, content, readiness, and metadata with `expectedRevision`; a stale revision returns `409` and the latest saved document. |
-| `/api/documents/:id` | `DELETE` | Archive a document. |
+| `/api/documents/:id` | `PUT` | Save legacy title, content, and metadata with `expectedRevision`; readiness is rejected because workflow state has its own authority boundary. A stale revision returns `409` and the latest saved document. An initialized collaborative document returns `409 collaboration_initialized`. |
+| `/api/documents/:id/workflow` | `GET` | Read uncached server-authoritative readiness, document revision, and the current collaborative generation/head when present. |
+| `/api/documents/:id/workflow` | `POST` | Compare-and-set readiness. Approval additionally requires an exact observed collaborative head and is unsupported for unversioned legacy documents. |
+| `/api/documents/:id` | `DELETE` | Atomically archive a document and enqueue closure of its current collaboration room. Success reports `roomClosure` as `not_required`, `delivered`, or `pending`. |
 | `/api/documents/import` | `POST` | Convert a multipart `.docx` into an unsaved preview with warnings and a fidelity report, or confirm its JSON preview with an `Idempotency-Key` to create the document. |
 | `/api/documents/:id/export/preview` | `POST` | Inspect the draft's export fidelity before generating a file. |
 | `/api/documents/:id/export` | `POST` | Export the submitted draft as `.docx`; lossy output requires `acknowledgedLoss`, otherwise the route returns `409` with the fidelity report. |
 
 Import confirmation is deliberately separate from conversion so warnings are visible before persistence. Fidelity outcomes are `preserved`, `approximated`, or `removed`; they do not imply full Word layout parity.
+
+Non-approval workflow commands contain exactly `expectedReadiness` and `nextReadiness`. Approval contains exactly `expectedReadiness: "ready"`, `nextReadiness: "approved"`, and non-negative `observedHeadSeq`. The server validates the active Project Profile and performs the readiness compare-and-set in the same transaction. Collaborative approval also records the exact generation, head, Yjs state vector, and canonical content hash. A later changed Yjs update atomically invalidates that approval and returns readiness to `needs_review`; a canonical no-op does neither. Every successful collaborative HTTP transition atomically coalesces a durable notification job by Workspace/document. The job carries only exact generation, workflow revision fencing, and bounded delivery state; a sidecar retries the fixed stateless signal at least once without exposing readiness or document content. Notifications are only hints to re-read this endpoint.
+
+Archive success is durable even when the collaboration sidecar is temporarily unavailable. In that case `roomClosure: "pending"` means a bounded sidecar reconciler will retry the idempotent exact-generation room close. Clients must stop treating the archived room as writable regardless of immediate delivery status.
 
 ## Templates
 

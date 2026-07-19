@@ -71,11 +71,18 @@ import {
   DocumentSessionConflictError,
   DocumentSessionInvalidProfileError,
   DocumentSessionRequestError,
+  DocumentWorkflowRequestError,
   type DocumentSessionChange,
   type DocumentSessionHistoryChange,
   type DocumentSessionProposal,
+  type DocumentWorkflowErrorReason,
+  type DocumentWorkflowState,
 } from "@/features/documents/document-session-client";
 import { extractPlainTextFromTiptap } from "@/features/documents/tiptap-text";
+import {
+  createDocumentWorkflowNotificationBus,
+  type DocumentWorkflowNotificationBus,
+} from "@/features/documents/workflow-notification";
 import {
   EDITOR_LANGUAGE_STORAGE_KEY,
   editorLanguageOptions,
@@ -255,6 +262,7 @@ type RewriteResponse = {
 
 const MAX_CONCURRENT_SELECTION_COMMANDS = 5;
 const AUTOSAVE_DEBOUNCE_MS = 1000;
+export const DOCUMENT_WORKFLOW_RECOVERY_INTERVAL_MS = 30_000;
 const COMPACT_WORKSPACE_MEDIA_QUERY = "(max-width: 1279px)";
 const COMPACT_SIDEBAR_MEDIA_QUERY = "(max-width: 1023px)";
 const subscribeToNothing = () => () => undefined;
@@ -277,6 +285,18 @@ type ProposalStatusPatchPayload = {
   appliedMode?: AiProposalApplyMode;
   expectedStatus?: ShellProposal["status"];
   status: ShellProposal["status"];
+};
+
+type WorkflowFeedback =
+  | "approval_durability_pending"
+  | "legacy_approval_unsupported"
+  | "saved"
+  | DocumentWorkflowErrorReason;
+
+type WorkflowReadRequest = {
+  controller: AbortController;
+  documentId: string;
+  promise: Promise<DocumentWorkflowState | null>;
 };
 
 class ProposalStatusConflictError extends Error {
@@ -566,6 +586,21 @@ function DocumentShellContent({
   const serverContentSignatureRef = useRef(createProposalContentSignature(incomingDocument.contentJson));
   const serverRevisionRef = useRef(incomingDocument.revision);
   const [serverRevision, setServerRevision] = useState(incomingDocument.revision);
+  const initialWorkflowState = useMemo<DocumentWorkflowState | null>(() => isCollaborationMode
+    ? null
+    : Object.freeze({
+        collaboration: null,
+        documentId: document.id,
+        readiness: document.readiness ?? "draft",
+        revision: document.revision,
+      }), [document.id, document.readiness, document.revision, isCollaborationMode]);
+  const [workflowState, setWorkflowState] = useState<DocumentWorkflowState | null>(initialWorkflowState);
+  const workflowStateRef = useRef<DocumentWorkflowState | null>(initialWorkflowState);
+  const workflowReadRequestRef = useRef<WorkflowReadRequest | null>(null);
+  const workflowMutationControllerRef = useRef<AbortController | null>(null);
+  const workflowNotificationBusRef = useRef<DocumentWorkflowNotificationBus | null>(null);
+  const [workflowFeedback, setWorkflowFeedback] = useState<WorkflowFeedback | null>(null);
+  const [isWorkflowMutating, setIsWorkflowMutating] = useState(false);
   const [saveState, setSaveState] = useState<SaveState>("saved");
   const [projectProfileViolation, setProjectProfileViolation] = useState<ProjectProfileViolation | null>(null);
   const [saveConflict, setSaveConflict] = useState<{
@@ -710,7 +745,7 @@ function DocumentShellContent({
   const isSelectionCommandLimitReached = runningSelectionCommands.length >= MAX_CONCURRENT_SELECTION_COMMANDS;
   const isInternalNavigationBlocked = !isCollaborationMode && saveState !== "saved";
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     collaborationSnapshotRef.current = collaborationRuntime?.snapshot ?? null;
   }, [collaborationRuntime?.snapshot]);
 
@@ -751,6 +786,98 @@ function DocumentShellContent({
     serverRevisionRef.current = nextRevision;
     setServerRevision(nextRevision);
   }, []);
+  const adoptWorkflowState = useCallback((nextWorkflow: DocumentWorkflowState) => {
+    if (nextWorkflow.documentId !== documentAsyncScopeRef.current.documentId) return;
+    workflowStateRef.current = nextWorkflow;
+    setWorkflowState(nextWorkflow);
+    setDraft((currentDraft) => {
+      if (currentDraft.readiness === nextWorkflow.readiness) return currentDraft;
+      const nextDraft = { ...currentDraft, readiness: nextWorkflow.readiness };
+      draftRef.current = nextDraft;
+      return nextDraft;
+    });
+  }, []);
+  const refreshWorkflow = useCallback((): Promise<DocumentWorkflowState | null> => {
+    const currentRequest = workflowReadRequestRef.current;
+    if (currentRequest?.documentId === document.id) return currentRequest.promise;
+    if (workflowMutationControllerRef.current) return Promise.resolve(null);
+
+    const requestScope = documentAsyncScopeRef.current;
+    const controller = new AbortController();
+    const promise = (async () => {
+      try {
+        const result = await documentSessionClient.readWorkflow(document.id, { signal: controller.signal });
+        if (!isActiveDocumentAsyncScope(requestScope)) return null;
+        adoptWorkflowState(result.workflow);
+        setWorkflowFeedback(null);
+        return result.workflow;
+      } catch (error) {
+        if (!isActiveDocumentAsyncScope(requestScope) || controller.signal.aborted) return null;
+        setWorkflowFeedback(error instanceof DocumentWorkflowRequestError ? error.reason : "network_error");
+        return null;
+      } finally {
+        const activeRequest = workflowReadRequestRef.current;
+        if (activeRequest?.controller === controller) workflowReadRequestRef.current = null;
+      }
+    })();
+    workflowReadRequestRef.current = { controller, documentId: document.id, promise };
+    return promise;
+  }, [adoptWorkflowState, document.id, isActiveDocumentAsyncScope]);
+
+  useEffect(() => {
+    const recoverWorkflow = () => {
+      void refreshWorkflow();
+    };
+    if (isCollaborationMode) recoverWorkflow();
+    const notificationBus = createDocumentWorkflowNotificationBus({
+      onDocumentChanged: (changedDocumentId) => {
+        if (changedDocumentId === document.id) recoverWorkflow();
+      },
+    });
+    workflowNotificationBusRef.current = notificationBus;
+    window.addEventListener("focus", recoverWorkflow);
+    window.addEventListener("online", recoverWorkflow);
+    const intervalId = window.setInterval(recoverWorkflow, DOCUMENT_WORKFLOW_RECOVERY_INTERVAL_MS);
+
+    return () => {
+      window.removeEventListener("focus", recoverWorkflow);
+      window.removeEventListener("online", recoverWorkflow);
+      window.clearInterval(intervalId);
+      notificationBus.destroy();
+      if (workflowNotificationBusRef.current === notificationBus) {
+        workflowNotificationBusRef.current = null;
+      }
+      workflowReadRequestRef.current?.controller.abort();
+      workflowReadRequestRef.current = null;
+      workflowMutationControllerRef.current?.abort();
+      workflowMutationControllerRef.current = null;
+    };
+  }, [document.id, isCollaborationMode, refreshWorkflow]);
+
+  useEffect(() => {
+    const session = collaborationRuntime?.session;
+    if (!session) return;
+    return session.subscribeWorkflowChanged(() => {
+      void refreshWorkflow();
+    });
+  }, [collaborationRuntime?.session, refreshWorkflow]);
+
+  useEffect(() => {
+    if (
+      !collaborationRuntime?.session ||
+      !collaborationRuntime.snapshot.hasCompletedInitialSync ||
+      !collaborationRuntime.snapshot.transportSynced
+    ) {
+      return;
+    }
+    void refreshWorkflow();
+  }, [
+    collaborationRuntime?.session,
+    collaborationRuntime?.snapshot.hasCompletedInitialSync,
+    collaborationRuntime?.snapshot.status,
+    collaborationRuntime?.snapshot.transportSynced,
+    refreshWorkflow,
+  ]);
   const enterRevisionConflictRecovery = useCallback((serverDocument: DocumentSnapshot) => {
     saveRequestGenerationRef.current += 1;
     intentionalNavigationRef.current = false;
@@ -960,10 +1087,141 @@ function DocumentShellContent({
     else nextMetadata[key] = Array.isArray(value) ? [...value] : value;
     handleLegacyMetadataChange({ metadataJson: nextMetadata });
   }, [activeCollaborationFields, handleLegacyMetadataChange, isCollaborationMode]);
-  const handleReadinessChange = useCallback((next: DocumentReadiness) => {
-    if (isCollaborationMode) return;
-    handleLegacyMetadataChange({ readiness: next });
-  }, [handleLegacyMetadataChange, isCollaborationMode]);
+  const handleReadinessChange = useCallback(async (next: DocumentReadiness) => {
+    const initialWorkflow = workflowStateRef.current;
+    if (
+      !initialWorkflow ||
+      isWorkflowMutating ||
+      workflowMutationControllerRef.current ||
+      (!isCollaborationMode && (saveState !== "saved" || saveConflict !== null)) ||
+      next === initialWorkflow.readiness
+    ) return;
+    if (
+      isCollaborationMode && (
+        !collaborationRuntime?.snapshot.hasCompletedInitialSync ||
+        collaborationRuntime.snapshot.permission !== "write" ||
+        collaborationRuntime.snapshot.status === "fatal"
+      )
+    ) {
+      return;
+    }
+
+    const requestScope = documentAsyncScopeRef.current;
+    const controller = new AbortController();
+    const pendingRead = workflowReadRequestRef.current?.promise;
+    workflowMutationControllerRef.current = controller;
+    setIsWorkflowMutating(true);
+    setWorkflowFeedback(null);
+
+    const readAuthoritativeWorkflow = async () => {
+      const result = await documentSessionClient.readWorkflow(document.id, { signal: controller.signal });
+      if (!isActiveDocumentAsyncScope(requestScope)) return null;
+      adoptWorkflowState(result.workflow);
+      return result.workflow;
+    };
+
+    try {
+      if (pendingRead) await pendingRead;
+      if (!isActiveDocumentAsyncScope(requestScope) || controller.signal.aborted) return;
+      let expectedWorkflow = workflowStateRef.current;
+      if (!expectedWorkflow) return;
+
+      let command: Parameters<typeof documentSessionClient.updateWorkflow>[1];
+      if (next === "approved") {
+        expectedWorkflow = await readAuthoritativeWorkflow();
+        if (!expectedWorkflow) return;
+        if (expectedWorkflow.readiness !== "ready") {
+          setWorkflowFeedback("expected_readiness_conflict");
+          return;
+        }
+        if (!expectedWorkflow.collaboration) {
+          setWorkflowFeedback("legacy_approval_unsupported");
+          return;
+        }
+        const liveSnapshot = collaborationSnapshotRef.current;
+        if (
+          !liveSnapshot ||
+          liveSnapshot.status !== "synced" ||
+          !liveSnapshot.transportSynced ||
+          hasPendingCollaborationUpdates(liveSnapshot)
+        ) {
+          setWorkflowFeedback("approval_durability_pending");
+          return;
+        }
+        command = {
+          expectedReadiness: "ready",
+          nextReadiness: "approved",
+          observedHeadSeq: expectedWorkflow.collaboration.headSeq,
+        };
+      } else {
+        command = {
+          expectedReadiness: expectedWorkflow.readiness,
+          nextReadiness: next,
+        };
+      }
+
+      const result = await documentSessionClient.updateWorkflow(document.id, command, {
+        signal: controller.signal,
+      });
+      if (!isActiveDocumentAsyncScope(requestScope)) return;
+      adoptWorkflowState(result.workflow);
+      if (
+        !isCollaborationMode &&
+        expectedWorkflow.revision === serverRevisionRef.current &&
+        result.workflow.revision === expectedWorkflow.revision + 1
+      ) {
+        // Workflow and legacy body saves share one document revision. Only
+        // advance the body CAS when this command is provably the sole
+        // intervening revision; otherwise retain the stale revision so the
+        // next body save conflicts instead of overwriting an external edit.
+        adoptServerRevision(result.workflow.revision);
+      }
+      setWorkflowFeedback("saved");
+      try {
+        workflowNotificationBusRef.current?.publish(document.id);
+      } catch {
+        // The HTTP command already committed. Notification transports are
+        // hints only; explicit re-read and recovery polling remain active.
+      }
+      try {
+        await readAuthoritativeWorkflow();
+      } catch {
+        if (!controller.signal.aborted && isActiveDocumentAsyncScope(requestScope)) {
+          setWorkflowFeedback("workflow_unavailable");
+        }
+      }
+    } catch (error) {
+      if (!isActiveDocumentAsyncScope(requestScope) || controller.signal.aborted) return;
+      if (error instanceof DocumentWorkflowRequestError) {
+        if (error.workflow) adoptWorkflowState(error.workflow);
+        if (error.violation) setProjectProfileViolation(error.violation);
+        setWorkflowFeedback(error.reason);
+      } else {
+        setWorkflowFeedback("network_error");
+      }
+      try {
+        await readAuthoritativeWorkflow();
+      } catch {
+        // Preserve the stable command error while a later focus/online/poll
+        // recovery retries the authoritative workflow read.
+      }
+    } finally {
+      if (workflowMutationControllerRef.current === controller) {
+        workflowMutationControllerRef.current = null;
+      }
+      if (isActiveDocumentAsyncScope(requestScope)) setIsWorkflowMutating(false);
+    }
+  }, [
+    adoptServerRevision,
+    adoptWorkflowState,
+    collaborationRuntime,
+    document.id,
+    isActiveDocumentAsyncScope,
+    isCollaborationMode,
+    isWorkflowMutating,
+    saveConflict,
+    saveState,
+  ]);
 
   const handleLanguageChange = useCallback((nextLanguage: string) => {
     if (!isEditorLanguage(nextLanguage)) {
@@ -1236,7 +1494,12 @@ function DocumentShellContent({
   ]);
 
   const saveDraft = useCallback(async () => {
-    if (isCollaborationMode || saveConflict) return;
+    if (
+      isCollaborationMode
+      || saveConflict
+      || isWorkflowMutating
+      || workflowMutationControllerRef.current
+    ) return;
     const requestScope = documentAsyncScopeRef.current;
     const requestGeneration = saveRequestGenerationRef.current + 1;
     saveRequestGenerationRef.current = requestGeneration;
@@ -1283,6 +1546,7 @@ function DocumentShellContent({
     enterRevisionConflictRecovery,
     isActiveDocumentAsyncScope,
     isCollaborationMode,
+    isWorkflowMutating,
     saveConflict,
   ]);
 
@@ -2140,6 +2404,50 @@ function DocumentShellContent({
   }, [conversations]);
 
   const selectedTemplateName = selectedTemplate?.name ?? "";
+  const workflowReadiness = workflowState?.readiness ?? draft.readiness;
+  const collaborationApprovalIsDurable = Boolean(
+    collaborationRuntime?.snapshot.status === "synced" &&
+    collaborationRuntime.snapshot.transportSynced &&
+    !hasPendingCollaborationUpdates(collaborationRuntime.snapshot),
+  );
+  const workflowControlEnabled = Boolean(
+    workflowState &&
+    !isWorkflowMutating &&
+    (isCollaborationMode || (saveState === "saved" && saveConflict === null)) &&
+    (
+      !isCollaborationMode ||
+      (
+        collaborationRuntime?.snapshot.hasCompletedInitialSync &&
+        collaborationRuntime.snapshot.permission === "write" &&
+        collaborationRuntime.snapshot.status !== "fatal"
+      )
+    ),
+  );
+  const workflowDescription = workflowReadiness === "ready" && isCollaborationMode && !collaborationApprovalIsDurable
+      ? messages.metadataPanel.readinessApprovalDurability
+      : messages.metadataPanel.readinessServerAuthority;
+  const workflowFeedbackMessage = isWorkflowMutating
+    ? messages.metadataPanel.readinessSaving
+    : workflowFeedback === "saved"
+      ? messages.metadataPanel.readinessSaved
+      : workflowFeedback === "approval_durability_pending"
+        ? messages.metadataPanel.readinessApprovalDurability
+        : workflowFeedback === "legacy_approval_unsupported"
+          ? messages.metadataPanel.readinessApprovalLegacyUnsupported
+          : workflowFeedback === "expected_readiness_conflict" || workflowFeedback === "head_conflict"
+            ? messages.metadataPanel.readinessConflict
+            : workflowFeedback === "forbidden"
+              ? messages.metadataPanel.readinessForbidden
+              : workflowFeedback === "invalid_project_profile"
+                ? messages.metadataPanel.readinessInvalidProfile
+                : workflowFeedback
+                  ? messages.metadataPanel.readinessUnavailable
+                  : !workflowState && isCollaborationMode
+                    ? messages.metadataPanel.readinessChecking
+                    : "";
+  const workflowFeedbackKind = workflowFeedback && (
+    workflowFeedback !== "saved" && workflowFeedback !== "approval_durability_pending"
+  ) ? "error" as const : "status" as const;
   const inlineSuggestions = useMemo(
     () =>
       reviewProposals
@@ -2196,7 +2504,7 @@ function DocumentShellContent({
       document: {
         id: document.id,
         metadata: draft.metadataJson,
-        readiness: draft.readiness,
+        readiness: workflowReadiness,
         text: extractPlainTextFromTiptap(contentJsonForSnapshot),
         title: titleForSnapshot || messages.shell.untitledDocument,
       },
@@ -2222,7 +2530,7 @@ function DocumentShellContent({
     document.id,
     draft.contentJson,
     draft.metadataJson,
-    draft.readiness,
+    workflowReadiness,
     draft.title,
     initialTemplate,
     messages.shell.untitledDocument,
@@ -2372,6 +2680,11 @@ function DocumentShellContent({
         ) : null}
 
         <DocumentMetadataPanel
+          isReadinessOptionDisabled={(next) => next === "approved" && (
+            workflowState?.collaboration === null ||
+            !isCollaborationMode ||
+            !collaborationApprovalIsDurable
+          )}
           language={language}
           metadata={activeCollaborationFields ? collaborationMetadata : draft.metadataJson}
           metadataDisabled={isCollaborationMode && (
@@ -2382,11 +2695,11 @@ function DocumentShellContent({
           onMetadataFieldChange={handleMetadataFieldChange}
           onReadinessChange={handleReadinessChange}
           profile={projectProfile}
-          readiness={draft.readiness}
-          readinessDescription={isCollaborationMode
-            ? messages.metadataPanel.readinessServerAuthority
-            : undefined}
-          readinessDisabled={isCollaborationMode}
+          readiness={workflowReadiness}
+          readinessDescription={workflowDescription}
+          readinessDisabled={!workflowControlEnabled}
+          readinessFeedback={workflowFeedbackMessage}
+          readinessFeedbackKind={workflowFeedbackKind}
         />
 
         <PromptTemplatePanel
@@ -2659,6 +2972,7 @@ function DocumentShellContent({
               className="inline-flex h-8 shrink-0 items-center justify-center rounded-md bg-zinc-950 px-3 text-sm font-medium text-white transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-300"
               disabled={
                 isCollaborationMode
+                || isWorkflowMutating
                 || saveConflict !== null
                 || saveState === "saved"
                 || saveState === "saving"

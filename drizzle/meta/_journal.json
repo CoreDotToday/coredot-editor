@@ -120,6 +120,20 @@
       "when": 1784732400000,
       "tag": "0016_collaboration_noop_receipts",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "6",
+      "when": 1784818800000,
+      "tag": "0017_nice_roulette",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "6",
+      "when": 1784905200000,
+      "tag": "0018_lethal_mongu",
+      "breakpoints": true
     }
   ]
 }

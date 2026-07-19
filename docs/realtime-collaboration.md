@@ -66,7 +66,7 @@ The Next.js application issues collaboration capabilities and owns normal HTTP a
 
 ### Collaboration Session
 
-The browser uses one `CollaborationSession` interface. Callers may observe connection status, the synchronized Y.Doc, verified participants, durable head acknowledgements, and lifecycle events. Callers may connect, disconnect, request a token refresh, and flush pending updates before a snapshot-dependent command.
+The browser uses one `CollaborationSession` interface. Callers may observe connection status, the synchronized Y.Doc, verified participants, durable update acknowledgements, and bounded server workflow-change events. Callers may connect, disconnect, request a token refresh, and flush pending updates before a snapshot-dependent command. The session does not infer a durable `headSeq` from client Yjs state; snapshot-dependent workflow commands obtain it from the authoritative HTTP workflow read.
 
 The interface does not expose Hocuspocus configuration or provider events. A Hocuspocus adapter translates those details. Disabled mode keeps the existing single-user document session rather than pretending to be a collaborative adapter.
 
@@ -181,6 +181,7 @@ Approval is version-bound. A `document_approvals` record includes:
 - Approving Principal and request id.
 - Approval time.
 - Invalidation update sequence, Principal, and time when superseded.
+- Explicit revocation time, Principal, and request id when an authorized workflow command moves away from `approved` without a document edit.
 
 The effective `documents.readiness` remains server-owned.
 
@@ -265,7 +266,13 @@ Approval binds to the current collaborative head. The first later change to body
 
 Clients re-read workflow state after a notification. Reconnection, tab focus, and bounded periodic revalidation recover a missed notification. The SQL workflow row remains authoritative.
 
-Archiving or otherwise removing document access closes the room with a bounded retry policy. A client may copy unsynchronized local content but cannot continue writing to the archived canonical document.
+The editor reads and changes this state only through `GET` and `POST /api/documents/{id}/workflow`. Legacy document autosave no longer carries readiness. A collaborative approval remains disabled until the first Yjs sync has completed, the current capability is writable, the transport is synchronized, and every local update has a durable acknowledgement. Immediately before approval, the browser performs a fresh workflow GET and sends that response's `headSeq`; it never guesses a sequence from the Y.Doc. A concurrent change between GET and POST is rejected by the server head/state precondition, after which the client reads the workflow again.
+
+Successful browser workflow commands publish only `{v: 1, documentId}` through a same-origin `BroadcastChannel` plus a same-window event. Every successful collaborative HTTP workflow transition also upserts a durable notification job in the same SQL transaction. The job table has one row per Workspace/document across all generation rotations; a newer transition replaces the stored exact generation and workflow revision, resets its bounded retry state, and compare-and-set fencing prevents an older in-flight delivery from deleting the replacement. After commit, a Web process with a real local gateway may deliver immediately. The normal separate-process deployment leaves the coalesced job pending for a bounded sidecar worker, which publishes to the stored generation without re-resolving current state. An unloaded room counts as delivered because a later connection reads authoritative HTTP workflow state.
+
+The sidecar publication API accepts no caller-provided payload and emits only the exact stateless constant `{"type":"workflow_changed","v":1}`. Delivery is at least once and duplicate-safe because receivers treat every signal as a hint to re-read. Neither browser nor sidecar notification contains readiness, identity, metadata, authorization, or document content. Channel construction or delivery can be unavailable, and a tab may miss an event while suspended; online/focus recovery, collaboration reconnect recovery, and a non-overlapping 30-second poll bound that staleness. All channel, window, session, timer, and request listeners are removed on document rotation or unmount.
+
+Archiving commits the document status change and an exact-current-generation room-closure job in one transaction. The HTTP process attempts delivery only through a real gateway; it never reports a no-op as a closed room. A sidecar reconciler claims due jobs in bounded batches and passes each job's stored generation to a dedicated archive-room gateway. That gateway builds and closes the exact local Hocuspocus room idempotently; it never reloads or substitutes whichever generation happens to be current during a later retry. Failures use capped exponential backoff, and permanently exhausted work remains available for operator inspection after the bounded attempt limit. Shutdown first stops and awaits this worker, then drains the sidecar and closes the database. An archive response distinguishes `not_required`, `delivered`, and durable `pending` closure without exposing the room name or generation. A client may copy unsynchronized local content but cannot continue writing to the archived canonical document.
 
 ## Authentication And Workspace Isolation
 
@@ -352,7 +359,7 @@ Hocuspocus v4 requires Node.js 22 or later. The application engine, CI, type pac
 
 Deploy the Next.js Web process and collaboration sidecar with separate environment allowlists. Only the Web process receives `COLLABORATION_CAPABILITY_SIGNING_KEY_RING`, which contains private signing JWKs. Only the sidecar receives `COLLABORATION_CAPABILITY_VERIFICATION_KEY_RING`, which contains public verification JWKs. The sidecar fails closed if non-empty private signer material is present; do not share one unrestricted environment or secret bundle between the two processes.
 
-The sidecar exposes separate liveness and readiness endpoints. Readiness requires valid configuration and verification keys, the expected DB migration, a non-destructive storage probe, and healthy persistence/projection workers. Next.js readiness includes the sidecar check with a bounded timeout when collaboration is enabled.
+The sidecar exposes separate liveness and readiness endpoints. Readiness requires valid configuration and verification keys, the expected DB migration, a non-destructive storage probe, and healthy room-closure and workflow-notification reconcilers. Both bounded workers run immediately, retry on separate schedules, and must stop before sidecar drain and database close. Next.js readiness includes the sidecar check with a bounded timeout when collaboration is enabled.
 
 Graceful shutdown follows:
 

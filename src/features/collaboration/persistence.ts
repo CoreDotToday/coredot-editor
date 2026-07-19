@@ -78,6 +78,8 @@ export type DurableUpdateReceipt = {
   generation: number;
   headSeq: number;
   seq: number;
+  /** True only when this append atomically changed server-owned workflow state. */
+  workflowChanged: boolean;
 };
 
 export type DurableUpdateReplayIdentity = {
@@ -312,6 +314,7 @@ export function createCollaborationPersistence(
             generation: loaded.generation,
             headSeq: loaded.headSeq,
             seq: loaded.headSeq,
+            workflowChanged: false,
           };
         }
 
@@ -412,9 +415,10 @@ export function createCollaborationPersistence(
             eq(documentApprovals.workspaceId, scope.workspaceId),
             eq(documentApprovals.documentId, input.documentId),
             isNull(documentApprovals.invalidatedAt),
+            isNull(documentApprovals.revokedAt),
           ))
           .returning({ id: documentApprovals.id });
-        await transaction
+        const readinessChanged = await transaction
           .update(documents)
           .set({
             readiness: "needs_review",
@@ -427,7 +431,8 @@ export function createCollaborationPersistence(
             eq(documents.workspaceId, scope.workspaceId),
             eq(documents.id, input.documentId),
             invalidated[0] ? undefined : eq(documents.readiness, "approved"),
-          ));
+          ))
+          .returning({ readiness: documents.readiness });
 
         return {
           checksum: updateChecksum,
@@ -435,6 +440,7 @@ export function createCollaborationPersistence(
           generation: appendGeneration,
           headSeq: seq,
           seq,
+          workflowChanged: invalidated.length > 0 || readinessChanged.length > 0,
         };
         }));
       });
@@ -1185,6 +1191,7 @@ function durableReceipt(receipt: StoredIdempotentReceipt): DurableUpdateReceipt 
     generation: stored.generation,
     headSeq,
     seq: headSeq,
+    workflowChanged: false,
   };
 }
 

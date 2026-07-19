@@ -13,6 +13,13 @@ export type DocumentMetadata = Record<string, DocumentMetadataValue>;
 export type CollaborationUpdateOriginKind = "client" | "migration" | "proposal_command" | "repair" | "undo_command";
 export type CollaborationActionType = "proposal_apply" | "proposal_batch_apply" | "repair" | "selective_undo";
 export type CollaborationActionStatus = "applied" | "failed" | "pending";
+export type CollaborationRoomClosureReason = "archived";
+export type CollaborationRoomClosureStatus = "exhausted" | "pending";
+export type CollaborationRoomClosureFailureCategory = "delivery_failed";
+export const COLLABORATION_ROOM_CLOSURE_MAX_ATTEMPTS = 5;
+export type CollaborationWorkflowNotificationStatus = "exhausted" | "pending";
+export type CollaborationWorkflowNotificationFailureCategory = "delivery_failed";
+export const COLLABORATION_WORKFLOW_NOTIFICATION_MAX_ATTEMPTS = 5;
 export const COLLABORATION_STORAGE_LIMITS = {
   codecBytes: 10 * 1024 * 1024,
   correctnessKeyBytes: 256,
@@ -444,6 +451,149 @@ export const collaborationDocuments = sqliteTable(
   ],
 );
 
+export const collaborationRoomClosureJobs = sqliteTable(
+  "collaboration_room_closure_jobs",
+  {
+    workspaceId: text("workspace_id").notNull(),
+    documentId: text("document_id").notNull(),
+    generation: integer("generation").notNull(),
+    reason: text("reason", { enum: ["archived"] }).notNull(),
+    status: text("status", { enum: ["pending", "exhausted"] }).notNull().default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    nextAttemptAt: integer("next_attempt_at", { mode: "timestamp_ms" }),
+    failureCategory: text("failure_category", { enum: ["delivery_failed"] }),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+    updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.workspaceId, table.documentId, table.generation, table.reason],
+      name: "collaboration_room_closure_jobs_pk",
+    }),
+    index("collaboration_room_closure_jobs_due_idx").on(
+      table.status,
+      table.nextAttemptAt,
+      table.createdAt,
+      table.workspaceId,
+      table.documentId,
+      table.generation,
+    ),
+    foreignKey({
+      columns: [table.workspaceId, table.documentId, table.generation],
+      foreignColumns: [
+        collaborationDocuments.workspaceId,
+        collaborationDocuments.documentId,
+        collaborationDocuments.generation,
+      ],
+      name: "collaboration_room_closure_jobs_document_fk",
+    }).onDelete("cascade"),
+    check(
+      "collaboration_room_closure_jobs_generation_check",
+      sql`typeof(${table.generation}) = 'integer' and ${table.generation} between 1 and 9007199254740991`,
+    ),
+    check(
+      "collaboration_room_closure_jobs_reason_check",
+      sql`${table.reason} = 'archived'`,
+    ),
+    check(
+      "collaboration_room_closure_jobs_retry_state_check",
+      sql`(
+          ${table.status} = 'pending'
+          and typeof(${table.attempts}) = 'integer'
+          and ${table.attempts} between 0 and ${sql.raw(String(COLLABORATION_ROOM_CLOSURE_MAX_ATTEMPTS - 1))}
+          and typeof(${table.nextAttemptAt}) = 'integer'
+          and ${table.nextAttemptAt} >= ${table.createdAt}
+          and (
+            (${table.attempts} = 0 and ${table.failureCategory} is null)
+            or (${table.attempts} > 0 and ${table.failureCategory} = 'delivery_failed')
+          )
+        ) or (
+          ${table.status} = 'exhausted'
+          and ${table.attempts} = ${sql.raw(String(COLLABORATION_ROOM_CLOSURE_MAX_ATTEMPTS))}
+          and ${table.nextAttemptAt} is null
+          and ${table.failureCategory} = 'delivery_failed'
+        )`,
+    ),
+    check(
+      "collaboration_room_closure_jobs_timestamps_check",
+      sql`typeof(${table.createdAt}) = 'integer'
+        and typeof(${table.updatedAt}) = 'integer'
+        and ${table.updatedAt} >= ${table.createdAt}`,
+    ),
+  ],
+);
+
+export const collaborationWorkflowNotificationJobs = sqliteTable(
+  "collaboration_workflow_notification_jobs",
+  {
+    workspaceId: text("workspace_id").notNull(),
+    documentId: text("document_id").notNull(),
+    generation: integer("generation").notNull(),
+    workflowRevision: integer("workflow_revision").notNull(),
+    status: text("status", { enum: ["pending", "exhausted"] }).notNull().default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    nextAttemptAt: integer("next_attempt_at", { mode: "timestamp_ms" }),
+    failureCategory: text("failure_category", { enum: ["delivery_failed"] }),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+    updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.workspaceId, table.documentId],
+      name: "collaboration_workflow_notification_jobs_pk",
+    }),
+    index("collaboration_workflow_notification_jobs_due_idx").on(
+      table.status,
+      table.nextAttemptAt,
+      table.createdAt,
+      table.workspaceId,
+      table.documentId,
+      table.generation,
+    ),
+    foreignKey({
+      columns: [table.workspaceId, table.documentId, table.generation],
+      foreignColumns: [
+        collaborationDocuments.workspaceId,
+        collaborationDocuments.documentId,
+        collaborationDocuments.generation,
+      ],
+      name: "collaboration_workflow_notification_jobs_document_fk",
+    }).onDelete("cascade"),
+    check(
+      "collaboration_workflow_notification_jobs_version_check",
+      sql`typeof(${table.generation}) = 'integer'
+        and ${table.generation} between 1 and 9007199254740991
+        and typeof(${table.workflowRevision}) = 'integer'
+        and ${table.workflowRevision} between 1 and 9007199254740991`,
+    ),
+    check(
+      "collaboration_workflow_notification_jobs_retry_state_check",
+      sql`(
+          ${table.status} = 'pending'
+          and typeof(${table.attempts}) = 'integer'
+          and ${table.attempts} between 0 and ${sql.raw(String(COLLABORATION_WORKFLOW_NOTIFICATION_MAX_ATTEMPTS - 1))}
+          and typeof(${table.nextAttemptAt}) = 'integer'
+          and ${table.nextAttemptAt} >= ${table.createdAt}
+          and (
+            (${table.attempts} = 0 and ${table.failureCategory} is null)
+            or (${table.attempts} > 0 and ${table.failureCategory} = 'delivery_failed')
+          )
+        ) or (
+          ${table.status} = 'exhausted'
+          and ${table.attempts} = ${sql.raw(String(COLLABORATION_WORKFLOW_NOTIFICATION_MAX_ATTEMPTS))}
+          and ${table.nextAttemptAt} is null
+          and ${table.failureCategory} = 'delivery_failed'
+        )`,
+    ),
+    check(
+      "collaboration_workflow_notification_jobs_timestamps_check",
+      sql`typeof(${table.createdAt}) = 'integer'
+        and typeof(${table.updatedAt}) = 'integer'
+        and ${table.updatedAt} >= ${table.createdAt}`,
+    ),
+  ],
+);
+
 export const collaborationActions = sqliteTable(
   "collaboration_actions",
   {
@@ -753,11 +903,14 @@ export const documentApprovals = sqliteTable(
     invalidatedSeq: integer("invalidated_seq"),
     invalidatedPrincipalId: text("invalidated_principal_id"),
     invalidatedAt: integer("invalidated_at", { mode: "timestamp_ms" }),
+    revokedAt: integer("revoked_at", { mode: "timestamp_ms" }),
+    revokedPrincipalId: text("revoked_principal_id"),
+    revokedRequestId: text("revoked_request_id"),
   },
   (table) => [
     uniqueIndex("document_approvals_active_document_unique")
       .on(table.workspaceId, table.documentId)
-      .where(sql`${table.invalidatedAt} is null`),
+      .where(sql`${table.invalidatedAt} is null and ${table.revokedAt} is null`),
     index("document_approvals_workspace_document_generation_approved_id_idx").on(
       table.workspaceId,
       table.documentId,
@@ -799,6 +952,35 @@ export const documentApprovals = sqliteTable(
           and typeof(${table.invalidatedSeq}) = 'integer'
           and ${table.invalidatedSeq} between 1 and 9007199254740991
           and ${table.invalidatedSeq} > ${table.approvedHeadSeq})`,
+    ),
+    check(
+      "document_approvals_revocation_check",
+      sql`(
+          ${table.revokedAt} is null
+          and ${table.revokedPrincipalId} is null
+          and ${table.revokedRequestId} is null
+        ) or (
+          ${table.revokedAt} is not null
+          and typeof(${table.revokedAt}) = 'integer'
+          and ${table.revokedAt} >= ${table.approvedAt}
+          and typeof(${table.revokedPrincipalId}) = 'text'
+          and ${table.revokedPrincipalId} = trim(
+            ${table.revokedPrincipalId},
+            ${COLLABORATION_KEY_BOUNDARY_WHITESPACE_SQL}
+          )
+          and length(cast(${table.revokedPrincipalId} as blob)) between 1
+            and ${COLLABORATION_STORAGE_LIMIT_SQL.correctnessKeyBytes}
+          and typeof(${table.revokedRequestId}) = 'text'
+          and ${table.revokedRequestId} = trim(
+            ${table.revokedRequestId},
+            ${COLLABORATION_KEY_BOUNDARY_WHITESPACE_SQL}
+          )
+          and length(cast(${table.revokedRequestId} as blob)) between 1
+            and ${COLLABORATION_STORAGE_LIMIT_SQL.correctnessKeyBytes}
+          and ${table.invalidatedSeq} is null
+          and ${table.invalidatedPrincipalId} is null
+          and ${table.invalidatedAt} is null
+        )`,
     ),
   ],
 );
@@ -1125,6 +1307,10 @@ export type NewDocumentChangeRecord = typeof documentChanges.$inferInsert;
 export type DocumentChangeProposalRecord = typeof documentChangeProposals.$inferSelect;
 export type CollaborationDocumentRecord = typeof collaborationDocuments.$inferSelect;
 export type NewCollaborationDocumentRecord = typeof collaborationDocuments.$inferInsert;
+export type CollaborationRoomClosureJobRecord = typeof collaborationRoomClosureJobs.$inferSelect;
+export type NewCollaborationRoomClosureJobRecord = typeof collaborationRoomClosureJobs.$inferInsert;
+export type CollaborationWorkflowNotificationJobRecord = typeof collaborationWorkflowNotificationJobs.$inferSelect;
+export type NewCollaborationWorkflowNotificationJobRecord = typeof collaborationWorkflowNotificationJobs.$inferInsert;
 export type CollaborationUpdateRecord = typeof collaborationUpdates.$inferSelect;
 export type NewCollaborationUpdateRecord = typeof collaborationUpdates.$inferInsert;
 export type CollaborationNoopReceiptRecord = typeof collaborationNoopReceipts.$inferSelect;

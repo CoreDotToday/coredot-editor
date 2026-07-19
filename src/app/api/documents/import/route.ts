@@ -28,7 +28,7 @@ const confirmImportSchema = z.object({
     content: z.array(z.unknown()).optional(),
   }),
   title: z.string().trim().min(1).max(500),
-});
+}).strict();
 
 const postHandler = createProtectedRouteHandler(async (context, request: Request) => {
   const deadline = Date.now() + RESOURCE_LIMITS.operationMs;
@@ -52,7 +52,6 @@ const postHandler = createProtectedRouteHandler(async (context, request: Request
     const creation = await createDocumentFromDraftIdempotently(context, {
       contentJson: result.data.contentJson,
       metadataJson: {},
-      readiness: "draft",
       title: result.data.title,
     }, creationKey.data);
     return NextResponse.json({

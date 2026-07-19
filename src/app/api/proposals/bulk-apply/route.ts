@@ -16,8 +16,8 @@ const proposalBatchApplyPayloadSchema = z.object({
   proposals: z.array(z.object({
     id: z.string().min(1),
     appliedMode: z.enum(["replace", "insert_below"]),
-  })).min(1),
-});
+  }).strict()).min(1),
+}).strict();
 
 const optionsHandler = createProtectedOptionsHandler(["POST"]);
 const postHandler = createProtectedRouteHandler(async (requestContext, request: Request) => {
@@ -40,7 +40,6 @@ const postHandler = createProtectedRouteHandler(async (requestContext, request: 
       title: result.data.document.title,
       contentJson: result.data.document.contentJson,
       metadataJson: result.data.document.metadataJson,
-      readiness: result.data.document.readiness,
     },
     expectedRevision: result.data.expectedRevision,
     proposals: result.data.proposals.map((proposal) => ({

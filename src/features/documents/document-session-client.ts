@@ -14,6 +14,55 @@ export type DocumentSessionDraft = {
   readiness: DocumentReadiness;
 };
 
+export type DocumentSessionSaveDraft = Omit<DocumentSessionDraft, "readiness">;
+
+export type DocumentWorkflowState = Readonly<{
+  collaboration: Readonly<{
+    generation: number;
+    headSeq: number;
+  }> | null;
+  documentId: string;
+  readiness: DocumentReadiness;
+  revision: number;
+}>;
+
+export type DocumentWorkflowCommand =
+  | {
+      expectedReadiness: DocumentReadiness;
+      nextReadiness: Exclude<DocumentReadiness, "approved">;
+    }
+  | {
+      expectedReadiness: "ready";
+      nextReadiness: "approved";
+      observedHeadSeq: number;
+    };
+
+export type DocumentWorkflowResult = Readonly<{
+  workflow: DocumentWorkflowState;
+}>;
+
+export type DocumentWorkflowErrorReason =
+  | "aborted"
+  | "collaboration_unavailable"
+  | "expected_readiness_conflict"
+  | "forbidden"
+  | "head_conflict"
+  | "invalid_project_profile"
+  | "legacy_approval_unsupported"
+  | "malformed_response"
+  | "network_error"
+  | "not_found"
+  | "timeout"
+  | "unknown"
+  | "workflow_unavailable";
+
+export type DocumentWorkflowRequestOptions = Readonly<{
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}>;
+
+export const DOCUMENT_WORKFLOW_CLIENT_TIMEOUT_MS = 15_000;
+
 export type DocumentSessionDocument = DocumentSessionDraft & {
   id: string;
   revision: number;
@@ -73,12 +122,12 @@ export type DocumentSaveResult =
 
 export type ProposalApplyPayload = {
   appliedMode: ProposalApplyMode;
-  document: DocumentSessionDraft & { id: string };
+  document: DocumentSessionSaveDraft & { id: string };
   expectedRevision: number;
 };
 
 export type ProposalBatchApplyPayload = {
-  document: DocumentSessionDraft & { id: string };
+  document: DocumentSessionSaveDraft & { id: string };
   expectedRevision: number;
   proposals: Array<{ appliedMode: ProposalApplyMode; id: string }>;
 };
@@ -114,6 +163,26 @@ export class DocumentSessionInvalidProfileError extends DocumentSessionRequestEr
   ) {
     super(status, body);
     this.name = "DocumentSessionInvalidProfileError";
+  }
+}
+
+export class DocumentWorkflowRequestError extends DocumentSessionRequestError {
+  constructor(
+    status: number,
+    body: Record<string, unknown>,
+    readonly reason: DocumentWorkflowErrorReason,
+    readonly workflow: DocumentWorkflowState | null = null,
+    readonly violation: ProjectProfileViolation | null = null,
+  ) {
+    super(status, body);
+    this.name = "DocumentWorkflowRequestError";
+  }
+}
+
+class DocumentWorkflowTimeoutError extends Error {
+  constructor() {
+    super("Document workflow request timed out");
+    this.name = "DocumentWorkflowTimeoutError";
   }
 }
 
@@ -174,7 +243,12 @@ export function createDocumentSessionClient(request: RequestFunction = fetch) {
           request,
           `/api/documents/${encodeURIComponent(documentId)}`,
           "PUT",
-          { ...localDraft, expectedRevision },
+          {
+            contentJson: localDraft.contentJson,
+            expectedRevision,
+            metadataJson: localDraft.metadataJson,
+            title: localDraft.title,
+          },
         );
       } catch {
         return { kind: "failed", status: null };
@@ -200,13 +274,17 @@ export function createDocumentSessionClient(request: RequestFunction = fetch) {
     applyProposal(proposalId: string, payload: ProposalApplyPayload) {
       return requestChange(
         `/api/proposals/${encodeURIComponent(proposalId)}/apply`,
-        payload,
+        { ...payload, document: legacyWriterDocument(payload.document) },
         "single",
       );
     },
 
     applyProposalBatch(payload: ProposalBatchApplyPayload) {
-      return requestChange("/api/proposals/bulk-apply", payload, "plural");
+      return requestChange(
+        "/api/proposals/bulk-apply",
+        { ...payload, document: legacyWriterDocument(payload.document) },
+        "plural",
+      );
     },
 
     undoChange(changeId: string, expectedRevision: number) {
@@ -241,7 +319,7 @@ export function createDocumentSessionClient(request: RequestFunction = fetch) {
     },
 
     async createFromDraft(
-      draft: DocumentSessionDraft,
+      draft: DocumentSessionSaveDraft,
       creationKey: string,
     ): Promise<{ document: DocumentSessionDocument; replayed: boolean }> {
       const response = await request("/api/documents", {
@@ -250,7 +328,7 @@ export function createDocumentSessionClient(request: RequestFunction = fetch) {
           "Content-Type": "application/json",
           "Idempotency-Key": creationKey,
         },
-        body: JSON.stringify(draft),
+        body: JSON.stringify(legacyWriterDraft(draft)),
       });
       const body = await readBody(response);
       if (
@@ -262,7 +340,133 @@ export function createDocumentSessionClient(request: RequestFunction = fetch) {
       }
       return { document: body.document, replayed: body.replayed };
     },
+
+    async readWorkflow(
+      documentId: string,
+      options: DocumentWorkflowRequestOptions = {},
+    ): Promise<DocumentWorkflowResult> {
+      return requestWorkflow(documentId, "GET", undefined, options);
+    },
+
+    async updateWorkflow(
+      documentId: string,
+      command: DocumentWorkflowCommand,
+      options: DocumentWorkflowRequestOptions = {},
+    ): Promise<DocumentWorkflowResult> {
+      return requestWorkflow(documentId, "POST", command, options);
+    },
   };
+
+  async function requestWorkflow(
+    documentId: string,
+    method: "GET" | "POST",
+    payload: DocumentWorkflowCommand | undefined,
+    options: DocumentWorkflowRequestOptions,
+  ): Promise<DocumentWorkflowResult> {
+    const url = `/api/documents/${encodeURIComponent(documentId)}/workflow`;
+    let exchange: { body: Record<string, unknown>; response: Response };
+    try {
+      exchange = await requestWithWorkflowDeadline(request, url, {
+        ...(payload === undefined ? {} : {
+          body: JSON.stringify(payload),
+          headers: { "Content-Type": "application/json" },
+        }),
+        method,
+        signal: options.signal,
+      }, async (response) => ({ body: await readBody(response), response }),
+      options.timeoutMs ?? DOCUMENT_WORKFLOW_CLIENT_TIMEOUT_MS);
+    } catch (error) {
+      if (error instanceof DocumentWorkflowTimeoutError) {
+        throw new DocumentWorkflowRequestError(0, {}, "timeout");
+      }
+      if (options.signal?.aborted) {
+        throw new DocumentWorkflowRequestError(0, {}, "aborted");
+      }
+      throw new DocumentWorkflowRequestError(0, {}, "network_error");
+    }
+
+    const { body, response } = exchange;
+    const workflow = isDocumentWorkflowState(body.workflow, documentId)
+      ? body.workflow
+      : null;
+    if (response.ok) {
+      if (!workflow) {
+        throw new DocumentWorkflowRequestError(response.status, body, "malformed_response");
+      }
+      return { workflow };
+    }
+
+    const reason = parseWorkflowErrorReason(body.reason);
+    const violation = reason === "invalid_project_profile"
+      ? parseProjectProfileViolation(body.violation)
+      : null;
+    throw new DocumentWorkflowRequestError(response.status, body, reason, workflow, violation);
+  }
+}
+
+function legacyWriterDraft(draft: DocumentSessionSaveDraft): DocumentSessionSaveDraft {
+  return {
+    title: draft.title,
+    contentJson: draft.contentJson,
+    metadataJson: draft.metadataJson,
+  };
+}
+
+function legacyWriterDocument(
+  document: DocumentSessionSaveDraft & { id: string },
+): DocumentSessionSaveDraft & { id: string } {
+  return { id: document.id, ...legacyWriterDraft(document) };
+}
+
+async function requestWithWorkflowDeadline<T>(
+  request: RequestFunction,
+  input: RequestInfo | URL,
+  init: RequestInit,
+  consumeResponse: (response: Response) => Promise<T>,
+  timeoutMs: number,
+): Promise<T> {
+  const controller = new AbortController();
+  const callerSignal = init.signal;
+  let rejectCallerAbort!: (reason: unknown) => void;
+  const callerAbort = new Promise<never>((_resolve, reject) => {
+    rejectCallerAbort = reject;
+  });
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  let didTimeout = false;
+  const handleCallerAbort = () => {
+    const reason = callerSignal?.reason ?? new DOMException("The operation was aborted", "AbortError");
+    controller.abort(reason);
+    rejectCallerAbort(reason);
+  };
+  callerSignal?.addEventListener("abort", handleCallerAbort, { once: true });
+  if (callerSignal?.aborted) handleCallerAbort();
+
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timeoutId = setTimeout(() => {
+      didTimeout = true;
+      const error = new DocumentWorkflowTimeoutError();
+      controller.abort(error);
+      reject(error);
+    }, Math.max(0, timeoutMs));
+  });
+
+  try {
+    const requestAndConsume = (async () => {
+      const response = await request(input, { ...init, signal: controller.signal });
+      return consumeResponse(response);
+    })();
+    return await Promise.race([
+      requestAndConsume,
+      timeout,
+      callerAbort,
+    ]);
+  } catch (error) {
+    if (didTimeout) throw new DocumentWorkflowTimeoutError();
+    throw error;
+  } finally {
+    if (timeoutId !== undefined) clearTimeout(timeoutId);
+    callerSignal?.removeEventListener("abort", handleCallerAbort);
+  }
 }
 
 async function requestJson(
@@ -288,6 +492,45 @@ function isDocumentSessionDocument(value: unknown): value is DocumentSessionDocu
     typeof value.readiness === "string" &&
     Number.isSafeInteger(value.revision) &&
     Number(value.revision) >= 0;
+}
+
+function isDocumentWorkflowState(
+  value: unknown,
+  expectedDocumentId: string,
+): value is DocumentWorkflowState {
+  if (!isRecord(value)) return false;
+  if (
+    value.documentId !== expectedDocumentId ||
+    !isDocumentReadiness(value.readiness) ||
+    !isNonNegativeSafeInteger(value.revision)
+  ) {
+    return false;
+  }
+  if (value.collaboration === null) return true;
+  return isRecord(value.collaboration) &&
+    isPositiveSafeInteger(value.collaboration.generation) &&
+    isNonNegativeSafeInteger(value.collaboration.headSeq);
+}
+
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isPositiveSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
+function parseWorkflowErrorReason(value: unknown): DocumentWorkflowErrorReason {
+  return value === "collaboration_unavailable" ||
+    value === "expected_readiness_conflict" ||
+    value === "forbidden" ||
+    value === "head_conflict" ||
+    value === "invalid_project_profile" ||
+    value === "legacy_approval_unsupported" ||
+    value === "not_found" ||
+    value === "workflow_unavailable"
+    ? value
+    : "unknown";
 }
 
 function isDocumentSessionChange(value: unknown): value is DocumentSessionChange {

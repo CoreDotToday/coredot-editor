@@ -119,6 +119,11 @@ export function createCollaborativeDocumentGateway(options: {
     generation: number,
     update: Uint8Array,
   ): void | Promise<void>;
+  publishWorkflowChanged(
+    scope: WorkspaceScope,
+    documentId: string,
+    generation: number,
+  ): void | Promise<void>;
 }): CollaborativeDocumentGateway {
   const getSnapshot = async (scope: WorkspaceScope, documentId: string) => {
     validateScope(scope, documentId);
@@ -159,6 +164,7 @@ export function createCollaborativeDocumentGateway(options: {
         closeRoom: options.closeRoom,
         command,
         publish: options.publish,
+        publishWorkflowChanged: options.publishWorkflowChanged,
         replay: durableReplay,
         scope,
       });
@@ -201,6 +207,7 @@ export function createCollaborativeDocumentGateway(options: {
       closeRoom: options.closeRoom,
       command,
       publish: options.publish,
+      publishWorkflowChanged: options.publishWorkflowChanged,
       replay: { receipt, update },
       scope,
     });
@@ -290,6 +297,11 @@ async function deliverDurableUpdate(options: {
     generation: number,
     update: Uint8Array,
   ): void | Promise<void>;
+  publishWorkflowChanged(
+    scope: WorkspaceScope,
+    documentId: string,
+    generation: number,
+  ): void | Promise<void>;
   replay: DurableUpdateReplay;
   scope: WorkspaceScope;
 }) {
@@ -318,6 +330,18 @@ async function deliverDurableUpdate(options: {
         replay.receipt.generation,
         replay.update,
       );
+    }
+    if (replay.receipt.workflowChanged) {
+      // This signal carries no workflow value and is never an authority
+      // boundary. Delivery is best effort because clients recover by reading
+      // the authoritative HTTP endpoint on focus, reconnect, and a timer.
+      await Promise.resolve()
+        .then(() => options.publishWorkflowChanged(
+          scope,
+          command.documentId,
+          replay.receipt.generation,
+        ))
+        .catch(() => undefined);
     }
   } catch {
     const roomsToClose = sourceClosed ? [targetRoom] : [sourceRoom, targetRoom];

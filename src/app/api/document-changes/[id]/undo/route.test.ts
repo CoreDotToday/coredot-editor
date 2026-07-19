@@ -103,9 +103,25 @@ describe("POST /api/document-changes/[id]/undo", () => {
     expect((await POST(request({ expectedRevision: 2 }), routeContext)).status).toBe(409);
   });
 
+  it("returns the stable collaboration fence conflict", async () => {
+    vi.mocked(undoDocumentChange).mockResolvedValueOnce({
+      ok: false,
+      reason: "collaboration_initialized",
+    });
+
+    const response = await POST(request({ expectedRevision: 1 }), routeContext);
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: "Document collaboration is already initialized",
+      reason: "collaboration_initialized",
+    });
+  });
+
   it("rejects missing or unsafe revision preconditions", async () => {
     expect((await POST(request({}), routeContext)).status).toBe(400);
     expect((await POST(request({ expectedRevision: -1 }), routeContext)).status).toBe(400);
+    expect((await POST(request({ expectedRevision: 1, readiness: "approved" }), routeContext)).status).toBe(400);
     expect(undoDocumentChange).not.toHaveBeenCalled();
   });
 });

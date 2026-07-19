@@ -15,6 +15,42 @@ const ROTATED_ROOM = "collab:v1:workspace-a:document-a:g2";
 const CHECKSUM = "a".repeat(64);
 
 describe("Hocuspocus provider adapter", () => {
+  it("delivers workflow-changed notifications only while the active session subscription exists", async () => {
+    const fixture = createFixture();
+    const listener = vi.fn();
+    const unsubscribe = fixture.session.subscribeWorkflowChanged(listener);
+    await fixture.session.connect();
+
+    fixture.providers[0]?.options.events.workflowChanged();
+    expect(listener).toHaveBeenCalledOnce();
+
+    unsubscribe();
+    fixture.providers[0]?.options.events.workflowChanged();
+    fixture.session.destroy();
+    fixture.providers[0]?.options.events.workflowChanged();
+    expect(listener).toHaveBeenCalledOnce();
+  });
+
+  it("accepts only the exact bounded workflow-changed stateless payload", () => {
+    const fixture = createRealProviderHandleFixture();
+    const onStateless = fixture.handle.provider.configuration.onStateless;
+
+    onStateless({ payload: JSON.stringify({ type: "workflow_changed", v: 1 }) });
+    for (const payload of [
+      "",
+      "not-json",
+      JSON.stringify({ type: "workflow_changed", v: 2 }),
+      JSON.stringify({ type: "workflow_changed", v: 1, readiness: "approved" }),
+      JSON.stringify({ type: "other", v: 1 }),
+      JSON.stringify({ type: "workflow_changed", v: 1, padding: "x".repeat(512) }),
+    ]) {
+      onStateless({ payload });
+    }
+
+    expect(fixture.events.workflowChanged).toHaveBeenCalledOnce();
+    fixture.handle.destroy();
+  });
+
   it("uses only the exact page room and waits for authentication plus sync before writing", async () => {
     const fixture = createFixture();
 
@@ -660,6 +696,7 @@ function createRealProviderHandleFixture() {
     status: vi.fn(),
     synced: vi.fn(),
     unsyncedChanges: vi.fn(),
+    workflowChanged: vi.fn(),
   };
   const handle = createHocuspocusProviderHandle({
     document: new Y.Doc(),
@@ -682,6 +719,7 @@ function createRealProviderHandleFixture() {
     connect,
     disconnect,
     emitStatus,
+    events,
     handle,
     off,
     statusListenerCount: () => websocket.callbacks.status?.length ?? 0,

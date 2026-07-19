@@ -61,6 +61,13 @@ describe("durable request budget", () => {
     });
   });
 
+  it("defines a bounded document workflow command budget", () => {
+    expect(REQUEST_BUDGET_POLICIES["documents.workflow"]).toEqual({
+      limit: 60,
+      windowMs: 60_000,
+    });
+  });
+
   it("allows exactly the configured number of requests and rejects the next request", async () => {
     const { client } = await createBudgetClient();
     const budget = createRequestBudget({ client, policies: { test: policy } });

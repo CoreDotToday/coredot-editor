@@ -59,7 +59,7 @@ function createChangeRecord(overrides: Partial<DocumentChangeRecord> = {}): Docu
     requestId: TEST_REQUEST_CONTEXT.requestId,
     kind: "single",
     batchId: null,
-    beforeSnapshotJson: createValidPayload().document,
+    beforeSnapshotJson: { ...createValidPayload().document, readiness: "needs_review" },
     afterRevision: 1,
     createdAt,
     undoneAt: null,
@@ -75,7 +75,6 @@ function createValidPayload() {
       title: "Dirty draft",
       contentJson: { type: "doc" as const, content: [{ type: "paragraph", content: [{ type: "text", text: "old" }] }] },
       metadataJson: { owner: "Legal" },
-      readiness: "needs_review" as const,
     },
     expectedRevision: 0,
   };
@@ -95,6 +94,16 @@ function createContext(id = "proposal_1") {
 
 describe("POST /api/proposals/[id]/apply", () => {
   beforeEach(() => vi.clearAllMocks());
+
+  it("rejects readiness smuggling before proposal service access", async () => {
+    const base = createValidPayload();
+    const payload = { ...base, document: { ...base.document, readiness: "approved" } };
+
+    const response = await POST(createJsonRequest(payload), createContext());
+
+    expect(response.status).toBe(400);
+    expect(applyProposal).not.toHaveBeenCalled();
+  });
 
   it("applies a proposal to the bounded submitted dirty draft and expected revision", async () => {
     vi.mocked(applyProposal).mockResolvedValueOnce({
@@ -129,7 +138,6 @@ describe("POST /api/proposals/[id]/apply", () => {
         title: "Dirty draft",
         contentJson: createValidPayload().document.contentJson,
         metadataJson: { owner: "Legal" },
-        readiness: "needs_review",
       },
       expectedRevision: 0,
       mode: "replace",
@@ -148,6 +156,21 @@ describe("POST /api/proposals/[id]/apply", () => {
 
     expect(response.status).toBe(409);
     expect(await response.json()).toMatchObject({ reason: "revision_conflict", document: { revision: 7 } });
+  });
+
+  it("returns the stable collaboration fence conflict", async () => {
+    vi.mocked(applyProposal).mockResolvedValueOnce({
+      ok: false,
+      reason: "collaboration_initialized",
+    });
+
+    const response = await POST(createJsonRequest(createValidPayload()), createContext());
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: "Document collaboration is already initialized",
+      reason: "collaboration_initialized",
+    });
   });
 
   it("maps active Project Profile violations to a stable 400 response", async () => {

@@ -63,6 +63,51 @@ describe("CollaborativeDocumentGateway", () => {
     expect(fixture.appended[0]?.originKind).toBe("proposal_command");
   });
 
+  it("notifies the live room only after an update atomically changed workflow state", async () => {
+    const events: string[] = [];
+    const fixture = createFixture({ events, workflowChanged: true });
+
+    await fixture.gateway.applyProposal(context, {
+      commandId: "proposal-command-workflow-change",
+      documentId: "document-a",
+      generation: 1,
+    });
+
+    expect(events).toEqual(["plan", "append", "publish", "workflow"]);
+    expect(fixture.publishWorkflowChanged).toHaveBeenCalledWith(
+      scope,
+      "document-a",
+      1,
+    );
+  });
+
+  it("does not emit a workflow notification for an ordinary durable update", async () => {
+    const fixture = createFixture({ workflowChanged: false });
+
+    await fixture.gateway.applyProposal(context, {
+      commandId: "proposal-command-no-workflow-change",
+      documentId: "document-a",
+      generation: 1,
+    });
+
+    expect(fixture.publishWorkflowChanged).not.toHaveBeenCalled();
+  });
+
+  it("does not fail a committed command when its best-effort workflow notification throws synchronously", async () => {
+    const fixture = createFixture({
+      publishWorkflowChanged: () => {
+        throw new Error("notification transport failed");
+      },
+      workflowChanged: true,
+    });
+
+    await expect(fixture.gateway.applyProposal(context, {
+      commandId: "proposal-command-workflow-notification-failure",
+      documentId: "document-a",
+      generation: 1,
+    })).resolves.toMatchObject({ headSeq: 1, status: "applied" });
+  });
+
   it("closes the source room before publishing to a rotated generation", async () => {
     const events: string[] = [];
     const publish = vi.fn(async () => {
@@ -210,8 +255,14 @@ function createFixture(options: {
     generation: number,
     update: Uint8Array,
   ) => void | Promise<void>;
+  publishWorkflowChanged?: (
+    scope: WorkspaceScope,
+    documentId: string,
+    generation: number,
+  ) => void | Promise<void>;
   persistReplay?: boolean;
   receiptGeneration?: number;
+  workflowChanged?: boolean;
 } = {}) {
   const canonical = new Y.Doc();
   canonical.getText("test").insert(0, "base");
@@ -233,6 +284,7 @@ function createFixture(options: {
       generation: number;
       headSeq: number;
       seq: number;
+      workflowChanged: boolean;
     };
     update: Uint8Array;
   } | null = null;
@@ -247,6 +299,7 @@ function createFixture(options: {
         generation: options.receiptGeneration ?? input.generation,
         headSeq: 1,
         seq: 1,
+        workflowChanged: options.workflowChanged ?? false,
       };
       if (options.persistReplay) {
         replay = { receipt, update: Uint8Array.from(input.update) };
@@ -270,6 +323,9 @@ function createFixture(options: {
   const closeRoom = vi.fn(async (room: string) => {
     options.events?.push(`close:${room}`);
   });
+  const publishWorkflowChanged = vi.fn(options.publishWorkflowChanged ?? (async () => {
+    options.events?.push("workflow");
+  }));
   const planProposal = vi.fn(async (document: Y.Doc) => {
     options.events?.push("plan");
     document.getText("test").insert(document.getText("test").length, " proposal");
@@ -287,6 +343,7 @@ function createFixture(options: {
       },
     },
     publish,
+    publishWorkflowChanged,
   });
   return {
     appendValidatedUpdate,
@@ -299,6 +356,7 @@ function createFixture(options: {
     gateway,
     planProposal,
     publish,
+    publishWorkflowChanged,
   };
 }
 

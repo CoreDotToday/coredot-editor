@@ -13,7 +13,7 @@ const proposalApplyPayloadSchema = z.object({
   appliedMode: z.enum(["replace", "insert_below"]),
   document: documentChangeDraftSchema,
   expectedRevision: z.number().int().nonnegative(),
-});
+}).strict();
 
 type ProposalApplyRouteContext = { params: Promise<{ id: string }> };
 
@@ -37,7 +37,6 @@ const postHandler = createProtectedRouteHandler(async (
       title: result.data.document.title,
       contentJson: result.data.document.contentJson,
       metadataJson: result.data.document.metadataJson,
-      readiness: result.data.document.readiness,
     },
     expectedRevision: result.data.expectedRevision,
     mode: result.data.appliedMode,

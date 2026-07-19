@@ -20,6 +20,8 @@ const TABLES = [
   { key: "aiWorkspaceMessages", table: "ai_workspace_messages" },
   { key: "collaborationUpdates", table: "collaboration_updates" },
   { key: "collaborationNoopReceipts", table: "collaboration_noop_receipts" },
+  { key: "collaborationRoomClosureJobs", table: "collaboration_room_closure_jobs" },
+  { key: "collaborationWorkflowNotificationJobs", table: "collaboration_workflow_notification_jobs" },
   { key: "collaborationProposalAnchors", table: "collaboration_proposal_anchors" },
   { key: "collaborationDocumentChanges", table: "collaboration_document_changes" },
   { key: "appSettings", table: "app_settings" },
@@ -36,6 +38,8 @@ const COLLABORATION_TABLE_KEYS = [
   "collaborationProposalAnchors",
   "collaborationUpdates",
   "collaborationNoopReceipts",
+  "collaborationRoomClosureJobs",
+  "collaborationWorkflowNotificationJobs",
   "documentApprovals",
 ] as const satisfies readonly WorkspaceTableKey[];
 

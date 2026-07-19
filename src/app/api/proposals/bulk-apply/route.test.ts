@@ -13,7 +13,6 @@ const dirtyDocument = {
   title: "Dirty draft",
   contentJson: { type: "doc" as const, content: [{ type: "paragraph", content: [{ type: "text", text: "alpha beta" }] }] },
   metadataJson: {},
-  readiness: "draft" as const,
 };
 
 function proposal(id: string): AiProposalRecord {
@@ -48,7 +47,7 @@ function successResult() {
       requestId: TEST_REQUEST_CONTEXT.requestId,
       kind: "batch" as const,
       batchId: "batch_1",
-      beforeSnapshotJson: dirtyDocument,
+      beforeSnapshotJson: { ...dirtyDocument, readiness: "draft" },
       afterRevision: 1,
       createdAt,
       undoneAt: null,
@@ -58,6 +57,7 @@ function successResult() {
       workspaceId: "vitest-workspace",
       creationKey: null,
       plainText: "ALPHA BETA",
+      readiness: "draft" as const,
       status: "draft" as const,
       revision: 1,
       createdAt,
@@ -86,6 +86,16 @@ function request(body: unknown) {
 describe("POST /api/proposals/bulk-apply", () => {
   beforeEach(() => vi.clearAllMocks());
 
+  it("rejects readiness smuggling before bulk proposal service access", async () => {
+    const base = payload();
+    const smuggled = { ...base, document: { ...base.document, readiness: "approved" } };
+
+    const response = await POST(request(smuggled));
+
+    expect(response.status).toBe(400);
+    expect(applyProposalBatch).not.toHaveBeenCalled();
+  });
+
   it("applies a bounded proposal batch in one service call", async () => {
     vi.mocked(applyProposalBatch).mockResolvedValueOnce(successResult());
 
@@ -103,7 +113,6 @@ describe("POST /api/proposals/bulk-apply", () => {
         title: "Dirty draft",
         contentJson: dirtyDocument.contentJson,
         metadataJson: {},
-        readiness: "draft",
       },
       expectedRevision: 0,
       proposals: [
@@ -139,5 +148,20 @@ describe("POST /api/proposals/bulk-apply", () => {
 
     expect(response.status).toBe(409);
     expect(await response.json()).toMatchObject({ reason: "target_not_found" });
+  });
+
+  it("returns the stable collaboration fence conflict", async () => {
+    vi.mocked(applyProposalBatch).mockResolvedValueOnce({
+      ok: false,
+      reason: "collaboration_initialized",
+    });
+
+    const response = await POST(request(payload()));
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: "Document collaboration is already initialized",
+      reason: "collaboration_initialized",
+    });
   });
 });

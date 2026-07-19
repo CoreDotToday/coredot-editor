@@ -2,14 +2,26 @@ import { pathToFileURL } from "node:url";
 
 import { createCollaborationAuthorizationRepository } from "../authorization-repository";
 import { createCollaborationPersistence } from "../persistence";
+import { createDocumentArchiveService } from "@/features/documents/document-archive-service";
+import { createDocumentWorkflowNotificationOutbox } from "@/features/documents/document-workflow-notification-outbox";
 import { createCollaborationSidecar } from "./create-server";
 import { readCollaborationServerConfig } from "./config";
 import type { CollaborationReadinessChecks } from "./health-server";
+import {
+  createCollaborationRoomClosureWorker,
+  createSidecarArchiveRoomGateway,
+} from "./room-closure-worker";
+import {
+  createCollaborationWorkflowNotificationWorker,
+  createSidecarWorkflowNotificationGateway,
+} from "./workflow-notification-worker";
 
 export const COLLABORATION_MIGRATION_TABLES = [
   "collaboration_documents",
   "collaboration_updates",
   "collaboration_noop_receipts",
+  "collaboration_room_closure_jobs",
+  "collaboration_workflow_notification_jobs",
   "collaboration_actions",
   "collaboration_authorization_epochs",
   "document_approvals",
@@ -98,15 +110,17 @@ export function installCollaborationSignalHandlers(options: {
 export function createCollaborationShutdown(options: {
   closeDatabase(): void;
   destroySidecar(): Promise<void>;
-  stopWorkers(): void;
+  stopWorkers(): void | Promise<void>;
 }) {
   let shutdownPromise: Promise<void> | undefined;
   return () => {
     if (!shutdownPromise) {
-      options.stopWorkers();
-      shutdownPromise = options.destroySidecar().finally(() => {
-        options.closeDatabase();
-      });
+      shutdownPromise = Promise.resolve()
+        .then(() => options.stopWorkers())
+        .then(() => options.destroySidecar())
+        .finally(() => {
+          options.closeDatabase();
+        });
     }
     return shutdownPromise;
   };
@@ -121,25 +135,57 @@ export async function startCollaborationSidecar(
   const { db, sqliteClient } = await import("@/db/client");
   const persistence = createCollaborationPersistence(db);
   const authorization = createCollaborationAuthorizationRepository(db);
-  let workersRunning = true;
+  const roomClosureWorkerRef: {
+    current?: ReturnType<typeof createCollaborationRoomClosureWorker>;
+  } = {};
+  const workflowNotificationWorkerRef: {
+    current?: ReturnType<typeof createCollaborationWorkflowNotificationWorker>;
+  } = {};
   const sidecar = createCollaborationSidecar({
     authorization,
     config,
     persistence,
     readinessChecks: createCollaborationReadinessChecks({
       execute: (statement) => sqliteClient.execute(statement),
-      // Persistence, checkpoint, and projection work is request-bound in this
-      // process today; the lifecycle flag fences it before drain starts.
-      workersReady: () => workersRunning,
+      workersReady: () => Boolean(
+        roomClosureWorkerRef.current?.isReady()
+        && workflowNotificationWorkerRef.current?.isReady()
+      ),
     }),
   });
+  const archiveService = createDocumentArchiveService({
+    database: db,
+    gateway: createSidecarArchiveRoomGateway({
+      closeRoom: (room, reason) => sidecar.closeRoom(room, reason),
+    }),
+  });
+  const roomClosureWorker = createCollaborationRoomClosureWorker({
+    async reconcile() {
+      await archiveService.reconcileDueRoomClosures();
+    },
+  });
+  roomClosureWorkerRef.current = roomClosureWorker;
+  const workflowNotificationOutbox = createDocumentWorkflowNotificationOutbox({
+    database: db,
+    gateway: createSidecarWorkflowNotificationGateway({
+      publishWorkflowChanged: (scope, documentId, generation) =>
+        sidecar.publishWorkflowChanged(scope, documentId, generation),
+    }),
+  });
+  const workflowNotificationWorker = createCollaborationWorkflowNotificationWorker({
+    async reconcile() {
+      await workflowNotificationOutbox.reconcileDue();
+    },
+  });
+  workflowNotificationWorkerRef.current = workflowNotificationWorker;
 
   const shutdown = createCollaborationShutdown({
     closeDatabase: () => sqliteClient.close(),
     destroySidecar: () => sidecar.destroy(),
-    stopWorkers: () => {
-      workersRunning = false;
-    },
+    stopWorkers: () => Promise.all([
+      roomClosureWorker.stop(),
+      workflowNotificationWorker.stop(),
+    ]).then(() => undefined),
   });
   const removeSignalHandlers = installCollaborationSignalHandlers({
     onFailure() {
@@ -152,9 +198,14 @@ export async function startCollaborationSidecar(
 
   try {
     await sidecar.listen();
+    roomClosureWorker.start();
+    workflowNotificationWorker.start();
   } catch (error) {
     removeSignalHandlers();
-    workersRunning = false;
+    await Promise.all([
+      roomClosureWorker.stop(),
+      workflowNotificationWorker.stop(),
+    ]);
     sqliteClient.close();
     throw error;
   }
