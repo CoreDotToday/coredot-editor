@@ -169,6 +169,43 @@ export function createCollaborationCapabilityAuthority(options: {
       throw configurationError();
     }
   };
+  const verifyToken = async (token: string) => {
+    if (
+      typeof token !== "string"
+      || Buffer.byteLength(token, "utf8") < 1
+      || Buffer.byteLength(token, "utf8") > MAX_TOKEN_BYTES
+    ) {
+      throw invalidCapability();
+    }
+    const segments = token.split(".");
+    if (segments.length !== 3 || segments.some((segment) => !/^[A-Za-z0-9_-]+$/.test(segment))) {
+      throw invalidCapability();
+    }
+    const protectedHeader = JSON.parse(
+      Buffer.from(segments[0]!, "base64url").toString("utf8"),
+    ) as Record<string, unknown>;
+    if (
+      Object.keys(protectedHeader).toSorted().join(",") !== "alg,kid,typ"
+      || !ALGORITHMS.includes(protectedHeader.alg as (typeof ALGORITHMS)[number])
+      || typeof protectedHeader.kid !== "string"
+      || protectedHeader.typ !== "JWT"
+    ) {
+      throw invalidCapability();
+    }
+    const entry = options.verificationKeyRing?.keys.find(
+      (key) => key.kid === protectedHeader.kid && key.alg === protectedHeader.alg,
+    );
+    if (!entry) throw invalidCapability();
+    const key = await importJWK(entry.publicJwk as JWK, entry.alg);
+    const result = await jwtVerify(token, key, {
+      algorithms: [entry.alg],
+      audience: AUDIENCE,
+      clockTolerance: 0,
+      currentDate: now(),
+      issuer: ISSUER,
+    });
+    return normalizeClaims(result.payload, now());
+  };
   return {
     async issue(bindings: CollaborationCapabilityBindings) {
       const signer = await prepareSigner();
@@ -180,42 +217,20 @@ export function createCollaborationCapabilityAuthority(options: {
     async verify(token: string, expected: CollaborationCapabilityBindings) {
       try {
         const normalizedExpected = normalizeBindings(expected);
-        if (
-          typeof token !== "string"
-          || Buffer.byteLength(token, "utf8") < 1
-          || Buffer.byteLength(token, "utf8") > MAX_TOKEN_BYTES
-        ) {
-          throw invalidCapability();
-        }
-        const segments = token.split(".");
-        if (segments.length !== 3 || segments.some((segment) => !/^[A-Za-z0-9_-]+$/.test(segment))) {
-          throw invalidCapability();
-        }
-        const protectedHeader = JSON.parse(
-          Buffer.from(segments[0]!, "base64url").toString("utf8"),
-        ) as Record<string, unknown>;
-        if (
-          Object.keys(protectedHeader).toSorted().join(",") !== "alg,kid,typ"
-          || !ALGORITHMS.includes(protectedHeader.alg as (typeof ALGORITHMS)[number])
-          || typeof protectedHeader.kid !== "string"
-          || protectedHeader.typ !== "JWT"
-        ) {
-          throw invalidCapability();
-        }
-        const entry = options.verificationKeyRing?.keys.find(
-          (key) => key.kid === protectedHeader.kid && key.alg === protectedHeader.alg,
-        );
-        if (!entry) throw invalidCapability();
-        const key = await importJWK(entry.publicJwk as JWK, entry.alg);
-        const result = await jwtVerify(token, key, {
-          algorithms: [entry.alg],
-          audience: AUDIENCE,
-          clockTolerance: 0,
-          currentDate: now(),
-          issuer: ISSUER,
-        });
-        const claims = normalizeClaims(result.payload, now());
+        const claims = await verifyToken(token);
         assertExactBindings(claims, normalizedExpected);
+        return claims;
+      } catch {
+        throw invalidCapability();
+      }
+    },
+
+    async verifyForRoom(token: string, exactRoom: string) {
+      try {
+        const claims = await verifyToken(token);
+        const room = normalizeIdentifier(exactRoom, MAX_ROOM_BYTES);
+        parseCollaborationRoomName(room);
+        if (claims.room !== room) throw invalidCapability();
         return claims;
       } catch {
         throw invalidCapability();

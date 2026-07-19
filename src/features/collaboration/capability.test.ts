@@ -114,6 +114,18 @@ describe("collaboration capability authority", () => {
     await expect(authority.verify(token, expectedBindings())).resolves.toEqual(claims);
   });
 
+  it("verifies a signed capability for an exact room before returning normalized sidecar claims", async () => {
+    const signer = createCollaborationCapabilityAuthority({ now: () => now, signingKeyRing });
+    const verifier = createCollaborationCapabilityAuthority({ now: () => now, verificationKeyRing });
+    const token = await signer.issue(expectedBindings());
+
+    await expect(verifier.verifyForRoom(token, room)).resolves.toMatchObject(expectedBindings());
+    await expect(verifier.verifyForRoom(
+      token,
+      "collab:v1:clerk%3Aorg%3Aworkspace-a:document-a:g4",
+    )).rejects.toBeInstanceOf(CollaborationCapabilityError);
+  });
+
   it.each([
     ["room", "collab:v1:other:document-a:g3"],
     ["workspaceId", "workspace-b"],

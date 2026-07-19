@@ -346,6 +346,8 @@ Validation applies updates to a clone before accepting them. Invalid updates clo
 
 Hocuspocus v4 requires Node.js 22 or later. The application engine, CI, type packages, production images, and DOCX worker target move to Node.js 22 together.
 
+Deploy the Next.js Web process and collaboration sidecar with separate environment allowlists. Only the Web process receives `COLLABORATION_CAPABILITY_SIGNING_KEY_RING`, which contains private signing JWKs. Only the sidecar receives `COLLABORATION_CAPABILITY_VERIFICATION_KEY_RING`, which contains public verification JWKs. The sidecar fails closed if non-empty private signer material is present; do not share one unrestricted environment or secret bundle between the two processes.
+
 The sidecar exposes separate liveness and readiness endpoints. Readiness requires valid configuration and verification keys, the expected DB migration, a non-destructive storage probe, and healthy persistence/projection workers. Next.js readiness includes the sidecar check with a bounded timeout when collaboration is enabled.
 
 Graceful shutdown follows:
