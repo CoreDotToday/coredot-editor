@@ -107,7 +107,7 @@ Yjs binary state is canonical for collaborative body, title, and metadata. The `
 
 A `collaboration_documents` record is scoped by Workspace, document, and generation and contains:
 
-- `generation`: changes only after an explicit destructive collaboration reset.
+- `generation`: advances only through a server-authoritative, audited transition. A storage-budget rotation preserves the logical Yjs state in the new generation, while an explicit destructive reset starts a new canonical Yjs state.
 - `isCurrent`: exactly one generation per Workspace/document may be current.
 - `schemaVersion` and `schemaFingerprint`.
 - `checkpointBlob` and `checkpointChecksum`.
@@ -124,7 +124,7 @@ The required invariant is:
 
 Projection may temporarily lag the live document, but every interactive snapshot consumer uses the collaborative gateway rather than assuming that the SQL projection is current.
 
-Generation rotation retires generation N and inserts generation N+1 in one transaction. Retired generations and their child rows remain available for audit. Current reads use the partial current-generation index; history reads filter by Workspace/document and order the generation index by `generation DESC`.
+Both generation transitions retire generation N and insert generation N+1 in one server-authoritative transaction. A storage-budget rotation checkpoints and carries the existing logical Yjs state into N+1; a destructive reset replaces it only through the explicit reset path. Retired generations and their child rows remain available for audit in either case. Current reads use the partial current-generation index; history reads filter by Workspace/document and order the generation index by `generation DESC`.
 
 Canonical persistence limits are deliberately below the general SQLite value boundary: checkpoints, updates, and inverse updates are at most 10 MiB; state vectors are at most 1 MiB; relative positions are at most 64 KiB; diagnostic JSON objects are at most 4 KiB; target previews are at most 1 KiB; failure categories are at most 128 bytes; and command/idempotency keys are at most 256 bytes. Binary values must use SQLite BLOB storage and be non-empty. Hashes must use TEXT storage and contain exactly 64 lowercase hexadecimal characters. Text limits are measured as UTF-8 bytes.
 
