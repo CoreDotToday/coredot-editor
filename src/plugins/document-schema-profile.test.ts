@@ -51,7 +51,7 @@ describe("document schema profile", () => {
       format: "cjs",
       metafile: true,
       platform: "node",
-      target: "node20",
+      target: "node22",
       write: false,
     });
     const inputs = Object.keys(bundle.metafile.inputs);

@@ -5,6 +5,8 @@ import { parse } from "yaml";
 
 const MINIMUM_NODE_MAJOR = 22 as const;
 const EXPECTED_NODE_ENGINE = ">=22.13.0";
+const EXPECTED_COLLABORATION_BUILD = "tsx scripts/collaboration/build-server.ts";
+const EXPECTED_COLLABORATION_DEV = "tsx watch src/features/collaboration/server/main.ts";
 const MAX_ERRORS = 8;
 const WORKFLOW_PATHS = [
   ".github/workflows/ci.yml",
@@ -13,22 +15,25 @@ const WORKFLOW_PATHS = [
 
 type PackageManifest = {
   engines?: { node?: unknown };
-  scripts?: { "build:docx-worker"?: unknown };
+  scripts?: {
+    "build:docx-worker"?: unknown;
+    "collaboration:build"?: unknown;
+    "collaboration:dev"?: unknown;
+  };
 };
 
 type JsonRecord = Record<string, unknown>;
 
-export type RuntimeVerificationResult =
+export type RuntimeVerification =
   | { minimumMajor: typeof MINIMUM_NODE_MAJOR; ok: true }
   | {
       errors: string[];
-      minimumMajor: typeof MINIMUM_NODE_MAJOR;
       ok: false;
     };
 
 export async function verifyRuntimeConfiguration(
   root: string,
-): Promise<RuntimeVerificationResult> {
+): Promise<RuntimeVerification> {
   const errors: string[] = [];
   const addError = (error: string) => {
     if (errors.length < MAX_ERRORS && !errors.includes(error)) errors.push(error);
@@ -51,6 +56,12 @@ export async function verifyRuntimeConfiguration(
     if (typeof workerBuild !== "string" || !workerBuild.includes("--target=node22")) {
       addError("package.json: build:docx-worker must target Node 22");
     }
+    if (
+      manifest.scripts?.["collaboration:build"] !== EXPECTED_COLLABORATION_BUILD
+      || manifest.scripts?.["collaboration:dev"] !== EXPECTED_COLLABORATION_DEV
+    ) {
+      addError("package.json: collaboration scripts must match the approved server contract");
+    }
   }
 
   await Promise.all(
@@ -68,7 +79,7 @@ export async function verifyRuntimeConfiguration(
 
   return errors.length === 0
     ? { minimumMajor: MINIMUM_NODE_MAJOR, ok: true }
-    : { errors, minimumMajor: MINIMUM_NODE_MAJOR, ok: false };
+    : { errors, ok: false };
 }
 
 function everySetupNodeStepUsesNode22(value: unknown) {
