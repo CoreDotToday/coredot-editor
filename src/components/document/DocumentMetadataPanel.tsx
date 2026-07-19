@@ -156,21 +156,16 @@ function MetadataFieldInput({
     };
     setInputState(currentInputState);
   } else if (inputState.observedCanonical !== canonicalStringValue) {
-    const keepDraft = inputState.draft !== null && (
-      canonicalStringValue === inputState.draft.baseCanonical ||
-      canonicalStringValue === inputState.draft.expectedCanonical
-    );
+    const reconciledDraft = reconcileMetadataDraft(inputState.draft, canonicalStringValue);
     currentInputState = {
-      draft: keepDraft ? inputState.draft : null,
+      draft: reconciledDraft,
       identity: metadataDraftIdentity,
       observedCanonical: canonicalStringValue,
     };
     setInputState(currentInputState);
   }
   const draft = currentInputState.draft;
-  const draftMatchesCanonical = draft !== null && (
-    canonicalStringValue === draft.baseCanonical || canonicalStringValue === draft.expectedCanonical
-  );
+  const draftMatchesCanonical = canDisplayMetadataDraft(draft, canonicalStringValue);
 
   if (field.type === "boolean") {
     return (
@@ -266,10 +261,12 @@ function MetadataFieldInput({
           const raw = event.currentTarget.value;
           const nextValue = getEditableMetadataValue(field, raw);
           if (supportsRawDraft && event.currentTarget.ownerDocument.activeElement === event.currentTarget) {
+            const expectedCanonical = getCanonicalEditableValue(field, nextValue);
             setInputState({
               draft: {
                 baseCanonical: canonicalStringValue,
-                expectedCanonical: getCanonicalEditableValue(field, nextValue),
+                expectedCanonical,
+                hasObservedExpectedCanonical: expectedCanonical === canonicalStringValue,
                 raw,
               },
               identity: metadataDraftIdentity,
@@ -284,6 +281,7 @@ function MetadataFieldInput({
             draft: {
               baseCanonical: canonicalStringValue,
               expectedCanonical: canonicalStringValue,
+              hasObservedExpectedCanonical: true,
               raw: canonicalStringValue,
             },
             identity: metadataDraftIdentity,
@@ -302,6 +300,7 @@ function MetadataFieldInput({
 type MetadataInputDraft = {
   baseCanonical: string;
   expectedCanonical: string;
+  hasObservedExpectedCanonical: boolean;
   raw: string;
 };
 
@@ -310,6 +309,29 @@ type MetadataInputState = {
   identity: object;
   observedCanonical: string;
 };
+
+function reconcileMetadataDraft(
+  draft: MetadataInputDraft | null,
+  canonical: string,
+): MetadataInputDraft | null {
+  if (!draft) return null;
+  if (canonical === draft.expectedCanonical) {
+    return draft.hasObservedExpectedCanonical
+      ? draft
+      : { ...draft, hasObservedExpectedCanonical: true };
+  }
+  if (canonical === draft.baseCanonical && !draft.hasObservedExpectedCanonical) {
+    return draft;
+  }
+  return null;
+}
+
+function canDisplayMetadataDraft(draft: MetadataInputDraft | null, canonical: string) {
+  return draft !== null && (
+    canonical === draft.expectedCanonical
+    || (canonical === draft.baseCanonical && !draft.hasObservedExpectedCanonical)
+  );
+}
 
 function getEditableMetadataValue(field: ProjectMetadataField, raw: string): DocumentMetadataValue {
   return field.type === "tags"

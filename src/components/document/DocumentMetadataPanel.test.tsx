@@ -335,6 +335,46 @@ describe("DocumentMetadataPanel", () => {
     expect(owner).toHaveValue("Bob");
   });
 
+  it("does not resurrect an acknowledged local value after remote canonical returns to its base", async () => {
+    const user = userEvent.setup();
+    const handleChange = vi.fn();
+    let replaceMetadata: (metadata: DocumentMetadata) => void = () => {
+      throw new Error("Harness is not ready");
+    };
+
+    function Harness() {
+      const [metadata, setMetadata] = useState<DocumentMetadata>({ owner: "Alice" });
+      replaceMetadata = setMetadata;
+      return (
+        <DocumentMetadataPanel
+          metadata={metadata}
+          onMetadataFieldChange={(key, value) => {
+            handleChange(key, value);
+            setMetadata((current) => normalizeMetadataChange(getProjectProfile("default"), current, key, value));
+          }}
+          onReadinessChange={vi.fn()}
+          readiness="draft"
+        />
+      );
+    }
+
+    render(<Harness />);
+    const owner = screen.getByRole("textbox", { name: "소유자" });
+    await user.click(owner);
+    await user.type(owner, "X");
+    expect(owner).toHaveValue("AliceX");
+    expect(handleChange).toHaveBeenLastCalledWith("owner", "AliceX");
+
+    act(() => replaceMetadata({ owner: "Alice" }));
+    expect(owner).toHaveValue("Alice");
+    const callCountAfterRemoteDecision = handleChange.mock.calls.length;
+    fireEvent.blur(owner);
+
+    expect(handleChange).toHaveBeenCalledTimes(callCountAfterRemoteDecision);
+    expect(handleChange).toHaveBeenCalledTimes(1);
+    expect(owner).toHaveValue("Alice");
+  });
+
   it("clears focused drafts on permission downgrade and Project Profile replacement", async () => {
     const user = userEvent.setup();
     const metadata = { owner: "Alice" } satisfies DocumentMetadata;
