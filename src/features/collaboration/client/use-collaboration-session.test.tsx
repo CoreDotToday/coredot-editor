@@ -1,7 +1,7 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { StrictMode, type ReactNode } from "react";
 import * as Y from "yjs";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { getProjectProfile } from "@/features/projects/default-project-profiles";
 
@@ -18,6 +18,11 @@ const configuration = {
   schemaFingerprint: "a".repeat(64),
   websocketUrl: "wss://collaboration.example.test/",
 };
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
 
 describe("useCollaborationSession", () => {
   it("creates one exact-room session, stays read-only until sync, and tears it down", async () => {
@@ -91,6 +96,159 @@ describe("useCollaborationSession", () => {
     expect(result.current).toMatchObject({ session: null, snapshot: { writable: false } });
     expect(harness.createSession).not.toHaveBeenCalled();
     expect(harness.connect).not.toHaveBeenCalled();
+  });
+
+  it("installs a fatal read-only session when the provider factory throws synchronously", async () => {
+    const document = new Y.Doc();
+    const destroyDocument = vi.spyOn(document, "destroy");
+    const store = createCollaborationSessionStore();
+    const dependencies: CollaborationSessionHookDependencies = {
+      createDocument: () => document,
+      createSession: vi.fn(() => {
+        throw new Error("provider internals must not escape");
+      }),
+      createStore: () => store,
+      fetch: vi.fn(async () => new Response(null, { status: 503 })),
+      fingerprintSchema: async () => configuration.schemaFingerprint,
+    };
+
+    const { result, unmount } = renderHook(() => useCollaborationSession(configuration, dependencies));
+
+    await waitFor(() => expect(result.current.snapshot.status).toBe("fatal"));
+    expect(result.current).toMatchObject({ session: null, snapshot: { writable: false } });
+    expect(destroyDocument).not.toHaveBeenCalled();
+
+    unmount();
+    expect(destroyDocument).toHaveBeenCalledOnce();
+  });
+
+  it("falls back to a fatal store when the injected store factory throws synchronously", async () => {
+    const document = new Y.Doc();
+    const destroyDocument = vi.spyOn(document, "destroy");
+    const dependencies: CollaborationSessionHookDependencies = {
+      createDocument: () => document,
+      createSession: vi.fn(),
+      createStore: vi.fn(() => {
+        throw new Error("store construction failed");
+      }),
+      fetch: vi.fn(async () => new Response(null, { status: 503 })),
+      fingerprintSchema: async () => configuration.schemaFingerprint,
+    };
+
+    const { result, unmount } = renderHook(() => useCollaborationSession(configuration, dependencies));
+
+    await waitFor(() => expect(result.current.snapshot.status).toBe("fatal"));
+    expect(result.current).toMatchObject({ session: null, snapshot: { writable: false } });
+    expect(dependencies.createSession).not.toHaveBeenCalled();
+
+    unmount();
+    expect(destroyDocument).toHaveBeenCalledOnce();
+  });
+
+  it("destroys each successful session and document exactly once across configuration churn", async () => {
+    const documents: Y.Doc[] = [];
+    const destroyDocuments: Array<ReturnType<typeof vi.spyOn>> = [];
+    const destroySessions: Array<ReturnType<typeof vi.fn>> = [];
+    const dependencies: CollaborationSessionHookDependencies = {
+      createDocument: () => {
+        const document = new Y.Doc();
+        documents.push(document);
+        destroyDocuments.push(vi.spyOn(document, "destroy"));
+        return document;
+      },
+      createSession: vi.fn((options) => {
+        const destroy = vi.fn();
+        destroySessions.push(destroy);
+        return {
+          connect: vi.fn(async () => undefined),
+          destroy,
+          document: options.document,
+          provider: null,
+          refreshCapability: vi.fn(async () => undefined),
+          room: options.room,
+          store: options.store,
+        };
+      }),
+      createStore: createCollaborationSessionStore,
+      fetch: vi.fn(async () => new Response(null, { status: 503 })),
+      fingerprintSchema: async () => configuration.schemaFingerprint,
+    };
+    const { result, rerender, unmount } = renderHook(
+      ({ documentId }) => useCollaborationSession({
+        ...configuration,
+        documentId,
+        room: `collab:v1:workspace-a:${documentId}:g1`,
+      }, dependencies),
+      { initialProps: { documentId: "document-a" } },
+    );
+
+    await waitFor(() => expect(dependencies.createSession).toHaveBeenCalledTimes(1));
+    rerender({ documentId: "document-b" });
+    await waitFor(() => expect(dependencies.createSession).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(result.current.session?.room).toBe("collab:v1:workspace-a:document-b:g1"));
+
+    expect(destroySessions[0]).toHaveBeenCalledOnce();
+    expect(destroyDocuments[0]).toHaveBeenCalledOnce();
+    unmount();
+    expect(destroySessions.every((destroy) => destroy.mock.calls.length === 1)).toBe(true);
+    expect(destroyDocuments.every((destroy) => destroy.mock.calls.length === 1)).toBe(true);
+    expect(documents.every((document) => document.isDestroyed)).toBe(true);
+  });
+
+  it("defers unmount cleanup while durability is pending and cleans up on acknowledgement", async () => {
+    const harness = createHarness();
+    harness.store.recordLocalUpdate("a".repeat(64));
+    harness.store.markAwaitingDurableAcknowledgement("a".repeat(64));
+    const destroyDocument = vi.spyOn(harness.document, "destroy");
+    const { unmount } = renderHook(() => useCollaborationSession(configuration, harness.dependencies));
+    await waitFor(() => expect(harness.createSession).toHaveBeenCalledOnce());
+
+    unmount();
+    expect(harness.destroy).not.toHaveBeenCalled();
+    expect(destroyDocument).not.toHaveBeenCalled();
+
+    act(() => harness.store.acknowledgeDurableUpdate("a".repeat(64)));
+    await waitFor(() => expect(harness.destroy).toHaveBeenCalledOnce());
+    expect(destroyDocument).toHaveBeenCalledOnce();
+  });
+
+  it("bounds deferred cleanup, emits a generic warning, and remains exact-once after timeout", async () => {
+    const harness = createHarness();
+    harness.store.recordLocalUpdate("b".repeat(64));
+    harness.store.markAwaitingDurableAcknowledgement("b".repeat(64));
+    const destroyDocument = vi.spyOn(harness.document, "destroy");
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const { unmount } = renderHook(() => useCollaborationSession(configuration, harness.dependencies));
+    await waitFor(() => expect(harness.createSession).toHaveBeenCalledOnce());
+    vi.useFakeTimers();
+
+    unmount();
+    vi.advanceTimersByTime(1);
+    expect(harness.destroy).not.toHaveBeenCalled();
+
+    vi.runOnlyPendingTimers();
+    expect(warning).toHaveBeenCalledOnce();
+    expect(warning.mock.calls[0]?.[0]).toBe("Collaboration cleanup timed out");
+    expect(harness.destroy).toHaveBeenCalledOnce();
+    expect(destroyDocument).toHaveBeenCalledOnce();
+
+    act(() => harness.store.acknowledgeDurableUpdate("b".repeat(64)));
+    expect(harness.destroy).toHaveBeenCalledOnce();
+    expect(destroyDocument).toHaveBeenCalledOnce();
+  });
+
+  it("destroys the Y.Doc even when session teardown throws", async () => {
+    const harness = createHarness();
+    harness.destroy.mockImplementation(() => {
+      throw new Error("provider teardown detail");
+    });
+    const destroyDocument = vi.spyOn(harness.document, "destroy");
+    const { unmount } = renderHook(() => useCollaborationSession(configuration, harness.dependencies));
+    await waitFor(() => expect(harness.createSession).toHaveBeenCalledOnce());
+
+    expect(() => unmount()).not.toThrow();
+    expect(harness.destroy).toHaveBeenCalledOnce();
+    expect(destroyDocument).toHaveBeenCalledOnce();
   });
 
   it("destroys every session created by StrictMode's mount probe", async () => {

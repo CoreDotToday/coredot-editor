@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import {
   ChevronsLeft,
   Code2,
@@ -116,6 +117,12 @@ import type { CollaborationSession } from "@/features/collaboration/client/hocus
 import type { CollaborationSessionSnapshot } from "@/features/collaboration/client/session-store";
 import { useCollaborationSession } from "@/features/collaboration/client/use-collaboration-session";
 import {
+  createBrowserCollaborationNavigationEnvironment,
+  createCollaborationNavigationController,
+  type CollaborationNavigationController,
+} from "@/features/collaboration/client/navigation-controller";
+import { hasPendingCollaborationUpdates } from "@/features/collaboration/client/durability-state";
+import {
   PROJECT_METADATA_LIMITS,
   type ProjectProfile,
   type ProjectProfileViolation,
@@ -172,11 +179,7 @@ type CollaborationRuntime = {
   snapshot: CollaborationSessionSnapshot;
 };
 
-export function hasPendingCollaborationUpdates(snapshot: CollaborationSessionSnapshot) {
-  return snapshot.pendingLocalUpdateCount > 0
-    || snapshot.pendingLocalChecksums.length > 0
-    || snapshot.pendingDurableAcknowledgementChecksums.length > 0;
-}
+export { hasPendingCollaborationUpdates };
 
 type DocumentShellContentProps = DocumentShellProps & {
   collaborationRuntime: CollaborationRuntime | null;
@@ -438,6 +441,7 @@ function DocumentShellContent({
   templates,
   collaborationRuntime,
 }: DocumentShellContentProps) {
+  const router = useRouter();
   const isCollaborationMode = collaborationRuntime !== null;
   const initialTemplate = getInitialTemplate(templates, defaultTemplateId);
   const initialTemplateVariables = useMemo(
@@ -486,6 +490,9 @@ function DocumentShellContent({
   const [saveConflictNotice, setSaveConflictNotice] = useState("");
   const [isSavingConflictCopy, setIsSavingConflictCopy] = useState(false);
   const [language, setLanguage] = useState<EditorLanguage>(() => readStoredEditorLanguage());
+  const collaborationNavigationRef = useRef<CollaborationNavigationController | null>(null);
+  const collaborationSnapshotRef = useRef(collaborationRuntime?.snapshot ?? null);
+  const collaborationNavigationMessageRef = useRef("");
   const [selectionCommand, setSelectionCommand] = useState<SelectionCommandPayload | null>(null);
   const [selectionAiResult, setSelectionAiResult] = useState<SelectionAiResultPreview | null>(null);
   const [selectionApplicationNotice, setSelectionApplicationNotice] = useState("");
@@ -616,12 +623,39 @@ function DocumentShellContent({
   const selectionCommandLabel = selectionCommand ? getSelectionCommandLabel(selectionCommand.command, language) : "";
   const isRewritingSelection = runningSelectionCommands.length > 0;
   const isSelectionCommandLimitReached = runningSelectionCommands.length >= MAX_CONCURRENT_SELECTION_COMMANDS;
-  const hasPendingCollaborationChanges = collaborationRuntime
-    ? hasPendingCollaborationUpdates(collaborationRuntime.snapshot)
-    : false;
-  const isInternalNavigationBlocked = isCollaborationMode
-    ? hasPendingCollaborationChanges
-    : saveState !== "saved";
+  const isInternalNavigationBlocked = !isCollaborationMode && saveState !== "saved";
+
+  useEffect(() => {
+    collaborationSnapshotRef.current = collaborationRuntime?.snapshot ?? null;
+  }, [collaborationRuntime?.snapshot]);
+
+  useEffect(() => {
+    collaborationNavigationMessageRef.current = language === "ko"
+      ? "내구성 확인을 기다리는 공동 편집 변경 사항이 있습니다. 이동을 계속하시겠습니까?"
+      : "Collaboration changes are still awaiting durable storage. Continue navigating?";
+  }, [language]);
+
+  useEffect(() => {
+    const initialSnapshot = collaborationSnapshotRef.current;
+    if (!isCollaborationMode || !initialSnapshot) {
+      collaborationNavigationRef.current = null;
+      return;
+    }
+    const controller = collaborationNavigationRef.current
+      ?? createCollaborationNavigationController({
+        environment: createBrowserCollaborationNavigationEnvironment(),
+        getMessage: () => collaborationNavigationMessageRef.current,
+        getSnapshot: () => collaborationSnapshotRef.current ?? initialSnapshot,
+        onHandoff: () => {
+          intentionalNavigationRef.current = true;
+        },
+      });
+    if (!collaborationNavigationRef.current) {
+      collaborationNavigationRef.current = controller;
+    }
+    const uninstall = controller.install();
+    return uninstall;
+  }, [document.id, isCollaborationMode]);
   const adoptServerRevision = useCallback((returnedRevision: number, mode: "advance" | "reset" = "advance") => {
     const nextRevision = resolveServerRevision(serverRevisionRef.current, returnedRevision, mode);
     serverRevisionRef.current = nextRevision;
@@ -831,9 +865,10 @@ function DocumentShellContent({
   }, []);
 
   const createNewDocument = useCallback(async () => {
-    if (isInternalNavigationBlocked) {
-      return;
-    }
+    const navigationPermit = isCollaborationMode
+      ? collaborationNavigationRef.current?.requestTransition()
+      : undefined;
+    if ((isCollaborationMode && !navigationPermit) || isInternalNavigationBlocked) return;
 
     setIsCreatingDocument(true);
 
@@ -852,20 +887,48 @@ function DocumentShellContent({
 
       const body = (await response.json()) as { document?: { id?: string } };
       if (body.document?.id) {
-        window.location.assign(`/documents/${body.document.id}`);
+        const destination = `/documents/${encodeURIComponent(body.document.id)}`;
+        if (navigationPermit) {
+          navigationPermit.continue(() => router.push(destination));
+        } else {
+          window.location.assign(destination);
+        }
       }
     } catch {
       setReviewError(messages.errors.createDocumentFailed);
     } finally {
       setIsCreatingDocument(false);
     }
-  }, [isInternalNavigationBlocked, messages.errors.createDocumentFailed, messages.shell.untitledDocument]);
+  }, [
+    isCollaborationMode,
+    isInternalNavigationBlocked,
+    messages.errors.createDocumentFailed,
+    messages.shell.untitledDocument,
+    router,
+  ]);
 
   const handleInternalNavigationClick = useCallback((event: MouseEvent<HTMLAnchorElement>) => {
     if (isInternalNavigationBlocked) {
       event.preventDefault();
+      return;
     }
-  }, [isInternalNavigationBlocked]);
+    if (!isCollaborationMode) return;
+    if (
+      event.button !== 0
+      || event.altKey
+      || event.ctrlKey
+      || event.metaKey
+      || event.shiftKey
+      || event.currentTarget.target === "_blank"
+    ) {
+      return;
+    }
+    const destination = event.currentTarget.getAttribute("href");
+    if (!destination || !destination.startsWith("/") || destination.startsWith("//")) return;
+    event.preventDefault();
+    const permit = collaborationNavigationRef.current?.requestTransition();
+    permit?.continue(() => router.push(destination));
+  }, [isCollaborationMode, isInternalNavigationBlocked, router]);
 
   const handleSelectionCommand = useCallback(async (
     command: string,
@@ -1233,7 +1296,7 @@ function DocumentShellContent({
     const hasPendingLegacyChanges = saveState === "dirty"
       || saveState === "failed"
       || saveState === "saving";
-    if (isCollaborationMode ? !hasPendingCollaborationChanges : !hasPendingLegacyChanges) return;
+    if (isCollaborationMode || !hasPendingLegacyChanges) return;
 
     const handleBeforeUnload = (event: BeforeUnloadEvent) => {
       if (intentionalNavigationRef.current) return;
@@ -1243,7 +1306,7 @@ function DocumentShellContent({
 
     window.addEventListener("beforeunload", handleBeforeUnload);
     return () => window.removeEventListener("beforeunload", handleBeforeUnload);
-  }, [hasPendingCollaborationChanges, isCollaborationMode, saveState]);
+  }, [isCollaborationMode, saveState]);
 
   const downloadDocxSnapshot = useCallback(async (
     snapshot: Pick<PendingDocxExport, "contentJson" | "title">,

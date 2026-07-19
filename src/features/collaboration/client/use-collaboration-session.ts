@@ -15,6 +15,7 @@ import {
   type CollaborationSessionSnapshot,
 } from "./session-store";
 import { createBrowserCollaborationSchemaFingerprint } from "./schema-fingerprint";
+import { deferCollaborationResourceCleanup } from "./deferred-resource-cleanup";
 
 export type CollaborationSessionConfiguration = {
   documentId: string;
@@ -97,15 +98,19 @@ export function useCollaborationSession(
         browserFingerprint = await dependencies.fingerprintSchema(configuration.projectProfile);
       } catch {
         if (!active) return;
-        const store = dependencies.createStore();
-        store.markFatal();
-        installResources(dependencies.createDocument(), store, null);
+        installResources(dependencies.createDocument(), createFatalStore(dependencies), null);
         return;
       }
       if (!active) return;
 
       const document = dependencies.createDocument();
-      const store = dependencies.createStore();
+      let store: ReturnType<typeof createCollaborationSessionStore>;
+      try {
+        store = dependencies.createStore();
+      } catch {
+        installResources(document, createFatalStore(), null);
+        return;
+      }
       if (browserFingerprint !== configuration.schemaFingerprint) {
         store.markSchemaIncompatible();
         installResources(document, store, null);
@@ -137,19 +142,33 @@ export function useCollaborationSession(
         }
       };
 
-      const session = dependencies.createSession({
-        document,
-        issueCapability,
-        room: configuration.room,
-        store,
-        url: configuration.websocketUrl,
-      });
+      let session: CollaborationSession;
+      try {
+        session = dependencies.createSession({
+          document,
+          issueCapability,
+          room: configuration.room,
+          store,
+          url: configuration.websocketUrl,
+        });
+      } catch {
+        store.markFatal();
+        installResources(document, store, null, requestControllers);
+        return;
+      }
       installResources(document, store, session, requestControllers);
     })();
 
     return () => {
       active = false;
-      if (ownedResources) destroyResources(ownedResources);
+      const resourcesToDestroy = ownedResources;
+      if (resourcesToDestroy) {
+        deferCollaborationResourceCleanup({
+          cleanup: () => destroyResources(resourcesToDestroy),
+          onTimeout: () => console.warn("Collaboration cleanup timed out"),
+          store: resourcesToDestroy.store,
+        });
+      }
     };
   }, [
     configuration.documentId,
@@ -173,6 +192,19 @@ export function useCollaborationSession(
   return { session: activeResources?.session ?? null, snapshot };
 }
 
+function createFatalStore(
+  dependencies?: Pick<CollaborationSessionHookDependencies, "createStore">,
+) {
+  let store: ReturnType<typeof createCollaborationSessionStore>;
+  try {
+    store = dependencies?.createStore() ?? createCollaborationSessionStore();
+  } catch {
+    store = createCollaborationSessionStore();
+  }
+  store.markFatal();
+  return store;
+}
+
 function createConfigurationIdentity(configuration: CollaborationSessionConfiguration) {
   return JSON.stringify([
     configuration.documentId,
@@ -184,7 +216,19 @@ function createConfigurationIdentity(configuration: CollaborationSessionConfigur
 }
 
 function destroyResources(resources: CollaborationSessionResources) {
-  resources.abortRequests();
-  resources.session?.destroy();
-  resources.document.destroy();
+  try {
+    resources.abortRequests();
+  } catch {
+    // Cleanup remains best-effort across independent resources.
+  }
+  try {
+    resources.session?.destroy();
+  } catch {
+    // The Y.Doc must still be released if provider teardown fails.
+  }
+  try {
+    resources.document.destroy();
+  } catch {
+    // React effect cleanup must not surface teardown-only failures.
+  }
 }

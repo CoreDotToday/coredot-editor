@@ -24,6 +24,8 @@ import type {
   DurableUpdateReceipt,
 } from "../persistence";
 import { createCollaborationRoomName } from "../room-name";
+import { createHocuspocusProviderAdapter } from "../client/hocuspocus-provider-adapter";
+import { createCollaborationSessionStore } from "../client/session-store";
 import { createCollaborationSidecar } from "./create-server";
 import { createCollaborationResourceRegistry } from "./resource-limits";
 
@@ -383,6 +385,177 @@ describe("the pinned Hocuspocus durable message lifecycle", () => {
     }
   });
 
+  it("uses the real provider websocket reconnect lifecycle for refresh, downgrade, and destroy", async () => {
+    const fixture = await createFixture({ append: async (input) => receipt(input) });
+    try {
+      await withOriginWebSocket(async () => {
+        const sessionId = randomUUID();
+        const issued = [
+          await fixture.issueCapability("principal:adapter-refresh", "write", sessionId),
+          await fixture.issueCapability("principal:adapter-refresh", "write", sessionId),
+          await fixture.issueCapability("principal:adapter-refresh", "read", sessionId),
+        ];
+        const store = createCollaborationSessionStore();
+        const session = createHocuspocusProviderAdapter({
+          document: new Y.Doc(),
+          issueCapability: async () => {
+            const next = issued.shift();
+            if (!next) throw new Error("no capability configured");
+            return next;
+          },
+          room,
+          store,
+          url: fixture.webSocketUrl,
+        });
+        try {
+          await session.connect();
+          await eventually(() => expect(store.getSnapshot()).toMatchObject({
+            status: "synced",
+            writable: true,
+          }));
+          const provider = session.provider;
+          if (!provider) throw new Error("real provider unavailable");
+          const destroy = vi.spyOn(provider, "destroy");
+
+          const writeRefresh = session.refreshCapability();
+          expect(store.getSnapshot().writable).toBe(false);
+          await writeRefresh;
+          await eventually(() => expect(store.getSnapshot()).toMatchObject({
+            permission: "write",
+            status: "synced",
+            writable: true,
+          }));
+
+          await session.refreshCapability();
+          await eventually(() => expect(store.getSnapshot()).toMatchObject({
+            permission: "read",
+            status: "read_only",
+            writable: false,
+          }));
+
+          session.destroy();
+          session.destroy();
+          expect(destroy).toHaveBeenCalledTimes(1);
+        } finally {
+          session.destroy();
+        }
+      });
+    } finally {
+      await fixture.destroy();
+    }
+  });
+
+  it("keeps real pending state behind the reconnect SyncStep2 durable barrier", async () => {
+    const append = deferred<DurableUpdateReceipt>();
+    let changedAttempt = 0;
+    const fixture = await createFixture({
+      append: async (input) => {
+        if (!hasYjsChanges(input.update)) return receipt(input, 0);
+        changedAttempt += 1;
+        return changedAttempt === 1 ? append.promise : receipt(input, changedAttempt);
+      },
+    });
+    try {
+      await withOriginWebSocket(async () => {
+        const sessionId = randomUUID();
+        const initial = await fixture.issueCapability("principal:adapter-pending", "write", sessionId);
+        const refreshed = deferred<typeof initial>();
+        const issueCapability = vi.fn(async () => (
+          issueCapability.mock.calls.length === 1 ? initial : refreshed.promise
+        ));
+        const store = createCollaborationSessionStore();
+        const document = new Y.Doc();
+        const session = createHocuspocusProviderAdapter({
+          checksum: async () => "d".repeat(64),
+          document,
+          issueCapability,
+          room,
+          store,
+          url: fixture.webSocketUrl,
+        });
+        try {
+          await session.connect();
+          await eventually(() => expect(store.getSnapshot().writable).toBe(true));
+          const refreshing = session.refreshCapability();
+          await eventually(() => expect(issueCapability).toHaveBeenCalledTimes(2));
+
+          document.getText("test").insert(0, "survives refresh");
+          await eventually(() => expect(
+            store.getSnapshot().pendingDurableAcknowledgementChecksums,
+          ).toEqual(["d".repeat(64)]));
+
+          refreshed.resolve(await fixture.issueCapability(
+            "principal:adapter-pending",
+            "write",
+            sessionId,
+          ));
+          await refreshing;
+          await eventually(() => expect(changedAttempt).toBe(1));
+          expect(store.getSnapshot().pendingDurableAcknowledgementChecksums)
+            .toEqual(["d".repeat(64)]);
+
+          append.resolve(receipt(fixture.changedAppendInputs[0]!));
+          await eventually(() => expect(store.getSnapshot()).toMatchObject({
+            pendingDurableAcknowledgementChecksums: [],
+            status: "synced",
+            writable: true,
+          }));
+        } finally {
+          append.resolve(receipt({ generation: 1 } as AppendCollaborationUpdate));
+          session.destroy();
+        }
+      });
+    } finally {
+      await fixture.destroy();
+    }
+  });
+
+  it("fails closed and destroys the real provider when refreshed authentication is rejected", async () => {
+    const fixture = await createFixture({ append: async (input) => receipt(input) });
+    try {
+      await withOriginWebSocket(async () => {
+        const sessionId = randomUUID();
+        const issued = [
+          await fixture.issueCapability("principal:adapter-rejected", "write", sessionId),
+          { expiresInSeconds: 60, room, token: "rejected-token" },
+        ];
+        const store = createCollaborationSessionStore();
+        const session = createHocuspocusProviderAdapter({
+          document: new Y.Doc(),
+          issueCapability: async () => {
+            const next = issued.shift();
+            if (!next) throw new Error("no capability configured");
+            return next;
+          },
+          room,
+          store,
+          url: fixture.webSocketUrl,
+        });
+        try {
+          await session.connect();
+          await eventually(() => expect(store.getSnapshot().writable).toBe(true));
+          const provider = session.provider;
+          if (!provider) throw new Error("real provider unavailable");
+          const destroy = vi.spyOn(provider, "destroy");
+
+          await session.refreshCapability().catch(() => undefined);
+          await eventually(() => expect(store.getSnapshot()).toMatchObject({
+            status: "fatal",
+            writable: false,
+          }));
+          expect(session.provider).toBeNull();
+          expect(destroy).toHaveBeenCalledTimes(1);
+          session.destroy();
+          expect(destroy).toHaveBeenCalledTimes(1);
+        } finally {
+          session.destroy();
+        }
+      });
+    } finally {
+      await fixture.destroy();
+    }
+  });
+
 });
 
 async function createFixture(options: {
@@ -487,6 +660,23 @@ async function createFixture(options: {
   };
 
   const providers: HocuspocusProvider[] = [];
+  const issueCapability = async (
+    principalId: string,
+    permission: "read" | "write" = "write",
+    sessionId = randomUUID(),
+  ) => ({
+    expiresInSeconds: 60,
+    room,
+    token: await issuer.issue({
+      authorizationEpoch: 0,
+      documentId,
+      permission,
+      principalId,
+      room,
+      sessionId,
+      workspaceId,
+    }),
+  });
   return {
     appendInputs,
     beginDrain: sidecar.beginDrain,
@@ -496,15 +686,7 @@ async function createFixture(options: {
     },
     async connect(principalId: string, connectOptions: { awareness?: boolean } = {}) {
       const sessionId = randomUUID();
-      const token = await issuer.issue({
-        authorizationEpoch: 0,
-        documentId,
-        permission: "write",
-        principalId,
-        room,
-        sessionId,
-        workspaceId,
-      });
+      const { token } = await issueCapability(principalId, "write", sessionId);
       const document = new Y.Doc();
       const awareness = connectOptions.awareness ? new Awareness(document) : null;
       const websocketProvider = new HocuspocusProviderWebsocket({
@@ -547,6 +729,7 @@ async function createFixture(options: {
     },
     destroySidecar: sidecar.destroy,
     httpUrl: sidecar.httpUrl,
+    issueCapability,
     publishDurableUpdate(update: Uint8Array) {
       return sidecar.publishDurableUpdate({ workspaceId }, documentId, 1, update);
     },
@@ -636,6 +819,21 @@ async function eventually(assertion: () => void, timeoutMs = 2_000) {
     }
   }
   throw failure;
+}
+
+async function withOriginWebSocket<T>(callback: () => Promise<T>): Promise<T> {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, "WebSocket");
+  Object.defineProperty(globalThis, "WebSocket", {
+    configurable: true,
+    value: OriginWebSocket,
+    writable: true,
+  });
+  try {
+    return await callback();
+  } finally {
+    if (descriptor) Object.defineProperty(globalThis, "WebSocket", descriptor);
+    else Reflect.deleteProperty(globalThis, "WebSocket");
+  }
 }
 
 async function expectUpgradeRejected(url: string) {

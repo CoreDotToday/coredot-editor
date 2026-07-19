@@ -32,6 +32,7 @@ type MutableSessionState = {
   pendingLocalChecksums: string[];
   pendingLocalUpdateCount: number;
   permission: "read" | "write" | null;
+  requiresFreshSync: boolean;
   storageDelayed: boolean;
   transportSynced: boolean;
 };
@@ -47,6 +48,7 @@ export function createCollaborationSessionStore() {
     pendingLocalChecksums: [],
     pendingLocalUpdateCount: 0,
     permission: null,
+    requiresFreshSync: false,
     storageDelayed: false,
     transportSynced: false,
   };
@@ -60,6 +62,16 @@ export function createCollaborationSessionStore() {
   };
 
   return {
+    beginReauthenticating() {
+      if (state.lifecycle === "fatal") return;
+      state.lifecycle = "reconnecting";
+      state.permission = null;
+      state.requiresFreshSync = true;
+      state.storageDelayed = false;
+      state.transportSynced = false;
+      publish();
+    },
+
     beginLocalUpdate() {
       state.pendingLocalUpdateCount += 1;
       publish();
@@ -108,6 +120,7 @@ export function createCollaborationSessionStore() {
       if (state.lifecycle === "fatal") return;
       state.lifecycle = "authorization_expired";
       state.permission = null;
+      state.requiresFreshSync = true;
       state.transportSynced = false;
       publish();
     },
@@ -132,6 +145,7 @@ export function createCollaborationSessionStore() {
     markFatal() {
       state.lifecycle = "fatal";
       state.permission = null;
+      state.requiresFreshSync = true;
       state.transportSynced = false;
       publish();
     },
@@ -152,6 +166,7 @@ export function createCollaborationSessionStore() {
     markTransportSynced() {
       if (isTerminal(state)) return;
       state.transportSynced = true;
+      state.requiresFreshSync = false;
       if (state.permission !== null) state.hasCompletedInitialSync = true;
       publish();
     },
@@ -202,6 +217,7 @@ function createSnapshot(state: MutableSessionState): CollaborationSessionSnapsho
       )
       || (
         state.hasCompletedInitialSync
+        && !state.requiresFreshSync
         && (
           status === "reconnecting"
           || status === "offline_pending"

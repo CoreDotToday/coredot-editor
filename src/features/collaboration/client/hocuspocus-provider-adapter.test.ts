@@ -116,11 +116,11 @@ describe("Hocuspocus provider adapter", () => {
     expect(fixture.store.getSnapshot()).toMatchObject({ status: "synced", writable: true });
   });
 
-  it("uses the reconnect SyncStep2 acknowledgement as a durable barrier for retransmitted state", async () => {
+  it("separates the reconnect state barrier from new transport updates", async () => {
     const firstChecksum = "1".repeat(64);
-    const retransmissionChecksum = "2".repeat(64);
+    const secondChecksum = "2".repeat(64);
     const fixture = createFixture({
-      checksums: [firstChecksum, retransmissionChecksum],
+      checksums: [firstChecksum, secondChecksum],
     });
     await fixture.session.connect();
     const events = fixture.providers[0]!.options.events;
@@ -135,17 +135,22 @@ describe("Hocuspocus provider adapter", () => {
 
     events.status("disconnected");
     events.status("connecting");
-    events.outgoingUpdate(new Uint8Array([1, 2]), "sync-step-2");
+    events.outgoingUpdate(new Uint8Array([2]), "incremental");
     events.synced(true);
     await settleMicrotasks();
     expect(fixture.store.getSnapshot().pendingDurableAcknowledgementChecksums).toEqual([
       firstChecksum,
-      retransmissionChecksum,
+      secondChecksum,
     ]);
 
-    // The pre-disconnect frame has no acknowledgement to consume. The server
-    // persisted the reconnect state diff, so this one SyncStatus is a durable
-    // barrier for both the original update and its retransmission.
+    // Hocuspocus 4.4 writes the handshake SyncStep2 directly to its websocket,
+    // bypassing onOutgoingMessage. Its first SyncStatus acknowledges only the
+    // reconnect state barrier, not a later incremental frame.
+    events.durableAcknowledged();
+    expect(fixture.store.getSnapshot().pendingDurableAcknowledgementChecksums).toEqual([
+      secondChecksum,
+    ]);
+
     events.durableAcknowledged();
     expect(fixture.store.getSnapshot()).toMatchObject({
       pendingDurableAcknowledgementChecksums: [],
@@ -153,7 +158,7 @@ describe("Hocuspocus provider adapter", () => {
     });
   });
 
-  it("refreshes an in-memory token before expiry without persisting or exposing it", async () => {
+  it("refreshes by reconnecting with the in-memory token and waits for fresh auth plus sync", async () => {
     const fixture = createFixture({
       capabilities: [
         capability("signed-token-1"),
@@ -163,15 +168,165 @@ describe("Hocuspocus provider adapter", () => {
     const storageWrite = vi.spyOn(Storage.prototype, "setItem");
 
     await fixture.session.connect();
+    const provider = fixture.providers[0]!;
+    provider.options.events.authenticated("read-write");
+    provider.options.events.synced(true);
     const refreshTimer = fixture.timers.findLast((timer) => timer.delay === 45_000);
     expect(refreshTimer).toBeDefined();
-    await refreshTimer?.callback();
+    const refreshing = refreshTimer?.callback();
 
-    expect(fixture.providers[0]?.refreshToken).toHaveBeenCalledTimes(1);
-    expect(fixture.providers[0]?.options.getToken()).toBe("signed-token-2");
+    expect(fixture.store.getSnapshot()).toMatchObject({
+      permission: null,
+      status: "reconnecting",
+      transportSynced: false,
+      writable: false,
+    });
+    await refreshing;
+
+    expect(provider.reauthenticate).toHaveBeenCalledTimes(1);
+    expect(provider.options.getToken()).toBe("signed-token-2");
+    expect(fixture.store.getSnapshot().writable).toBe(false);
+    provider.options.events.authenticated("read-write");
+    expect(fixture.store.getSnapshot().writable).toBe(false);
+    provider.options.events.synced(true);
+    expect(fixture.store.getSnapshot()).toMatchObject({ status: "synced", writable: true });
     expect(JSON.stringify(fixture.store.getSnapshot())).not.toContain("signed-token");
     expect(storageWrite).not.toHaveBeenCalled();
     storageWrite.mockRestore();
+  });
+
+  it("applies a write-to-read downgrade only after reconnect authentication and sync", async () => {
+    const fixture = createFixture({
+      capabilities: [capability("signed-token-1"), capability("signed-token-read")],
+    });
+    await fixture.session.connect();
+    const provider = fixture.providers[0]!;
+    provider.options.events.authenticated("read-write");
+    provider.options.events.synced(true);
+
+    await fixture.session.refreshCapability();
+    expect(provider.reauthenticate).toHaveBeenCalledTimes(1);
+    expect(fixture.store.getSnapshot()).toMatchObject({ permission: null, writable: false });
+
+    provider.options.events.authenticated("readonly");
+    expect(fixture.store.getSnapshot()).toMatchObject({
+      permission: "read",
+      status: "reconnecting",
+      writable: false,
+    });
+    provider.options.events.synced(true);
+    expect(fixture.store.getSnapshot()).toMatchObject({
+      permission: "read",
+      status: "read_only",
+      writable: false,
+    });
+  });
+
+  it("ignores stale old-transport sync until the refreshed transport authenticates and syncs", async () => {
+    const nextCapability = deferred<ReturnType<typeof capability>>();
+    const fixture = createFixture({
+      capabilities: [capability("signed-token-1")],
+      issueCapabilityFallback: () => nextCapability.promise,
+    });
+    await fixture.session.connect();
+    const events = fixture.providers[0]!.options.events;
+    events.authenticated("read-write");
+    events.synced(true);
+
+    const refreshing = fixture.session.refreshCapability();
+    events.synced(true);
+    expect(fixture.store.getSnapshot()).toMatchObject({
+      permission: null,
+      transportSynced: false,
+      writable: false,
+    });
+
+    nextCapability.resolve(capability("signed-token-2"));
+    await refreshing;
+    events.authenticated("read-write");
+    expect(fixture.store.getSnapshot()).toMatchObject({
+      permission: "write",
+      transportSynced: false,
+      writable: false,
+    });
+    events.synced(true);
+    expect(fixture.store.getSnapshot()).toMatchObject({ status: "synced", writable: true });
+  });
+
+  it("opens the fresh authority barrier when refresh starts from a disconnected transport", async () => {
+    const fixture = createFixture({
+      capabilities: [capability("signed-token-1"), capability("signed-token-2")],
+    });
+    await fixture.session.connect();
+    const events = fixture.providers[0]!.options.events;
+    events.authenticated("read-write");
+    events.synced(true);
+    events.status("disconnected");
+
+    await fixture.session.refreshCapability();
+    events.authenticated("readonly");
+    expect(fixture.store.getSnapshot()).toMatchObject({
+      permission: "read",
+      transportSynced: false,
+      writable: false,
+    });
+    events.synced(true);
+    expect(fixture.store.getSnapshot()).toMatchObject({ status: "read_only", writable: false });
+  });
+
+  it("preserves pending updates until the reconnect SyncStep2 durable barrier", async () => {
+    const firstChecksum = "1".repeat(64);
+    const fixture = createFixture({
+      capabilities: [capability("signed-token-1"), capability("signed-token-2")],
+      checksums: [firstChecksum],
+    });
+    await fixture.session.connect();
+    const provider = fixture.providers[0]!;
+    const events = provider.options.events;
+    events.authenticated("read-write");
+    events.synced(true);
+    events.outgoingUpdate(new Uint8Array([1]), "incremental");
+    await settleMicrotasks();
+
+    await fixture.session.refreshCapability();
+    expect(fixture.store.getSnapshot()).toMatchObject({
+      pendingDurableAcknowledgementChecksums: [firstChecksum],
+      writable: false,
+    });
+
+    events.durableAcknowledged();
+    events.authenticated("read-write");
+    events.synced(true);
+    expect(fixture.store.getSnapshot()).toMatchObject({
+      pendingDurableAcknowledgementChecksums: [],
+      status: "synced",
+      writable: true,
+    });
+  });
+
+  it("keeps a failed refresh non-writable and does not reuse the old authority", async () => {
+    const fixture = createFixture({
+      capabilities: [capability("signed-token-1")],
+      issueCapabilityFallback: async () => {
+        throw new Error("issuer details must stay internal");
+      },
+    });
+    await fixture.session.connect();
+    const provider = fixture.providers[0]!;
+    provider.options.events.authenticated("read-write");
+    provider.options.events.synced(true);
+
+    const refreshing = fixture.session.refreshCapability();
+    expect(fixture.store.getSnapshot().writable).toBe(false);
+    await expect(refreshing).rejects.toEqual(
+      new CollaborationSessionError("capability_unavailable"),
+    );
+    expect(provider.reauthenticate).toHaveBeenCalledTimes(1);
+    expect(fixture.store.getSnapshot()).toMatchObject({
+      permission: null,
+      status: "authorization_expired",
+      writable: false,
+    });
   });
 
   it("rejects a refreshed capability for another generation and tears down the stale provider", async () => {
@@ -194,10 +349,10 @@ describe("Hocuspocus provider adapter", () => {
   });
 
   it.each([
-    ["authorization_expired", "authorization_expired"],
-    ["authorization_revoked", "authorization_expired"],
+    ["authorization_expired", "reconnecting"],
+    ["authorization_revoked", "reconnecting"],
     ["server_draining", "reconnecting"],
-    ["storage_unavailable", "storage_delayed"],
+    ["storage_unavailable", "reconnecting"],
     ["invalid_message", "fatal"],
     ["update_rejected", "fatal"],
     ["resource_limit", "fatal"],
@@ -215,7 +370,7 @@ describe("Hocuspocus provider adapter", () => {
 
     expect(fixture.store.getSnapshot()).toMatchObject({
       status: expectedStatus,
-      writable: expectedStatus === "reconnecting" || expectedStatus === "storage_delayed",
+      writable: expectedStatus === "reconnecting" && reason === "server_draining",
     });
   });
 
@@ -234,7 +389,7 @@ describe("Hocuspocus provider adapter", () => {
 
     events.authenticationFailed("authorization_expired");
     expect(fixture.store.getSnapshot()).toMatchObject({
-      status: "authorization_expired",
+      status: "reconnecting",
       writable: false,
     });
   });
@@ -407,7 +562,15 @@ function createFakeProvider(
     }),
     options,
     provider,
-    refreshToken: vi.fn(async () => undefined),
+    reauthenticate: vi.fn(async (
+      prepareToken: () => Promise<void>,
+      onTransportReset: () => void,
+    ) => {
+      options.events.status("disconnected");
+      onTransportReset();
+      await prepareToken();
+      options.events.status("connecting");
+    }),
   };
 }
 

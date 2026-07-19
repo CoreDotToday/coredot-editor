@@ -130,6 +130,67 @@ describe("scoped collaborative block transactions", () => {
     expect(peers.remote.getJSON()).toEqual(peers.local.getJSON());
   });
 
+  it("removes the sole hard break inline child from a collaborative textblock", () => {
+    const peers = createPeers({
+      content: [{ content: [{ type: "hardBreak" }], type: "paragraph" }],
+      type: "doc",
+    });
+    const range = requiredRange(getTopLevelBlockActionRangeByIndex(peers.local, 0));
+
+    expect(applyScopedLastBlockDeletion(peers.local, range, peers.localDocument)).toBe(true);
+    expect(peers.local.getJSON()).toEqual(emptyParagraphDocument());
+  });
+
+  it("removes mixed text and hard-break inline children from a collaborative textblock", () => {
+    const peers = createPeers({
+      content: [{
+        content: [
+          { text: "Before", type: "text" },
+          { type: "hardBreak" },
+          { text: "After", type: "text" },
+        ],
+        type: "paragraph",
+      }],
+      type: "doc",
+    });
+    const range = requiredRange(getTopLevelBlockActionRangeByIndex(peers.local, 0));
+
+    expect(applyScopedLastBlockDeletion(peers.local, range, peers.localDocument)).toBe(true);
+    expect(peers.local.getJSON()).toEqual(emptyParagraphDocument());
+  });
+
+  it("returns false when the sole collaborative textblock is already empty", () => {
+    const peers = createPeers(emptyParagraphDocument());
+    const range = requiredRange(getTopLevelBlockActionRangeByIndex(peers.local, 0));
+
+    expect(applyScopedLastBlockDeletion(peers.local, range, peers.localDocument)).toBe(false);
+    expect(peers.local.getJSON()).toEqual(emptyParagraphDocument());
+  });
+
+  it("converges exactly when remote text races a mixed-inline clear", () => {
+    const content: TiptapJson = {
+      content: [{
+        content: [
+          { text: "Before", type: "text" },
+          { type: "hardBreak" },
+          { text: "After", type: "text" },
+        ],
+        type: "paragraph",
+      }],
+      type: "doc",
+    };
+    const peers = createPeers(content);
+    const localRange = requiredRange(getTopLevelBlockActionRangeByIndex(peers.local, 0));
+    const remoteRange = requiredRange(getTopLevelBlockActionRangeByIndex(peers.remote, 0));
+
+    expect(applyScopedLastBlockDeletion(peers.local, localRange, peers.localDocument)).toBe(true);
+    peers.remote.commands.insertContentAt(remoteRange.from + 1, "REMOTE-");
+    peers.exchange();
+
+    expect(peers.local.getJSON()).toEqual(paragraphDocument("REMOTE-"));
+    expect(peers.remote.getJSON()).toEqual(peers.local.getJSON());
+  });
+
   it("fails closed when the final collaborative block cannot be cleared as text", () => {
     const peers = createPeers({ content: [{ type: "horizontalRule" }], type: "doc" });
     const range = requiredRange(getTopLevelBlockActionRangeByIndex(peers.local, 0));
@@ -267,6 +328,10 @@ function expectConvergedWithText(
 
 function paragraphDocument(...text: string[]): TiptapJson {
   return { content: text.map((value) => paragraph(value)), type: "doc" };
+}
+
+function emptyParagraphDocument(): TiptapJson {
+  return { content: [{ type: "paragraph" }], type: "doc" };
 }
 
 function findTextNodeMarks(document: JSONContent, text: string) {

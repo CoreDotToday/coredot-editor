@@ -150,6 +150,32 @@ describe("collaboration session store", () => {
     });
   });
 
+  it("revokes local write authority immediately while a capability is being refreshed", () => {
+    const store = createCollaborationSessionStore();
+    store.markAuthenticated("read-write");
+    store.markTransportSynced();
+
+    store.beginReauthenticating();
+
+    expect(store.getSnapshot()).toMatchObject({
+      hasCompletedInitialSync: true,
+      permission: null,
+      status: "reconnecting",
+      transportSynced: false,
+      writable: false,
+    });
+
+    store.markAuthenticated("read-write");
+    expect(store.getSnapshot()).toMatchObject({
+      permission: "write",
+      status: "reconnecting",
+      writable: false,
+    });
+
+    store.markTransportSynced();
+    expect(store.getSnapshot()).toMatchObject({ status: "synced", writable: true });
+  });
+
   it("prioritizes offline pending work over a prior storage-delay warning", () => {
     const store = createCollaborationSessionStore();
     store.markAuthenticated("read-write");

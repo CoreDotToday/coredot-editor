@@ -1,11 +1,18 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { StrictMode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DocumentShell, hasPendingCollaborationUpdates } from "./DocumentShell";
 import { SelectionAiMenu } from "./SelectionAiMenu";
 import { DOCUMENT_INTERCHANGE_CLIENT_TIMEOUT_MS } from "@/features/documents/document-interchange-fetch";
 import { useCollaborationSession } from "@/features/collaboration/client/use-collaboration-session";
 import type { CollaborationSessionSnapshot } from "@/features/collaboration/client/session-store";
+
+const { routerPush } = vi.hoisted(() => ({ routerPush: vi.fn() }));
+
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: routerPush }),
+}));
 
 vi.mock("@/features/collaboration/client/use-collaboration-session", () => ({
   useCollaborationSession: vi.fn(),
@@ -242,6 +249,7 @@ function readMockTiptapText(node: unknown): string {
 }
 
 afterEach(() => {
+  routerPush.mockReset();
   vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -735,7 +743,7 @@ describe("DocumentShell", () => {
     });
   });
 
-  it("blocks unload, internal navigation, and new-document creation while collaboration updates await durability", () => {
+  it("warns and retains the document when pending collaboration navigation is canceled", () => {
     vi.mocked(useCollaborationSession).mockReturnValue({
       session: createMockCollaborationSession(),
       snapshot: createCollaborationSnapshot({
@@ -748,6 +756,7 @@ describe("DocumentShell", () => {
       }),
     });
     const fetchSpy = vi.spyOn(globalThis, "fetch");
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
 
     render(
       <DocumentShell
@@ -762,8 +771,87 @@ describe("DocumentShell", () => {
     window.dispatchEvent(beforeUnload);
     expect(beforeUnload.defaultPrevented).toBe(true);
     expect(fireEvent.click(screen.getByRole("link", { name: "문서" }))).toBe(false);
-    expect(screen.getByRole("button", { name: "새로 만들기" })).toBeDisabled();
+    expect(routerPush).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "새로 만들기" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "새로 만들기" }));
+    expect(confirm).toHaveBeenCalledTimes(2);
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["ko", "내구성 확인을 기다리는 공동 편집 변경 사항이 있습니다. 이동을 계속하시겠습니까?"],
+    ["en", "Collaboration changes are still awaiting durable storage. Continue navigating?"],
+  ] as const)("confirms pending collaboration soft navigation in %s", async (language, warning) => {
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session: createMockCollaborationSession(),
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        pendingDurableAcknowledgementChecksums: ["a".repeat(64)],
+        permission: "write",
+        status: "storage_delayed",
+        transportSynced: true,
+        writable: true,
+      }),
+    });
+    window.localStorage.setItem("coredot-editor-language", language);
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const replaceState = vi.spyOn(window.history, "replaceState");
+    vi.spyOn(window.history, "back").mockImplementation(() => undefined);
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocument("doc_1", "Pending collaboration")}
+        templates={[]}
+      />,
+    );
+    const baseState = replaceState.mock.calls.at(-1)?.[0];
+
+    expect(fireEvent.click(screen.getByRole("link", { name: language === "ko" ? "문서" : "Documents" })))
+      .toBe(false);
+    expect(confirm).toHaveBeenCalledWith(warning);
+    expect(routerPush).not.toHaveBeenCalled();
+
+    window.dispatchEvent(new PopStateEvent("popstate", { state: baseState }));
+    await waitFor(() => expect(routerPush).toHaveBeenCalledOnce());
+    expect(routerPush).toHaveBeenCalledWith("/documents");
+  });
+
+  it("confirms before creating a document and continues only after the sentinel handoff", async () => {
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session: createMockCollaborationSession(),
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        pendingLocalChecksums: ["a".repeat(64)],
+        permission: "write",
+        status: "offline_pending",
+        writable: true,
+      }),
+    });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+      document: { id: "doc/new" },
+    }), { headers: { "content-type": "application/json" }, status: 201 }));
+    const replaceState = vi.spyOn(window.history, "replaceState");
+    vi.spyOn(window.history, "back").mockImplementation(() => undefined);
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocument("doc_1", "Pending collaboration")}
+        templates={[]}
+      />,
+    );
+    const baseState = replaceState.mock.calls.at(-1)?.[0];
+
+    fireEvent.click(screen.getByRole("button", { name: "새로 만들기" }));
+    await waitFor(() => expect(globalThis.fetch).toHaveBeenCalledOnce());
+    expect(routerPush).not.toHaveBeenCalled();
+
+    window.dispatchEvent(new PopStateEvent("popstate", { state: baseState }));
+    await waitFor(() => expect(routerPush).toHaveBeenCalledWith("/documents/doc%2Fnew"));
   });
 
   it("allows navigation once every collaboration update is durably acknowledged", () => {
@@ -792,6 +880,33 @@ describe("DocumentShell", () => {
     expect(beforeUnload.defaultPrevented).toBe(false);
     expect(screen.getByRole("button", { name: "새로 만들기" })).toBeEnabled();
     expect(screen.getByRole("link", { name: "문서" })).not.toHaveAttribute("aria-disabled", "true");
+  });
+
+  it("installs one collaboration history sentinel across the StrictMode effect probe", () => {
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session: createMockCollaborationSession(),
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        permission: "write",
+        status: "synced",
+        transportSynced: true,
+        writable: true,
+      }),
+    });
+    const pushState = vi.spyOn(window.history, "pushState");
+
+    render(
+      <StrictMode>
+        <DocumentShell
+          aiRuns={[]}
+          collaboration={createCollaborationConfiguration()}
+          document={createDocument("doc_1", "Strict collaboration")}
+          templates={[]}
+        />
+      </StrictMode>,
+    );
+
+    expect(pushState).toHaveBeenCalledOnce();
   });
 
   it("does not schedule legacy autosave or expose conflict-copy actions in collaboration mode", async () => {

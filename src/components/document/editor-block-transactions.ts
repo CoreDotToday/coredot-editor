@@ -72,8 +72,20 @@ export function applyScopedLastBlockDeletion(
     if (!range.node.isTextblock) return false;
     const block = collaborationDocument.getXmlFragment("body").get(range.topLevelIndex);
     if (!(block instanceof Y.XmlFragment)) return false;
-    collaborationDocument.transact(() => clearCollaborativeText(block));
-    return true;
+    let changed = false;
+    collaborationDocument.transact(() => {
+      for (let index = block.length - 1; index >= 0; index -= 1) {
+        const inline = block.get(index);
+        if (inline instanceof Y.XmlText) {
+          if (inline.length === 0) continue;
+          inline.delete(0, inline.length);
+        } else {
+          block.delete(index, 1);
+        }
+        changed = true;
+      }
+    });
+    return changed;
   }
   const contentFrom = Math.min(range.to - 1, range.from + 1);
   const contentTo = Math.max(contentFrom, range.to - 1);
@@ -157,16 +169,4 @@ export function applyScopedDocumentJson(editor: RuntimeEditor, contentJson: Tipt
 
 function isCollaborationEditor(editor: RuntimeEditor) {
   return editor.extensionManager.extensions.some((extension) => extension.name === "collaboration");
-}
-
-function clearCollaborativeText(node: Y.XmlFragment | Y.XmlText) {
-  if (node instanceof Y.XmlText) {
-    if (node.length > 0) node.delete(0, node.length);
-    return;
-  }
-  for (const child of node.toArray()) {
-    if (child instanceof Y.XmlText || child instanceof Y.XmlFragment) {
-      clearCollaborativeText(child);
-    }
-  }
 }

@@ -1,6 +1,7 @@
 import {
   HocuspocusProvider,
   HocuspocusProviderWebsocket,
+  WebSocketStatus,
 } from "@hocuspocus/provider";
 import * as decoding from "lib0/decoding";
 import type { Awareness } from "y-protocols/awareness";
@@ -40,7 +41,10 @@ export type CollaborationProviderHandle = {
   connect(): Promise<void>;
   destroy(): void;
   provider: CollaborationHocuspocusProvider;
-  refreshToken(): Promise<void>;
+  reauthenticate(
+    prepareToken: () => Promise<void>,
+    onTransportReset: () => void,
+  ): Promise<void>;
 };
 
 export type CollaborationProviderFactory = (
@@ -78,7 +82,6 @@ type TimerApi = {
 
 type PendingUpdate = {
   acknowledged: boolean;
-  durableBarrierUpdates: PendingUpdate[];
   checksum?: string;
 };
 
@@ -109,8 +112,14 @@ export function createHocuspocusProviderAdapter(options: {
   let connectPromise: Promise<void> | undefined;
   let destroyed = false;
   let hasAttemptedConnect = false;
+  let awaitingTransportBarrier = false;
   let lifecycleId = 0;
   let providerHandle: CollaborationProviderHandle | undefined;
+  let acceptingReauthenticationEvents = false;
+  let reauthenticationAuthenticated = false;
+  let reauthenticationPending = false;
+  let reauthenticationSawDisconnect = false;
+  let reauthenticationSynced = false;
   let refreshPromise: Promise<void> | undefined;
   let refreshTimer: unknown;
   let storageDelayTimer: unknown;
@@ -141,8 +150,15 @@ export function createHocuspocusProviderAdapter(options: {
   };
 
   const failFatal = () => {
+    reauthenticationPending = false;
     options.store.markFatal();
     teardownProvider();
+  };
+
+  const finishReauthenticationIfReady = () => {
+    if (reauthenticationAuthenticated && reauthenticationSynced) {
+      reauthenticationPending = false;
+    }
   };
 
   const scheduleStorageDelay = (id: number) => {
@@ -156,10 +172,6 @@ export function createHocuspocusProviderAdapter(options: {
   const acknowledgePendingUpdate = (pending: PendingUpdate) => {
     pending.acknowledged = true;
     if (pending.checksum) options.store.acknowledgeDurableUpdate(pending.checksum);
-    for (const barrierUpdate of pending.durableBarrierUpdates) {
-      acknowledgePendingUpdate(barrierUpdate);
-    }
-    pending.durableBarrierUpdates.length = 0;
   };
 
   const hasPendingUpdateFrames = () => (
@@ -168,6 +180,14 @@ export function createHocuspocusProviderAdapter(options: {
 
   const acknowledgeNextDurableUpdate = (id: number) => {
     if (!isCurrent(id)) return;
+    if (awaitingTransportBarrier) {
+      awaitingTransportBarrier = false;
+      for (const pending of reconnectBarrierUpdates.splice(0)) {
+        acknowledgePendingUpdate(pending);
+      }
+      if (!hasPendingUpdateFrames()) clearStorageDelayTimer();
+      return;
+    }
     const pending = pendingUpdates.shift();
     if (!pending) return;
     acknowledgePendingUpdate(pending);
@@ -180,11 +200,12 @@ export function createHocuspocusProviderAdapter(options: {
     kind: "incremental" | "sync-step-2",
   ) => {
     if (!isCurrent(id)) return;
+    // Hocuspocus 4.4 sends the handshake SyncStep2 from MessageReceiver
+    // directly through the websocket, bypassing onOutgoingMessage. The first
+    // durable SyncStatus on each transport is tracked as the barrier instead.
+    if (kind === "sync-step-2") return;
     const pending: PendingUpdate = {
       acknowledged: false,
-      durableBarrierUpdates: kind === "sync-step-2"
-        ? reconnectBarrierUpdates.splice(0)
-        : [],
     };
     pendingUpdates.push(pending);
     // SHA-256 is asynchronous in browsers. Publish the pending update before
@@ -210,13 +231,19 @@ export function createHocuspocusProviderAdapter(options: {
     refreshTimer = timers.set(async () => {
       refreshTimer = undefined;
       if (!isCurrent(id)) return;
-      await refreshCapability(false).catch(() => undefined);
+      await refreshCapability().catch(() => undefined);
     }, delay);
   };
 
   const createEvents = (id: number): CollaborationProviderFactoryOptions["events"] => ({
     authenticated(scope) {
-      if (isCurrent(id)) options.store.markAuthenticated(scope);
+      if (!isCurrent(id)) return;
+      if (reauthenticationPending && !acceptingReauthenticationEvents) return;
+      options.store.markAuthenticated(scope);
+      if (reauthenticationPending) {
+        reauthenticationAuthenticated = true;
+        finishReauthenticationIfReady();
+      }
     },
     authenticationFailed(reason) {
       if (!isCurrent(id)) return;
@@ -235,6 +262,14 @@ export function createHocuspocusProviderAdapter(options: {
     status(status) {
       if (!isCurrent(id)) return;
       if (status === "connecting") {
+        awaitingTransportBarrier = true;
+        reconnectBarrierUpdates.push(...pendingUpdates.splice(0));
+        if (reauthenticationPending && reauthenticationSawDisconnect) {
+          acceptingReauthenticationEvents = true;
+          reauthenticationAuthenticated = false;
+          reauthenticationSynced = false;
+          options.store.beginReauthenticating();
+        }
         const snapshot = options.store.getSnapshot();
         options.store.beginConnecting({
           reconnecting: snapshot.hasCompletedInitialSync || snapshot.status !== "connecting",
@@ -244,11 +279,21 @@ export function createHocuspocusProviderAdapter(options: {
         // the active transport. Preserve their logical updates, but let the
         // next SyncStep2 acknowledgement act as the durable state barrier.
         reconnectBarrierUpdates.push(...pendingUpdates.splice(0));
+        if (reauthenticationPending) {
+          acceptingReauthenticationEvents = false;
+          reauthenticationSawDisconnect = true;
+        }
         options.store.markDisconnected();
       }
     },
     synced(state) {
-      if (isCurrent(id) && state) options.store.markTransportSynced();
+      if (!isCurrent(id) || !state) return;
+      if (reauthenticationPending && !acceptingReauthenticationEvents) return;
+      options.store.markTransportSynced();
+      if (reauthenticationPending) {
+        reauthenticationSynced = true;
+        finishReauthenticationIfReady();
+      }
     },
     unsyncedChanges(number) {
       if (!isCurrent(id) || !Number.isSafeInteger(number) || number < 0) {
@@ -261,7 +306,7 @@ export function createHocuspocusProviderAdapter(options: {
   });
 
   const beginRecovery = (id: number) => {
-    void refreshCapability(true).catch(() => {
+    void refreshCapability().catch(() => {
       if (isCurrent(id) && options.store.getSnapshot().status !== "fatal") {
         options.store.markAuthorizationExpired();
       }
@@ -269,6 +314,15 @@ export function createHocuspocusProviderAdapter(options: {
   };
 
   const handleAuthorizationFailure = (id: number, reason: string) => {
+    if (
+      reauthenticationPending
+      && acceptingReauthenticationEvents
+      && (reason === "authorization_expired" || reason === "authorization_revoked")
+    ) {
+      failFatal();
+      return;
+    }
+    if (reauthenticationPending && !acceptingReauthenticationEvents) return;
     if (reason === "authorization_expired") {
       options.store.markAuthorizationExpired();
       beginRecovery(id);
@@ -287,6 +341,19 @@ export function createHocuspocusProviderAdapter(options: {
   };
 
   const handleClose = (id: number, reason: string) => {
+    if (
+      reauthenticationPending
+      && acceptingReauthenticationEvents
+      && (reason === "authorization_expired" || reason === "authorization_revoked")
+    ) {
+      failFatal();
+      return;
+    }
+    if (
+      reauthenticationPending
+      && !acceptingReauthenticationEvents
+      && (reason === "authorization_expired" || reason === "authorization_revoked")
+    ) return;
     if (reason === "authorization_expired") {
       options.store.markAuthorizationExpired();
       beginRecovery(id);
@@ -332,32 +399,46 @@ export function createHocuspocusProviderAdapter(options: {
     return issued;
   };
 
-  const refreshCapability = (recovering: boolean): Promise<void> => {
+  const refreshCapability = (): Promise<void> => {
     if (destroyed) return Promise.reject(new CollaborationSessionError("destroyed"));
     if (!providerHandle) return Promise.reject(new CollaborationSessionError("transport_unavailable"));
     if (refreshPromise) {
-      return recovering
-        ? refreshPromise.then(() => {
-            if (!destroyed && providerHandle) {
-              options.store.beginConnecting({ reconnecting: true });
-            }
-          })
-        : refreshPromise;
+      return refreshPromise;
     }
     const id = lifecycleId;
+    // A previously authenticated capability is no longer authority once its
+    // replacement starts. Revoke local writes before waiting on the issuer so
+    // a write-to-read downgrade cannot race the refresh request.
+    options.store.beginReauthenticating();
+    acceptingReauthenticationEvents = false;
+    reauthenticationAuthenticated = false;
+    reauthenticationPending = true;
+    reauthenticationSawDisconnect = false;
+    reauthenticationSynced = false;
     refreshPromise = (async () => {
       try {
-        const next = await issueExactCapability();
+        let next: CollaborationCapability | undefined;
+        await providerHandle!.reauthenticate(
+          async () => {
+            next = await issueExactCapability();
+            if (!isCurrent(id)) throw new CollaborationSessionError("destroyed");
+            capability = next;
+          },
+          () => {
+            if (!isCurrent(id)) return;
+            acceptingReauthenticationEvents = false;
+            reauthenticationSawDisconnect = true;
+            options.store.beginReauthenticating();
+          },
+        );
         if (!isCurrent(id)) throw new CollaborationSessionError("destroyed");
-        capability = next;
-        if (recovering) options.store.beginConnecting({ reconnecting: true });
-        await providerHandle!.refreshToken();
-        if (!isCurrent(id)) throw new CollaborationSessionError("destroyed");
+        if (!next) throw new CollaborationSessionError("capability_unavailable");
         scheduleCapabilityRefresh(id, next.expiresInSeconds);
       } catch (error) {
         if (error instanceof CollaborationSessionError && error.category === "capability_invalid") {
           failFatal();
         } else if (!destroyed && isCurrent(id)) {
+          reauthenticationPending = false;
           options.store.markAuthorizationExpired();
         }
         throw normalizeSessionError(error, "capability_unavailable");
@@ -419,7 +500,7 @@ export function createHocuspocusProviderAdapter(options: {
       return providerHandle?.provider ?? null;
     },
     refreshCapability() {
-      return refreshCapability(false);
+      return refreshCapability();
     },
     room: options.room,
     store: options.store,
@@ -459,12 +540,18 @@ function createProvider(options: CollaborationProviderFactoryOptions): Collabora
     throw new CollaborationSessionError("transport_unavailable");
   }
   const collaborationProvider = provider as CollaborationHocuspocusProvider;
+  let destroyed = false;
+  let rejectDisconnectWait: ((error: CollaborationSessionError) => void) | undefined;
   provider.attach();
   return {
     async connect() {
       await websocketProvider.connect();
     },
     destroy() {
+      if (destroyed) return;
+      destroyed = true;
+      rejectDisconnectWait?.(new CollaborationSessionError("destroyed"));
+      rejectDisconnectWait = undefined;
       try {
         provider.destroy();
       } finally {
@@ -472,8 +559,33 @@ function createProvider(options: CollaborationProviderFactoryOptions): Collabora
       }
     },
     provider: collaborationProvider,
-    async refreshToken() {
-      await provider.sendToken();
+    async reauthenticate(prepareToken, onTransportReset) {
+      if (destroyed) throw new CollaborationSessionError("destroyed");
+      if (websocketProvider.status !== WebSocketStatus.Disconnected) {
+        await new Promise<void>((resolve, reject) => {
+          const finish = () => {
+            websocketProvider.off("status", onStatus);
+            rejectDisconnectWait = undefined;
+            resolve();
+          };
+          const onStatus = ({ status }: { status: WebSocketStatus }) => {
+            if (status === WebSocketStatus.Disconnected) finish();
+          };
+          rejectDisconnectWait = (error) => {
+            websocketProvider.off("status", onStatus);
+            rejectDisconnectWait = undefined;
+            reject(error);
+          };
+          websocketProvider.on("status", onStatus);
+          websocketProvider.disconnect();
+          if (websocketProvider.status === WebSocketStatus.Disconnected) finish();
+        });
+      }
+      if (destroyed) throw new CollaborationSessionError("destroyed");
+      onTransportReset();
+      await prepareToken();
+      if (destroyed) throw new CollaborationSessionError("destroyed");
+      await websocketProvider.connect();
     },
   };
 }
