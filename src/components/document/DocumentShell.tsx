@@ -442,6 +442,7 @@ function DocumentShellContent({
   collaborationRuntime,
 }: DocumentShellContentProps) {
   const router = useRouter();
+  const replaceRoute = router.replace;
   const isCollaborationMode = collaborationRuntime !== null;
   const initialTemplate = getInitialTemplate(templates, defaultTemplateId);
   const initialTemplateVariables = useMemo(
@@ -649,13 +650,18 @@ function DocumentShellContent({
         onHandoff: () => {
           intentionalNavigationRef.current = true;
         },
+        onRestoreProtectedRoute: (href) => {
+          const protectedUrl = new URL(href, window.location.href);
+          if (protectedUrl.origin !== window.location.origin) return;
+          replaceRoute(`${protectedUrl.pathname}${protectedUrl.search}${protectedUrl.hash}`);
+        },
       });
     if (!collaborationNavigationRef.current) {
       collaborationNavigationRef.current = controller;
     }
     const uninstall = controller.install();
     return uninstall;
-  }, [document.id, isCollaborationMode]);
+  }, [document.id, isCollaborationMode, replaceRoute]);
   const adoptServerRevision = useCallback((returnedRevision: number, mode: "advance" | "reset" = "advance") => {
     const nextRevision = resolveServerRevision(serverRevisionRef.current, returnedRevision, mode);
     serverRevisionRef.current = nextRevision;

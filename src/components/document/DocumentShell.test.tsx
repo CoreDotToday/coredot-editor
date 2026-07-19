@@ -8,10 +8,13 @@ import { DOCUMENT_INTERCHANGE_CLIENT_TIMEOUT_MS } from "@/features/documents/doc
 import { useCollaborationSession } from "@/features/collaboration/client/use-collaboration-session";
 import type { CollaborationSessionSnapshot } from "@/features/collaboration/client/session-store";
 
-const { routerPush } = vi.hoisted(() => ({ routerPush: vi.fn() }));
+const { routerPush, routerReplace } = vi.hoisted(() => ({
+  routerPush: vi.fn(),
+  routerReplace: vi.fn(),
+}));
 
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: routerPush }),
+  useRouter: () => ({ push: routerPush, replace: routerReplace }),
 }));
 
 vi.mock("@/features/collaboration/client/use-collaboration-session", () => ({
@@ -250,6 +253,7 @@ function readMockTiptapText(node: unknown): string {
 
 afterEach(() => {
   routerPush.mockReset();
+  routerReplace.mockReset();
   vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -776,6 +780,53 @@ describe("DocumentShell", () => {
     fireEvent.click(screen.getByRole("button", { name: "새로 만들기" }));
     expect(confirm).toHaveBeenCalledTimes(2);
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("restores the protected Next route after a canceled multi-entry history traversal", () => {
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session: createMockCollaborationSession(),
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        pendingDurableAcknowledgementChecksums: ["a".repeat(64)],
+        permission: "write",
+        status: "storage_delayed",
+        transportSynced: true,
+        writable: true,
+      }),
+    });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const replaceState = vi.spyOn(window.history, "replaceState");
+    const forward = vi.spyOn(window.history, "forward").mockImplementation(() => undefined);
+    const protectedRoute = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocumentWithContent("doc_1", "Protected collaboration", "Protected body")}
+        templates={[]}
+      />,
+    );
+    const baseState = replaceState.mock.calls.at(-1)?.[0];
+
+    act(() => {
+      window.dispatchEvent(new PopStateEvent("popstate", {
+        state: { route: "foreign-target" },
+      }));
+    });
+    expect(confirm).toHaveBeenCalledOnce();
+    expect(forward).toHaveBeenCalledOnce();
+    expect(routerReplace).not.toHaveBeenCalled();
+
+    act(() => {
+      window.dispatchEvent(new PopStateEvent("popstate", { state: baseState }));
+    });
+
+    expect(confirm).toHaveBeenCalledOnce();
+    expect(routerReplace).toHaveBeenCalledOnce();
+    expect(routerReplace).toHaveBeenCalledWith(protectedRoute);
+    expect(screen.getByRole("textbox", { name: "문서 제목" })).toHaveValue("Protected collaboration");
+    expect(screen.getByTestId("mock-editor-mode")).toHaveTextContent("collaboration");
   });
 
   it.each([
