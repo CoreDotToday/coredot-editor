@@ -1,7 +1,13 @@
-import { and, desc, eq, inArray, lt, ne, or, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, lt, ne, notExists, or, sql } from "drizzle-orm";
 import { db } from "@/db/client";
 import { withSerializedDocumentWrite } from "@/db/document-write-queue";
-import { documents, type DocumentMetadata, type DocumentReadiness, type TiptapJson } from "@/db/schema";
+import {
+  collaborationDocuments,
+  documents,
+  type DocumentMetadata,
+  type DocumentReadiness,
+  type TiptapJson,
+} from "@/db/schema";
 import { retrySqliteContention } from "@/db/sqlite-contention";
 import type { WorkspaceScope } from "@/features/auth/request-context";
 import { decodeCollectionCursor, encodeCollectionCursor } from "@/features/pagination/collection-cursor";
@@ -330,6 +336,15 @@ export function createDocumentRepository(
           ))
           .limit(1);
         if (!current) return { status: "not_found" as const };
+        const [collaboration] = await database
+          .select({ generation: collaborationDocuments.generation })
+          .from(collaborationDocuments)
+          .where(and(
+            eq(collaborationDocuments.workspaceId, scope.workspaceId),
+            eq(collaborationDocuments.documentId, id),
+          ))
+          .limit(1);
+        if (collaboration) return { status: "collaboration_initialized" as const };
         if (current.revision !== input.expectedRevision) {
           return { latest: current, status: "revision_conflict" as const };
         }
@@ -361,10 +376,27 @@ export function createDocumentRepository(
             eq(documents.id, id),
             eq(documents.status, "draft"),
             eq(documents.revision, input.expectedRevision),
+            notExists(database
+              .select({ generation: collaborationDocuments.generation })
+              .from(collaborationDocuments)
+              .where(and(
+                eq(collaborationDocuments.workspaceId, scope.workspaceId),
+                eq(collaborationDocuments.documentId, id),
+              ))),
           ))
           .returning());
         const savedDocument = rows[0];
         if (savedDocument) return { document: savedDocument, status: "success" as const };
+
+        const [initializedCollaboration] = await database
+          .select({ generation: collaborationDocuments.generation })
+          .from(collaborationDocuments)
+          .where(and(
+            eq(collaborationDocuments.workspaceId, scope.workspaceId),
+            eq(collaborationDocuments.documentId, id),
+          ))
+          .limit(1);
+        if (initializedCollaboration) return { status: "collaboration_initialized" as const };
 
         const [latest] = await database
           .select()

@@ -1,0 +1,600 @@
+import { createHash } from "node:crypto";
+
+import { createClient, type Client } from "@libsql/client";
+import { and, asc, eq } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/libsql";
+import { migrate } from "drizzle-orm/libsql/migrator";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import * as Y from "yjs";
+
+import * as schema from "@/db/schema";
+import {
+  collaborationDocuments,
+  collaborationUpdates,
+  documentApprovals,
+  documents,
+} from "@/db/schema";
+import { getProjectProfile } from "@/features/projects/default-project-profiles";
+
+import { COLLABORATION_METADATA_NAME, COLLABORATION_TITLE_NAME } from "./contracts";
+import { createCollaborationDocumentCodec } from "./document-codec";
+import {
+  CollaborationPersistenceError,
+  createCollaborationPersistence,
+  type AppendCollaborationUpdate,
+  type CollaborationSnapshot,
+} from "./persistence";
+
+const migrationsFolder = resolve(process.cwd(), "drizzle");
+const tempDirs: string[] = [];
+const clients: Client[] = [];
+const scope = { workspaceId: "workspace-a" };
+const otherScope = { workspaceId: "workspace-b" };
+const projectProfile = getProjectProfile("default");
+
+afterEach(async () => {
+  clients.splice(0).forEach((client) => client.close());
+  await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { force: true, recursive: true })));
+});
+
+describe("CollaborationPersistence", () => {
+  it("bootstraps exactly once from the legacy materialization and never falls back to JSON", async () => {
+    const harness = await createHarness("bootstrap-once");
+
+    const [first, second] = await Promise.all([
+      harness.persistence.initialize(scope, harness.documentId),
+      harness.persistence.initialize(scope, harness.documentId),
+    ]);
+
+    expect(snapshotIdentity(first)).toEqual(snapshotIdentity(second));
+    expect(first.generation).toBe(1);
+    expect(first.headSeq).toBe(0);
+    expect(harness.codec.materialize(first.document)).toMatchObject({
+      metadataJson: { owner: "Legacy" },
+      plainText: "Legacy body",
+      title: "Legacy title",
+    });
+    const generations = await harness.database
+      .select()
+      .from(collaborationDocuments)
+      .where(and(
+        eq(collaborationDocuments.workspaceId, scope.workspaceId),
+        eq(collaborationDocuments.documentId, harness.documentId),
+      ));
+    expect(generations).toHaveLength(1);
+    expect(generations[0]?.isCurrent).toBe(true);
+
+    await harness.database.update(documents).set({
+      contentJson: paragraphDocument("Poisoned JSON body"),
+      metadataJson: { owner: "Poisoned" },
+      plainText: "Poisoned JSON body",
+      title: "Poisoned JSON title",
+    }).where(and(
+      eq(documents.workspaceId, scope.workspaceId),
+      eq(documents.id, harness.documentId),
+    ));
+
+    const loaded = await harness.persistence.load(scope, harness.documentId);
+    expect(loaded).not.toBeNull();
+    expect(harness.codec.materialize(loaded!.document)).toMatchObject({
+      metadataJson: { owner: "Legacy" },
+      plainText: "Legacy body",
+      title: "Legacy title",
+    });
+  });
+
+  it("allocates monotonic sequences, replays an identical idempotency key, and tolerates duplicate Yjs updates", async () => {
+    const harness = await createHarness("append-idempotency");
+    const snapshot = await harness.persistence.initialize(scope, harness.documentId);
+    const update = mutateSnapshot(snapshot, (document) => {
+      replaceTitle(document, "Durable title");
+    });
+    const command = appendCommand(harness.documentId, snapshot.generation, update, {
+      idempotencyKey: "append-title-1",
+    });
+
+    const first = await harness.persistence.appendValidatedUpdate(scope, command);
+    const replay = await harness.persistence.appendValidatedUpdate(scope, command);
+    const duplicate = await harness.persistence.appendValidatedUpdate(scope, {
+      ...command,
+      idempotencyKey: "append-title-duplicate",
+    });
+
+    expect(replay).toEqual(first);
+    expect(first).toMatchObject({ generation: 1, headSeq: 1, seq: 1 });
+    expect(duplicate).toMatchObject({ generation: 1, headSeq: 2, seq: 2 });
+    const loaded = await harness.persistence.load(scope, harness.documentId);
+    expect(loaded?.headSeq).toBe(2);
+    expect(harness.codec.materialize(loaded!.document).title).toBe("Durable title");
+    const updates = await harness.database
+      .select({ idempotencyKey: collaborationUpdates.idempotencyKey, seq: collaborationUpdates.seq })
+      .from(collaborationUpdates)
+      .orderBy(asc(collaborationUpdates.seq));
+    expect(updates).toEqual([
+      { idempotencyKey: "append-title-1", seq: 1 },
+      { idempotencyKey: "append-title-duplicate", seq: 2 },
+    ]);
+  });
+
+  it("fails closed when an idempotency key is replayed with a different checksum or audit identity", async () => {
+    const harness = await createHarness("idempotency-conflict");
+    const snapshot = await harness.persistence.initialize(scope, harness.documentId);
+    const update = mutateSnapshot(snapshot, (document) => {
+      document.getMap(COLLABORATION_METADATA_NAME).set("owner", "Ada");
+    });
+    const command = appendCommand(harness.documentId, snapshot.generation, update, {
+      idempotencyKey: "stable-key",
+      requestId: "request-original",
+    });
+    await harness.persistence.appendValidatedUpdate(scope, command);
+
+    await expect(harness.persistence.appendValidatedUpdate(scope, {
+      ...command,
+      update: new Uint8Array([1, 2, 3]),
+    })).rejects.toMatchObject({ category: "idempotency_conflict", retryable: false });
+    await expect(harness.persistence.appendValidatedUpdate(scope, {
+      ...command,
+      principalId: "principal-other",
+    })).rejects.toMatchObject({ category: "idempotency_conflict", retryable: false });
+    await expect(harness.persistence.load(scope, harness.documentId)).resolves.toMatchObject({ headSeq: 1 });
+  });
+
+  it("recovers from a checkpoint plus ordered tail and rejects checksum or schema corruption", async () => {
+    const harness = await createHarness("checkpoint-tail");
+    const snapshot = await harness.persistence.initialize(scope, harness.documentId);
+    const titleUpdate = mutateSnapshot(snapshot, (document) => {
+      replaceTitle(document, "Checkpoint title");
+    });
+    await harness.persistence.appendValidatedUpdate(
+      scope,
+      appendCommand(harness.documentId, snapshot.generation, titleUpdate, { idempotencyKey: "title" }),
+    );
+    const checkpoint = await harness.persistence.checkpoint(scope, harness.documentId, 1);
+    expect(checkpoint).toMatchObject({ checkpointSeq: 1, generation: 1, projectedSeq: 1 });
+
+    const metadataUpdate = mutateSnapshot(snapshot, (document) => {
+      document.getMap(COLLABORATION_METADATA_NAME).set("category", "research");
+    });
+    await harness.persistence.appendValidatedUpdate(
+      scope,
+      appendCommand(harness.documentId, 1, metadataUpdate, { idempotencyKey: "metadata" }),
+    );
+    const loaded = await harness.persistence.load(scope, harness.documentId);
+    expect(loaded).toMatchObject({ checkpointSeq: 1, headSeq: 2 });
+    expect(harness.codec.materialize(loaded!.document)).toMatchObject({
+      metadataJson: { category: "research", owner: "Legacy" },
+      title: "Checkpoint title",
+    });
+
+    await harness.database.update(collaborationUpdates).set({ checksum: "f".repeat(64) }).where(and(
+      eq(collaborationUpdates.workspaceId, scope.workspaceId),
+      eq(collaborationUpdates.documentId, harness.documentId),
+      eq(collaborationUpdates.generation, 1),
+      eq(collaborationUpdates.seq, 2),
+    ));
+    await expect(harness.persistence.load(scope, harness.documentId)).rejects.toMatchObject({
+      category: "checksum_mismatch",
+      retryable: false,
+    });
+
+    await harness.database.update(collaborationUpdates).set({ checksum: sha256(metadataUpdate) }).where(and(
+      eq(collaborationUpdates.workspaceId, scope.workspaceId),
+      eq(collaborationUpdates.documentId, harness.documentId),
+      eq(collaborationUpdates.generation, 1),
+      eq(collaborationUpdates.seq, 2),
+    ));
+    await harness.database.update(collaborationDocuments).set({ schemaFingerprint: "e".repeat(64) }).where(and(
+      eq(collaborationDocuments.workspaceId, scope.workspaceId),
+      eq(collaborationDocuments.documentId, harness.documentId),
+      eq(collaborationDocuments.generation, 1),
+    ));
+    await expect(harness.persistence.load(scope, harness.documentId)).rejects.toMatchObject({
+      category: "schema_mismatch",
+      retryable: false,
+    });
+  });
+
+  it("projects only through the requested sequence and preserves sequence fencing", async () => {
+    const harness = await createHarness("projection");
+    const snapshot = await harness.persistence.initialize(scope, harness.documentId);
+    const titleUpdate = mutateSnapshot(snapshot, (document) => {
+      replaceTitle(document, "Projected title");
+    });
+    await harness.persistence.appendValidatedUpdate(
+      scope,
+      appendCommand(harness.documentId, 1, titleUpdate, { idempotencyKey: "project-title" }),
+    );
+    const metadataUpdate = mutateSnapshot(snapshot, (document) => {
+      document.getMap(COLLABORATION_METADATA_NAME).set("category", "plan");
+    });
+    await harness.persistence.appendValidatedUpdate(
+      scope,
+      appendCommand(harness.documentId, 1, metadataUpdate, { idempotencyKey: "project-metadata" }),
+    );
+
+    const firstProjection = await harness.persistence.project(scope, harness.documentId, 1);
+    const firstDocument = await readLegacyDocument(harness.database, harness.documentId);
+    expect(firstProjection).toMatchObject({ generation: 1, projectedSeq: 1 });
+    expect(firstDocument).toMatchObject({
+      metadataJson: { owner: "Legacy" },
+      title: "Projected title",
+    });
+
+    await expect(harness.persistence.project(scope, harness.documentId, 3)).rejects.toMatchObject({
+      category: "projection_fence",
+      retryable: false,
+    });
+    const secondProjection = await harness.persistence.project(scope, harness.documentId, 2);
+    const secondDocument = await readLegacyDocument(harness.database, harness.documentId);
+    expect(secondProjection.projectedSeq).toBe(2);
+    expect(secondDocument.metadataJson).toEqual({ category: "plan", owner: "Legacy" });
+    const [state] = await harness.database
+      .select()
+      .from(collaborationDocuments)
+      .where(eq(collaborationDocuments.documentId, harness.documentId));
+    expect(state).toMatchObject({ checkpointSeq: 0, headSeq: 2, projectedSeq: 2 });
+  });
+
+  it("invalidates the active approval and sets server-owned readiness in the append transaction", async () => {
+    const harness = await createHarness("approval");
+    const snapshot = await harness.persistence.initialize(scope, harness.documentId);
+    await harness.database.update(documents).set({ readiness: "approved" }).where(and(
+      eq(documents.workspaceId, scope.workspaceId),
+      eq(documents.id, harness.documentId),
+    ));
+    await harness.database.insert(documentApprovals).values({
+      approvedAt: new Date(1_000),
+      approvedContentHash: "a".repeat(64),
+      approvedHeadSeq: 0,
+      approvedStateVector: Buffer.from(Y.encodeStateVector(snapshot.document)),
+      documentId: harness.documentId,
+      generation: 1,
+      id: "approval-active",
+      principalId: "approver",
+      requestId: "approval-request",
+      workspaceId: scope.workspaceId,
+    });
+    const update = mutateSnapshot(snapshot, (document) => {
+      replaceTitle(document, "Needs another review");
+    });
+
+    await harness.persistence.appendValidatedUpdate(
+      scope,
+      appendCommand(harness.documentId, 1, update, {
+        idempotencyKey: "approval-invalidating-update",
+        principalId: "editor-principal",
+      }),
+    );
+
+    const [approval] = await harness.database.select().from(documentApprovals);
+    const currentDocument = await readLegacyDocument(harness.database, harness.documentId);
+    expect(approval).toMatchObject({
+      invalidatedPrincipalId: "editor-principal",
+      invalidatedSeq: 1,
+    });
+    expect(approval?.invalidatedAt).toBeInstanceOf(Date);
+    expect(currentDocument.readiness).toBe("needs_review");
+  });
+
+  it("rotates before applying the candidate update, preserves Yjs clocks, and fences the retired generation", async () => {
+    const harness = await createHarness("rotation");
+    const snapshot = await harness.persistence.initialize(scope, harness.documentId);
+    const persistedTail = mutateSnapshot(snapshot, (document) => {
+      document.getMap(COLLABORATION_METADATA_NAME).set("owner", "Ada");
+    });
+    await harness.persistence.appendValidatedUpdate(
+      scope,
+      appendCommand(harness.documentId, 1, persistedTail, { idempotencyKey: "pre-rotation-tail" }),
+    );
+    await harness.database.update(documents).set({
+      contentJson: paragraphDocument("Must not become canonical"),
+      metadataJson: { owner: "Poisoned" },
+      plainText: "Must not become canonical",
+      title: "Poisoned projection",
+    }).where(eq(documents.id, harness.documentId));
+    const update = mutateSnapshot(snapshot, (document) => {
+      document.getMap(COLLABORATION_METADATA_NAME).set("category", "rotated");
+    });
+    const [current] = await harness.database.select().from(collaborationDocuments);
+    const [tail] = await harness.database.select().from(collaborationUpdates);
+    if (!current || !tail) throw new Error("Expected pre-rotation state");
+    const rotating = createCollaborationPersistence(harness.database, {
+      codec: harness.codec,
+      projectProfile,
+      storageLimits: {
+        cumulativeUpdateBytes:
+          current.checkpointBlob.byteLength + tail.updateBlob.byteLength + update.byteLength - 1,
+      },
+    });
+
+    const receipt = await rotating.appendValidatedUpdate(
+      scope,
+      appendCommand(harness.documentId, 1, update, { idempotencyKey: "rotate-update" }),
+    );
+
+    expect(receipt).toMatchObject({ generation: 2, headSeq: 2, seq: 2 });
+    const generationRows = await harness.database.select().from(collaborationDocuments)
+      .orderBy(asc(collaborationDocuments.generation));
+    expect(generationRows.map(({ generation, headSeq, isCurrent }) => ({ generation, headSeq, isCurrent }))).toEqual([
+      { generation: 1, headSeq: 1, isCurrent: false },
+      { generation: 2, headSeq: 2, isCurrent: true },
+    ]);
+    const updateRows = await harness.database.select().from(collaborationUpdates);
+    expect(updateRows).toHaveLength(2);
+    expect(updateRows).toEqual(expect.arrayContaining([
+      expect.objectContaining({ generation: 1, seq: 1 }),
+      expect.objectContaining({ generation: 2, seq: 2 }),
+    ]));
+    const loaded = await rotating.load(scope, harness.documentId);
+    expect(Y.encodeStateVector(loaded!.document)).toEqual(Y.encodeStateVector(snapshot.document));
+    expect(harness.codec.materialize(loaded!.document)).toMatchObject({
+      metadataJson: { category: "rotated", owner: "Ada" },
+      title: "Legacy title",
+    });
+
+    await expect(rotating.appendValidatedUpdate(scope, {
+      ...appendCommand(harness.documentId, 1, update, { idempotencyKey: "stale-generation" }),
+    })).rejects.toMatchObject({ category: "stale_generation", retryable: true });
+  });
+
+  it("counts checkpoint bytes, post-checkpoint tail, and the candidate before deciding to rotate", async () => {
+    const harness = await createHarness("rotation-tracked-bytes");
+    const snapshot = await harness.persistence.initialize(scope, harness.documentId);
+    const firstUpdate = mutateSnapshot(snapshot, (document) => {
+      document.getMap(COLLABORATION_METADATA_NAME).set("owner", "Ada");
+    });
+    await harness.persistence.appendValidatedUpdate(
+      scope,
+      appendCommand(harness.documentId, 1, firstUpdate, { idempotencyKey: "tracked-first" }),
+    );
+    const [current] = await harness.database.select().from(collaborationDocuments);
+    const [tail] = await harness.database.select().from(collaborationUpdates);
+    if (!current || !tail) throw new Error("Expected persisted collaboration state");
+    const candidate = mutateSnapshot(snapshot, (document) => {
+      document.getMap(COLLABORATION_METADATA_NAME).set("category", "tracked-rotation");
+    });
+    const persistence = createCollaborationPersistence(harness.database, {
+      codec: harness.codec,
+      projectProfile,
+      storageLimits: {
+        cumulativeUpdateBytes:
+          current.checkpointBlob.byteLength + tail.updateBlob.byteLength + candidate.byteLength - 1,
+      },
+    });
+
+    const receipt = await persistence.appendValidatedUpdate(
+      scope,
+      appendCommand(harness.documentId, 1, candidate, { idempotencyKey: "tracked-candidate" }),
+    );
+
+    expect(receipt).toMatchObject({ generation: 2, headSeq: 2, seq: 2 });
+    const generations = await harness.database.select().from(collaborationDocuments)
+      .orderBy(asc(collaborationDocuments.generation));
+    expect(generations).toEqual([
+      expect.objectContaining({ generation: 1, headSeq: 1, isCurrent: false }),
+      expect.objectContaining({
+        checkpointSeq: 1,
+        generation: 2,
+        headSeq: 2,
+        isCurrent: true,
+        projectedSeq: 1,
+      }),
+    ]);
+  });
+
+  it("carries sequence fences through rotation so an old-head approval keeps its audit identity", async () => {
+    const harness = await createHarness("rotation-active-approval");
+    const snapshot = await harness.persistence.initialize(scope, harness.documentId);
+    const approvedUpdate = mutateSnapshot(snapshot, (document) => {
+      replaceTitle(document, "Approved canonical title");
+    });
+    await harness.persistence.appendValidatedUpdate(
+      scope,
+      appendCommand(harness.documentId, 1, approvedUpdate, { idempotencyKey: "approved-state" }),
+    );
+    await harness.database.update(documents).set({
+      readiness: "approved",
+      title: "Stale materialized title",
+    }).where(eq(documents.id, harness.documentId));
+    await harness.database.insert(documentApprovals).values({
+      approvedAt: new Date(1_000),
+      approvedContentHash: "b".repeat(64),
+      approvedHeadSeq: 1,
+      approvedStateVector: Buffer.from(Y.encodeStateVector(snapshot.document)),
+      documentId: harness.documentId,
+      generation: 1,
+      id: "approval-before-rotation",
+      principalId: "approver",
+      requestId: "approval-before-rotation-request",
+      workspaceId: scope.workspaceId,
+    });
+    const candidate = mutateSnapshot(snapshot, (document) => {
+      document.getMap(COLLABORATION_METADATA_NAME).set("category", "post-approval");
+    });
+    const [current] = await harness.database.select().from(collaborationDocuments);
+    const [tail] = await harness.database.select().from(collaborationUpdates);
+    if (!current || !tail) throw new Error("Expected approved collaboration state");
+    const rotating = createCollaborationPersistence(harness.database, {
+      codec: harness.codec,
+      projectProfile,
+      storageLimits: {
+        cumulativeUpdateBytes:
+          current.checkpointBlob.byteLength + tail.updateBlob.byteLength + candidate.byteLength - 1,
+      },
+    });
+
+    const receipt = await rotating.appendValidatedUpdate(
+      scope,
+      appendCommand(harness.documentId, 1, candidate, {
+        idempotencyKey: "approval-rotation-candidate",
+        principalId: "editing-principal",
+      }),
+    );
+
+    expect(receipt).toMatchObject({ generation: 2, headSeq: 2, seq: 2 });
+    const [approval] = await harness.database.select().from(documentApprovals);
+    expect(approval).toMatchObject({
+      approvedHeadSeq: 1,
+      generation: 1,
+      invalidatedPrincipalId: "editing-principal",
+      invalidatedSeq: 2,
+    });
+    const currentDocument = await readLegacyDocument(harness.database, harness.documentId);
+    expect(currentDocument).toMatchObject({
+      readiness: "needs_review",
+      revision: 1,
+      title: "Approved canonical title",
+    });
+    const loaded = await rotating.load(scope, harness.documentId);
+    expect(loaded).toMatchObject({ checkpointSeq: 1, generation: 2, headSeq: 2, projectedSeq: 1 });
+    expect(harness.codec.materialize(loaded!.document).metadataJson).toMatchObject({
+      category: "post-approval",
+    });
+  });
+
+  it("returns a bounded retryable failure when safe rotation cannot encode its checkpoint", async () => {
+    const harness = await createHarness("rotation-budget-failure");
+    const snapshot = await harness.persistence.initialize(scope, harness.documentId);
+    const update = mutateSnapshot(snapshot, (document) => {
+      document.getMap(COLLABORATION_METADATA_NAME).set("category", "blocked");
+    });
+    const constrained = createCollaborationPersistence(harness.database, {
+      codec: harness.codec,
+      projectProfile,
+      storageLimits: { checkpointBytes: 1, cumulativeUpdateBytes: 1 },
+    });
+
+    const failure = await capturePersistenceFailure(() => constrained.appendValidatedUpdate(
+      scope,
+      appendCommand(harness.documentId, 1, update, { idempotencyKey: "cannot-rotate" }),
+    ));
+
+    expect(failure).toMatchObject({ category: "storage_budget", retryable: true });
+    expect(failure.message.length).toBeLessThanOrEqual(120);
+    await expect(harness.persistence.load(scope, harness.documentId)).resolves.toMatchObject({
+      generation: 1,
+      headSeq: 0,
+    });
+  });
+
+  it("keeps collaboration records isolated by Workspace", async () => {
+    const harness = await createHarness("workspace-isolation");
+    await harness.persistence.initialize(scope, harness.documentId);
+
+    await expect(harness.persistence.load(otherScope, harness.documentId)).resolves.toBeNull();
+    await expect(harness.persistence.initialize(otherScope, harness.documentId)).rejects.toMatchObject({
+      category: "not_found",
+      retryable: false,
+    });
+  });
+});
+
+async function createHarness(label: string) {
+  const dir = await mkdtemp(join(tmpdir(), `coredot-collaboration-${label}-`));
+  tempDirs.push(dir);
+  const client = createClient({ url: `file:${join(dir, "collaboration.db")}` });
+  clients.push(client);
+  const database = drizzle(client, { schema });
+  await migrate(database, { migrationsFolder });
+  await client.execute("PRAGMA foreign_keys=ON");
+  const documentId = `document-${label}`;
+  await database.insert(documents).values({
+    contentJson: paragraphDocument("Legacy body"),
+    createdAt: new Date(1_000),
+    id: documentId,
+    metadataJson: { owner: "Legacy" },
+    plainText: "Legacy body",
+    readiness: "draft",
+    revision: 0,
+    status: "draft",
+    title: "Legacy title",
+    updatedAt: new Date(1_000),
+    workspaceId: scope.workspaceId,
+  });
+  const codec = createCollaborationDocumentCodec(projectProfile);
+  return {
+    codec,
+    database,
+    documentId,
+    persistence: createCollaborationPersistence(database, { codec, projectProfile }),
+  };
+}
+
+function appendCommand(
+  documentId: string,
+  generation: number,
+  update: Uint8Array,
+  overrides: Partial<AppendCollaborationUpdate> = {},
+): AppendCollaborationUpdate {
+  return {
+    documentId,
+    generation,
+    idempotencyKey: "append-key",
+    originKind: "client",
+    principalId: "principal-a",
+    requestId: "request-a",
+    sessionId: "session-a",
+    update,
+    ...overrides,
+  };
+}
+
+function mutateSnapshot(
+  snapshot: CollaborationSnapshot,
+  mutation: (document: Y.Doc) => void,
+) {
+  const stateVector = Y.encodeStateVector(snapshot.document);
+  snapshot.document.transact(() => mutation(snapshot.document), "test-client");
+  return Y.encodeStateAsUpdate(snapshot.document, stateVector);
+}
+
+function replaceTitle(document: Y.Doc, title: string) {
+  const sharedTitle = document.getText(COLLABORATION_TITLE_NAME);
+  sharedTitle.delete(0, sharedTitle.length);
+  sharedTitle.insert(0, title);
+}
+
+function paragraphDocument(text: string) {
+  return {
+    content: [{ content: [{ text, type: "text" }], type: "paragraph" }],
+    type: "doc" as const,
+  };
+}
+
+function sha256(value: Uint8Array) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function snapshotIdentity(snapshot: CollaborationSnapshot) {
+  return {
+    generation: snapshot.generation,
+    headSeq: snapshot.headSeq,
+    schemaFingerprint: snapshot.schemaFingerprint,
+    schemaVersion: snapshot.schemaVersion,
+  };
+}
+
+async function readLegacyDocument(
+  database: Awaited<ReturnType<typeof createHarness>>["database"],
+  documentId: string,
+) {
+  const [document] = await database.select().from(documents).where(and(
+    eq(documents.workspaceId, scope.workspaceId),
+    eq(documents.id, documentId),
+  ));
+  if (!document) throw new Error("Expected legacy document");
+  return document;
+}
+
+async function capturePersistenceFailure(operation: () => Promise<unknown>) {
+  try {
+    await operation();
+  } catch (error) {
+    if (error instanceof CollaborationPersistenceError) return error;
+    throw error;
+  }
+  throw new Error("Expected CollaborationPersistenceError");
+}

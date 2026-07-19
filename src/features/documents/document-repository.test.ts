@@ -47,6 +47,15 @@ async function createIsolatedDocumentDb() {
     CREATE UNIQUE INDEX documents_workspace_creation_key_unique
     ON documents (workspace_id, creation_key)
   `);
+  await db.run(sql`
+    CREATE TABLE collaboration_documents (
+      workspace_id text NOT NULL,
+      document_id text NOT NULL,
+      generation integer NOT NULL,
+      is_current integer DEFAULT 1 NOT NULL,
+      PRIMARY KEY (workspace_id, document_id, generation)
+    )
+  `);
 
   return db;
 }
@@ -550,6 +559,36 @@ describe("document repository", () => {
     expect(stale).toMatchObject({
       status: "revision_conflict",
       latest: { title: "Updated Memo", plainText: "Updated", revision: 1 },
+    });
+  });
+
+  it("fences legacy full-draft writes after collaboration has initialized", async () => {
+    const db = await createIsolatedDocumentDb();
+    const repository = createDocumentRepository(db);
+    const document = await repository.createDocumentDraft(workspaceA, "Canonical collaboration draft");
+    await db.run(sql`
+      INSERT INTO collaboration_documents (workspace_id, document_id, generation, is_current)
+      VALUES (${workspaceA.workspaceId}, ${document.id}, 1, 0)
+    `);
+
+    const result = await repository.saveDocumentDraft(workspaceA, document.id, {
+      contentJson: {
+        content: [{ content: [{ text: "Legacy overwrite", type: "text" }], type: "paragraph" }],
+        type: "doc",
+      },
+      expectedRevision: 0,
+      metadataJson: { owner: "Legacy writer" },
+      readiness: "approved",
+      title: "Legacy overwrite",
+    });
+
+    expect(result).toEqual({ status: "collaboration_initialized" });
+    await expect(repository.getDocumentById(workspaceA, document.id)).resolves.toMatchObject({
+      contentJson: document.contentJson,
+      metadataJson: document.metadataJson,
+      readiness: document.readiness,
+      revision: 0,
+      title: "Canonical collaboration draft",
     });
   });
 

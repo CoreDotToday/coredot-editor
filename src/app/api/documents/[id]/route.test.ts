@@ -139,6 +139,27 @@ describe("PUT /api/documents/[id]", () => {
     });
   });
 
+  it("returns a bounded 409 when collaboration already owns the document draft", async () => {
+    vi.mocked(saveDocumentDraft).mockResolvedValueOnce({
+      status: "collaboration_initialized",
+    } as never);
+
+    const response = await PUT(
+      createJsonRequest({
+        title: "Legacy overwrite",
+        contentJson: { type: "doc", content: [] },
+        expectedRevision: 0,
+      }),
+      { params: Promise.resolve({ id: "doc_1" }) },
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: "Document collaboration is already initialized",
+      reason: "collaboration_initialized",
+    });
+  });
+
   it("returns 400 when the persistence boundary rejects a Project Profile transition", async () => {
     vi.mocked(saveDocumentDraft).mockResolvedValueOnce({
       status: "invalid_profile",

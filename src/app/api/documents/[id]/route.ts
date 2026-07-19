@@ -71,6 +71,12 @@ const putHandler = createProtectedRouteHandler(async (context, request: Request,
       { status: 409 },
     );
   }
+  if (saveResult.status === "collaboration_initialized") {
+    return NextResponse.json({
+      error: "Document collaboration is already initialized",
+      reason: "collaboration_initialized",
+    }, { status: 409 });
+  }
   if (saveResult.status === "invalid_profile") {
     return NextResponse.json({
       error: "Document violates active Project Profile",
