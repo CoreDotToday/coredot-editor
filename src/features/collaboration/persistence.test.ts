@@ -7,7 +7,7 @@ import { migrate } from "drizzle-orm/libsql/migrator";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 
 import * as schema from "@/db/schema";
@@ -20,7 +20,7 @@ import {
 import { getProjectProfile } from "@/features/projects/default-project-profiles";
 
 import { COLLABORATION_METADATA_NAME, COLLABORATION_TITLE_NAME } from "./contracts";
-import { createCollaborationDocumentCodec } from "./document-codec";
+import { CollaborationCodecError, createCollaborationDocumentCodec } from "./document-codec";
 import {
   CollaborationPersistenceError,
   createCollaborationPersistence,
@@ -84,6 +84,50 @@ describe("CollaborationPersistence", () => {
       plainText: "Legacy body",
       title: "Legacy title",
     });
+  });
+
+  it("fails closed without bootstrapping when collaboration history has no current generation", async () => {
+    const harness = await createHarness("retired-history");
+    await harness.persistence.initialize(scope, harness.documentId);
+    await harness.database.update(collaborationDocuments).set({ isCurrent: false }).where(and(
+      eq(collaborationDocuments.workspaceId, scope.workspaceId),
+      eq(collaborationDocuments.documentId, harness.documentId),
+    ));
+    const bootstrap = vi.spyOn(harness.codec, "bootstrap");
+
+    await expect(harness.persistence.initialize(scope, harness.documentId)).rejects.toMatchObject({
+      category: "corrupt_state",
+      retryable: false,
+    });
+    expect(bootstrap).not.toHaveBeenCalled();
+  });
+
+  it("initializes and appends a legacy document in one write transaction", async () => {
+    const harness = await createHarness("single-append-transaction");
+    const seedDocument = harness.codec.bootstrap({
+      contentJson: paragraphDocument("Legacy body"),
+      metadataJson: { owner: "Legacy" },
+      plainText: "Legacy body",
+      title: "Legacy title",
+    });
+    const update = mutateSnapshot({
+      checkpointSeq: 0,
+      document: seedDocument,
+      documentId: harness.documentId,
+      generation: 1,
+      headSeq: 0,
+      projectedSeq: 0,
+      schemaFingerprint: harness.codec.fingerprint(),
+      schemaVersion: 1,
+    }, (document) => replaceTitle(document, "Single transaction"));
+    const transaction = vi.spyOn(harness.database.$client, "transaction");
+
+    await harness.persistence.appendValidatedUpdate(
+      scope,
+      appendCommand(harness.documentId, 1, update),
+    );
+
+    expect(transaction.mock.calls as unknown as Array<[unknown]>).toEqual([["write"]]);
   });
 
   it("allocates monotonic sequences, replays an identical idempotency key, and tolerates duplicate Yjs updates", async () => {
@@ -197,6 +241,26 @@ describe("CollaborationPersistence", () => {
     });
   });
 
+  it("does not advance the materialized revision for a repeated checkpoint at the same head", async () => {
+    const harness = await createHarness("checkpoint-same-head");
+    const snapshot = await harness.persistence.initialize(scope, harness.documentId);
+    const update = mutateSnapshot(snapshot, (document) => {
+      replaceTitle(document, "Checkpoint once");
+    });
+    await harness.persistence.appendValidatedUpdate(
+      scope,
+      appendCommand(harness.documentId, 1, update),
+    );
+
+    await harness.persistence.checkpoint(scope, harness.documentId, 1);
+    const first = await readLegacyDocument(harness.database, harness.documentId);
+    await harness.persistence.checkpoint(scope, harness.documentId, 1);
+    const repeated = await readLegacyDocument(harness.database, harness.documentId);
+
+    expect(first).toMatchObject({ revision: 1, title: "Checkpoint once" });
+    expect(repeated).toMatchObject({ revision: 1, title: "Checkpoint once" });
+  });
+
   it("projects only through the requested sequence and preserves sequence fencing", async () => {
     const harness = await createHarness("projection");
     const snapshot = await harness.persistence.initialize(scope, harness.documentId);
@@ -279,6 +343,31 @@ describe("CollaborationPersistence", () => {
     expect(currentDocument.readiness).toBe("needs_review");
   });
 
+  it("downgrades legacy approved readiness without inventing an approval record", async () => {
+    const harness = await createHarness("legacy-approved-without-approval");
+    const snapshot = await harness.persistence.initialize(scope, harness.documentId);
+    await harness.database.update(documents).set({ readiness: "approved" }).where(and(
+      eq(documents.workspaceId, scope.workspaceId),
+      eq(documents.id, harness.documentId),
+    ));
+    const update = mutateSnapshot(snapshot, (document) => {
+      replaceTitle(document, "Migration mutation");
+    });
+
+    await harness.persistence.appendValidatedUpdate(
+      scope,
+      appendCommand(harness.documentId, 1, update, {
+        idempotencyKey: "legacy-approved-mutation",
+      }),
+    );
+
+    await expect(harness.database.select().from(documentApprovals)).resolves.toHaveLength(0);
+    await expect(readLegacyDocument(harness.database, harness.documentId)).resolves.toMatchObject({
+      readiness: "needs_review",
+      revision: 1,
+    });
+  });
+
   it("rotates before applying the candidate update, preserves Yjs clocks, and fences the retired generation", async () => {
     const harness = await createHarness("rotation");
     const snapshot = await harness.persistence.initialize(scope, harness.documentId);
@@ -338,6 +427,51 @@ describe("CollaborationPersistence", () => {
     await expect(rotating.appendValidatedUpdate(scope, {
       ...appendCommand(harness.documentId, 1, update, { idempotencyKey: "stale-generation" }),
     })).rejects.toMatchObject({ category: "stale_generation", retryable: true });
+  });
+
+  it("combines rotation projection and legacy readiness downgrade into one revision", async () => {
+    const harness = await createHarness("rotation-legacy-approved");
+    const snapshot = await harness.persistence.initialize(scope, harness.documentId);
+    const tailUpdate = mutateSnapshot(snapshot, (document) => {
+      document.getMap(COLLABORATION_METADATA_NAME).set("owner", "Migrated owner");
+    });
+    await harness.persistence.appendValidatedUpdate(
+      scope,
+      appendCommand(harness.documentId, 1, tailUpdate, {
+        idempotencyKey: "rotation-readiness-tail",
+      }),
+    );
+    await harness.database.update(documents).set({ readiness: "approved" }).where(and(
+      eq(documents.workspaceId, scope.workspaceId),
+      eq(documents.id, harness.documentId),
+    ));
+    const candidate = mutateSnapshot(snapshot, (document) => {
+      replaceTitle(document, "Rotated approved migration");
+    });
+    const [current] = await harness.database.select().from(collaborationDocuments);
+    const [tail] = await harness.database.select().from(collaborationUpdates);
+    if (!current || !tail) throw new Error("Expected collaboration state");
+    const rotating = createCollaborationPersistence(harness.database, {
+      codec: harness.codec,
+      projectProfile,
+      storageLimits: {
+        cumulativeUpdateBytes:
+          current.checkpointBlob.byteLength + tail.updateBlob.byteLength + candidate.byteLength - 1,
+      },
+    });
+
+    await rotating.appendValidatedUpdate(
+      scope,
+      appendCommand(harness.documentId, 1, candidate, {
+        idempotencyKey: "rotation-readiness-migration",
+      }),
+    );
+
+    await expect(harness.database.select().from(documentApprovals)).resolves.toHaveLength(0);
+    await expect(readLegacyDocument(harness.database, harness.documentId)).resolves.toMatchObject({
+      readiness: "needs_review",
+      revision: 1,
+    });
   });
 
   it("counts checkpoint bytes, post-checkpoint tail, and the candidate before deciding to rotate", async () => {
@@ -478,6 +612,115 @@ describe("CollaborationPersistence", () => {
       generation: 1,
       headSeq: 0,
     });
+  });
+
+  it("maps a candidate checkpoint budget failure to retryable storage budget", async () => {
+    const harness = await createHarness("candidate-checkpoint-budget");
+    const snapshot = await harness.persistence.initialize(scope, harness.documentId);
+    const update = mutateSnapshot(snapshot, (document) => {
+      replaceTitle(document, "Budget boundary");
+    });
+    const budgetCodec = {
+      ...harness.codec,
+      encodeCheckpoint: vi.fn(() => {
+        throw new CollaborationCodecError({ ok: false, reason: "checkpoint_budget" });
+      }),
+    };
+    const persistence = createCollaborationPersistence(harness.database, {
+      codec: budgetCodec,
+      projectProfile,
+    });
+
+    const failure = await capturePersistenceFailure(() => persistence.appendValidatedUpdate(
+      scope,
+      appendCommand(harness.documentId, 1, update, {
+        idempotencyKey: "candidate-budget",
+      }),
+    ));
+
+    expect(failure).toMatchObject({ category: "storage_budget", retryable: true });
+  });
+
+  it("rejects invalid append fields before opening a database transaction", async () => {
+    const transaction = vi.fn(() => Promise.reject(new Error("database must not be touched")));
+    const persistence = createCollaborationPersistence({
+      $client: { transaction },
+      transaction,
+    } as never, { projectProfile });
+    const base = appendCommand("document-secret", 1, new Uint8Array([1]), {
+      idempotencyKey: "idempotency-secret",
+      principalId: "principal-secret",
+    });
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    const cases: Array<[string, AppendCollaborationUpdate]> = [
+      ["generation", { ...base, generation: 0 }],
+      ["empty update", { ...base, update: new Uint8Array() }],
+      ["oversized update", { ...base, update: new Uint8Array(10 * 1024 * 1024 + 1) }],
+      ["blank document", { ...base, documentId: " " }],
+      ["oversized document", { ...base, documentId: "가".repeat(86) }],
+      ["blank idempotency", { ...base, idempotencyKey: "\u00a0" }],
+      ["oversized idempotency", { ...base, idempotencyKey: "가".repeat(86) }],
+      ["unknown origin", { ...base, originKind: "unknown" as never }],
+      ["blank principal", { ...base, principalId: "\t" }],
+      ["oversized principal", { ...base, principalId: "가".repeat(86) }],
+      ["blank request", { ...base, requestId: "\n" }],
+      ["oversized request", { ...base, requestId: "가".repeat(86) }],
+      ["blank session", { ...base, sessionId: "\r" }],
+      ["oversized session", { ...base, sessionId: "가".repeat(86) }],
+      ["blank action", { ...base, semanticActionId: "\u000b" }],
+      ["oversized action", { ...base, semanticActionId: "가".repeat(86) }],
+      ["array diagnostic", { ...base, diagnosticJson: [] as never }],
+      ["cyclic diagnostic", { ...base, diagnosticJson: cyclic }],
+      ["bigint diagnostic", { ...base, diagnosticJson: { secret: BigInt(1) } as never }],
+      ["undefined diagnostic", { ...base, diagnosticJson: { secret: undefined } }],
+      ["oversized diagnostic", {
+        ...base,
+        diagnosticJson: { secret: "x".repeat(4 * 1024) },
+      }],
+    ];
+
+    for (const [label, input] of cases) {
+      const failure = await capturePersistenceFailure(() => persistence.appendValidatedUpdate(scope, input));
+      expect(failure, label).toMatchObject({ category: "invalid_input", retryable: false });
+      expect(failure.message.length, label).toBeLessThanOrEqual(120);
+      expect(failure.message, label).not.toMatch(/secret|database/i);
+    }
+    expect(transaction).not.toHaveBeenCalled();
+  });
+
+  it("maps unknown and Aggregate database failures to a bounded parameter-free error", async () => {
+    const secret = "document-secret checksum-secret principal-secret json-secret";
+    const transaction = vi.fn(() => Promise.reject(new AggregateError([
+      new Error(secret),
+    ], secret)));
+    const persistence = createCollaborationPersistence({
+      $client: { transaction },
+      transaction,
+    } as never, { projectProfile });
+
+    const failure = await capturePersistenceFailure(() => persistence.load(scope, "document-secret"));
+
+    expect(failure).toMatchObject({ category: "internal", retryable: false });
+    expect(failure.message.length).toBeLessThanOrEqual(120);
+    expect(failure.message).not.toMatch(/document|checksum|principal|json|secret/i);
+  });
+
+  it("maps exhausted SQLite contention to a bounded retryable error", async () => {
+    const contention = Object.assign(new Error("database locked for document-secret"), {
+      code: "SQLITE_BUSY",
+    });
+    const transaction = vi.fn(() => Promise.reject(contention));
+    const persistence = createCollaborationPersistence({
+      $client: { transaction },
+      transaction,
+    } as never, { projectProfile });
+
+    const failure = await capturePersistenceFailure(() => persistence.load(scope, "document-secret"));
+
+    expect(failure).toMatchObject({ category: "contention", retryable: true });
+    expect(failure.message.length).toBeLessThanOrEqual(120);
+    expect(failure.message).not.toMatch(/document|secret|locked/i);
   });
 
   it("keeps collaboration records isolated by Workspace", async () => {

@@ -12,6 +12,7 @@ import {
   type CollaborationUpdateOriginKind,
 } from "@/db/schema";
 import { withSerializedDocumentWrite } from "@/db/document-write-queue";
+import { isRetryableSqliteContention } from "@/db/sqlite-contention";
 import type { WorkspaceScope } from "@/features/auth/request-context";
 import { resolveActiveProjectProfile } from "@/features/projects/active-project-profile";
 import type { ProjectProfile } from "@/features/projects/project-profile";
@@ -21,7 +22,7 @@ import {
   type CollaborationDocumentCodec,
   type CollaborationMaterialization,
 } from "./contracts";
-import { createCollaborationDocumentCodec } from "./document-codec";
+import { CollaborationCodecError, createCollaborationDocumentCodec } from "./document-codec";
 import {
   createCollaborationRepository,
   type CollaborationDatabase,
@@ -79,8 +80,11 @@ export type ProjectionReceipt = {
 
 export type CollaborationPersistenceCategory =
   | "checksum_mismatch"
+  | "contention"
   | "corrupt_state"
   | "idempotency_conflict"
+  | "internal"
+  | "invalid_input"
   | "not_found"
   | "projection_fence"
   | "schema_mismatch"
@@ -89,8 +93,11 @@ export type CollaborationPersistenceCategory =
 
 const ERROR_MESSAGES: Record<CollaborationPersistenceCategory, string> = {
   checksum_mismatch: "Collaboration state checksum validation failed",
+  contention: "Collaboration persistence is temporarily busy",
   corrupt_state: "Collaboration state recovery failed",
   idempotency_conflict: "Collaboration idempotency identity conflicts with durable state",
+  internal: "Collaboration persistence failed",
+  invalid_input: "Collaboration persistence input is invalid",
   not_found: "Collaboration document was not found",
   projection_fence: "Collaboration projection sequence is outside the durable range",
   schema_mismatch: "Collaboration schema identity does not match the server",
@@ -152,72 +159,35 @@ export function createCollaborationPersistence(
       options.storageLimits?.cumulativeUpdateBytes ?? DEFAULT_CUMULATIVE_UPDATE_BYTES,
   };
 
-  const initialize = (scope: WorkspaceScope, documentId: string) =>
-    withSerializedDocumentWrite(scope, documentId, () => repository.write(async (transaction) => {
-      const existing = await loadSnapshot(
+  const initialize = (scope: WorkspaceScope, documentId: string) => executePersistenceOperation(() => {
+    validateScopeAndDocument(scope, documentId);
+    return withSerializedDocumentWrite(scope, documentId, () => repository.write((transaction) =>
+      ensureInitializedInTransaction(
         transaction,
         scope,
         documentId,
         codec,
         projectProfile,
-      );
-      if (existing) return existing;
-
-      const [legacy] = await transaction
-        .select()
-        .from(documents)
-        .where(and(
-          eq(documents.workspaceId, scope.workspaceId),
-          eq(documents.id, documentId),
-          eq(documents.status, "draft"),
-        ))
-        .limit(1);
-      if (!legacy) throw persistenceError("not_found", false);
-
-      const document = codec.bootstrap({
-        contentJson: legacy.contentJson,
-        metadataJson: legacy.metadataJson,
-        plainText: legacy.plainText,
-        title: legacy.title,
-      });
-      const checkpoint = codec.encodeCheckpoint(document);
-      if (checkpoint.byteLength > storageLimits.checkpointBytes) {
-        throw persistenceError("storage_budget", true);
-      }
-      const timestamp = now();
-      await transaction.insert(collaborationDocuments).values({
-        checkpointBlob: Buffer.from(checkpoint),
-        checkpointChecksum: checksum(checkpoint),
-        checkpointSeq: 0,
-        createdAt: timestamp,
-        documentId,
-        generation: 1,
-        headSeq: 0,
-        isCurrent: true,
-        lastCheckpointAt: timestamp,
-        projectedSeq: 0,
-        schemaFingerprint: codec.fingerprint(),
-        schemaVersion: COLLABORATION_DOCUMENT_SCHEMA_VERSION,
-        updatedAt: timestamp,
-        workspaceId: scope.workspaceId,
-      }).onConflictDoNothing();
-
-      const initialized = await loadSnapshot(
-        transaction,
-        scope,
-        documentId,
-        codec,
-        projectProfile,
-      );
-      if (!initialized) throw persistenceError("corrupt_state", false);
-      return initialized;
-    }));
+        storageLimits.checkpointBytes,
+        now,
+      )));
+  });
 
   return {
-    async appendValidatedUpdate(scope, input) {
-      validateAppendInput(input);
-      await initialize(scope, input.documentId);
-      return repository.write(async (transaction) => {
+    appendValidatedUpdate(scope, input) {
+      return executePersistenceOperation(() => {
+        validateScopeAndDocument(scope, input.documentId);
+        validateAppendInput(input);
+        return withSerializedDocumentWrite(scope, input.documentId, () => repository.write(async (transaction) => {
+        const loaded = await ensureInitializedInTransaction(
+          transaction,
+          scope,
+          input.documentId,
+          codec,
+          projectProfile,
+          storageLimits.checkpointBytes,
+          now,
+        );
         const updateChecksum = checksum(input.update);
         const replay = await findIdempotentUpdate(transaction, scope, input);
         if (replay) {
@@ -227,14 +197,6 @@ export function createCollaborationPersistence(
           return updateReceipt(replay);
         }
 
-        const loaded = await loadSnapshot(
-          transaction,
-          scope,
-          input.documentId,
-          codec,
-          projectProfile,
-        );
-        if (!loaded) throw persistenceError("not_found", false);
         if (loaded.generation !== input.generation) {
           throw persistenceError("stale_generation", true);
         }
@@ -288,20 +250,22 @@ export function createCollaborationPersistence(
           ) {
             throw persistenceError("storage_budget", true);
           }
-          let rotationMaterialization;
-          try {
-            rotationMaterialization = codec.materialize(loaded.document);
-          } catch {
-            throw persistenceError("storage_budget", true);
+          if (loaded.projectedSeq < loaded.headSeq) {
+            let rotationMaterialization;
+            try {
+              rotationMaterialization = codec.materialize(loaded.document);
+            } catch {
+              throw persistenceError("storage_budget", true);
+            }
+            await writeMaterializedDocument(
+              transaction,
+              scope,
+              input.documentId,
+              rotationMaterialization,
+              timestamp,
+            );
+            projectedDuringRotation = true;
           }
-          await writeMaterializedDocument(
-            transaction,
-            scope,
-            input.documentId,
-            rotationMaterialization,
-            timestamp,
-          );
-          projectedDuringRotation = true;
           const retired = await transaction
             .update(collaborationDocuments)
             .set({
@@ -352,6 +316,12 @@ export function createCollaborationPersistence(
           }
         } catch (error) {
           if (error instanceof CollaborationPersistenceError) throw error;
+          if (
+            error instanceof CollaborationCodecError
+            && error.failure.reason === "checkpoint_budget"
+          ) {
+            throw persistenceError("storage_budget", true);
+          }
           throw persistenceError("corrupt_state", false);
         }
 
@@ -399,21 +369,20 @@ export function createCollaborationPersistence(
             isNull(documentApprovals.invalidatedAt),
           ))
           .returning({ id: documentApprovals.id });
-        if (invalidated[0]) {
-          await transaction
-            .update(documents)
-            .set({
-              readiness: "needs_review",
-              ...(!projectedDuringRotation && {
-                revision: sql`${documents.revision} + 1`,
-              }),
-              updatedAt: timestamp,
-            })
-            .where(and(
-              eq(documents.workspaceId, scope.workspaceId),
-              eq(documents.id, input.documentId),
-            ));
-        }
+        await transaction
+          .update(documents)
+          .set({
+            readiness: "needs_review",
+            ...(!projectedDuringRotation && {
+              revision: sql`${documents.revision} + 1`,
+            }),
+            updatedAt: timestamp,
+          })
+          .where(and(
+            eq(documents.workspaceId, scope.workspaceId),
+            eq(documents.id, input.documentId),
+            invalidated[0] ? undefined : eq(documents.readiness, "approved"),
+          ));
 
         return {
           checksum: updateChecksum,
@@ -422,11 +391,15 @@ export function createCollaborationPersistence(
           headSeq: seq,
           seq,
         };
+        }));
       });
     },
 
     checkpoint(scope, documentId, generation) {
-      return repository.write(async (transaction) => {
+      return executePersistenceOperation(() => {
+        validateScopeAndDocument(scope, documentId);
+        validateGeneration(generation);
+        return repository.write(async (transaction) => {
         const loaded = await loadSnapshot(
           transaction,
           scope,
@@ -439,10 +412,12 @@ export function createCollaborationPersistence(
           throw persistenceError("stale_generation", true);
         }
         let checkpoint: Uint8Array;
-        let materialization;
+        let materialization: CollaborationMaterialization | undefined;
         try {
           checkpoint = codec.encodeCheckpoint(loaded.document);
-          materialization = codec.materialize(loaded.document);
+          if (loaded.projectedSeq < loaded.headSeq) {
+            materialization = codec.materialize(loaded.document);
+          }
         } catch {
           throw persistenceError("storage_budget", true);
         }
@@ -470,13 +445,15 @@ export function createCollaborationPersistence(
           ))
           .returning({ generation: collaborationDocuments.generation });
         if (!updated[0]) throw new CollaborationCasRetryError();
-        await writeMaterializedDocument(
-          transaction,
-          scope,
-          documentId,
-          materialization,
-          timestamp,
-        );
+        if (materialization) {
+          await writeMaterializedDocument(
+            transaction,
+            scope,
+            documentId,
+            materialization,
+            timestamp,
+          );
+        }
         return {
           checkpointSeq: loaded.headSeq,
           checksum: checkpointChecksum,
@@ -484,23 +461,30 @@ export function createCollaborationPersistence(
           generation,
           projectedSeq: loaded.headSeq,
         };
+        });
       });
     },
 
     initialize,
 
     load(scope, documentId) {
-      return repository.read((transaction) => loadSnapshot(
-        transaction,
-        scope,
-        documentId,
-        codec,
-        projectProfile,
-      ));
+      return executePersistenceOperation(() => {
+        validateScopeAndDocument(scope, documentId);
+        return repository.read((transaction) => loadSnapshot(
+          transaction,
+          scope,
+          documentId,
+          codec,
+          projectProfile,
+        ));
+      });
     },
 
     project(scope, documentId, throughSeq) {
-      return repository.write(async (transaction) => {
+      return executePersistenceOperation(() => {
+        validateScopeAndDocument(scope, documentId);
+        validateSequence(throughSeq);
+        return repository.write(async (transaction) => {
         const loaded = await loadSnapshot(
           transaction,
           scope,
@@ -556,9 +540,100 @@ export function createCollaborationPersistence(
           projectedSeq: throughSeq,
           revision,
         };
+        });
       });
     },
   };
+}
+
+async function ensureInitializedInTransaction(
+  transaction: CollaborationTransaction,
+  scope: WorkspaceScope,
+  documentId: string,
+  codec: CollaborationDocumentCodec,
+  projectProfile: ProjectProfile,
+  checkpointBytes: number,
+  now: () => Date,
+) {
+  const existing = await loadSnapshot(
+    transaction,
+    scope,
+    documentId,
+    codec,
+    projectProfile,
+  );
+  if (existing) return existing;
+
+  const [history] = await transaction
+    .select({ generation: collaborationDocuments.generation })
+    .from(collaborationDocuments)
+    .where(and(
+      eq(collaborationDocuments.workspaceId, scope.workspaceId),
+      eq(collaborationDocuments.documentId, documentId),
+    ))
+    .limit(1);
+  if (history) throw persistenceError("corrupt_state", false);
+
+  const [legacy] = await transaction
+    .select()
+    .from(documents)
+    .where(and(
+      eq(documents.workspaceId, scope.workspaceId),
+      eq(documents.id, documentId),
+      eq(documents.status, "draft"),
+    ))
+    .limit(1);
+  if (!legacy) throw persistenceError("not_found", false);
+
+  let document: Y.Doc;
+  let checkpoint: Uint8Array;
+  try {
+    document = codec.bootstrap({
+      contentJson: legacy.contentJson,
+      metadataJson: legacy.metadataJson,
+      plainText: legacy.plainText,
+      title: legacy.title,
+    });
+    checkpoint = codec.encodeCheckpoint(document);
+  } catch (error) {
+    if (
+      error instanceof CollaborationCodecError
+      && error.failure.reason === "checkpoint_budget"
+    ) {
+      throw persistenceError("storage_budget", true);
+    }
+    throw persistenceError("corrupt_state", false);
+  }
+  if (checkpoint.byteLength > checkpointBytes) {
+    throw persistenceError("storage_budget", true);
+  }
+  const timestamp = now();
+  await transaction.insert(collaborationDocuments).values({
+    checkpointBlob: Buffer.from(checkpoint),
+    checkpointChecksum: checksum(checkpoint),
+    checkpointSeq: 0,
+    createdAt: timestamp,
+    documentId,
+    generation: 1,
+    headSeq: 0,
+    isCurrent: true,
+    lastCheckpointAt: timestamp,
+    projectedSeq: 0,
+    schemaFingerprint: codec.fingerprint(),
+    schemaVersion: COLLABORATION_DOCUMENT_SCHEMA_VERSION,
+    updatedAt: timestamp,
+    workspaceId: scope.workspaceId,
+  });
+
+  const initialized = await loadSnapshot(
+    transaction,
+    scope,
+    documentId,
+    codec,
+    projectProfile,
+  );
+  if (!initialized) throw persistenceError("corrupt_state", false);
+  return initialized;
 }
 
 async function loadSnapshot(
@@ -666,15 +741,117 @@ class CollaborationCasRetryError extends Error {
   }
 }
 
-function validateAppendInput(input: AppendCollaborationUpdate) {
-  if (
-    !Number.isSafeInteger(input.generation)
-    || input.generation < 1
-    || input.update.byteLength < 1
-    || input.update.byteLength > COLLABORATION_STORAGE_LIMITS.codecBytes
-  ) {
-    throw persistenceError("corrupt_state", false);
+async function executePersistenceOperation<T>(operation: () => Promise<T> | T): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (error instanceof CollaborationPersistenceError) throw error;
+    if (isRetryableSqliteContention(error)) {
+      throw persistenceError("contention", true);
+    }
+    throw persistenceError("internal", false);
   }
+}
+
+const COLLABORATION_ORIGIN_KINDS = new Set<CollaborationUpdateOriginKind>([
+  "client",
+  "migration",
+  "proposal_command",
+  "repair",
+  "undo_command",
+]);
+const COLLABORATION_BOUNDARY_WHITESPACE = /^[\t\n\v\f\r \u00a0]|[\t\n\v\f\r \u00a0]$/u;
+const UTF8_ENCODER = new TextEncoder();
+
+function validateAppendInput(input: AppendCollaborationUpdate) {
+  validateGeneration(input.generation);
+  if (!(input.update instanceof Uint8Array)
+    || input.update.byteLength < 1
+    || input.update.byteLength > COLLABORATION_STORAGE_LIMITS.codecBytes) {
+    throw persistenceError("invalid_input", false);
+  }
+  validateBoundedText(input.idempotencyKey);
+  validateBoundedText(input.principalId);
+  validateOptionalBoundedText(input.requestId);
+  validateOptionalBoundedText(input.sessionId);
+  validateOptionalBoundedText(input.semanticActionId);
+  if (!COLLABORATION_ORIGIN_KINDS.has(input.originKind)) {
+    throw persistenceError("invalid_input", false);
+  }
+  if (input.diagnosticJson !== undefined) validateDiagnosticJson(input.diagnosticJson);
+}
+
+function validateScopeAndDocument(scope: WorkspaceScope, documentId: string) {
+  validateBoundedText(scope.workspaceId);
+  validateBoundedText(documentId);
+}
+
+function validateGeneration(generation: number) {
+  if (!Number.isSafeInteger(generation) || generation < 1) {
+    throw persistenceError("invalid_input", false);
+  }
+}
+
+function validateSequence(sequence: number) {
+  if (!Number.isSafeInteger(sequence) || sequence < 0) {
+    throw persistenceError("invalid_input", false);
+  }
+}
+
+function validateOptionalBoundedText(value: string | undefined) {
+  if (value !== undefined) validateBoundedText(value);
+}
+
+function validateBoundedText(value: string) {
+  if (typeof value !== "string" || COLLABORATION_BOUNDARY_WHITESPACE.test(value)) {
+    throw persistenceError("invalid_input", false);
+  }
+  const bytes = UTF8_ENCODER.encode(value).byteLength;
+  if (bytes < 1 || bytes > COLLABORATION_STORAGE_LIMITS.correctnessKeyBytes) {
+    throw persistenceError("invalid_input", false);
+  }
+}
+
+function validateDiagnosticJson(value: Record<string, unknown>) {
+  try {
+    if (!isPlainJsonObject(value) || !isJsonValue(value, new Set())) {
+      throw new Error("invalid diagnostic");
+    }
+    const serialized = JSON.stringify(value);
+    const bytes = UTF8_ENCODER.encode(serialized).byteLength;
+    if (bytes < 2 || bytes > COLLABORATION_STORAGE_LIMITS.diagnosticJsonBytes) {
+      throw new Error("invalid diagnostic size");
+    }
+  } catch {
+    throw persistenceError("invalid_input", false);
+  }
+}
+
+function isJsonValue(value: unknown, ancestors: Set<object>): boolean {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (typeof value !== "object" || ancestors.has(value)) return false;
+
+  ancestors.add(value);
+  let valid: boolean;
+  if (Array.isArray(value)) {
+    valid = Object.getOwnPropertySymbols(value).length === 0
+      && Object.keys(value).length === value.length
+      && value.every((item) => isJsonValue(item, ancestors));
+  } else if (isPlainJsonObject(value)) {
+    valid = Object.getOwnPropertySymbols(value).length === 0
+      && Object.values(value).every((item) => isJsonValue(item, ancestors));
+  } else {
+    valid = false;
+  }
+  ancestors.delete(value);
+  return valid;
+}
+
+function isPlainJsonObject(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
 }
 
 async function findIdempotentUpdate(
