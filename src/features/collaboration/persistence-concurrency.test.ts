@@ -5,7 +5,7 @@ import { migrate } from "drizzle-orm/libsql/migrator";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 
 import * as schema from "@/db/schema";
@@ -82,6 +82,30 @@ describe("CollaborationPersistence cross-client contention", () => {
     expect(first).toMatchObject({ headSeq: 1, seq: 1 });
     await expect(harness.databaseA.select().from(collaborationUpdates)).resolves.toHaveLength(1);
   });
+
+  it("serializes archive before append and rejects the stale initialized writer", async () => {
+    const harness = await createTwoClientHarness("archive-race");
+    const snapshot = await harness.persistenceA.initialize(scope, harness.documentId);
+    const update = metadataUpdate(snapshot, "owner", "Archived writer");
+    const archive = await harness.clientB.transaction("write");
+    await archive.execute({
+      args: ["archived", harness.documentId],
+      sql: "UPDATE documents SET status = ? WHERE id = ?",
+    });
+    const transactions = vi.spyOn(harness.clientA, "transaction");
+
+    const append = harness.persistenceA.appendValidatedUpdate(
+      scope,
+      command(harness.documentId, update, "archive-race", "principal-a"),
+    );
+    await vi.waitFor(() => expect(transactions).toHaveBeenCalledWith("write"));
+    await archive.commit();
+    archive.close();
+
+    await expect(append).rejects.toMatchObject({ category: "not_found", retryable: false });
+    await expect(harness.databaseA.select().from(collaborationUpdates)).resolves.toHaveLength(0);
+    await expect(harness.persistenceA.load(scope, harness.documentId)).resolves.toMatchObject({ headSeq: 0 });
+  });
 });
 
 async function createTwoClientHarness(label: string) {
@@ -116,6 +140,8 @@ async function createTwoClientHarness(label: string) {
   const codecA = createCollaborationDocumentCodec(projectProfile);
   const codecB = createCollaborationDocumentCodec(projectProfile);
   return {
+    clientA,
+    clientB,
     codecA,
     databaseA,
     documentId,

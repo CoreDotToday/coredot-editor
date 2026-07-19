@@ -55,6 +55,11 @@ export type AppendCollaborationUpdate = {
   update: Uint8Array;
 };
 
+/**
+ * Changed updates return their durable row sequence. A Yjs no-op returns the
+ * current generation/head with `seq === headSeq` and the input checksum; it
+ * creates no durable update or idempotency row.
+ */
 export type DurableUpdateReceipt = {
   checksum: string;
   documentId: string;
@@ -188,6 +193,7 @@ export function createCollaborationPersistence(
           storageLimits.checkpointBytes,
           now,
         );
+        await assertAppendableDocument(transaction, scope, input.documentId);
         const updateChecksum = checksum(input.update);
         const replay = await findIdempotentUpdate(transaction, scope, input);
         if (replay) {
@@ -233,9 +239,10 @@ export function createCollaborationPersistence(
         let appendHeadSeq = loaded.headSeq;
         let projectedDuringRotation = false;
         const timestamp = now();
+        let rotationCheckpoint: Uint8Array | undefined;
+        let rotationMaterialization: CollaborationMaterialization | undefined;
 
         if (mustRotate) {
-          let rotationCheckpoint: Uint8Array;
           try {
             rotationCheckpoint = codec.encodeCheckpoint(loaded.document);
           } catch {
@@ -244,19 +251,68 @@ export function createCollaborationPersistence(
           if (rotationCheckpoint.byteLength > storageLimits.checkpointBytes) {
             throw persistenceError("storage_budget", true);
           }
+          if (loaded.projectedSeq < loaded.headSeq) {
+            try {
+              rotationMaterialization = codec.materialize(loaded.document);
+            } catch {
+              throw persistenceError("storage_budget", true);
+            }
+          }
+          try {
+            appendDocument = codec.loadCheckpoint(rotationCheckpoint);
+          } catch {
+            throw persistenceError("storage_budget", true);
+          }
+        }
+
+        let changed = false;
+        const observeCandidateUpdate = () => {
+          changed = true;
+        };
+        appendDocument.on("update", observeCandidateUpdate);
+        try {
+          Y.applyUpdate(appendDocument, input.update, "durable-append-validation");
+        } catch {
+          throw persistenceError("corrupt_state", false);
+        } finally {
+          appendDocument.off("update", observeCandidateUpdate);
+        }
+        if (!changed) {
+          return {
+            checksum: updateChecksum,
+            documentId: input.documentId,
+            generation: loaded.generation,
+            headSeq: loaded.headSeq,
+            seq: loaded.headSeq,
+          };
+        }
+
+        try {
+          codec.validate(appendDocument, projectProfile);
+          const candidateCheckpoint = codec.encodeCheckpoint(appendDocument);
+          if (candidateCheckpoint.byteLength > storageLimits.checkpointBytes) {
+            throw persistenceError("storage_budget", true);
+          }
+        } catch (error) {
+          if (error instanceof CollaborationPersistenceError) throw error;
+          if (
+            error instanceof CollaborationCodecError
+            && error.failure.reason === "checkpoint_budget"
+          ) {
+            throw persistenceError("storage_budget", true);
+          }
+          throw persistenceError("corrupt_state", false);
+        }
+
+        if (mustRotate) {
+          if (!rotationCheckpoint) throw persistenceError("corrupt_state", false);
           if (
             rotationCheckpoint.byteLength + input.update.byteLength
             > storageLimits.cumulativeUpdateBytes
           ) {
             throw persistenceError("storage_budget", true);
           }
-          if (loaded.projectedSeq < loaded.headSeq) {
-            let rotationMaterialization;
-            try {
-              rotationMaterialization = codec.materialize(loaded.document);
-            } catch {
-              throw persistenceError("storage_budget", true);
-            }
+          if (rotationMaterialization) {
             await writeMaterializedDocument(
               transaction,
               scope,
@@ -299,30 +355,7 @@ export function createCollaborationPersistence(
             updatedAt: timestamp,
             workspaceId: scope.workspaceId,
           });
-          try {
-            appendDocument = codec.loadCheckpoint(rotationCheckpoint);
-          } catch {
-            throw persistenceError("storage_budget", true);
-          }
           appendHeadSeq = loaded.headSeq;
-        }
-
-        try {
-          Y.applyUpdate(appendDocument, input.update, "durable-append-validation");
-          codec.validate(appendDocument, projectProfile);
-          const candidateCheckpoint = codec.encodeCheckpoint(appendDocument);
-          if (candidateCheckpoint.byteLength > storageLimits.checkpointBytes) {
-            throw persistenceError("storage_budget", true);
-          }
-        } catch (error) {
-          if (error instanceof CollaborationPersistenceError) throw error;
-          if (
-            error instanceof CollaborationCodecError
-            && error.failure.reason === "checkpoint_budget"
-          ) {
-            throw persistenceError("storage_budget", true);
-          }
-          throw persistenceError("corrupt_state", false);
         }
 
         const seq = appendHeadSeq + 1;
@@ -636,6 +669,23 @@ async function ensureInitializedInTransaction(
   return initialized;
 }
 
+async function assertAppendableDocument(
+  transaction: CollaborationTransaction,
+  scope: WorkspaceScope,
+  documentId: string,
+) {
+  const [draft] = await transaction
+    .select({ id: documents.id })
+    .from(documents)
+    .where(and(
+      eq(documents.workspaceId, scope.workspaceId),
+      eq(documents.id, documentId),
+      eq(documents.status, "draft"),
+    ))
+    .limit(1);
+  if (!draft) throw persistenceError("not_found", false);
+}
+
 async function loadSnapshot(
   transaction: CollaborationTransaction,
   scope: WorkspaceScope,
@@ -673,6 +723,17 @@ async function loadSnapshot(
   ) {
     throw persistenceError("projection_fence", false);
   }
+  const [orphanedFutureUpdate] = await transaction
+    .select({ seq: collaborationUpdates.seq })
+    .from(collaborationUpdates)
+    .where(and(
+      eq(collaborationUpdates.workspaceId, scope.workspaceId),
+      eq(collaborationUpdates.documentId, documentId),
+      eq(collaborationUpdates.generation, current.generation),
+      gt(collaborationUpdates.seq, current.headSeq),
+    ))
+    .limit(1);
+  if (orphanedFutureUpdate) throw persistenceError("corrupt_state", false);
 
   let document: Y.Doc;
   try {

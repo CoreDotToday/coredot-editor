@@ -130,7 +130,51 @@ describe("CollaborationPersistence", () => {
     expect(transaction.mock.calls as unknown as Array<[unknown]>).toEqual([["write"]]);
   });
 
-  it("allocates monotonic sequences, replays an identical idempotency key, and tolerates duplicate Yjs updates", async () => {
+  it("rejects appends to an archived initialized document without durable side effects", async () => {
+    const harness = await createHarness("archived-append");
+    const snapshot = await harness.persistence.initialize(scope, harness.documentId);
+    await harness.database.update(documents).set({
+      readiness: "approved",
+      status: "archived",
+    }).where(and(
+      eq(documents.workspaceId, scope.workspaceId),
+      eq(documents.id, harness.documentId),
+    ));
+    await harness.database.insert(documentApprovals).values({
+      approvedAt: new Date(1_000),
+      approvedContentHash: "c".repeat(64),
+      approvedHeadSeq: 0,
+      approvedStateVector: Buffer.from(Y.encodeStateVector(snapshot.document)),
+      documentId: harness.documentId,
+      generation: 1,
+      id: "archived-approval",
+      principalId: "approver",
+      requestId: "archived-approval-request",
+      workspaceId: scope.workspaceId,
+    });
+    const update = mutateSnapshot(snapshot, (document) => {
+      replaceTitle(document, "Must not append");
+    });
+
+    const failure = await capturePersistenceFailure(() => harness.persistence.appendValidatedUpdate(
+      scope,
+      appendCommand(harness.documentId, 1, update, { idempotencyKey: "archived-write" }),
+    ));
+
+    expect(failure).toMatchObject({ category: "not_found", retryable: false });
+    expect(failure.message.length).toBeLessThanOrEqual(120);
+    await expect(harness.database.select().from(collaborationUpdates)).resolves.toHaveLength(0);
+    await expect(harness.persistence.load(scope, harness.documentId)).resolves.toMatchObject({ headSeq: 0 });
+    const [approval] = await harness.database.select().from(documentApprovals);
+    expect(approval).toMatchObject({ invalidatedAt: null, invalidatedSeq: null });
+    await expect(readLegacyDocument(harness.database, harness.documentId)).resolves.toMatchObject({
+      readiness: "approved",
+      revision: 0,
+      status: "archived",
+    });
+  });
+
+  it("allocates monotonic sequences and returns the current head for a duplicate Yjs no-op", async () => {
     const harness = await createHarness("append-idempotency");
     const snapshot = await harness.persistence.initialize(scope, harness.documentId);
     const update = mutateSnapshot(snapshot, (document) => {
@@ -149,18 +193,125 @@ describe("CollaborationPersistence", () => {
 
     expect(replay).toEqual(first);
     expect(first).toMatchObject({ generation: 1, headSeq: 1, seq: 1 });
-    expect(duplicate).toMatchObject({ generation: 1, headSeq: 2, seq: 2 });
+    expect(duplicate).toMatchObject({
+      checksum: sha256(update),
+      generation: 1,
+      headSeq: 1,
+      seq: 1,
+    });
     const loaded = await harness.persistence.load(scope, harness.documentId);
-    expect(loaded?.headSeq).toBe(2);
+    expect(loaded?.headSeq).toBe(1);
     expect(harness.codec.materialize(loaded!.document).title).toBe("Durable title");
     const updates = await harness.database
       .select({ idempotencyKey: collaborationUpdates.idempotencyKey, seq: collaborationUpdates.seq })
       .from(collaborationUpdates)
       .orderBy(asc(collaborationUpdates.seq));
-    expect(updates).toEqual([
-      { idempotencyKey: "append-title-1", seq: 1 },
-      { idempotencyKey: "append-title-duplicate", seq: 2 },
+    expect(updates).toEqual([{ idempotencyKey: "append-title-1", seq: 1 }]);
+  });
+
+  it("does not persist a duplicate delete-only Yjs update", async () => {
+    const harness = await createHarness("noop-delete-only");
+    const snapshot = await harness.persistence.initialize(scope, harness.documentId);
+    const stateVector = Y.encodeStateVector(snapshot.document);
+    snapshot.document.getText(COLLABORATION_TITLE_NAME).delete(0, 1);
+    const deleteUpdate = Y.encodeStateAsUpdate(snapshot.document, stateVector);
+    await harness.persistence.appendValidatedUpdate(
+      scope,
+      appendCommand(harness.documentId, 1, deleteUpdate, { idempotencyKey: "delete-once" }),
+    );
+
+    const duplicate = await harness.persistence.appendValidatedUpdate(
+      scope,
+      appendCommand(harness.documentId, 1, deleteUpdate, { idempotencyKey: "delete-duplicate" }),
+    );
+
+    expect(duplicate).toMatchObject({
+      checksum: sha256(deleteUpdate),
+      generation: 1,
+      headSeq: 1,
+      seq: 1,
+    });
+    await expect(harness.database.select().from(collaborationUpdates)).resolves.toEqual([
+      expect.objectContaining({ idempotencyKey: "delete-once", seq: 1 }),
     ]);
+  });
+
+  it("preserves approval and readiness for a no-op update", async () => {
+    const harness = await createHarness("noop-approval");
+    const snapshot = await harness.persistence.initialize(scope, harness.documentId);
+    await harness.database.update(documents).set({ readiness: "approved" }).where(and(
+      eq(documents.workspaceId, scope.workspaceId),
+      eq(documents.id, harness.documentId),
+    ));
+    await harness.database.insert(documentApprovals).values({
+      approvedAt: new Date(1_000),
+      approvedContentHash: "d".repeat(64),
+      approvedHeadSeq: 0,
+      approvedStateVector: Buffer.from(Y.encodeStateVector(snapshot.document)),
+      documentId: harness.documentId,
+      generation: 1,
+      id: "noop-approval",
+      principalId: "approver",
+      requestId: "noop-approval-request",
+      workspaceId: scope.workspaceId,
+    });
+    const duplicateState = Y.encodeStateAsUpdate(snapshot.document);
+
+    const receipt = await harness.persistence.appendValidatedUpdate(
+      scope,
+      appendCommand(harness.documentId, 1, duplicateState, {
+        idempotencyKey: "noop-approved-update",
+      }),
+    );
+
+    expect(receipt).toMatchObject({
+      checksum: sha256(duplicateState),
+      generation: 1,
+      headSeq: 0,
+      seq: 0,
+    });
+    await expect(harness.database.select().from(collaborationUpdates)).resolves.toHaveLength(0);
+    const [approval] = await harness.database.select().from(documentApprovals);
+    expect(approval).toMatchObject({ invalidatedAt: null, invalidatedSeq: null });
+    await expect(readLegacyDocument(harness.database, harness.documentId)).resolves.toMatchObject({
+      readiness: "approved",
+      revision: 0,
+    });
+  });
+
+  it("does not give a no-op idempotency key a durable receipt across later heads", async () => {
+    const harness = await createHarness("noop-idempotency-limit");
+    const snapshot = await harness.persistence.initialize(scope, harness.documentId);
+    const titleUpdate = mutateSnapshot(snapshot, (document) => {
+      replaceTitle(document, "First durable head");
+    });
+    await harness.persistence.appendValidatedUpdate(
+      scope,
+      appendCommand(harness.documentId, 1, titleUpdate, { idempotencyKey: "first-head" }),
+    );
+    const noOpCommand = appendCommand(harness.documentId, 1, titleUpdate, {
+      idempotencyKey: "non-durable-noop-key",
+    });
+    const firstNoOp = await harness.persistence.appendValidatedUpdate(scope, noOpCommand);
+    const metadataUpdate = mutateSnapshot(snapshot, (document) => {
+      document.getMap(COLLABORATION_METADATA_NAME).set("category", "later-head");
+    });
+    await harness.persistence.appendValidatedUpdate(
+      scope,
+      appendCommand(harness.documentId, 1, metadataUpdate, { idempotencyKey: "second-head" }),
+    );
+
+    const laterNoOp = await harness.persistence.appendValidatedUpdate(scope, noOpCommand);
+
+    expect(firstNoOp).toMatchObject({ headSeq: 1, seq: 1 });
+    expect(laterNoOp).toMatchObject({ headSeq: 2, seq: 2 });
+    const updates = await harness.database.select({ idempotencyKey: collaborationUpdates.idempotencyKey })
+      .from(collaborationUpdates);
+    expect(updates).toEqual(expect.arrayContaining([
+      { idempotencyKey: "first-head" },
+      { idempotencyKey: "second-head" },
+    ]));
+    expect(updates).not.toContainEqual({ idempotencyKey: "non-durable-noop-key" });
   });
 
   it("fails closed when an idempotency key is replayed with a different checksum or audit identity", async () => {
@@ -259,6 +410,51 @@ describe("CollaborationPersistence", () => {
 
     expect(first).toMatchObject({ revision: 1, title: "Checkpoint once" });
     expect(repeated).toMatchObject({ revision: 1, title: "Checkpoint once" });
+  });
+
+  it("fails closed when a current generation has an update beyond its durable head", async () => {
+    const harness = await createHarness("orphan-future-tail");
+    const snapshot = await harness.persistence.initialize(scope, harness.documentId);
+    const orphan = mutateSnapshot(snapshot, (document) => {
+      replaceTitle(document, "Orphan future update");
+    });
+    await harness.database.insert(collaborationUpdates).values({
+      checksum: sha256(orphan),
+      createdAt: new Date(2_000),
+      documentId: harness.documentId,
+      generation: 1,
+      idempotencyKey: "orphan-future-tail",
+      originKind: "client",
+      principalId: "orphan-principal",
+      seq: 2,
+      updateBlob: Buffer.from(orphan),
+      workspaceId: scope.workspaceId,
+    });
+
+    await expect(harness.persistence.load(scope, harness.documentId)).rejects.toMatchObject({
+      category: "corrupt_state",
+      retryable: false,
+    });
+  });
+
+  it("loads normally when retained updates are at or below the checkpoint", async () => {
+    const harness = await createHarness("retained-checkpoint-tail");
+    const snapshot = await harness.persistence.initialize(scope, harness.documentId);
+    const update = mutateSnapshot(snapshot, (document) => {
+      replaceTitle(document, "Retained checkpoint title");
+    });
+    await harness.persistence.appendValidatedUpdate(
+      scope,
+      appendCommand(harness.documentId, 1, update, { idempotencyKey: "retained-update" }),
+    );
+    await harness.persistence.checkpoint(scope, harness.documentId, 1);
+
+    await expect(harness.database.select().from(collaborationUpdates)).resolves.toEqual([
+      expect.objectContaining({ generation: 1, seq: 1 }),
+    ]);
+    const loaded = await harness.persistence.load(scope, harness.documentId);
+    expect(loaded).toMatchObject({ checkpointSeq: 1, headSeq: 1 });
+    expect(harness.codec.materialize(loaded!.document).title).toBe("Retained checkpoint title");
   });
 
   it("projects only through the requested sequence and preserves sequence fencing", async () => {
@@ -471,6 +667,52 @@ describe("CollaborationPersistence", () => {
     await expect(readLegacyDocument(harness.database, harness.documentId)).resolves.toMatchObject({
       readiness: "needs_review",
       revision: 1,
+    });
+  });
+
+  it("does not rotate, project, or revise for a no-op at the rotation threshold", async () => {
+    const harness = await createHarness("noop-near-rotation");
+    const snapshot = await harness.persistence.initialize(scope, harness.documentId);
+    const update = mutateSnapshot(snapshot, (document) => {
+      replaceTitle(document, "Canonical but not projected");
+    });
+    await harness.persistence.appendValidatedUpdate(
+      scope,
+      appendCommand(harness.documentId, 1, update, { idempotencyKey: "near-rotation-head" }),
+    );
+    const [current] = await harness.database.select().from(collaborationDocuments);
+    const [tail] = await harness.database.select().from(collaborationUpdates);
+    if (!current || !tail) throw new Error("Expected persisted collaboration state");
+    const rotating = createCollaborationPersistence(harness.database, {
+      codec: harness.codec,
+      projectProfile,
+      storageLimits: {
+        cumulativeUpdateBytes:
+          current.checkpointBlob.byteLength + tail.updateBlob.byteLength + update.byteLength - 1,
+      },
+    });
+
+    const receipt = await rotating.appendValidatedUpdate(
+      scope,
+      appendCommand(harness.documentId, 1, update, { idempotencyKey: "near-rotation-noop" }),
+    );
+
+    expect(receipt).toMatchObject({
+      checksum: sha256(update),
+      generation: 1,
+      headSeq: 1,
+      seq: 1,
+    });
+    await expect(harness.database.select().from(collaborationDocuments)).resolves.toEqual([
+      expect.objectContaining({ generation: 1, headSeq: 1, isCurrent: true, projectedSeq: 0 }),
+    ]);
+    await expect(harness.database.select().from(collaborationUpdates)).resolves.toEqual([
+      expect.objectContaining({ generation: 1, idempotencyKey: "near-rotation-head", seq: 1 }),
+    ]);
+    await expect(readLegacyDocument(harness.database, harness.documentId)).resolves.toMatchObject({
+      readiness: "draft",
+      revision: 0,
+      title: "Legacy title",
     });
   });
 
