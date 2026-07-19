@@ -3,6 +3,8 @@ import { resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import { COLLABORATION_SCHEMA_PACKAGE_VERSIONS } from "./schema-package-versions";
+
 describe("collaboration schema package alignment", () => {
   it("exact-pins every declared Tiptap package to the fingerprinted runtime version", () => {
     const manifest = JSON.parse(
@@ -29,10 +31,13 @@ describe("collaboration schema package alignment", () => {
     ];
 
     expect(tiptapPackages.map(([name]) => name)).toEqual(expectedPackageNames);
+    expect(Object.isFrozen(COLLABORATION_SCHEMA_PACKAGE_VERSIONS)).toBe(true);
     expect(tiptapPackages).toEqual(
-      expectedPackageNames.map((name) => [name, "3.27.4"]),
+      expectedPackageNames.map((name) => [name, COLLABORATION_SCHEMA_PACKAGE_VERSIONS.tiptap]),
     );
-    expect(dependencies["y-prosemirror"]).toBe("1.3.7");
-    expect(dependencies.yjs).toBe("13.6.31");
+    expect(dependencies["y-prosemirror"]).toBe(
+      COLLABORATION_SCHEMA_PACKAGE_VERSIONS.yProsemirror,
+    );
+    expect(dependencies.yjs).toBe(COLLABORATION_SCHEMA_PACKAGE_VERSIONS.yjs);
   });
 });

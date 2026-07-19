@@ -31,7 +31,7 @@ export type CollaborationMaterialization = {
 };
 
 export type CollaborationValidationFailure =
-  | { ok: false; reason: "checkpoint_invalid" | "shared_type_mismatch" }
+  | { ok: false; reason: "checkpoint_budget" | "checkpoint_invalid" | "shared_type_mismatch" }
   | { ok: false; reason: "content_schema" }
   | {
       limit: "documentDepth" | "documentJsonBytes" | "documentNodes" | "malformed";

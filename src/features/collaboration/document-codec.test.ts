@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { getSchema } from "@tiptap/core";
 import * as Y from "yjs";
 import { describe, expect, it } from "vitest";
@@ -125,6 +128,19 @@ describe("CollaborationDocumentCodec", () => {
       plainText: "Alpha beta",
       title: "Shared document",
     });
+  });
+
+  it("does not mutate valid collaborative state while materializing it", () => {
+    const codec = createCollaborationDocumentCodec(getProjectProfile("default"));
+    const document = codec.bootstrap(snapshot);
+    const beforeBody = document.getXmlFragment(COLLABORATION_BODY_NAME).toString();
+    const beforeState = Y.encodeStateAsUpdate(document);
+    const beforeStateVector = Y.encodeStateVector(document);
+
+    expect(codec.materialize(document)).toMatchObject({ plainText: "Alpha beta" });
+    expect(document.getXmlFragment(COLLABORATION_BODY_NAME).toString()).toBe(beforeBody);
+    expect(Y.encodeStateAsUpdate(document)).toEqual(beforeState);
+    expect(Y.encodeStateVector(document)).toEqual(beforeStateVector);
   });
 
   it("round-trips checkpoints into fresh documents and applies tail updates idempotently", () => {
@@ -309,11 +325,13 @@ describe("CollaborationDocumentCodec", () => {
     });
 
     const guardedArray = codec.bootstrap({ ...snapshot, metadataJson: {} });
-    const arrayThatMustNotBeScanned = new Array<string>(129);
+    const guardedMetadata = guardedArray.getMap(COLLABORATION_METADATA_NAME);
+    guardedMetadata.set("tags", Array.from({ length: 129 }, () => "x"));
+    const arrayThatMustNotBeScanned = guardedMetadata.get("tags");
+    if (!Array.isArray(arrayThatMustNotBeScanned)) throw new Error("Expected tags array");
     Object.defineProperty(arrayThatMustNotBeScanned, 0, {
       get: () => { throw new Error("oversized-array-item-should-not-be-read"); },
     });
-    guardedArray.getMap(COLLABORATION_METADATA_NAME).set("tags", arrayThatMustNotBeScanned);
     expect(captureCodecFailure(() => codec.materialize(guardedArray))).toEqual({
       ok: false,
       reason: "metadata_structure",
@@ -355,6 +373,38 @@ describe("CollaborationDocumentCodec", () => {
     });
   });
 
+  it("accounts for pending body nodes before expanding a broad branch", () => {
+    const codec = createCollaborationDocumentCodec(getProjectProfile("default"));
+    const document = codec.bootstrap(snapshot);
+    const body = document.getXmlFragment(COLLABORATION_BODY_NAME);
+    const pendingLeaf = body.get(0);
+    if (!(pendingLeaf instanceof Y.XmlElement)) throw new Error("Expected paragraph element");
+    const broadBranch = new Y.XmlElement("paragraph");
+    Object.defineProperty(broadBranch, "length", {
+      configurable: true,
+      get: () => 50_000,
+    });
+    Object.defineProperty(broadBranch, "toArray", {
+      configurable: true,
+      value: () => {
+        throw new Error("broad-branch-must-not-be-expanded");
+      },
+    });
+    Object.defineProperty(body, "toArray", {
+      configurable: true,
+      value: () => [
+        ...Array.from({ length: 50_001 }, () => pendingLeaf),
+        broadBranch,
+      ],
+    });
+
+    expect(captureCodecFailure(() => codec.materialize(document))).toEqual({
+      limit: "documentNodes",
+      ok: false,
+      reason: "content_resource",
+    });
+  });
+
   it("bounds checkpoint bytes before invoking Yjs update decoding", () => {
     const codec = createCollaborationDocumentCodec(getProjectProfile("default"));
     const checkpoint = new Uint8Array(RESOURCE_LIMITS.documentJsonBytes + 1);
@@ -362,6 +412,57 @@ describe("CollaborationDocumentCodec", () => {
     expect(captureCodecFailure(() => codec.loadCheckpoint(checkpoint))).toEqual({
       ok: false,
       reason: "checkpoint_invalid",
+    });
+  });
+
+  it("rejects untracked documents before validation state cloning", () => {
+    const codec = createCollaborationDocumentCodec(getProjectProfile("default"));
+    const tracked = codec.bootstrap(snapshot);
+    const untracked = new Y.Doc();
+    Y.applyUpdate(untracked, codec.encodeCheckpoint(tracked));
+
+    expect(captureCodecFailure(() => codec.materialize(untracked))).toEqual({
+      ok: false,
+      reason: "checkpoint_budget",
+    });
+  });
+
+  it("rejects unexpected shared roots before checkpointing or validation cloning", () => {
+    const codec = createCollaborationDocumentCodec(getProjectProfile("default"));
+    const document = codec.bootstrap(snapshot);
+    document.getMap("unpreflighted-private-root").set("secret", "must-not-be-cloned");
+
+    expect(captureCodecFailure(() => codec.encodeCheckpoint(document))).toEqual({
+      ok: false,
+      reason: "shared_type_mismatch",
+    });
+    expect(captureCodecFailure(() => codec.materialize(document))).toEqual({
+      ok: false,
+      reason: "shared_type_mismatch",
+    });
+    expect(captureCodecFailure(() => codec.loadCheckpoint(Y.encodeStateAsUpdate(document)))).toEqual({
+      ok: false,
+      reason: "shared_type_mismatch",
+    });
+  });
+
+  it("rejects history-heavy documents before invoking full-state encoding", () => {
+    const codec = createCollaborationDocumentCodec(getProjectProfile("default"));
+    const document = codec.bootstrap(snapshot);
+    const title = document.getText(COLLABORATION_TITLE_NAME);
+    const tombstoneChunk = "x".repeat(320 * 1024);
+    for (let index = 0; index < 40; index += 1) {
+      title.insert(title.length, tombstoneChunk);
+      title.delete(title.length - tombstoneChunk.length, tombstoneChunk.length);
+    }
+
+    expect(captureCodecFailure(() => codec.encodeCheckpoint(document))).toEqual({
+      ok: false,
+      reason: "checkpoint_budget",
+    });
+    expect(captureCodecFailure(() => codec.materialize(document))).toEqual({
+      ok: false,
+      reason: "checkpoint_budget",
     });
   });
 
@@ -431,9 +532,21 @@ describe("CollaborationDocumentCodec", () => {
     body.delete(0, body.length);
     body.insert(0, [new Y.XmlElement("not-in-the-schema")]);
 
-    const failure = captureCodecFailure(() => codec.validate(document, getProjectProfile("default")));
-    expect(failure).toEqual({ ok: false, reason: "content_schema" });
-    expect(JSON.stringify(failure).length).toBeLessThan(200);
+    const bodyBefore = body.toString();
+    const stateBefore = Y.encodeStateAsUpdate(document);
+    const stateVectorBefore = Y.encodeStateVector(document);
+
+    for (const operation of [
+      () => codec.validate(document, getProjectProfile("default")),
+      () => codec.materialize(document),
+    ]) {
+      const failure = captureCodecFailure(operation);
+      expect(failure).toEqual({ ok: false, reason: "content_schema" });
+      expect(JSON.stringify(failure).length).toBeLessThan(200);
+      expect(body.toString()).toBe(bodyBefore);
+      expect(Y.encodeStateAsUpdate(document)).toEqual(stateBefore);
+      expect(Y.encodeStateVector(document)).toEqual(stateVectorBefore);
+    }
   });
 
   it("enforces the shared Tiptap resource policy before schema import", () => {
@@ -476,7 +589,7 @@ describe("CollaborationDocumentCodec", () => {
   it("keeps the default schema fingerprint golden and distinguishes active schema profile ids", () => {
     const projectProfile = getProjectProfile("default");
     expect(createCollaborationDocumentCodec(projectProfile).fingerprint()).toBe(
-      "f78e27098a0889b4ec22c1e0d0ef0f55625c192808e8f9ab8849d89e6b15de99",
+      "935a25eabb51fbd27d86dc2fcbe3dd5f3e3b518ed1c25a73a0f45e1d57b7f738",
     );
     const extensions = () => createServerSchemaExtensions();
     const profileA: DocumentSchemaProfile = { extensions, id: "test.same-schema.a" };
@@ -511,6 +624,20 @@ describe("CollaborationDocumentCodec", () => {
     expect(source).not.toMatch(/export (const|function|type) Collaboration(SchemaExtension|MetadataField|ProjectProfile)/);
     expect(source).not.toContain("export function createCollaborationSchemaFingerprint");
   });
+
+  it("binds the fingerprint to the immutable collaboration schema package descriptor", () => {
+    const source = readFileSync(
+      resolve(process.cwd(), "src/features/collaboration/document-codec.ts"),
+      "utf8",
+    );
+
+    expect(source).toContain('from "./schema-package-versions"');
+    expect(source).toContain("COLLABORATION_SCHEMA_PACKAGE_VERSIONS");
+    expect(source).not.toContain("const TIPTAP_SCHEMA_VERSION");
+    expect(createCollaborationDocumentCodec(getProjectProfile("default")).fingerprint()).not.toBe(
+      "f78e27098a0889b4ec22c1e0d0ef0f55625c192808e8f9ab8849d89e6b15de99",
+    );
+  });
 });
 
 function replaceTitle(document: Y.Doc, title: string) {
@@ -536,5 +663,3 @@ function captureCodecFailure(operation: () => unknown) {
 function cloneProjectProfile(profile: ProjectProfile): ProjectProfile {
   return structuredClone(profile);
 }
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";

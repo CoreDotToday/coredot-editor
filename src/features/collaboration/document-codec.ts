@@ -34,6 +34,7 @@ import {
   type CollaborationTiptapJson,
   type CollaborationValidationFailure,
 } from "./contracts";
+import { COLLABORATION_SCHEMA_PACKAGE_VERSIONS } from "./schema-package-versions";
 
 type MetadataDecodeResult =
   | { ok: true; value: CollaborationMetadata }
@@ -79,7 +80,21 @@ type CapturedSchemaContract = {
   schemaProfileId: string;
 };
 
-const TIPTAP_SCHEMA_VERSION = "3.27.4";
+type CollaborationDocumentState = {
+  cumulativeUpdateBytes: number;
+};
+
+type CollaborationStateEncodingResult =
+  | { ok: true; value: Uint8Array }
+  | CollaborationValidationFailure;
+
+const COLLABORATION_STATE_LIMITS = Object.freeze({
+  checkpointBytes: 10 * 1024 * 1024,
+  cumulativeUpdateBytes: 12 * 1024 * 1024,
+});
+// Task 4 persistence must rotate the collaboration generation, or cross an independently audited
+// compaction boundary, before the cumulative ceiling. Rebuilding from materialized JSON would
+// destroy Yjs client clocks and make subsequently applied tail updates unsafe.
 const COLLABORATION_METADATA_LIMITS = Object.freeze({
   cumulativeBytes: 1024 * 1024,
   fieldIdCodeUnits: 128,
@@ -117,6 +132,43 @@ export function createCollaborationDocumentCodec(
     capturedProjectProfile,
     schemaContract,
   );
+  const trackedDocuments = new WeakMap<Y.Doc, CollaborationDocumentState>();
+
+  const trackDocument = (document: Y.Doc, initialUpdateBytes: number) => {
+    const state: CollaborationDocumentState = {
+      cumulativeUpdateBytes: initialUpdateBytes,
+    };
+    document.on("update", (update: Uint8Array) => {
+      state.cumulativeUpdateBytes = Math.min(
+        COLLABORATION_STATE_LIMITS.cumulativeUpdateBytes + 1,
+        state.cumulativeUpdateBytes + update.byteLength,
+      );
+    });
+    trackedDocuments.set(document, state);
+  };
+
+  const encodeTrackedState = (document: Y.Doc): CollaborationStateEncodingResult => {
+    if (!hasOnlyCanonicalSharedRoots(document)) {
+      return { ok: false, reason: "shared_type_mismatch" };
+    }
+    const state = trackedDocuments.get(document);
+    if (
+      !state
+      || state.cumulativeUpdateBytes > COLLABORATION_STATE_LIMITS.cumulativeUpdateBytes
+    ) {
+      return { ok: false, reason: "checkpoint_budget" };
+    }
+    let update: Uint8Array;
+    try {
+      update = Y.encodeStateAsUpdate(document);
+    } catch {
+      return { ok: false, reason: "checkpoint_invalid" };
+    }
+    if (update.byteLength > COLLABORATION_STATE_LIMITS.checkpointBytes) {
+      return { ok: false, reason: "checkpoint_budget" };
+    }
+    return { ok: true, value: update };
+  };
 
   const codec: CollaborationDocumentCodec = {
     bootstrap(snapshot) {
@@ -124,6 +176,7 @@ export function createCollaborationDocumentCodec(
       if (!snapshotResult.ok) throw new CollaborationCodecError(snapshotResult);
 
       const document = new Y.Doc();
+      trackDocument(document, 0);
       const roots = acquireSharedRoots(document);
       if (!roots) {
         throw new CollaborationCodecError({ ok: false, reason: "shared_type_mismatch" });
@@ -144,7 +197,9 @@ export function createCollaborationDocumentCodec(
     },
 
     encodeCheckpoint(document) {
-      return Y.encodeStateAsUpdate(document);
+      const encoded = encodeTrackedState(document);
+      if (!encoded.ok) throw new CollaborationCodecError(encoded);
+      return encoded.value;
     },
 
     fingerprint() {
@@ -152,7 +207,10 @@ export function createCollaborationDocumentCodec(
     },
 
     loadCheckpoint(checkpoint) {
-      if (checkpoint.byteLength === 0 || checkpoint.byteLength > RESOURCE_LIMITS.documentJsonBytes) {
+      if (
+        checkpoint.byteLength === 0
+        || checkpoint.byteLength > COLLABORATION_STATE_LIMITS.checkpointBytes
+      ) {
         throw new CollaborationCodecError({ ok: false, reason: "checkpoint_invalid" });
       }
       const document = new Y.Doc();
@@ -160,6 +218,9 @@ export function createCollaborationDocumentCodec(
         Y.applyUpdate(document, checkpoint, "checkpoint-load");
       } catch {
         throw new CollaborationCodecError({ ok: false, reason: "checkpoint_invalid" });
+      }
+      if (!hasOnlyCanonicalSharedRoots(document)) {
+        throw new CollaborationCodecError({ ok: false, reason: "shared_type_mismatch" });
       }
       const roots = acquireSharedRoots(document);
       if (!roots) {
@@ -175,11 +236,12 @@ export function createCollaborationDocumentCodec(
         throw new CollaborationCodecError({ ok: false, reason: "shared_type_mismatch" });
       }
       if (bodyPreflight) throw new CollaborationCodecError(bodyPreflight);
+      trackDocument(document, checkpoint.byteLength);
       return document;
     },
 
     materialize(document) {
-      const result = validateDocument(document, capturedProjectProfile, schema);
+      const result = validateDocument(document, capturedProjectProfile, schema, encodeTrackedState);
       if (!result.ok) throw new CollaborationCodecError(result);
       return result.value;
     },
@@ -197,7 +259,7 @@ export function createCollaborationDocumentCodec(
       if (suppliedFingerprint !== schemaFingerprint) {
         throw new CollaborationCodecError({ ok: false, reason: "profile_mismatch" });
       }
-      const result = validateDocument(document, capturedProjectProfile, schema);
+      const result = validateDocument(document, capturedProjectProfile, schema, encodeTrackedState);
       if (!result.ok) throw new CollaborationCodecError(result);
       return result.value;
     },
@@ -219,6 +281,7 @@ function createCollaborationSchemaFingerprint(
     },
     layoutVersion: COLLABORATION_DOCUMENT_LAYOUT_VERSION,
     projectProfile: createCollaborationProjectProfileDescriptor(projectProfile),
+    schemaPackages: COLLABORATION_SCHEMA_PACKAGE_VERSIONS,
     schemaProfileId: schemaContract.schemaProfileId,
     schemaVersion: COLLABORATION_DOCUMENT_SCHEMA_VERSION,
   };
@@ -228,7 +291,7 @@ function createCollaborationSchemaFingerprint(
 function createSchemaExtensionDescriptors(extensionNames: readonly string[]) {
   return extensionNames.map((name) => ({
     name,
-    version: TIPTAP_SCHEMA_VERSION,
+    version: COLLABORATION_SCHEMA_PACKAGE_VERSIONS.tiptap,
   }));
 }
 
@@ -331,7 +394,11 @@ function validateDocument(
   document: Y.Doc,
   profile: CapturedCollaborationProjectProfile,
   schema: Schema,
+  encodeTrackedState: (document: Y.Doc) => CollaborationStateEncodingResult,
 ): CollaborationValidationResult {
+  if (!hasOnlyCanonicalSharedRoots(document)) {
+    return { ok: false, reason: "shared_type_mismatch" };
+  }
   const roots = acquireSharedRoots(document);
   if (!roots) return { ok: false, reason: "shared_type_mismatch" };
   const sharedTitle = roots.title;
@@ -375,11 +442,14 @@ function validateDocument(
   }
   if (bodyPreflight) return bodyPreflight;
 
+  const clonedBody = cloneBodyForValidation(document, encodeTrackedState);
+  if (!clonedBody.ok) return clonedBody;
+
   let contentJson: CollaborationTiptapJson;
   let prosemirrorDocument: ProseMirrorNode;
   try {
     prosemirrorDocument = yXmlFragmentToProseMirrorRootNode(
-      body,
+      clonedBody.value,
       schema,
     );
     contentJson = prosemirrorDocument.toJSON() as CollaborationTiptapJson;
@@ -405,6 +475,40 @@ function validateDocument(
       title,
     },
   };
+}
+
+function cloneBodyForValidation(
+  document: Y.Doc,
+  encodeTrackedState: (document: Y.Doc) => CollaborationStateEncodingResult,
+): { ok: true; value: Y.XmlFragment } | CollaborationValidationFailure {
+  const encoded = encodeTrackedState(document);
+  if (!encoded.ok) return encoded;
+
+  const clone = new Y.Doc();
+  try {
+    Y.applyUpdate(clone, encoded.value, "validation-clone");
+  } catch {
+    return { ok: false, reason: "checkpoint_invalid" };
+  }
+  if (!hasOnlyCanonicalSharedRoots(clone)) {
+    return { ok: false, reason: "shared_type_mismatch" };
+  }
+  const roots = acquireSharedRoots(clone);
+  if (!roots) return { ok: false, reason: "shared_type_mismatch" };
+  return { ok: true, value: roots.body };
+}
+
+function hasOnlyCanonicalSharedRoots(document: Y.Doc) {
+  for (const rootName of document.share.keys()) {
+    if (
+      rootName !== COLLABORATION_BODY_NAME
+      && rootName !== COLLABORATION_METADATA_NAME
+      && rootName !== COLLABORATION_TITLE_NAME
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function acquireSharedRoots(document: Y.Doc): CollaborationSharedRoots | undefined {
@@ -496,7 +600,11 @@ function preflightBody(body: Y.XmlFragment): CollaborationValidationFailure | un
   if (body.length > RESOURCE_LIMITS.documentNodes) {
     return { limit: "documentNodes", ok: false, reason: "content_resource" };
   }
-  const stack = body.toArray().map((node) => ({ depth: 1, node }));
+  const rootNodes = body.toArray();
+  if (rootNodes.length > RESOURCE_LIMITS.documentNodes) {
+    return { limit: "documentNodes", ok: false, reason: "content_resource" };
+  }
+  const stack = rootNodes.map((node) => ({ depth: 1, node }));
   let nodes = 0;
   let bytes = 0;
 
@@ -528,10 +636,15 @@ function preflightBody(body: Y.XmlFragment): CollaborationValidationFailure | un
         RESOURCE_LIMITS.documentJsonBytes,
       );
       if (bytes < 0) return { limit: "documentJsonBytes", ok: false, reason: "content_resource" };
-      if (current.node.length > RESOURCE_LIMITS.documentNodes - nodes) {
+      const remainingNodeBudget = RESOURCE_LIMITS.documentNodes - nodes - stack.length;
+      if (current.node.length > remainingNodeBudget) {
         return { limit: "documentNodes", ok: false, reason: "content_resource" };
       }
-      for (const child of current.node.toArray()) {
+      const children = current.node.toArray();
+      if (children.length > remainingNodeBudget) {
+        return { limit: "documentNodes", ok: false, reason: "content_resource" };
+      }
+      for (const child of children) {
         stack.push({ depth: current.depth + 1, node: child });
       }
     } else {
