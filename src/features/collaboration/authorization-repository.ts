@@ -10,12 +10,13 @@ import type { WorkspaceScope } from "@/features/auth/request-context";
 import {
   createCollaborationRepository,
   type CollaborationDatabase,
+  type CollaborationTransaction,
 } from "./repository";
 
 const MAX_KEY_BYTES = 256;
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/;
 const BOUNDARY_WHITESPACE = /^[\t\n\v\f\r\u00a0 ]|[\t\n\v\f\r\u00a0 ]$/;
-const authorizationWriteTails = new Map<string, Promise<void>>();
+let authorizationWriteTail: Promise<void> = Promise.resolve();
 
 export class CollaborationAuthorizationRepositoryError extends Error {
   override readonly name = "CollaborationAuthorizationRepositoryError";
@@ -30,52 +31,62 @@ export class CollaborationAuthorizationRepositoryError extends Error {
 export function createCollaborationAuthorizationRepository(database: CollaborationDatabase) {
   const repository = createCollaborationRepository(database);
 
+  const readCapabilityAuthorityInTransaction = (
+    transaction: CollaborationTransaction,
+    scope: WorkspaceScope,
+    input: { documentId: string; principalId: string },
+  ) => execute(async () => {
+    validateKey(scope.workspaceId);
+    validateKey(input.documentId);
+    validateKey(input.principalId);
+    const [row] = await transaction
+      .select({
+        authorizationEpoch: sql<number>`coalesce(${collaborationAuthorizationEpochs.epoch}, 0)`,
+        generation: collaborationDocuments.generation,
+      })
+      .from(documents)
+      .innerJoin(
+        collaborationDocuments,
+        and(
+          eq(collaborationDocuments.workspaceId, documents.workspaceId),
+          eq(collaborationDocuments.documentId, documents.id),
+          eq(collaborationDocuments.isCurrent, true),
+        ),
+      )
+      .leftJoin(
+        collaborationAuthorizationEpochs,
+        and(
+          eq(collaborationAuthorizationEpochs.workspaceId, documents.workspaceId),
+          eq(collaborationAuthorizationEpochs.principalId, input.principalId),
+        ),
+      )
+      .where(and(
+        eq(documents.workspaceId, scope.workspaceId),
+        eq(documents.id, input.documentId),
+        eq(documents.status, "draft"),
+      ))
+      .limit(1);
+    return row
+      ? {
+          authorizationEpoch: Number(row.authorizationEpoch),
+          generation: row.generation,
+        }
+      : null;
+  });
+
   return {
     readCapabilityAuthority(
       scope: WorkspaceScope,
       input: { documentId: string; principalId: string },
     ) {
-      return execute(async () => {
-        validateKey(scope.workspaceId);
-        validateKey(input.documentId);
-        validateKey(input.principalId);
-        return repository.read(async (transaction) => {
-          const [row] = await transaction
-            .select({
-              authorizationEpoch: sql<number>`coalesce(${collaborationAuthorizationEpochs.epoch}, 0)`,
-              generation: collaborationDocuments.generation,
-            })
-            .from(documents)
-            .innerJoin(
-              collaborationDocuments,
-              and(
-                eq(collaborationDocuments.workspaceId, documents.workspaceId),
-                eq(collaborationDocuments.documentId, documents.id),
-                eq(collaborationDocuments.isCurrent, true),
-              ),
-            )
-            .leftJoin(
-              collaborationAuthorizationEpochs,
-              and(
-                eq(collaborationAuthorizationEpochs.workspaceId, documents.workspaceId),
-                eq(collaborationAuthorizationEpochs.principalId, input.principalId),
-              ),
-            )
-            .where(and(
-              eq(documents.workspaceId, scope.workspaceId),
-              eq(documents.id, input.documentId),
-              eq(documents.status, "draft"),
-            ))
-            .limit(1);
-          return row
-            ? {
-                authorizationEpoch: Number(row.authorizationEpoch),
-                generation: row.generation,
-              }
-            : null;
-        });
-      });
+      return execute(() => repository.read((transaction) => readCapabilityAuthorityInTransaction(
+        transaction,
+        scope,
+        input,
+      )));
     },
+
+    readCapabilityAuthorityInTransaction,
 
     readEpoch(scope: WorkspaceScope, principalId: string) {
       return execute(async () => {
@@ -99,7 +110,7 @@ export function createCollaborationAuthorizationRepository(database: Collaborati
       return execute(async () => {
         validateKey(scope.workspaceId);
         validateKey(principalId);
-        return withSerializedAuthorizationWrite(scope, principalId, () => repository.write(async (transaction) => {
+        return withSerializedAuthorizationWrite(() => repository.write(async (transaction) => {
           const timestamp = new Date();
           const [row] = await transaction
             .insert(collaborationAuthorizationEpochs)
@@ -130,25 +141,20 @@ export function createCollaborationAuthorizationRepository(database: Collaborati
   };
 }
 
-async function withSerializedAuthorizationWrite<T>(
-  scope: WorkspaceScope,
-  principalId: string,
-  operation: () => Promise<T>,
-) {
-  const key = `${scope.workspaceId}\u0000${principalId}`;
-  const previous = authorizationWriteTails.get(key) ?? Promise.resolve();
+async function withSerializedAuthorizationWrite<T>(operation: () => Promise<T>) {
+  const previous = authorizationWriteTail;
   let release!: () => void;
   const current = new Promise<void>((resolve) => {
     release = resolve;
   });
   const tail = previous.then(() => current, () => current);
-  authorizationWriteTails.set(key, tail);
+  authorizationWriteTail = tail;
   await previous.catch(() => undefined);
   try {
     return await operation();
   } finally {
     release();
-    if (authorizationWriteTails.get(key) === tail) authorizationWriteTails.delete(key);
+    if (authorizationWriteTail === tail) authorizationWriteTail = Promise.resolve();
   }
 }
 

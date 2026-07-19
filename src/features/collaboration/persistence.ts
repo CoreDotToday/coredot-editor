@@ -144,6 +144,14 @@ export interface CollaborationPersistence {
     documentId: string,
     throughSeq: number,
   ): Promise<ProjectionReceipt>;
+  withInitializedWrite<T>(
+    scope: WorkspaceScope,
+    documentId: string,
+    operation: (
+      transaction: CollaborationTransaction,
+      snapshot: CollaborationSnapshot,
+    ) => Promise<T>,
+  ): Promise<T>;
 }
 
 type CollaborationPersistenceOptions = {
@@ -536,6 +544,31 @@ export function createCollaborationPersistence(
           revision,
         };
         });
+      });
+    },
+
+    withInitializedWrite<T>(
+      scope: WorkspaceScope,
+      documentId: string,
+      operation: (
+        transaction: CollaborationTransaction,
+        snapshot: CollaborationSnapshot,
+      ) => Promise<T>,
+    ) {
+      return executePersistenceOperation(() => {
+        validateScopeAndDocument(scope, documentId);
+        return withSerializedDocumentWrite(scope, documentId, () => repository.write(async (transaction) => {
+          const snapshot = await ensureInitializedInTransaction(
+            transaction,
+            scope,
+            documentId,
+            codec,
+            projectProfile,
+            storageLimits.checkpointBytes,
+            now,
+          );
+          return operation(transaction, snapshot);
+        }));
       });
     },
   };

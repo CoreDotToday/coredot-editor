@@ -7,6 +7,7 @@ import { retrySqliteContention } from "@/db/sqlite-contention";
 
 export type CollaborationDatabase = typeof db;
 export type CollaborationTransaction = CollaborationDatabase;
+const collaborationWriteTails = new WeakMap<object, Promise<void>>();
 
 export function createCollaborationRepository(database: CollaborationDatabase = db) {
   return {
@@ -25,7 +26,7 @@ function runRawTransaction<T>(
   mode: TransactionMode,
   operation: (transaction: CollaborationTransaction) => Promise<T>,
 ) {
-  return retrySqliteContention(async () => {
+  const run = () => retrySqliteContention(async () => {
     const rawTransaction = await database.$client.transaction(mode);
     let failure: unknown;
     let failed = false;
@@ -67,6 +68,31 @@ function runRawTransaction<T>(
     if (failed) throw failure;
     return result as T;
   });
+  return mode === "write"
+    ? withSerializedCollaborationWrite(database.$client as object, run)
+    : run();
+}
+
+async function withSerializedCollaborationWrite<T>(
+  writerIdentity: object,
+  operation: () => Promise<T>,
+) {
+  const previous = collaborationWriteTails.get(writerIdentity) ?? Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const tail = previous.then(() => current, () => current);
+  collaborationWriteTails.set(writerIdentity, tail);
+  await previous.catch(() => undefined);
+  try {
+    return await operation();
+  } finally {
+    release();
+    if (collaborationWriteTails.get(writerIdentity) === tail) {
+      collaborationWriteTails.delete(writerIdentity);
+    }
+  }
 }
 
 async function rollbackAfterFailure(rawTransaction: Transaction, operationError: unknown) {

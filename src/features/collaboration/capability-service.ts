@@ -14,6 +14,7 @@ import {
 import {
   CollaborationPersistenceError,
   createCollaborationPersistence,
+  type CollaborationPersistence,
 } from "./persistence";
 import { createCollaborationRoomName } from "./room-name";
 
@@ -24,15 +25,14 @@ type CapabilityAuthoritySnapshot = {
 
 type CapabilityServiceDependencies = {
   generateSessionId?: () => string;
-  initialize: (
-    scope: WorkspaceScope,
-    documentId: string,
-  ) => Promise<{ generation: number }>;
-  issue: (claims: CollaborationCapabilityBindings) => Promise<string>;
-  readAuthority: (
+  prepareIssue: () => Promise<(claims: CollaborationCapabilityBindings) => Promise<string>>;
+  withAuthority: (
     scope: WorkspaceScope,
     input: { documentId: string; principalId: string },
-  ) => Promise<CapabilityAuthoritySnapshot | null>;
+    operation: (
+      current: CapabilityAuthoritySnapshot,
+    ) => Promise<CollaborationCapabilityIssueResult>,
+  ) => Promise<CollaborationCapabilityIssueResult | null>;
 };
 
 export type CollaborationCapabilityIssueResult = {
@@ -66,35 +66,35 @@ export function createCollaborationCapabilityService(
         validateIdentifier(input.documentId, 256);
         validateIdentifier(context.workspaceId, 256);
         validateIdentifier(context.principalId, 256);
-        await dependencies.initialize(
-          { workspaceId: context.workspaceId },
-          input.documentId,
-        );
-        const current = await dependencies.readAuthority(
-          { workspaceId: context.workspaceId },
-          { documentId: input.documentId, principalId: context.principalId },
-        );
-        if (!current) throw new CollaborationCapabilityServiceError("not_found");
+        const preparedIssue = await dependencies.prepareIssue();
         const sessionId = generateSessionId();
         validateIdentifier(sessionId, 128);
         if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(sessionId)) {
           throw new InvalidCapabilityServiceInputError();
         }
-        const room = createCollaborationRoomName({
-          documentId: input.documentId,
-          generation: current.generation,
-          workspaceId: context.workspaceId,
-        });
-        const token = await dependencies.issue({
-          authorizationEpoch: current.authorizationEpoch,
-          documentId: input.documentId,
-          permission: "write",
-          principalId: context.principalId,
-          room,
-          sessionId,
-          workspaceId: context.workspaceId,
-        });
-        return { expiresInSeconds: 60, room, token };
+        const result = await dependencies.withAuthority(
+          { workspaceId: context.workspaceId },
+          { documentId: input.documentId, principalId: context.principalId },
+          async (current) => {
+            const room = createCollaborationRoomName({
+              documentId: input.documentId,
+              generation: current.generation,
+              workspaceId: context.workspaceId,
+            });
+            const token = await preparedIssue({
+              authorizationEpoch: current.authorizationEpoch,
+              documentId: input.documentId,
+              permission: "write",
+              principalId: context.principalId,
+              room,
+              sessionId,
+              workspaceId: context.workspaceId,
+            });
+            return { expiresInSeconds: 60, room, token };
+          },
+        );
+        if (!result) throw new CollaborationCapabilityServiceError("not_found");
+        return result;
       } catch (error) {
         if (error instanceof CollaborationCapabilityServiceError) throw error;
         if (
@@ -118,6 +118,32 @@ export function createCollaborationCapabilityService(
   };
 }
 
+type CapabilityPersistenceTransaction = Pick<CollaborationPersistence, "withInitializedWrite">;
+type CapabilityAuthorizationTransaction = {
+  readCapabilityAuthorityInTransaction: ReturnType<
+    typeof createCollaborationAuthorizationRepository
+  >["readCapabilityAuthorityInTransaction"];
+};
+
+export function createCollaborationCapabilityAuthorityTransaction(
+  persistence: CapabilityPersistenceTransaction,
+  authorization: CapabilityAuthorizationTransaction,
+): CapabilityServiceDependencies["withAuthority"] {
+  return (scope, input, operation) => persistence.withInitializedWrite(
+    scope,
+    input.documentId,
+    async (transaction) => {
+      const current = await authorization.readCapabilityAuthorityInTransaction(
+        transaction,
+        scope,
+        input,
+      );
+      if (!current) throw new CollaborationPersistenceError("not_found", false);
+      return operation(current);
+    },
+  );
+}
+
 class InvalidCapabilityServiceInputError extends Error {}
 
 function validateIdentifier(value: unknown, maximumBytes: number): asserts value is string {
@@ -135,11 +161,13 @@ function validateIdentifier(value: unknown, maximumBytes: number): asserts value
 const persistence = createCollaborationPersistence(db);
 const authorizationRepository = createCollaborationAuthorizationRepository(db);
 const defaultService = createCollaborationCapabilityService({
-  initialize: persistence.initialize,
-  issue: (claims) => createCollaborationCapabilityAuthority({
+  prepareIssue: () => createCollaborationCapabilityAuthority({
     signingKeyRing: readCollaborationCapabilitySigningKeyRing(),
-  }).issue(claims),
-  readAuthority: authorizationRepository.readCapabilityAuthority,
+  }).prepareSigner(),
+  withAuthority: createCollaborationCapabilityAuthorityTransaction(
+    persistence,
+    authorizationRepository,
+  ),
 });
 
 export const issueCollaborationCapabilityForDocument = defaultService.issue;

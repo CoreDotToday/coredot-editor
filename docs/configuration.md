@@ -16,6 +16,9 @@ Coredot Editor keeps runtime configuration explicit. Server-side secrets live in
 | `NEXT_PUBLIC_CLERK_SIGN_UP_URL` | `/sign-up` | Public Clerk sign-up route. |
 | `TEST_PRINCIPAL_ID` | `test:principal:local` | Deterministic Principal used only by `AUTH_MODE=test`. |
 | `TEST_WORKSPACE_ID` | `test:workspace:local` | Deterministic owner Workspace used only by `AUTH_MODE=test`. |
+| `TEST_IDENTITY_SIGNING_SECRET` | empty | At least 32-byte HMAC secret enabling signed multi-identity test requests only when `AUTH_MODE=test` and `NODE_ENV` is not `production`. Keep it out of deployed environments. |
+| `COLLABORATION_CAPABILITY_SIGNING_KEY_RING` | empty | Server-only JSON containing exactly one active ES256 or EdDSA private JWK used by Next.js to issue 60-second collaboration capabilities. Missing or invalid configuration fails closed before collaboration initialization. |
+| `COLLABORATION_CAPABILITY_VERIFICATION_KEY_RING` | empty | Public-only JSON key ring distributed to the collaboration sidecar. It may contain the current and previous public JWK during a bounded rotation overlap. |
 | `AI_PROVIDER` | derived | Initial provider seed before `app_settings` exists: an explicit valid value wins, otherwise `COREDOT_API_KEY` selects `coredot`, then `OPENAI_API_KEY` selects `openai`, and otherwise the app uses `stub`. |
 | `OPENAI_API_KEY` | empty | Required for direct OpenAI calls. |
 | `OPENAI_MODEL` | `gpt-4.1-mini` | Initial direct OpenAI model. |
@@ -39,6 +42,46 @@ Production must set `AUTH_MODE=clerk`, `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, and 
 An active Clerk organization maps to `clerk:org:<organization-id>`. A signed-in user without an active organization maps to the personal owner Workspace `clerk:user:<user-id>`. Clerk organization roles normalize to `owner`, `admin`, or `member`. Repositories include Workspace predicates on resource reads and writes, and cross-Workspace identifiers resolve as not found.
 
 Members may work with documents, DOCX interchange, AI Runs, Proposals, Document Changes, and Conversations. Only owners/admins may mutate prompt templates and AI settings or test saved provider credentials. `PROJECT_PROFILE_ID` remains deployment-owned rather than a Workspace setting.
+
+### Collaboration capability keys
+
+The Next.js signer and collaboration-sidecar verifier use separate environment payloads. Never copy a private JWK into the verifier ring, a `NEXT_PUBLIC_*` variable, a client bundle, logs, or source control.
+
+The signing value contains one active private key:
+
+```json
+{"activeKid":"collaboration-2026-07","keys":[{"alg":"ES256","kid":"collaboration-2026-07","privateJwk":{"kty":"EC","crv":"P-256","x":"...","y":"...","d":"..."}}]}
+```
+
+The verifier value contains only public keys. During rotation it may temporarily contain two entries:
+
+```json
+{"keys":[{"alg":"ES256","kid":"collaboration-2026-06","publicJwk":{"kty":"EC","crv":"P-256","x":"...","y":"..."}},{"alg":"ES256","kid":"collaboration-2026-07","publicJwk":{"kty":"EC","crv":"P-256","x":"...","y":"..."}}]}
+```
+
+Generate keys with Node.js 22 and the pinned `jose` dependency in a restricted environment. Use `ES256` for a P-256 key, or set `alg` to `EdDSA` to generate an Ed25519 key:
+
+```bash
+umask 077
+node --input-type=module <<'EOF' > /secure/path/collaboration-keypair.json
+import { exportJWK, generateKeyPair } from "jose";
+const alg = "ES256";
+const { privateKey, publicKey } = await generateKeyPair(alg, { extractable: true });
+process.stdout.write(JSON.stringify({ alg, privateJwk: await exportJWK(privateKey), publicJwk: await exportJWK(publicKey) }));
+EOF
+```
+
+Treat the generated file and signing JSON as secrets. Store them in the deployment secret manager, restrict the private value to the Next.js issuer, and give the sidecar only the public verifier JSON.
+
+Rotate without interrupting active clients:
+
+1. Generate a new key with a new stable `kid`.
+2. Deploy the verifier ring containing both old and new public keys.
+3. Switch the signing ring to the new private key.
+4. Wait longer than the 60-second capability lifetime and allow in-flight connections to refresh.
+5. Remove the retired public key from the verifier ring and destroy the retired private key according to the deployment retention policy.
+
+Unknown `kid`, wrong algorithms, malformed claims, expired tokens, and missing signing configuration fail closed with bounded errors. Raw JWTs and JWK material must never be logged.
 
 ## Project Profiles
 

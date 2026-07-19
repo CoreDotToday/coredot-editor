@@ -3,6 +3,71 @@ import { describe, expect, it, vi } from "vitest";
 import { createCollaborationRepository } from "./repository";
 
 describe("CollaborationRepository raw libSQL transactions", () => {
+  it("serializes write transaction acquisition across concurrent collaboration repositories", async () => {
+    let active = false;
+    let transactionNumber = 0;
+    const rawClient = {
+      transaction: vi.fn(async () => {
+        if (active) throw new Error("client already has an active write transaction");
+        active = true;
+        transactionNumber += 1;
+        const rawTransaction = createRawTransaction();
+        rawTransaction.commit.mockImplementation(async () => {
+          active = false;
+        });
+        return rawTransaction;
+      }),
+    };
+    const firstRepository = createCollaborationRepository({ $client: rawClient } as never);
+    const secondRepository = createCollaborationRepository({ $client: rawClient } as never);
+
+    const results = await Promise.all([
+      firstRepository.write(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        return "first";
+      }),
+      secondRepository.write(async () => "second"),
+    ]);
+
+    expect(results).toEqual(["first", "second"]);
+    expect(transactionNumber).toBe(2);
+    expect(rawClient.transaction).toHaveBeenNthCalledWith(1, "write");
+    expect(rawClient.transaction).toHaveBeenNthCalledWith(2, "write");
+  });
+
+  it("does not serialize write transactions belonging to different raw clients", async () => {
+    const firstTransaction = createRawTransaction();
+    const secondTransaction = createRawTransaction();
+    const firstRepository = createCollaborationRepository({
+      $client: { transaction: vi.fn(async () => firstTransaction) },
+    } as never);
+    const secondRepository = createCollaborationRepository({
+      $client: { transaction: vi.fn(async () => secondTransaction) },
+    } as never);
+    let releaseFirst!: () => void;
+    const firstBlocked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let firstEntered = false;
+    let secondEntered = false;
+
+    const first = firstRepository.write(async () => {
+      firstEntered = true;
+      await firstBlocked;
+      return "first";
+    });
+    await vi.waitFor(() => expect(firstEntered).toBe(true));
+    const second = secondRepository.write(async () => {
+      secondEntered = true;
+      return "second";
+    });
+    await vi.waitFor(() => expect(secondEntered).toBe(true));
+    releaseFirst();
+
+    await expect(Promise.all([first, second])).resolves.toEqual(["first", "second"]);
+  });
+
+
   it.each([
     ["read", "read"],
     ["write", "write"],

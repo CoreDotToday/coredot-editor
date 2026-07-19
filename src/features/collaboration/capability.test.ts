@@ -32,6 +32,7 @@ const sessionA = "22222222-2222-4222-8222-222222222222";
 const sessionB = "33333333-3333-4333-8333-333333333333";
 
 let signingKeyRing: CollaborationCapabilitySigningKeyRing;
+let nextSigningKeyRing: CollaborationCapabilitySigningKeyRing;
 let verificationKeyRing: CollaborationCapabilityVerificationKeyRing;
 let rotatedVerificationKeyRing: CollaborationCapabilityVerificationKeyRing;
 let activePrivateKey: CryptoKey;
@@ -63,7 +64,7 @@ beforeAll(async () => {
   });
   // Prove the private key for a future rotation parses independently from the
   // public verifier ring distributed to the sidecar.
-  parseCollaborationCapabilitySigningKeyRing({
+  nextSigningKeyRing = parseCollaborationCapabilitySigningKeyRing({
     activeKid: "2026-07-b",
     keys: [{ alg: "ES256", kid: "2026-07-b", privateJwk: secondPrivateJwk }],
   });
@@ -153,6 +154,29 @@ describe("collaboration capability authority", () => {
       .rejects.toBeInstanceOf(CollaborationCapabilityError);
   });
 
+  it("supports overlap verification during rotation and rejects the retired kid after the overlap window", async () => {
+    const oldSigner = createCollaborationCapabilityAuthority({ now: () => now, signingKeyRing });
+    const newSigner = createCollaborationCapabilityAuthority({ now: () => now, signingKeyRing: nextSigningKeyRing });
+    const overlapVerifier = createCollaborationCapabilityAuthority({
+      now: () => now,
+      verificationKeyRing: rotatedVerificationKeyRing,
+    });
+    const retiredVerifier = createCollaborationCapabilityAuthority({
+      now: () => now,
+      verificationKeyRing: {
+        keys: [rotatedVerificationKeyRing.keys.find((key) => key.kid === "2026-07-b")!],
+      },
+    });
+    const oldToken = await oldSigner.issue(expectedBindings());
+    const newToken = await newSigner.issue(expectedBindings());
+
+    await expect(overlapVerifier.verify(oldToken, expectedBindings())).resolves.toMatchObject({ jti: expect.any(String) });
+    await expect(overlapVerifier.verify(newToken, expectedBindings())).resolves.toMatchObject({ jti: expect.any(String) });
+    await expect(retiredVerifier.verify(oldToken, expectedBindings()))
+      .rejects.toBeInstanceOf(CollaborationCapabilityError);
+    await expect(retiredVerifier.verify(newToken, expectedBindings())).resolves.toMatchObject({ jti: expect.any(String) });
+  });
+
   it.each([
     ["issuer", { iss: "other-editor" }],
     ["audience", { aud: "other-audience" }],
@@ -232,23 +256,31 @@ describe("collaboration capability authority", () => {
 
 describe("collaboration capability service", () => {
   it("initializes then rechecks current Workspace, draft status, generation, and authorization epoch before signing", async () => {
-    const initialize = vi.fn(async () => ({ generation: 3 }));
-    const readAuthority = vi.fn(async () => ({ authorizationEpoch: 7, generation: 3 }));
+    const withAuthority = vi.fn(async (
+      _scope: { workspaceId: string },
+      _input: { documentId: string; principalId: string },
+      operation: (current: { authorizationEpoch: number; generation: number }) => Promise<{
+        expiresInSeconds: 60;
+        room: string;
+        token: string;
+      }>,
+    ) => operation({ authorizationEpoch: 7, generation: 3 }));
     const issue = vi.fn(async () => "signed-capability");
+    const prepareIssue = vi.fn(async () => issue);
     const service = createCollaborationCapabilityService({
       generateSessionId: () => sessionA,
-      initialize,
-      issue,
-      readAuthority,
+      prepareIssue,
+      withAuthority,
     });
 
     await expect(service.issue(context, { documentId: "document-a" }))
       .resolves.toEqual({ expiresInSeconds: 60, room, token: "signed-capability" });
-    expect(initialize).toHaveBeenCalledWith({ workspaceId: context.workspaceId }, "document-a");
-    expect(readAuthority).toHaveBeenCalledWith(
+    expect(withAuthority).toHaveBeenCalledWith(
       { workspaceId: context.workspaceId },
       { documentId: "document-a", principalId: context.principalId },
+      expect.any(Function),
     );
+    expect(prepareIssue).toHaveBeenCalledBefore(withAuthority);
     expect(issue).toHaveBeenCalledWith(expectedBindings());
   });
 
@@ -258,9 +290,8 @@ describe("collaboration capability service", () => {
       const issue = vi.fn(async () => "must-not-sign");
       const service = createCollaborationCapabilityService({
         generateSessionId: () => sessionA,
-        initialize: vi.fn(async () => ({ generation: 3 })),
-        issue,
-        readAuthority: vi.fn(async () => null),
+        prepareIssue: vi.fn(async () => issue),
+        withAuthority: vi.fn(async () => null),
       });
 
       await expect(service.issue(context, { documentId: "document-a" }))
@@ -273,9 +304,8 @@ describe("collaboration capability service", () => {
     const sessionId = `secret-${"x".repeat(300)}`;
     const service = createCollaborationCapabilityService({
       generateSessionId: () => sessionId,
-      initialize: vi.fn(async () => ({ generation: 3 })),
-      issue: vi.fn(),
-      readAuthority: vi.fn(async () => ({ authorizationEpoch: 7, generation: 3 })),
+      prepareIssue: vi.fn(async () => vi.fn()),
+      withAuthority: vi.fn(),
     });
 
     const failure = await captureFailure(() => service.issue(context, { documentId: "document-a" }));

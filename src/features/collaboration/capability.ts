@@ -132,38 +132,50 @@ export function createCollaborationCapabilityAuthority(options: {
   verificationKeyRing?: CollaborationCapabilityVerificationKeyRing;
 }) {
   const now = options.now ?? (() => new Date());
+  const prepareSigner = async () => {
+    const ring = options.signingKeyRing;
+    if (!ring) throw configurationError();
+    const entry = ring.keys.find((key) => key.kid === ring.activeKid);
+    if (!entry) throw configurationError();
+    try {
+      const key = await importJWK(entry.privateJwk as JWK, entry.alg);
+      return async (bindings: CollaborationCapabilityBindings) => {
+        const normalized = normalizeBindings(bindings);
+        const issuedAt = Math.floor(now().getTime() / 1_000);
+        try {
+          return await new SignJWT({
+            authorizationEpoch: normalized.authorizationEpoch,
+            documentId: normalized.documentId,
+            permission: normalized.permission,
+            principalId: normalized.principalId,
+            room: normalized.room,
+            sessionId: normalized.sessionId,
+            workspaceId: normalized.workspaceId,
+          })
+            .setProtectedHeader({ alg: entry.alg, kid: entry.kid, typ: "JWT" })
+            .setIssuer(ISSUER)
+            .setAudience(AUDIENCE)
+            .setJti(randomUUID())
+            .setIssuedAt(issuedAt)
+            .setNotBefore(issuedAt - 1)
+            .setExpirationTime(issuedAt + MAX_LIFETIME_SECONDS)
+            .sign(key);
+        } catch (error) {
+          if (error instanceof CollaborationCapabilityError) throw error;
+          throw configurationError();
+        }
+      };
+    } catch {
+      throw configurationError();
+    }
+  };
   return {
     async issue(bindings: CollaborationCapabilityBindings) {
-      const normalized = normalizeBindings(bindings);
-      const ring = options.signingKeyRing;
-      if (!ring) throw configurationError();
-      const entry = ring.keys.find((key) => key.kid === ring.activeKid);
-      if (!entry) throw configurationError();
-      const issuedAt = Math.floor(now().getTime() / 1_000);
-      try {
-        const key = await importJWK(entry.privateJwk as JWK, entry.alg);
-        return await new SignJWT({
-          authorizationEpoch: normalized.authorizationEpoch,
-          documentId: normalized.documentId,
-          permission: normalized.permission,
-          principalId: normalized.principalId,
-          room: normalized.room,
-          sessionId: normalized.sessionId,
-          workspaceId: normalized.workspaceId,
-        })
-          .setProtectedHeader({ alg: entry.alg, kid: entry.kid, typ: "JWT" })
-          .setIssuer(ISSUER)
-          .setAudience(AUDIENCE)
-          .setJti(randomUUID())
-          .setIssuedAt(issuedAt)
-          .setNotBefore(issuedAt - 1)
-          .setExpirationTime(issuedAt + MAX_LIFETIME_SECONDS)
-          .sign(key);
-      } catch (error) {
-        if (error instanceof CollaborationCapabilityError) throw error;
-        throw configurationError();
-      }
+      const signer = await prepareSigner();
+      return signer(bindings);
     },
+
+    prepareSigner,
 
     async verify(token: string, expected: CollaborationCapabilityBindings) {
       try {
