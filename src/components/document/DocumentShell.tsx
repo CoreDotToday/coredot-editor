@@ -2423,7 +2423,9 @@ function DocumentShellContent({
       )
     ),
   );
-  const workflowDescription = workflowReadiness === "ready" && isCollaborationMode && !collaborationApprovalIsDurable
+  const workflowDescription = workflowState?.collaboration === null
+    ? messages.metadataPanel.readinessApprovalLegacyUnsupported
+    : workflowReadiness === "ready" && isCollaborationMode && !collaborationApprovalIsDurable
       ? messages.metadataPanel.readinessApprovalDurability
       : messages.metadataPanel.readinessServerAuthority;
   const workflowFeedbackMessage = isWorkflowMutating

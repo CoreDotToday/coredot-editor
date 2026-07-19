@@ -636,6 +636,25 @@ function expectLastProposalApplyFetch(
 }
 
 describe("DocumentShell", () => {
+  it("explains through the readiness control that legacy documents cannot be approved", () => {
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={{ ...createDocument("doc_1", "Legacy approval"), readiness: "ready" }}
+        templates={[]}
+      />,
+    );
+
+    const readiness = screen.getByRole("combobox", { name: "준비 상태" });
+    expect(within(readiness).getByRole("option", { name: "승인됨" })).toBeDisabled();
+    expect(readiness).toHaveAccessibleDescription(
+      "이 문서는 현재 서버 승인 워크플로를 지원하지 않습니다.",
+    );
+    expect(screen.queryByText(
+      "준비 상태와 승인은 서버에서 검증되며 공동 편집 문서에 기록되지 않습니다.",
+    )).not.toBeInTheDocument();
+  });
+
   it("moves legacy readiness through the workflow endpoint without scheduling a document autosave", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {

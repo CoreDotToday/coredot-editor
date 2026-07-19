@@ -408,22 +408,6 @@ export function createDocumentRepository(
       });
     },
 
-    async archiveDocument(scope: WorkspaceScope, id: string) {
-      const now = new Date();
-      const rows = await database
-        .update(documents)
-        .set({ creationKey: null, status: "archived", updatedAt: now })
-        .where(
-          and(
-            eq(documents.workspaceId, scope.workspaceId),
-            eq(documents.id, id),
-            eq(documents.status, "draft"),
-          ),
-        )
-        .returning();
-
-      return rows[0] ?? null;
-    },
   };
 }
 
@@ -503,4 +487,3 @@ export const getDocumentById = defaultRepository.getDocumentById;
 export const getDocumentsByIds = defaultRepository.getDocumentsByIds;
 export const listDocumentReferenceCandidates = defaultRepository.listDocumentReferenceCandidates;
 export const saveDocumentDraft = defaultRepository.saveDocumentDraft;
-export const archiveDocument = defaultRepository.archiveDocument;

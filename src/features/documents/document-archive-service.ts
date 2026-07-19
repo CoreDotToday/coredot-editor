@@ -61,7 +61,7 @@ export class DocumentArchiveServiceError extends Error {
 
 export function createDocumentArchiveService(options: {
   database: CollaborationDatabase;
-  gateway: DocumentArchiveRoomGateway;
+  gateway?: DocumentArchiveRoomGateway;
   now?: () => Date;
 }) {
   const repository = createCollaborationRepository(options.database);
@@ -166,8 +166,10 @@ export function createDocumentArchiveService(options: {
     generation: number;
     scope: WorkspaceScope;
   }): Promise<"delivered" | "pending"> => {
+    const gateway = options.gateway;
+    if (!gateway) return "pending";
     try {
-      await options.gateway.closeArchivedRoom(
+      await gateway.closeArchivedRoom(
         input.scope,
         input.documentId,
         input.generation,
@@ -228,6 +230,9 @@ export function createDocumentArchiveService(options: {
     input: { limit?: number } = {},
   ): Promise<RoomClosureReconciliation> => {
     const limit = normalizeBatchLimit(input.limit);
+    if (!options.gateway) {
+      return { attempted: 0, closed: 0, ...await readJobCounts() };
+    }
     const startedAt = readTimestamp(now);
     const jobs = await storage(async () => repository.read((transaction) => transaction
       .select()

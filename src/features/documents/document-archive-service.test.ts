@@ -31,6 +31,29 @@ afterEach(async () => {
 });
 
 describe("document archive service", () => {
+  it("leaves a due-now closure job untouched when no local room gateway exists", async () => {
+    const harness = await createHarness("no-local-gateway");
+    await seedDocument(harness.database, "document-a", scopeA.workspaceId, true);
+    const now = new Date("2027-01-15T08:00:00.000Z");
+    const service = createDocumentArchiveService({
+      database: harness.database,
+      now: () => now,
+    });
+
+    await expect(service.archive(scopeA, "document-a")).resolves.toEqual({
+      roomClosure: "pending",
+      status: "archived",
+    });
+    await expect(harness.database.select().from(collaborationRoomClosureJobs)).resolves.toEqual([
+      expect.objectContaining({
+        attempts: 0,
+        failureCategory: null,
+        nextAttemptAt: now,
+        status: "pending",
+      }),
+    ]);
+  });
+
   it("commits a collaborative archive and its non-content closure job before delivery", async () => {
     const harness = await createHarness("commit-first");
     await seedDocument(harness.database, "document-a", scopeA.workspaceId, true);

@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import * as schema from "@/db/schema";
 import { getProjectProfile } from "@/features/projects/default-project-profiles";
 import { defineProjectProfile } from "@/features/projects/project-profile";
+import { createDocumentArchiveService } from "./document-archive-service";
 import { createDocumentRepository } from "./document-repository";
 
 const tempDirs: string[] = [];
@@ -56,11 +57,39 @@ async function createIsolatedDocumentDb() {
       PRIMARY KEY (workspace_id, document_id, generation)
     )
   `);
+  await db.run(sql`
+    CREATE TABLE collaboration_room_closure_jobs (
+      workspace_id text NOT NULL,
+      document_id text NOT NULL,
+      generation integer NOT NULL,
+      reason text NOT NULL,
+      status text DEFAULT 'pending' NOT NULL,
+      attempts integer DEFAULT 0 NOT NULL,
+      next_attempt_at integer,
+      failure_category text,
+      created_at integer NOT NULL,
+      updated_at integer NOT NULL,
+      PRIMARY KEY (workspace_id, document_id, generation, reason)
+    )
+  `);
 
   return db;
 }
 
+function createArchiveDocument(database: Awaited<ReturnType<typeof createIsolatedDocumentDb>>) {
+  return createDocumentArchiveService({ database }).archive;
+}
+
 describe("document repository", () => {
+  it("does not expose an archive writer outside the durable archive service", async () => {
+    const db = await createIsolatedDocumentDb();
+    const repository = createDocumentRepository(db);
+    const repositoryModule = await import("./document-repository");
+
+    expect(repository).not.toHaveProperty("archiveDocument");
+    expect(repositoryModule).not.toHaveProperty("archiveDocument");
+  });
+
   it("returns bounded stable summary pages without full document content", async () => {
     const db = await createIsolatedDocumentDb();
     const repository = createDocumentRepository(db);
@@ -437,7 +466,8 @@ describe("document repository", () => {
 
   it("releases an archived recovery copy key so a retry creates a new active copy", async () => {
     const db = await createIsolatedDocumentDb();
-    const { archiveDocument, createDocumentFromDraftIdempotently } = createDocumentRepository(db);
+    const { createDocumentFromDraftIdempotently } = createDocumentRepository(db);
+    const archiveDocument = createArchiveDocument(db);
     const draft = {
       title: "Recovery copy",
       contentJson: { type: "doc" as const, content: [{ type: "paragraph" }] },
@@ -463,32 +493,37 @@ describe("document repository", () => {
 
   it("archives an existing document and removes it from draft listings", async () => {
     const db = await createIsolatedDocumentDb();
-    const { archiveDocument, createDocumentDraft, getDocumentById, listDocuments } = createDocumentRepository(db);
+    const { createDocumentDraft, getDocumentById, listDocuments } = createDocumentRepository(db);
+    const archiveDocument = createArchiveDocument(db);
     const document = await createDocumentDraft(workspaceA, "Market Entry Memo");
 
-    const archivedDocument = await archiveDocument(workspaceA, document.id);
+    const archiveResult = await archiveDocument(workspaceA, document.id);
     const savedDocument = await getDocumentById(workspaceA, document.id);
     const documents = await listDocuments(workspaceA);
 
-    expect(archivedDocument?.id).toBe(document.id);
-    expect(archivedDocument?.status).toBe("archived");
+    expect(archiveResult).toEqual({ roomClosure: "not_required", status: "archived" });
     expect(savedDocument).toBeNull();
     expect(documents.some((item) => item.id === document.id)).toBe(false);
   });
 
-  it("returns null when archiving a missing or already archived document", async () => {
+  it("uses durable archive semantics for a missing or already archived document", async () => {
     const db = await createIsolatedDocumentDb();
-    const { archiveDocument, createDocumentDraft } = createDocumentRepository(db);
+    const { createDocumentDraft } = createDocumentRepository(db);
+    const archiveDocument = createArchiveDocument(db);
     const document = await createDocumentDraft(workspaceA, "Market Entry Memo");
     await archiveDocument(workspaceA, document.id);
 
-    await expect(archiveDocument(workspaceA, "missing-document")).resolves.toBeNull();
-    await expect(archiveDocument(workspaceA, document.id)).resolves.toBeNull();
+    await expect(archiveDocument(workspaceA, "missing-document")).resolves.toEqual({ status: "not_found" });
+    await expect(archiveDocument(workspaceA, document.id)).resolves.toEqual({
+      roomClosure: "not_required",
+      status: "already_archived",
+    });
   });
 
   it("returns not_found when saving an archived document", async () => {
     const db = await createIsolatedDocumentDb();
-    const { archiveDocument, createDocumentDraft, saveDocumentDraft } = createDocumentRepository(db);
+    const { createDocumentDraft, saveDocumentDraft } = createDocumentRepository(db);
+    const archiveDocument = createArchiveDocument(db);
     const document = await createDocumentDraft(workspaceA, "Market Entry Memo");
     await archiveDocument(workspaceA, document.id);
 
@@ -673,7 +708,8 @@ describe("document repository", () => {
 
   it("lists reference candidates while excluding the current and archived documents", async () => {
     const db = await createIsolatedDocumentDb();
-    const { archiveDocument, createDocumentFromContent, listDocumentReferenceCandidates } = createDocumentRepository(db);
+    const { createDocumentFromContent, listDocumentReferenceCandidates } = createDocumentRepository(db);
+    const archiveDocument = createArchiveDocument(db);
     const current = await createDocumentFromContent(workspaceA, "Current Plan", {
       type: "doc",
       content: [{ type: "paragraph", content: [{ type: "text", text: "Current body" }] }],
@@ -712,6 +748,7 @@ describe("document repository", () => {
   it("does not reveal or mutate documents across workspaces", async () => {
     const db = await createIsolatedDocumentDb();
     const repository = createDocumentRepository(db);
+    const archiveDocument = createArchiveDocument(db);
     const document = await repository.createDocumentDraft(workspaceA, "Workspace A memo");
 
     await expect(repository.getDocumentById(workspaceB, document.id)).resolves.toBeNull();
@@ -724,7 +761,7 @@ describe("document repository", () => {
         expectedRevision: 0,
       }),
     ).resolves.toEqual({ status: "not_found" });
-    await expect(repository.archiveDocument(workspaceB, document.id)).resolves.toBeNull();
+    await expect(archiveDocument(workspaceB, document.id)).resolves.toEqual({ status: "not_found" });
 
     await expect(repository.getDocumentById(workspaceA, document.id)).resolves.toMatchObject({
       status: "draft",
