@@ -68,7 +68,9 @@ nav:
   - Operate:
       - Architecture: ARCHITECTURE.md
       - Architecture Hardening: architecture-hardening.md
+      - Real-Time Collaboration Design: realtime-collaboration.md
       - Clerk ADR: adr/0001-clerk-for-identity-and-workspace-context.md
+      - Collaboration ADR: adr/0002-use-yjs-and-hocuspocus-for-real-time-collaboration.md
       - Production Readiness: production-readiness.md
       - Deployment: DEPLOYMENT.md
       - RAG Docker Stack: RAG_DOCKER.md
