@@ -6,6 +6,10 @@ export type CollaborationRoomIdentity = {
 
 const ROOM_PREFIX = "collab:v1";
 const ROOM_ERROR = "Invalid collaboration room name";
+const MAX_IDENTIFIER_CODE_UNITS = 256;
+const MAX_ENCODED_IDENTIFIER_LENGTH = 3_072;
+const MAX_ROOM_NAME_LENGTH = 6_200;
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/;
 
 export function createCollaborationRoomName(identity: CollaborationRoomIdentity): string {
   assertGeneration(identity.generation);
@@ -15,6 +19,9 @@ export function createCollaborationRoomName(identity: CollaborationRoomIdentity)
 }
 
 export function parseCollaborationRoomName(roomName: string): CollaborationRoomIdentity {
+  if (roomName.length > MAX_ROOM_NAME_LENGTH || CONTROL_CHARACTERS.test(roomName)) {
+    throw new Error(ROOM_ERROR);
+  }
   const parts = roomName.split(":");
   if (parts.length !== 5 || parts[0] !== "collab" || parts[1] !== "v1") {
     throw new Error(ROOM_ERROR);
@@ -39,18 +46,36 @@ function assertGeneration(generation: number) {
 }
 
 function encodeIdentifier(value: string) {
-  if (value.length === 0 || value.trim().length === 0) throw new Error(ROOM_ERROR);
-  return encodeURIComponent(value);
+  if (
+    value.length === 0
+    || value.length > MAX_IDENTIFIER_CODE_UNITS
+    || value.trim().length === 0
+    || CONTROL_CHARACTERS.test(value)
+  ) {
+    throw new Error(ROOM_ERROR);
+  }
+  const encoded = encodeURIComponent(value);
+  if (encoded.length > MAX_ENCODED_IDENTIFIER_LENGTH) throw new Error(ROOM_ERROR);
+  return encoded;
 }
 
 function decodeCanonicalIdentifier(value: string) {
+  if (value.length > MAX_ENCODED_IDENTIFIER_LENGTH || CONTROL_CHARACTERS.test(value)) {
+    throw new Error(ROOM_ERROR);
+  }
   let decoded: string;
   try {
     decoded = decodeURIComponent(value);
   } catch {
     throw new Error(ROOM_ERROR);
   }
-  if (decoded.length === 0 || decoded.trim().length === 0 || encodeURIComponent(decoded) !== value) {
+  if (
+    decoded.length === 0
+    || decoded.length > MAX_IDENTIFIER_CODE_UNITS
+    || decoded.trim().length === 0
+    || CONTROL_CHARACTERS.test(decoded)
+    || encodeURIComponent(decoded) !== value
+  ) {
     throw new Error(ROOM_ERROR);
   }
   return decoded;

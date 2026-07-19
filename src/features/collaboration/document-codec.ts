@@ -9,13 +9,15 @@ import { extractPlainTextFromTiptap } from "@/features/documents/tiptap-text";
 import {
   getProjectMetadataFieldLimits,
   validateProjectMetadata,
+  type ProjectMetadataContract,
   type ProjectMetadataField,
   type ProjectProfile,
 } from "@/features/projects/project-profile";
-import { validateTiptapResource } from "@/features/security/resource-policy";
+import { RESOURCE_LIMITS, validateTiptapResource } from "@/features/security/resource-policy";
+import { appDocumentSchemaProfileRuntime } from "@/plugins/app-document-schema-profile-runtime.mjs";
 import {
   createServerSchemaExtensions,
-  defaultDocumentSchemaProfile,
+  type DocumentSchemaProfile,
 } from "@/plugins/document-schema-profile";
 
 import {
@@ -23,7 +25,6 @@ import {
   COLLABORATION_DOCUMENT_LAYOUT_VERSION,
   COLLABORATION_DOCUMENT_SCHEMA_VERSION,
   COLLABORATION_METADATA_NAME,
-  COLLABORATION_TIPTAP_SCHEMA_VERSION,
   COLLABORATION_TITLE_MAX_LENGTH,
   COLLABORATION_TITLE_NAME,
   type CollaborationDocumentCodec,
@@ -36,18 +37,27 @@ import {
 
 type MetadataDecodeResult =
   | { ok: true; value: CollaborationMetadata }
-  | { fieldId: string; ok: false };
+  | { fieldId?: string; ok: false };
 
 type CollaborationValidationResult =
   | { ok: true; value: CollaborationMaterialization }
   | CollaborationValidationFailure;
 
-export type CollaborationSchemaExtensionDescriptor = {
+type CollaborationSharedRoots = {
+  body: Y.XmlFragment;
+  metadata: Y.Map<unknown>;
+  title: Y.Text;
+};
+
+type CapturedCollaborationProjectProfile = ProjectMetadataContract & { id: string };
+type SharedRoot = Y.Doc["share"] extends Map<string, infer Root> ? Root : never;
+
+type CollaborationSchemaExtensionDescriptor = {
   name: string;
   version: string;
 };
 
-export type CollaborationMetadataFieldDescriptor = {
+type CollaborationMetadataFieldDescriptor = {
   id: string;
   limits: {
     itemMaxLength: number | null;
@@ -59,19 +69,29 @@ export type CollaborationMetadataFieldDescriptor = {
   type: ProjectMetadataField["type"];
 };
 
-export type CollaborationProjectProfileDescriptor = {
+type CollaborationProjectProfileDescriptor = {
   id: string;
   metadataFields: readonly CollaborationMetadataFieldDescriptor[];
 };
 
-export const COLLABORATION_SCHEMA_EXTENSION_DESCRIPTORS = [
-  { name: "starterKit", version: COLLABORATION_TIPTAP_SCHEMA_VERSION },
-  { name: "link", version: COLLABORATION_TIPTAP_SCHEMA_VERSION },
-  { name: "taskList", version: COLLABORATION_TIPTAP_SCHEMA_VERSION },
-  { name: "taskItem", version: COLLABORATION_TIPTAP_SCHEMA_VERSION },
-  { name: "tableKit", version: COLLABORATION_TIPTAP_SCHEMA_VERSION },
-  { name: "typography", version: COLLABORATION_TIPTAP_SCHEMA_VERSION },
-] as const satisfies readonly CollaborationSchemaExtensionDescriptor[];
+type CapturedSchemaContract = {
+  extensionDescriptors: readonly CollaborationSchemaExtensionDescriptor[];
+  schemaProfileId: string;
+};
+
+const TIPTAP_SCHEMA_VERSION = "3.27.4";
+const COLLABORATION_METADATA_LIMITS = Object.freeze({
+  cumulativeBytes: 1024 * 1024,
+  fieldIdCodeUnits: 128,
+  fields: 256,
+  stringArrayItems: 128,
+  stringCodeUnits: 8_192,
+  stringItemCodeUnits: 1_024,
+});
+const COLLABORATION_XML_ATTRIBUTE_LIMIT = 256;
+const COLLABORATION_XML_ATTRIBUTE_NAME_CODE_UNITS = 128;
+const COLLABORATION_XML_ATTRIBUTE_VALUE_CODE_UNITS = 8_192;
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/;
 
 export class CollaborationCodecError extends Error {
   override readonly name = "CollaborationCodecError";
@@ -83,14 +103,20 @@ export class CollaborationCodecError extends Error {
 
 export function createCollaborationDocumentCodec(
   projectProfile: ProjectProfile,
+  options: { schemaProfile?: DocumentSchemaProfile } = {},
 ): CollaborationDocumentCodec {
   const capturedProjectProfile = captureProjectProfile(projectProfile);
-  const extensions = createServerSchemaExtensions();
+  const schemaProfile = options.schemaProfile ?? appDocumentSchemaProfileRuntime;
+  const extensions = createServerSchemaExtensions(schemaProfile);
   const schema = getSchema(extensions);
-  assertSchemaExtensionDescriptors(extensions.map((extension) => extension.name));
-  const schemaFingerprint = createCollaborationSchemaFingerprint({
-    projectProfile: capturedProjectProfile,
-  });
+  const schemaContract = captureSchemaContract(
+    schemaProfile.id,
+    extensions.map((extension) => extension.name),
+  );
+  const schemaFingerprint = createCollaborationSchemaFingerprint(
+    capturedProjectProfile,
+    schemaContract,
+  );
 
   const codec: CollaborationDocumentCodec = {
     bootstrap(snapshot) {
@@ -98,9 +124,12 @@ export function createCollaborationDocumentCodec(
       if (!snapshotResult.ok) throw new CollaborationCodecError(snapshotResult);
 
       const document = new Y.Doc();
-      const body = document.getXmlFragment(COLLABORATION_BODY_NAME);
-      const title = document.getText(COLLABORATION_TITLE_NAME);
-      const metadata = document.getMap<CollaborationMetadataValue>(COLLABORATION_METADATA_NAME);
+      const roots = acquireSharedRoots(document);
+      if (!roots) {
+        throw new CollaborationCodecError({ ok: false, reason: "shared_type_mismatch" });
+      }
+      const { body, title } = roots;
+      const metadata = roots.metadata as Y.Map<CollaborationMetadataValue>;
       const prosemirrorDocument = schema.nodeFromJSON(snapshotResult.value.contentJson);
 
       document.transact(() => {
@@ -123,8 +152,29 @@ export function createCollaborationDocumentCodec(
     },
 
     loadCheckpoint(checkpoint) {
+      if (checkpoint.byteLength === 0 || checkpoint.byteLength > RESOURCE_LIMITS.documentJsonBytes) {
+        throw new CollaborationCodecError({ ok: false, reason: "checkpoint_invalid" });
+      }
       const document = new Y.Doc();
-      Y.applyUpdate(document, checkpoint, "checkpoint-load");
+      try {
+        Y.applyUpdate(document, checkpoint, "checkpoint-load");
+      } catch {
+        throw new CollaborationCodecError({ ok: false, reason: "checkpoint_invalid" });
+      }
+      const roots = acquireSharedRoots(document);
+      if (!roots) {
+        throw new CollaborationCodecError({ ok: false, reason: "shared_type_mismatch" });
+      }
+      let bodyPreflight: CollaborationValidationFailure | undefined;
+      try {
+        bodyPreflight = preflightBody(roots.body);
+      } catch {
+        throw new CollaborationCodecError({ ok: false, reason: "shared_type_mismatch" });
+      }
+      if (bodyPreflight?.reason === "content_schema") {
+        throw new CollaborationCodecError({ ok: false, reason: "shared_type_mismatch" });
+      }
+      if (bodyPreflight) throw new CollaborationCodecError(bodyPreflight);
       return document;
     },
 
@@ -137,7 +187,10 @@ export function createCollaborationDocumentCodec(
     validate(document, profile) {
       let suppliedFingerprint: string;
       try {
-        suppliedFingerprint = createCollaborationSchemaFingerprint({ projectProfile: profile });
+        suppliedFingerprint = createCollaborationSchemaFingerprint(
+          captureProjectProfile(profile),
+          schemaContract,
+        );
       } catch {
         throw new CollaborationCodecError({ ok: false, reason: "profile_mismatch" });
       }
@@ -153,18 +206,12 @@ export function createCollaborationDocumentCodec(
   return codec;
 }
 
-export function createCollaborationSchemaFingerprint({
-  extensionDescriptors = COLLABORATION_SCHEMA_EXTENSION_DESCRIPTORS,
-  projectProfile,
-  schemaVersion = COLLABORATION_DOCUMENT_SCHEMA_VERSION,
-}: {
-  extensionDescriptors?: readonly CollaborationSchemaExtensionDescriptor[];
-  projectProfile: Pick<ProjectProfile, "id" | "metadataFields">;
-  schemaVersion?: number;
-}) {
+function createCollaborationSchemaFingerprint(
+  projectProfile: CapturedCollaborationProjectProfile,
+  schemaContract: CapturedSchemaContract,
+) {
   const descriptor = {
-    defaultSchemaProfileId: defaultDocumentSchemaProfile.id,
-    extensionDescriptors,
+    extensionDescriptors: schemaContract.extensionDescriptors,
     layout: {
       body: COLLABORATION_BODY_NAME,
       metadata: COLLABORATION_METADATA_NAME,
@@ -172,13 +219,33 @@ export function createCollaborationSchemaFingerprint({
     },
     layoutVersion: COLLABORATION_DOCUMENT_LAYOUT_VERSION,
     projectProfile: createCollaborationProjectProfileDescriptor(projectProfile),
-    schemaVersion,
+    schemaProfileId: schemaContract.schemaProfileId,
+    schemaVersion: COLLABORATION_DOCUMENT_SCHEMA_VERSION,
   };
   return createHash("sha256").update(JSON.stringify(descriptor), "utf8").digest("hex");
 }
 
-export function createCollaborationProjectProfileDescriptor(
-  profile: Pick<ProjectProfile, "id" | "metadataFields">,
+function createSchemaExtensionDescriptors(extensionNames: readonly string[]) {
+  return extensionNames.map((name) => ({
+    name,
+    version: TIPTAP_SCHEMA_VERSION,
+  }));
+}
+
+function captureSchemaContract(
+  schemaProfileId: string,
+  extensionNames: readonly string[],
+): CapturedSchemaContract {
+  return Object.freeze({
+    extensionDescriptors: Object.freeze(
+      createSchemaExtensionDescriptors(extensionNames).map((descriptor) => Object.freeze(descriptor)),
+    ),
+    schemaProfileId,
+  });
+}
+
+function createCollaborationProjectProfileDescriptor(
+  profile: CapturedCollaborationProjectProfile,
 ): CollaborationProjectProfileDescriptor {
   return {
     id: profile.id,
@@ -201,14 +268,18 @@ export function createCollaborationProjectProfileDescriptor(
   };
 }
 
-function captureProjectProfile(profile: ProjectProfile): ProjectProfile {
+function captureProjectProfile(profile: ProjectProfile): CapturedCollaborationProjectProfile {
   const metadataFields = profile.metadataFields.map((field) => Object.freeze({
-    ...field,
-    labels: Object.freeze({ ...field.labels }),
+    id: field.id,
+    itemMaxLength: field.itemMaxLength,
+    maxItems: field.maxItems,
+    maxLength: field.maxLength,
     options: field.options ? Object.freeze([...field.options]) : undefined,
+    required: field.required,
+    type: field.type,
   }));
   return Object.freeze({
-    ...profile,
+    id: profile.id,
     metadataFields: Object.freeze(metadataFields),
   });
 }
@@ -217,19 +288,9 @@ function compareStrings(left: string, right: string) {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
-function assertSchemaExtensionDescriptors(actualNames: readonly string[]) {
-  const describedNames = COLLABORATION_SCHEMA_EXTENSION_DESCRIPTORS.map(({ name }) => name);
-  if (
-    actualNames.length !== describedNames.length
-    || actualNames.some((name, index) => name !== describedNames[index])
-  ) {
-    throw new Error("Collaboration schema extension descriptors do not match the server schema");
-  }
-}
-
 function validateSnapshot(
   snapshot: CollaborationMaterialization,
-  profile: ProjectProfile,
+  profile: CapturedCollaborationProjectProfile,
   schema: Schema,
 ): CollaborationValidationResult {
   const titleFailure = validateTitle(snapshot.title);
@@ -268,14 +329,30 @@ function validateSnapshot(
 
 function validateDocument(
   document: Y.Doc,
-  profile: ProjectProfile,
+  profile: CapturedCollaborationProjectProfile,
   schema: Schema,
 ): CollaborationValidationResult {
-  const title = document.getText(COLLABORATION_TITLE_NAME).toString();
+  const roots = acquireSharedRoots(document);
+  if (!roots) return { ok: false, reason: "shared_type_mismatch" };
+  const sharedTitle = roots.title;
+  if (sharedTitle.length > COLLABORATION_TITLE_MAX_LENGTH) {
+    return { ok: false, reason: "title_too_long" };
+  }
+  let title: string;
+  try {
+    title = sharedTitle.toString();
+  } catch {
+    return { ok: false, reason: "shared_type_mismatch" };
+  }
   const titleFailure = validateTitle(title);
   if (titleFailure) return titleFailure;
 
-  const metadata = decodeMetadata(document.getMap(COLLABORATION_METADATA_NAME));
+  let metadata: MetadataDecodeResult;
+  try {
+    metadata = decodeMetadata(roots.metadata);
+  } catch {
+    return { ok: false, reason: "shared_type_mismatch" };
+  }
   if (!metadata.ok) {
     return { fieldId: metadata.fieldId, ok: false, reason: "metadata_structure" };
   }
@@ -289,16 +366,26 @@ function validateDocument(
     };
   }
 
+  const body = roots.body;
+  let bodyPreflight: CollaborationValidationFailure | undefined;
+  try {
+    bodyPreflight = preflightBody(body);
+  } catch {
+    return { ok: false, reason: "shared_type_mismatch" };
+  }
+  if (bodyPreflight) return bodyPreflight;
+
+  let contentJson: CollaborationTiptapJson;
   let prosemirrorDocument: ProseMirrorNode;
   try {
     prosemirrorDocument = yXmlFragmentToProseMirrorRootNode(
-      document.getXmlFragment(COLLABORATION_BODY_NAME),
+      body,
       schema,
     );
+    contentJson = prosemirrorDocument.toJSON() as CollaborationTiptapJson;
   } catch {
     return { ok: false, reason: "content_schema" };
   }
-  const contentJson = prosemirrorDocument.toJSON() as CollaborationTiptapJson;
   const resourceValidation = validateTiptapResource(contentJson);
   if (!resourceValidation.ok) {
     return { limit: resourceValidation.limit, ok: false, reason: "content_resource" };
@@ -320,6 +407,35 @@ function validateDocument(
   };
 }
 
+function acquireSharedRoots(document: Y.Doc): CollaborationSharedRoots | undefined {
+  const existingBody = document.share.get(COLLABORATION_BODY_NAME);
+  const existingMetadata = document.share.get(COLLABORATION_METADATA_NAME);
+  const existingTitle = document.share.get(COLLABORATION_TITLE_NAME);
+  if (
+    !isCompatibleRoot(existingBody, Y.XmlFragment)
+    || !isCompatibleRoot(existingMetadata, Y.Map)
+    || !isCompatibleRoot(existingTitle, Y.Text)
+  ) {
+    return undefined;
+  }
+  try {
+    return {
+      body: document.getXmlFragment(COLLABORATION_BODY_NAME),
+      metadata: document.getMap(COLLABORATION_METADATA_NAME),
+      title: document.getText(COLLABORATION_TITLE_NAME),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function isCompatibleRoot(
+  root: SharedRoot | undefined,
+  expectedConstructor: typeof Y.Map | typeof Y.Text | typeof Y.XmlFragment,
+) {
+  return !root || root.constructor === Y.AbstractType || root.constructor === expectedConstructor;
+}
+
 function validateTitle(title: string): CollaborationValidationFailure | undefined {
   if (title.trim().length === 0) return { ok: false, reason: "title_blank" };
   if (title.length > COLLABORATION_TITLE_MAX_LENGTH) {
@@ -329,20 +445,144 @@ function validateTitle(title: string): CollaborationValidationFailure | undefine
 }
 
 function decodeMetadata(metadata: Y.Map<unknown>): MetadataDecodeResult {
+  if (metadata.size > COLLABORATION_METADATA_LIMITS.fields) return { ok: false };
   const value: CollaborationMetadata = {};
+  let cumulativeBytes = 0;
   for (const [fieldId, candidate] of metadata.entries()) {
-    if (!isMetadataValue(candidate)) return { fieldId, ok: false };
-    value[fieldId] = cloneMetadataValue(candidate);
+    if (
+      fieldId.length === 0
+      || fieldId.length > COLLABORATION_METADATA_LIMITS.fieldIdCodeUnits
+      || CONTROL_CHARACTERS.test(fieldId)
+    ) {
+      return { ok: false };
+    }
+    cumulativeBytes = addBoundedUtf8Bytes(
+      fieldId,
+      cumulativeBytes,
+      COLLABORATION_METADATA_LIMITS.cumulativeBytes,
+    );
+    if (cumulativeBytes < 0) return { ok: false };
+    if (Array.isArray(candidate)) {
+      if (candidate.length > COLLABORATION_METADATA_LIMITS.stringArrayItems) return { ok: false };
+      for (const item of candidate) {
+        if (typeof item !== "string") return { fieldId, ok: false };
+        if (item.length > COLLABORATION_METADATA_LIMITS.stringItemCodeUnits) return { ok: false };
+        cumulativeBytes = addBoundedUtf8Bytes(
+          item,
+          cumulativeBytes,
+          COLLABORATION_METADATA_LIMITS.cumulativeBytes,
+        );
+        if (cumulativeBytes < 0) return { ok: false };
+      }
+      value[fieldId] = [...candidate];
+      continue;
+    }
+    if (!isMetadataScalar(candidate)) return { fieldId, ok: false };
+    if (typeof candidate === "string") {
+      if (candidate.length > COLLABORATION_METADATA_LIMITS.stringCodeUnits) return { ok: false };
+      cumulativeBytes = addBoundedUtf8Bytes(
+        candidate,
+        cumulativeBytes,
+        COLLABORATION_METADATA_LIMITS.cumulativeBytes,
+      );
+      if (cumulativeBytes < 0) return { ok: false };
+    }
+    value[fieldId] = candidate;
   }
   return { ok: true, value };
 }
 
-function isMetadataValue(candidate: unknown): candidate is CollaborationMetadataValue {
+function preflightBody(body: Y.XmlFragment): CollaborationValidationFailure | undefined {
+  if (body.length > RESOURCE_LIMITS.documentNodes) {
+    return { limit: "documentNodes", ok: false, reason: "content_resource" };
+  }
+  const stack = body.toArray().map((node) => ({ depth: 1, node }));
+  let nodes = 0;
+  let bytes = 0;
+
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (!current) break;
+    nodes += 1;
+    if (nodes > RESOURCE_LIMITS.documentNodes) {
+      return { limit: "documentNodes", ok: false, reason: "content_resource" };
+    }
+    if (current.depth > RESOURCE_LIMITS.documentDepth) {
+      return { limit: "documentDepth", ok: false, reason: "content_resource" };
+    }
+
+    if (current.node instanceof Y.XmlText) {
+      if (current.node.length > RESOURCE_LIMITS.documentJsonBytes - bytes) {
+        return { limit: "documentJsonBytes", ok: false, reason: "content_resource" };
+      }
+      bytes = addBoundedUtf8Bytes(
+        current.node.toString(),
+        bytes,
+        RESOURCE_LIMITS.documentJsonBytes,
+      );
+      if (bytes < 0) return { limit: "documentJsonBytes", ok: false, reason: "content_resource" };
+    } else if (current.node instanceof Y.XmlElement) {
+      bytes = addBoundedUtf8Bytes(
+        current.node.nodeName,
+        bytes,
+        RESOURCE_LIMITS.documentJsonBytes,
+      );
+      if (bytes < 0) return { limit: "documentJsonBytes", ok: false, reason: "content_resource" };
+      if (current.node.length > RESOURCE_LIMITS.documentNodes - nodes) {
+        return { limit: "documentNodes", ok: false, reason: "content_resource" };
+      }
+      for (const child of current.node.toArray()) {
+        stack.push({ depth: current.depth + 1, node: child });
+      }
+    } else {
+      return { ok: false, reason: "content_schema" };
+    }
+
+    const attributes = current.node.getAttributes();
+    const attributeEntries = Object.entries(attributes);
+    if (attributeEntries.length > COLLABORATION_XML_ATTRIBUTE_LIMIT) {
+      return { limit: "documentNodes", ok: false, reason: "content_resource" };
+    }
+    for (const [name, value] of attributeEntries) {
+      if (
+        name.length > COLLABORATION_XML_ATTRIBUTE_NAME_CODE_UNITS
+        || value.length > COLLABORATION_XML_ATTRIBUTE_VALUE_CODE_UNITS
+        || CONTROL_CHARACTERS.test(name)
+      ) {
+        return { limit: "documentJsonBytes", ok: false, reason: "content_resource" };
+      }
+      bytes = addBoundedUtf8Bytes(name, bytes, RESOURCE_LIMITS.documentJsonBytes);
+      if (bytes < 0) return { limit: "documentJsonBytes", ok: false, reason: "content_resource" };
+      bytes = addBoundedUtf8Bytes(value, bytes, RESOURCE_LIMITS.documentJsonBytes);
+      if (bytes < 0) return { limit: "documentJsonBytes", ok: false, reason: "content_resource" };
+    }
+  }
+  return undefined;
+}
+
+function addBoundedUtf8Bytes(value: string, current: number, limit: number) {
+  let bytes = current;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code <= 0x7f) bytes += 1;
+    else if (code <= 0x7ff) bytes += 2;
+    else if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        index += 1;
+        bytes += 4;
+      } else bytes += 3;
+    } else bytes += 3;
+    if (bytes > limit) return -1;
+  }
+  return bytes;
+}
+
+function isMetadataScalar(candidate: unknown): candidate is Exclude<CollaborationMetadataValue, string[]> {
   return candidate === null
     || typeof candidate === "boolean"
     || (typeof candidate === "number" && Number.isFinite(candidate))
-    || typeof candidate === "string"
-    || (Array.isArray(candidate) && candidate.every((item) => typeof item === "string"));
+    || typeof candidate === "string";
 }
 
 function cloneMetadataValue(value: CollaborationMetadataValue): CollaborationMetadataValue {

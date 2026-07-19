@@ -4,7 +4,9 @@ import { describe, expect, it } from "vitest";
 
 import { getProjectProfile } from "@/features/projects/default-project-profiles";
 import type { ProjectProfile } from "@/features/projects/project-profile";
+import { RESOURCE_LIMITS } from "@/features/security/resource-policy";
 import { createServerSchemaExtensions } from "@/plugins/document-schema-profile";
+import type { DocumentSchemaProfile } from "@/plugins/document-schema-profile";
 
 import {
   COLLABORATION_BODY_NAME,
@@ -15,10 +17,8 @@ import {
   type CollaborationTiptapJson,
 } from "./contracts";
 import {
-  COLLABORATION_SCHEMA_EXTENSION_DESCRIPTORS,
   CollaborationCodecError,
   createCollaborationDocumentCodec,
-  createCollaborationSchemaFingerprint,
 } from "./document-codec";
 import { createCollaborationRoomName, parseCollaborationRoomName } from "./room-name";
 
@@ -78,6 +78,23 @@ describe("collaboration room names", () => {
         .toThrowError("Invalid collaboration room generation");
     },
   );
+
+  it.each([
+    { documentId: "x".repeat(257), workspaceId: "ws" },
+    { documentId: "doc\ncontrol", workspaceId: "ws" },
+    { documentId: "doc", workspaceId: "\u0000workspace" },
+  ])("rejects oversized or control-character identifiers before encoding", (identity) => {
+    expect(() => createCollaborationRoomName({ ...identity, generation: 1 }))
+      .toThrowError("Invalid collaboration room name");
+  });
+
+  it.each([
+    `collab:v1:${"w".repeat(3073)}:document:g1`,
+    "collab:v1:workspace:doc%00control:g1",
+    `collab:v1:workspace:${"%F0%9F%98%80".repeat(129)}:g1`,
+  ])("rejects encoded and decoded room identifier resource abuse", (roomName) => {
+    expect(() => parseCollaborationRoomName(roomName)).toThrowError("Invalid collaboration room name");
+  });
 });
 
 describe("CollaborationDocumentCodec", () => {
@@ -195,8 +212,7 @@ describe("CollaborationDocumentCodec", () => {
       ok: false,
       reason: "profile_mismatch",
     });
-    expect(createCollaborationSchemaFingerprint({ projectProfile: changedProfile }))
-      .not.toBe(createCollaborationSchemaFingerprint({ projectProfile: profile }));
+    expect(createCollaborationDocumentCodec(changedProfile).fingerprint()).not.toBe(codec.fingerprint());
   });
 
   it("keeps validation bound to a frozen metadata contract after caller mutation", () => {
@@ -215,6 +231,19 @@ describe("CollaborationDocumentCodec", () => {
     });
   });
 
+  it("captures only the Project Profile fields consumed by collaboration validation", () => {
+    const base = getProjectProfile("default");
+    const profile = Object.defineProperties({} as ProjectProfile, {
+      defaultTemplateIds: { enumerable: true, get: () => { throw new Error("unused-default-templates"); } },
+      id: { enumerable: true, value: base.id },
+      labels: { enumerable: true, get: () => { throw new Error("unused-labels"); } },
+      metadataFields: { enumerable: true, value: base.metadataFields },
+      readiness: { enumerable: true, get: () => { throw new Error("unused-readiness"); } },
+    });
+
+    expect(() => createCollaborationDocumentCodec(profile)).not.toThrow();
+  });
+
   it.each([
     { expected: "title_blank", title: "   " },
     { expected: "title_too_long", title: "x".repeat(501) },
@@ -225,6 +254,149 @@ describe("CollaborationDocumentCodec", () => {
 
     expect(captureCodecFailure(() => codec.validate(document, getProjectProfile("default"))))
       .toEqual({ ok: false, reason: expected });
+  });
+
+  it("checks collaborative title length before allocating its string", () => {
+    const codec = createCollaborationDocumentCodec(getProjectProfile("default"));
+    const document = codec.bootstrap(snapshot);
+    replaceTitle(document, "x".repeat(501));
+    const title = document.getText(COLLABORATION_TITLE_NAME);
+    Object.defineProperty(title, "toString", {
+      configurable: true,
+      value: () => {
+        throw new Error("title-toString-should-not-run");
+      },
+    });
+
+    let failure;
+    try {
+      failure = captureCodecFailure(() => codec.materialize(document));
+    } finally {
+      Reflect.deleteProperty(title, "toString");
+    }
+    expect(failure).toEqual({ ok: false, reason: "title_too_long" });
+  });
+
+  it("preflights metadata count, keys, and values before cloning", () => {
+    const codec = createCollaborationDocumentCodec(getProjectProfile("default"));
+    const tooMany = codec.bootstrap({ ...snapshot, metadataJson: {} });
+    const tooManyMetadata = tooMany.getMap(COLLABORATION_METADATA_NAME);
+    for (let index = 0; index < 257; index += 1) tooManyMetadata.set(`field-${index}`, "x");
+    expect(captureCodecFailure(() => codec.materialize(tooMany))).toEqual({
+      ok: false,
+      reason: "metadata_structure",
+    });
+
+    const badKey = codec.bootstrap({ ...snapshot, metadataJson: {} });
+    badKey.getMap(COLLABORATION_METADATA_NAME).set(`owner-${"x".repeat(129)}`, "Ada");
+    expect(captureCodecFailure(() => codec.materialize(badKey))).toEqual({
+      ok: false,
+      reason: "metadata_structure",
+    });
+
+    const oversizedValue = codec.bootstrap({ ...snapshot, metadataJson: {} });
+    oversizedValue.getMap(COLLABORATION_METADATA_NAME).set("owner", "x".repeat(8_193));
+    expect(captureCodecFailure(() => codec.materialize(oversizedValue))).toEqual({
+      ok: false,
+      reason: "metadata_structure",
+    });
+
+    const oversizedArray = codec.bootstrap({ ...snapshot, metadataJson: {} });
+    oversizedArray.getMap(COLLABORATION_METADATA_NAME).set("tags", Array.from({ length: 129 }, () => "x"));
+    expect(captureCodecFailure(() => codec.materialize(oversizedArray))).toEqual({
+      ok: false,
+      reason: "metadata_structure",
+    });
+
+    const guardedArray = codec.bootstrap({ ...snapshot, metadataJson: {} });
+    const arrayThatMustNotBeScanned = new Array<string>(129);
+    Object.defineProperty(arrayThatMustNotBeScanned, 0, {
+      get: () => { throw new Error("oversized-array-item-should-not-be-read"); },
+    });
+    guardedArray.getMap(COLLABORATION_METADATA_NAME).set("tags", arrayThatMustNotBeScanned);
+    expect(captureCodecFailure(() => codec.materialize(guardedArray))).toEqual({
+      ok: false,
+      reason: "metadata_structure",
+    });
+  });
+
+  it("preflights collaborative body depth before ProseMirror conversion", () => {
+    const codec = createCollaborationDocumentCodec(getProjectProfile("default"));
+    const document = codec.bootstrap(snapshot);
+    const body = document.getXmlFragment(COLLABORATION_BODY_NAME);
+    body.delete(0, body.length);
+    const root = new Y.XmlElement("paragraph");
+    let current = root;
+    for (let depth = 0; depth < RESOURCE_LIMITS.documentDepth + 1; depth += 1) {
+      const child = new Y.XmlElement("paragraph");
+      current.insert(0, [child]);
+      current = child;
+    }
+    body.insert(0, [root]);
+
+    expect(captureCodecFailure(() => codec.materialize(document))).toEqual({
+      limit: "documentDepth",
+      ok: false,
+      reason: "content_resource",
+    });
+  });
+
+  it("preflights collaborative XML attribute bytes before conversion", () => {
+    const codec = createCollaborationDocumentCodec(getProjectProfile("default"));
+    const document = codec.bootstrap(snapshot);
+    const paragraph = document.getXmlFragment(COLLABORATION_BODY_NAME).get(0);
+    if (!(paragraph instanceof Y.XmlElement)) throw new Error("Expected paragraph element");
+    paragraph.setAttribute("oversized", "x".repeat(8_193));
+
+    expect(captureCodecFailure(() => codec.materialize(document))).toEqual({
+      limit: "documentJsonBytes",
+      ok: false,
+      reason: "content_resource",
+    });
+  });
+
+  it("bounds checkpoint bytes before invoking Yjs update decoding", () => {
+    const codec = createCollaborationDocumentCodec(getProjectProfile("default"));
+    const checkpoint = new Uint8Array(RESOURCE_LIMITS.documentJsonBytes + 1);
+
+    expect(captureCodecFailure(() => codec.loadCheckpoint(checkpoint))).toEqual({
+      ok: false,
+      reason: "checkpoint_invalid",
+    });
+  });
+
+  it("normalizes truncated and malformed checkpoint updates", () => {
+    const codec = createCollaborationDocumentCodec(getProjectProfile("default"));
+    const checkpoint = codec.encodeCheckpoint(codec.bootstrap(snapshot));
+    const corruptCheckpoints = [
+      checkpoint.slice(0, checkpoint.length - 1),
+      Uint8Array.of(0, 1, 255, 2, 128),
+    ];
+
+    for (const corrupt of corruptCheckpoints) {
+      expect(captureCodecFailure(() => codec.loadCheckpoint(corrupt))).toEqual({
+        ok: false,
+        reason: "checkpoint_invalid",
+      });
+    }
+  });
+
+  it("normalizes wrong shared root types during checkpoint load and materialization", () => {
+    const codec = createCollaborationDocumentCodec(getProjectProfile("default"));
+    const wrongCheckpointDocument = new Y.Doc();
+    wrongCheckpointDocument.getText(COLLABORATION_BODY_NAME).insert(0, "secret");
+    expect(captureCodecFailure(() => (
+      codec.loadCheckpoint(Y.encodeStateAsUpdate(wrongCheckpointDocument))
+    ))).toEqual({ ok: false, reason: "shared_type_mismatch" });
+
+    const wrongMaterializationDocument = new Y.Doc();
+    wrongMaterializationDocument.getText(COLLABORATION_TITLE_NAME).insert(0, "Title");
+    wrongMaterializationDocument.getText(COLLABORATION_METADATA_NAME).insert(0, "secret");
+    wrongMaterializationDocument.getXmlFragment(COLLABORATION_BODY_NAME);
+    expect(captureCodecFailure(() => codec.materialize(wrongMaterializationDocument))).toEqual({
+      ok: false,
+      reason: "shared_type_mismatch",
+    });
   });
 
   it("rejects structurally unsafe and unknown metadata without returning raw values", () => {
@@ -301,30 +473,43 @@ describe("CollaborationDocumentCodec", () => {
     expect(getSchema(createServerSchemaExtensions()).topNodeType.name).toBe("doc");
   });
 
-  it("fingerprints the numeric schema version and every ordered extension version", () => {
-    expect(COLLABORATION_SCHEMA_EXTENSION_DESCRIPTORS).toEqual([
-      { name: "starterKit", version: "3.27.4" },
-      { name: "link", version: "3.27.4" },
-      { name: "taskList", version: "3.27.4" },
-      { name: "taskItem", version: "3.27.4" },
-      { name: "tableKit", version: "3.27.4" },
-      { name: "typography", version: "3.27.4" },
-    ]);
-
+  it("keeps the default schema fingerprint golden and distinguishes active schema profile ids", () => {
     const projectProfile = getProjectProfile("default");
-    const baseline = createCollaborationSchemaFingerprint({ projectProfile });
-    const changedExtensions = COLLABORATION_SCHEMA_EXTENSION_DESCRIPTORS.map((descriptor) => (
-      descriptor.name === "link" ? { ...descriptor, version: "3.27.5" } : descriptor
-    ));
+    expect(createCollaborationDocumentCodec(projectProfile).fingerprint()).toBe(
+      "f78e27098a0889b4ec22c1e0d0ef0f55625c192808e8f9ab8849d89e6b15de99",
+    );
+    const extensions = () => createServerSchemaExtensions();
+    const profileA: DocumentSchemaProfile = { extensions, id: "test.same-schema.a" };
+    const profileB: DocumentSchemaProfile = { extensions, id: "test.same-schema.b" };
 
-    expect(createCollaborationSchemaFingerprint({
-      extensionDescriptors: changedExtensions,
-      projectProfile,
-    })).not.toBe(baseline);
-    expect(createCollaborationSchemaFingerprint({
-      projectProfile,
-      schemaVersion: COLLABORATION_DOCUMENT_SCHEMA_VERSION + 1,
-    })).not.toBe(baseline);
+    expect(createCollaborationDocumentCodec(projectProfile, { schemaProfile: profileA }).fingerprint())
+      .not.toBe(createCollaborationDocumentCodec(projectProfile, { schemaProfile: profileB }).fingerprint());
+  });
+
+  it("captures the active schema profile contract once at codec creation", () => {
+    const projectProfile = getProjectProfile("default");
+    const schemaProfile: DocumentSchemaProfile = {
+      extensions: () => createServerSchemaExtensions(),
+      id: "test.mutable-schema.v1",
+    };
+    const codec = createCollaborationDocumentCodec(projectProfile, { schemaProfile });
+    const document = codec.bootstrap(snapshot);
+    const fingerprint = codec.fingerprint();
+
+    schemaProfile.id = "test.mutated-after-creation";
+
+    expect(codec.fingerprint()).toBe(fingerprint);
+    expect(codec.validate(document, projectProfile).plainText).toBe("Alpha beta");
+  });
+
+  it("keeps fingerprint construction internals private", () => {
+    const source = readFileSync(
+      resolve(process.cwd(), "src/features/collaboration/document-codec.ts"),
+      "utf8",
+    );
+
+    expect(source).not.toMatch(/export (const|function|type) Collaboration(SchemaExtension|MetadataField|ProjectProfile)/);
+    expect(source).not.toContain("export function createCollaborationSchemaFingerprint");
   });
 });
 
@@ -351,3 +536,5 @@ function captureCodecFailure(operation: () => unknown) {
 function cloneProjectProfile(profile: ProjectProfile): ProjectProfile {
   return structuredClone(profile);
 }
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";

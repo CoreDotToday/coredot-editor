@@ -1,14 +1,17 @@
-import { getSchema } from "@tiptap/core";
+import { getSchema, Node as TiptapNode } from "@tiptap/core";
+import StarterKit from "@tiptap/starter-kit";
 import { initProseMirrorDoc } from "y-prosemirror";
 import * as Y from "yjs";
 import { describe, expect, it } from "vitest";
 
 import { getProjectProfile } from "@/features/projects/default-project-profiles";
 import { createServerSchemaExtensions } from "@/plugins/document-schema-profile";
+import type { DocumentSchemaProfile } from "@/plugins/document-schema-profile";
 
 import { COLLABORATION_BODY_NAME } from "./contracts";
 import { createCollaborationDocumentCodec } from "./document-codec";
 import {
+  createCollaborationRelativePositionCodec,
   createEncodedRelativeRange,
   resolveEncodedRelativeRange,
   type EncodedRelativeRange,
@@ -17,6 +20,54 @@ import {
 const schema = getSchema(createServerSchemaExtensions());
 
 describe("collaboration relative ranges", () => {
+  it("uses only documented Yjs relative-position and parent APIs", () => {
+    const source = readFileSync(
+      resolve(process.cwd(), "src/features/collaboration/relative-position.ts"),
+      "utf8",
+    );
+
+    expect(source).not.toContain("._item");
+    expect(source).not.toContain("new Y.RelativePosition");
+  });
+
+  it("uses one non-default schema profile for codec materialization, anchors, and fingerprint", () => {
+    const callout = TiptapNode.create({
+      content: "inline*",
+      group: "block",
+      name: "callout",
+      parseHTML: () => [{ tag: "aside" }],
+      renderHTML: ({ HTMLAttributes }) => ["aside", HTMLAttributes, 0],
+    });
+    const schemaProfile: DocumentSchemaProfile = {
+      extensions: () => [StarterKit, callout],
+      id: "test.callout.v1",
+    };
+    const projectProfile = getProjectProfile("default");
+    const codec = createCollaborationDocumentCodec(projectProfile, { schemaProfile });
+    const defaultCodec = createCollaborationDocumentCodec(projectProfile);
+    const customSnapshot = {
+      contentJson: {
+        content: [{ content: [{ text: "callout", type: "text" }], type: "callout" }],
+        type: "doc" as const,
+      },
+      metadataJson: {},
+      plainText: "callout",
+      title: "Custom schema",
+    };
+
+    expect(() => defaultCodec.bootstrap(customSnapshot)).toThrowError("Collaboration document is invalid");
+    const document = codec.bootstrap(customSnapshot);
+    expect(codec.materialize(document).contentJson).toEqual(customSnapshot.contentJson);
+    const relativePositions = createCollaborationRelativePositionCodec(schemaProfile);
+    const range = relativePositions.createEncodedRelativeRange(document, { from: 1, to: 8 });
+    expect(relativePositions.resolveEncodedRelativeRange(document, range)).toEqual({
+      from: 1,
+      ok: true,
+      to: 8,
+    });
+    expect(codec.fingerprint()).not.toBe(defaultCodec.fingerprint());
+  });
+
   it("round-trips an exact body range with explicit boundary associations", () => {
     const document = createDocument("alpha beta gamma");
     const range = createEncodedRelativeRange(document, { from: 7, to: 11 });
@@ -140,6 +191,20 @@ describe("collaboration relative ranges", () => {
     });
   });
 
+  it("normalizes a type-confused body root without leaking Yjs errors", () => {
+    const source = createDocument("alpha beta gamma");
+    const range = createEncodedRelativeRange(source, { from: 7, to: 11 });
+    const wrongBody = new Y.Doc();
+    wrongBody.getText(COLLABORATION_BODY_NAME).insert(0, "secret");
+
+    expect(() => createEncodedRelativeRange(wrongBody, { from: 0, to: 0 }))
+      .toThrowError("Invalid collaboration body range");
+    expect(resolveEncodedRelativeRange(wrongBody, range)).toEqual({
+      ok: false,
+      reason: "wrong_fragment",
+    });
+  });
+
   it("rejects invalid absolute and association contracts without a fallback", () => {
     const document = createDocument("alpha beta gamma");
 
@@ -195,3 +260,5 @@ function expectEncodedAssociations(range: EncodedRelativeRange) {
   expect(Y.decodeRelativePosition(range.start).assoc).toBe(-1);
   expect(Y.decodeRelativePosition(range.end).assoc).toBe(1);
 }
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";

@@ -6,7 +6,11 @@ import {
 } from "y-prosemirror";
 import * as Y from "yjs";
 
-import { createServerSchemaExtensions } from "@/plugins/document-schema-profile";
+import { appDocumentSchemaProfileRuntime } from "@/plugins/app-document-schema-profile-runtime.mjs";
+import {
+  createServerSchemaExtensions,
+  type DocumentSchemaProfile,
+} from "@/plugins/document-schema-profile";
 
 import { COLLABORATION_BODY_NAME } from "./contracts";
 
@@ -21,13 +25,48 @@ export type RelativeRangeResolution =
   | { from: number; ok: true; to: number }
   | { ok: false; reason: "missing" | "reversed" | "wrong_fragment" };
 
-const schema = getSchema(createServerSchemaExtensions());
+export type CollaborationRelativePositionCodec = {
+  createEncodedRelativeRange(document: Y.Doc, range: { from: number; to: number }): EncodedRelativeRange;
+  resolveEncodedRelativeRange(document: Y.Doc, range: EncodedRelativeRange): RelativeRangeResolution;
+};
+
+export function createCollaborationRelativePositionCodec(
+  schemaProfile: DocumentSchemaProfile = appDocumentSchemaProfileRuntime,
+): CollaborationRelativePositionCodec {
+  const schema = getSchema(createServerSchemaExtensions(schemaProfile));
+  return {
+    createEncodedRelativeRange(document, range) {
+      return createRange(schema, document, range);
+    },
+    resolveEncodedRelativeRange(document, range) {
+      return resolveRange(schema, document, range);
+    },
+  };
+}
+
+const appRelativePositionCodec = createCollaborationRelativePositionCodec();
 
 export function createEncodedRelativeRange(
   document: Y.Doc,
   range: { from: number; to: number },
 ): EncodedRelativeRange {
-  const body = document.getXmlFragment(COLLABORATION_BODY_NAME);
+  return appRelativePositionCodec.createEncodedRelativeRange(document, range);
+}
+
+export function resolveEncodedRelativeRange(
+  document: Y.Doc,
+  range: EncodedRelativeRange,
+): RelativeRangeResolution {
+  return appRelativePositionCodec.resolveEncodedRelativeRange(document, range);
+}
+
+function createRange(
+  schema: ReturnType<typeof getSchema>,
+  document: Y.Doc,
+  range: { from: number; to: number },
+): EncodedRelativeRange {
+  const body = acquireBody(document);
+  if (!body) throw new Error("Invalid collaboration body range");
   const { doc, mapping } = initProseMirrorDoc(body, schema);
   if (
     !Number.isSafeInteger(range.from)
@@ -58,7 +97,8 @@ export function createEncodedRelativeRange(
   };
 }
 
-export function resolveEncodedRelativeRange(
+function resolveRange(
+  schema: ReturnType<typeof getSchema>,
   document: Y.Doc,
   range: EncodedRelativeRange,
 ): RelativeRangeResolution {
@@ -76,7 +116,8 @@ export function resolveEncodedRelativeRange(
   }
   if (start.assoc !== -1 || end.assoc !== 1) return { ok: false, reason: "missing" };
 
-  const body = document.getXmlFragment(COLLABORATION_BODY_NAME);
+  const body = acquireBody(document);
+  if (!body) return { ok: false, reason: "wrong_fragment" };
   const startAbsolute = Y.createAbsolutePositionFromRelativePosition(start, document);
   const endAbsolute = Y.createAbsolutePositionFromRelativePosition(end, document);
   if (!startAbsolute || !endAbsolute) return { ok: false, reason: "missing" };
@@ -104,14 +145,30 @@ function withAssociation(
     absolute.index,
     association,
   );
-  return new Y.RelativePosition(
-    associated.type,
-    associated.tname,
-    associated.item,
-    association,
-  );
+  return associated;
 }
 
 function isBodyPosition(body: Y.XmlFragment, position: Y.AbsolutePosition) {
-  return position.type === body || Y.isParentOf(body, position.type._item);
+  let current: Y.AbstractType<unknown> | null = position.type;
+  while (current) {
+    if (current === body) return true;
+    current = current.parent;
+  }
+  return false;
+}
+
+function acquireBody(document: Y.Doc): Y.XmlFragment | undefined {
+  const existing = document.share.get(COLLABORATION_BODY_NAME);
+  if (
+    existing
+    && existing.constructor !== Y.AbstractType
+    && existing.constructor !== Y.XmlFragment
+  ) {
+    return undefined;
+  }
+  try {
+    return document.getXmlFragment(COLLABORATION_BODY_NAME);
+  } catch {
+    return undefined;
+  }
 }

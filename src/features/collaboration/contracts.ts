@@ -7,7 +7,6 @@ export const COLLABORATION_TITLE_NAME = "title";
 export const COLLABORATION_METADATA_NAME = "metadata";
 export const COLLABORATION_DOCUMENT_LAYOUT_VERSION = "coredot.collaboration.document.v1";
 export const COLLABORATION_DOCUMENT_SCHEMA_VERSION = 1;
-export const COLLABORATION_TIPTAP_SCHEMA_VERSION = "3.27.4";
 export const COLLABORATION_TITLE_MAX_LENGTH = 500;
 
 export type CollaborationTiptapJson = {
@@ -32,6 +31,7 @@ export type CollaborationMaterialization = {
 };
 
 export type CollaborationValidationFailure =
+  | { ok: false; reason: "checkpoint_invalid" | "shared_type_mismatch" }
   | { ok: false; reason: "content_schema" }
   | {
       limit: "documentDepth" | "documentJsonBytes" | "documentNodes" | "malformed";
@@ -40,7 +40,7 @@ export type CollaborationValidationFailure =
     }
   | { ok: false; reason: "title_blank" | "title_too_long" }
   | { ok: false; reason: "profile_mismatch" }
-  | { fieldId: string; ok: false; reason: "metadata_structure" }
+  | { fieldId?: string; ok: false; reason: "metadata_structure" }
   | {
       fieldId: string;
       metadataReason: Exclude<ProjectMetadataValidationResult, { ok: true }>["reason"];
