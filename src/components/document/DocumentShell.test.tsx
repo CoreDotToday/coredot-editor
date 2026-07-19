@@ -1,9 +1,15 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { DocumentShell } from "./DocumentShell";
+import { DocumentShell, hasPendingCollaborationUpdates } from "./DocumentShell";
 import { SelectionAiMenu } from "./SelectionAiMenu";
 import { DOCUMENT_INTERCHANGE_CLIENT_TIMEOUT_MS } from "@/features/documents/document-interchange-fetch";
+import { useCollaborationSession } from "@/features/collaboration/client/use-collaboration-session";
+import type { CollaborationSessionSnapshot } from "@/features/collaboration/client/session-store";
+
+vi.mock("@/features/collaboration/client/use-collaboration-session", () => ({
+  useCollaborationSession: vi.fn(),
+}));
 
 vi.mock("./DocumentEditor", () => ({
   DocumentEditor: ({
@@ -20,18 +26,24 @@ vi.mock("./DocumentEditor", () => ({
     runningSelectionCommands = [],
     resolvedPluginContributions,
     selectionAiResult,
+    mode,
     language = "ko",
     messages = { titleLabel: "문서 제목" },
     title,
   }: {
-    contentJson: { type: "doc"; content?: unknown[] };
+    contentJson?: { type: "doc"; content?: unknown[] };
     inlineSuggestions?: Array<{ active?: boolean; id: string; targetText: string }>;
     isFindOpen?: boolean;
     isSelectionCommandLimitReached?: boolean;
     isSelectionCommandRunning?: boolean;
     language?: "en" | "ko";
     messages?: { titleLabel: string };
-    onChange: (draft: { title: string; contentJson: { type: "doc"; content?: unknown[] } }) => void;
+    mode?: {
+      kind: "collaboration";
+      session: { document?: unknown; writable: boolean };
+      title: string;
+    };
+    onChange?: (draft: { title: string; contentJson: { type: "doc"; content?: unknown[] } }) => void;
     onApplySelectionAiResult?: (proposalId: string, applyMode: "replace" | "insert_below") => void;
     onDismissSelectionAiResult?: () => void;
     onSelectionCommand?: (
@@ -57,15 +69,22 @@ vi.mock("./DocumentEditor", () => ({
       replacementText: string;
       targetText: string;
     } | null;
-    title: string;
-  }) => (
-    <div>
+    title?: string;
+  }) => {
+    const resolvedContentJson = contentJson ?? { type: "doc" as const };
+    const resolvedTitle = mode?.title ?? title ?? "";
+
+    return <div>
       <input
         aria-label={messages.titleLabel}
-        onChange={(event) => onChange({ title: event.currentTarget.value, contentJson })}
-        value={title}
+        onChange={(event) => onChange?.({ title: event.currentTarget.value, contentJson: resolvedContentJson })}
+        readOnly={mode?.kind === "collaboration"}
+        value={resolvedTitle}
       />
-      <div data-testid="mock-document-body">{readMockTiptapText(contentJson)}</div>
+      <output data-testid="mock-editor-mode">{mode?.kind ?? "legacy"}</output>
+      <output data-testid="mock-editor-document-bound">{String(Boolean(mode?.session.document))}</output>
+      <output data-testid="mock-editor-writable">{String(mode?.session.writable ?? true)}</output>
+      <div data-testid="mock-document-body">{readMockTiptapText(resolvedContentJson)}</div>
       {isFindOpen ? <div role="search" aria-label="mock find bar">Find bar open</div> : null}
       <output data-testid="mock-inline-suggestions">{JSON.stringify(inlineSuggestions)}</output>
       {resolvedPluginContributions ? (
@@ -140,8 +159,8 @@ vi.mock("./DocumentEditor", () => ({
       </button>
       <button
         onClick={() =>
-          onChange({
-            title,
+          onChange?.({
+            title: resolvedTitle,
             contentJson: {
               type: "doc",
               content: [{ type: "paragraph", content: [{ type: "text", text: "fresh edited body" }] }],
@@ -185,7 +204,7 @@ vi.mock("./DocumentEditor", () => ({
         </div>
       ) : null}
     </div>
-  ),
+  },
 }));
 
 function getMockApplyModeLabel(applyMode: "replace" | "insert_below", language: "en" | "ko") {
@@ -255,6 +274,62 @@ function createDocumentWithContent(id: string, title: string, paragraphText: str
     revision: 0,
   };
 }
+
+function createCollaborationConfiguration() {
+  return {
+    documentId: "doc_1",
+    kind: "collaboration" as const,
+    room: "organization:org_1:document:doc_1",
+    schemaFingerprint: "schema-v1",
+    websocketUrl: "wss://collaboration.example.test",
+  };
+}
+
+function createCollaborationSnapshot(
+  overrides: Partial<CollaborationSessionSnapshot> = {},
+): CollaborationSessionSnapshot {
+  return {
+    hasCompletedInitialSync: false,
+    pendingDurableAcknowledgementChecksums: [],
+    pendingLocalChecksums: [],
+    pendingLocalUpdateCount: 0,
+    permission: null,
+    status: "connecting",
+    transportSynced: false,
+    writable: false,
+    ...overrides,
+  };
+}
+
+function createMockCollaborationSession() {
+  return {
+    connect: vi.fn(),
+    destroy: vi.fn(),
+    document: {},
+    provider: { awareness: {} },
+    refreshCapability: vi.fn(),
+    room: "organization:org_1:document:doc_1",
+    store: {},
+  } as never;
+}
+
+it.each([
+  { pendingLocalUpdateCount: 1 },
+  { pendingLocalChecksums: ["a".repeat(64)] },
+  { pendingDurableAcknowledgementChecksums: ["b".repeat(64)] },
+])("treats every collaboration durability queue as pending: %o", (pending) => {
+  expect(hasPendingCollaborationUpdates(createCollaborationSnapshot(pending))).toBe(true);
+});
+
+it("treats a fully acknowledged collaboration snapshot as navigation-safe", () => {
+  expect(hasPendingCollaborationUpdates(createCollaborationSnapshot({
+    hasCompletedInitialSync: true,
+    permission: "write",
+    status: "synced",
+    transportSynced: true,
+    writable: true,
+  }))).toBe(false);
+});
 
 function createListDocument(items: string[]) {
   return {
@@ -489,6 +564,269 @@ function expectLastProposalApplyFetch(
 }
 
 describe("DocumentShell", () => {
+  it("fails closed to the SQL projection when the collaboration session cannot start", async () => {
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session: null,
+      snapshot: createCollaborationSnapshot({ status: "fatal" }),
+    });
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocumentWithContent("doc_1", "Projected title", "Last durable body")}
+        templates={[]}
+      />,
+    );
+
+    await waitFor(() => {
+      const projection = screen.getByRole("article", { name: "Collaboration read-only projection" });
+      expect(projection).toHaveTextContent("Projected title");
+      expect(projection).toHaveTextContent("Last durable body");
+      expect(screen.queryByTestId("mock-editor-mode")).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "저장" })).toBeDisabled();
+    });
+  });
+
+  it("keeps the SQL projection mounted until authentication and initial sync both complete", async () => {
+    const session = createMockCollaborationSession();
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session,
+      snapshot: createCollaborationSnapshot({
+        permission: "write",
+        status: "connecting",
+      }),
+    });
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocumentWithContent("doc_1", "Projected title", "Pre-sync projection")}
+        templates={[]}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("article", { name: "Collaboration read-only projection" })).toHaveTextContent(
+        "Pre-sync projection",
+      );
+      expect(screen.queryByTestId("mock-editor-mode")).not.toBeInTheDocument();
+    });
+  });
+
+  it("mounts the Yjs editor only after initial sync and disables legacy save paths", async () => {
+    const session = createMockCollaborationSession();
+    const collaboration = createCollaborationConfiguration();
+    const document = createDocumentWithContent("doc_1", "Collaborative title", "Durable projection");
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session,
+      snapshot: createCollaborationSnapshot(),
+    });
+    const { rerender } = render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={collaboration}
+        document={document}
+        templates={[]}
+      />,
+    );
+    expect(screen.getByRole("article", { name: "Collaboration read-only projection" })).toBeInTheDocument();
+
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session,
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        permission: "write",
+        status: "synced",
+        transportSynced: true,
+        writable: true,
+      }),
+    });
+    await act(async () => {
+      rerender(
+        <DocumentShell
+          aiRuns={[]}
+          collaboration={collaboration}
+          document={document}
+          templates={[]}
+        />,
+      );
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("mock-editor-mode")).toHaveTextContent("collaboration");
+      expect(screen.getByTestId("mock-editor-document-bound")).toHaveTextContent("true");
+      expect(screen.getByTestId("mock-editor-writable")).toHaveTextContent("true");
+      expect(screen.getByRole("button", { name: "저장" })).toBeDisabled();
+      expect(screen.queryByRole("button", { name: "새 문서로 저장" })).not.toBeInTheDocument();
+      expect(useCollaborationSession).toHaveBeenCalledWith(expect.objectContaining(collaboration));
+    });
+  });
+
+  it("fails closed every SQL-backed body surface in collaboration mode", async () => {
+    const user = userEvent.setup();
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session: createMockCollaborationSession(),
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        permission: "write",
+        status: "synced",
+        transportSynced: true,
+        writable: true,
+      }),
+    });
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 204 }));
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocumentWithContent("doc_1", "Collaborative title", "Stale SQL projection")}
+        proposals={[createProposal("proposal_stale", "pending", "Stale SQL projection")]}
+        templates={[createTemplate("tpl_1", "SQL-backed review")]}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Source 보기" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "DOCX 내보내기" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "검토" })).toBeDisabled();
+    expect(screen.getByRole("tab", { name: "Source" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "AI 채팅" })).toBeDisabled();
+    expect(screen.queryByRole("navigation", { name: "개요" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Stale SQL projection 제안으로 교체/ })).not.toBeInTheDocument();
+
+    await user.keyboard("{Meta>}k{/Meta}");
+    const palette = screen.getByRole("dialog", { name: "명령 팔레트" });
+    expect(within(palette).queryByRole("option", { name: /문서 검토/ })).not.toBeInTheDocument();
+    expect(within(palette).queryByRole("option", { name: /Source 보기/ })).not.toBeInTheDocument();
+    expect(within(palette).queryByRole("option", { name: /DOCX 내보내기/ })).not.toBeInTheDocument();
+    expect(within(palette).getByRole("option", { name: /문서에서 찾기/ })).toBeInTheDocument();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("keeps the collaborative editor mounted and writable while post-sync changes are pending offline", async () => {
+    const session = createMockCollaborationSession();
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session,
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        pendingLocalChecksums: ["a".repeat(64)],
+        permission: "write",
+        status: "offline_pending",
+        writable: true,
+      }),
+    });
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocumentWithContent("doc_1", "Collaborative title", "Durable projection")}
+        templates={[]}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.queryByRole("article", { name: "Collaboration read-only projection" })).not.toBeInTheDocument();
+      expect(screen.getByTestId("mock-editor-mode")).toHaveTextContent("collaboration");
+      expect(screen.getByTestId("mock-editor-writable")).toHaveTextContent("true");
+      expect(screen.getByText("offline_pending", { selector: "[role='status']" })).toBeInTheDocument();
+    });
+  });
+
+  it("blocks unload, internal navigation, and new-document creation while collaboration updates await durability", () => {
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session: createMockCollaborationSession(),
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        pendingDurableAcknowledgementChecksums: ["a".repeat(64)],
+        permission: "write",
+        status: "storage_delayed",
+        transportSynced: true,
+        writable: true,
+      }),
+    });
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocument("doc_1", "Pending collaboration")}
+        templates={[]}
+      />,
+    );
+
+    const beforeUnload = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(beforeUnload);
+    expect(beforeUnload.defaultPrevented).toBe(true);
+    expect(fireEvent.click(screen.getByRole("link", { name: "문서" }))).toBe(false);
+    expect(screen.getByRole("button", { name: "새로 만들기" })).toBeDisabled();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("allows navigation once every collaboration update is durably acknowledged", () => {
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session: createMockCollaborationSession(),
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        permission: "write",
+        status: "synced",
+        transportSynced: true,
+        writable: true,
+      }),
+    });
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocument("doc_1", "Durable collaboration")}
+        templates={[]}
+      />,
+    );
+
+    const beforeUnload = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(beforeUnload);
+    expect(beforeUnload.defaultPrevented).toBe(false);
+    expect(screen.getByRole("button", { name: "새로 만들기" })).toBeEnabled();
+    expect(screen.getByRole("link", { name: "문서" })).not.toHaveAttribute("aria-disabled", "true");
+  });
+
+  it("does not schedule legacy autosave or expose conflict-copy actions in collaboration mode", async () => {
+    vi.useFakeTimers();
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session: createMockCollaborationSession(),
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        permission: "write",
+        status: "synced",
+        transportSynced: true,
+        writable: true,
+      }),
+    });
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 204 }));
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocumentWithContent("doc_1", "Collaborative title", "Durable projection")}
+        templates={[]}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Mock body edit" }));
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "새 문서로 저장" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "로컬 내용 복사" })).not.toBeInTheDocument();
+  });
+
   it("uses the localized generic user role instead of a personal placeholder", async () => {
     render(
       <DocumentShell

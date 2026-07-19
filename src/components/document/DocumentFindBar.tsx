@@ -36,6 +36,7 @@ type DocumentFindBarProps = {
   onReplaceCurrent: () => void;
   onReplaceTextChange: (replacement: string) => void;
   query: string;
+  readOnly?: boolean;
   regex: boolean;
   replaceText: string;
 };
@@ -56,6 +57,7 @@ export function DocumentFindBar({
   onReplaceCurrent,
   onReplaceTextChange,
   query,
+  readOnly = false,
   regex,
   replaceText,
 }: DocumentFindBarProps) {
@@ -124,6 +126,7 @@ export function DocumentFindBar({
         <input
           aria-label={messages.replaceLabel}
           className="h-8 min-w-0 flex-1 bg-transparent text-sm text-zinc-900 outline-none placeholder:text-zinc-400"
+          disabled={readOnly}
           onChange={(event) => onReplaceTextChange(event.currentTarget.value)}
           placeholder={messages.replacePlaceholder}
           type="text"
@@ -132,7 +135,7 @@ export function DocumentFindBar({
       </div>
       <button
         className="inline-flex h-8 items-center rounded-md border border-zinc-200 bg-white px-2 text-xs font-medium text-zinc-700 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:text-zinc-300"
-        disabled={!hasMatches}
+        disabled={readOnly || !hasMatches}
         onClick={onReplaceCurrent}
         type="button"
       >
@@ -140,7 +143,7 @@ export function DocumentFindBar({
       </button>
       <button
         className="inline-flex h-8 items-center rounded-md border border-zinc-200 bg-white px-2 text-xs font-medium text-zinc-700 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:text-zinc-300"
-        disabled={!hasMatches}
+        disabled={readOnly || !hasMatches}
         onClick={onReplaceAll}
         type="button"
       >

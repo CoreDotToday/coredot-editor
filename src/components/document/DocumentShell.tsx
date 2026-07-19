@@ -16,6 +16,8 @@ import {
 } from "lucide-react";
 import { nanoid } from "nanoid";
 import { z } from "zod";
+import type { HocuspocusProvider } from "@hocuspocus/provider";
+import type { Awareness } from "y-protocols/awareness";
 import {
   useCallback,
   useEffect,
@@ -109,6 +111,10 @@ import { buildDocumentCommandRegistry } from "./commands/document-command-regist
 import type { DocumentCommandAction } from "./commands/document-command-types";
 import type { SelectionAiResultPreview } from "./SelectionAiResultPopover";
 import { getProjectProfile } from "@/features/projects/default-project-profiles";
+import type { CollaborationClientConfiguration } from "@/features/collaboration/client-configuration";
+import type { CollaborationSession } from "@/features/collaboration/client/hocuspocus-provider-adapter";
+import type { CollaborationSessionSnapshot } from "@/features/collaboration/client/session-store";
+import { useCollaborationSession } from "@/features/collaboration/client/use-collaboration-session";
 import {
   PROJECT_METADATA_LIMITS,
   type ProjectProfile,
@@ -135,10 +141,13 @@ type ShellProposal = Pick<
   | "appliedMode"
   | "status"
 > & { isTruncated?: boolean };
+const EMPTY_SHELL_PROPOSALS: ShellProposal[] = [];
+const EMPTY_REFERENCE_DOCUMENTS: AiDocumentReferenceCandidate[] = [];
 export type SaveState = "saved" | "dirty" | "saving" | "failed";
 export type EditorSurface = "editor" | "source";
 
 type DocumentShellProps = {
+  collaboration?: CollaborationClientConfiguration;
   conversationStorageMode?: ConversationStorageMode;
   conversationWorkspaceId?: string;
   defaultTemplateId?: string;
@@ -156,6 +165,21 @@ type DocumentShellProps = {
   pluginContributions?: Partial<EditorPluginContributions>;
   /** Additional plugins appended to the app defaults. */
   plugins?: EditorPlugin[];
+};
+
+type CollaborationRuntime = {
+  session: CollaborationSession | null;
+  snapshot: CollaborationSessionSnapshot;
+};
+
+export function hasPendingCollaborationUpdates(snapshot: CollaborationSessionSnapshot) {
+  return snapshot.pendingLocalUpdateCount > 0
+    || snapshot.pendingLocalChecksums.length > 0
+    || snapshot.pendingDurableAcknowledgementChecksums.length > 0;
+}
+
+type DocumentShellContentProps = DocumentShellProps & {
+  collaborationRuntime: CollaborationRuntime | null;
 };
 
 type DraftState = {
@@ -364,43 +388,33 @@ function getCompactSidebarLayoutSnapshot() {
     window.matchMedia(COMPACT_SIDEBAR_MEDIA_QUERY).matches;
 }
 
-export function DocumentShell({
-  aiRuns,
-  aiRunsNextCursor = null,
-  conversationStorageMode = "local",
-  conversationWorkspaceId = "local-workspace",
-  defaultTemplateId,
-  document,
-  initialConversationLoadFailed = false,
-  initialConversationNextCursor = null,
-  initialConversations,
-  pluginContributions,
-  plugins,
-  proposals = [],
-  proposalsNextCursor = null,
-  projectProfile = getProjectProfile("default"),
-  referenceDocuments = [],
-  templates,
-}: DocumentShellProps) {
+export function DocumentShell(props: DocumentShellProps) {
+  if (props.collaboration?.kind === "collaboration") {
+    return (
+      <CollaborativeDocumentShellContent
+        key={props.document.id}
+        {...props}
+        collaboration={props.collaboration}
+      />
+    );
+  }
+  return <DocumentShellContent key={props.document.id} {...props} collaborationRuntime={null} />;
+}
+
+function CollaborativeDocumentShellContent(
+  props: DocumentShellProps & {
+    collaboration: Extract<CollaborationClientConfiguration, { kind: "collaboration" }>;
+  },
+) {
+  const { session, snapshot } = useCollaborationSession({
+    ...props.collaboration,
+    projectProfile: props.projectProfile ?? getProjectProfile("default"),
+  });
+
   return (
     <DocumentShellContent
-      key={document.id}
-      aiRuns={aiRuns}
-      aiRunsNextCursor={aiRunsNextCursor}
-      conversationStorageMode={conversationStorageMode}
-      conversationWorkspaceId={conversationWorkspaceId}
-      defaultTemplateId={defaultTemplateId}
-      document={document}
-      initialConversationLoadFailed={initialConversationLoadFailed}
-      initialConversationNextCursor={initialConversationNextCursor}
-      initialConversations={initialConversations}
-      pluginContributions={pluginContributions}
-      plugins={plugins}
-      proposals={proposals}
-      proposalsNextCursor={proposalsNextCursor}
-      projectProfile={projectProfile}
-      referenceDocuments={referenceDocuments}
-      templates={templates}
+      {...props}
+      collaborationRuntime={{ session, snapshot }}
     />
   );
 }
@@ -417,12 +431,14 @@ function DocumentShellContent({
   initialConversations,
   pluginContributions,
   plugins,
-  proposals = [],
+  proposals = EMPTY_SHELL_PROPOSALS,
   proposalsNextCursor = null,
   projectProfile = getProjectProfile("default"),
-  referenceDocuments = [],
+  referenceDocuments = EMPTY_REFERENCE_DOCUMENTS,
   templates,
-}: DocumentShellProps) {
+  collaborationRuntime,
+}: DocumentShellContentProps) {
+  const isCollaborationMode = collaborationRuntime !== null;
   const initialTemplate = getInitialTemplate(templates, defaultTemplateId);
   const initialTemplateVariables = useMemo(
     () => mergeMissingTemplateVariableDefaults(initialTemplate, {}),
@@ -600,7 +616,12 @@ function DocumentShellContent({
   const selectionCommandLabel = selectionCommand ? getSelectionCommandLabel(selectionCommand.command, language) : "";
   const isRewritingSelection = runningSelectionCommands.length > 0;
   const isSelectionCommandLimitReached = runningSelectionCommands.length >= MAX_CONCURRENT_SELECTION_COMMANDS;
-  const isInternalNavigationBlocked = saveState !== "saved";
+  const hasPendingCollaborationChanges = collaborationRuntime
+    ? hasPendingCollaborationUpdates(collaborationRuntime.snapshot)
+    : false;
+  const isInternalNavigationBlocked = isCollaborationMode
+    ? hasPendingCollaborationChanges
+    : saveState !== "saved";
   const adoptServerRevision = useCallback((returnedRevision: number, mode: "advance" | "reset" = "advance") => {
     const nextRevision = resolveServerRevision(serverRevisionRef.current, returnedRevision, mode);
     serverRevisionRef.current = nextRevision;
@@ -1042,7 +1063,7 @@ function DocumentShellContent({
   ]);
 
   const saveDraft = useCallback(async () => {
-    if (saveConflict) return;
+    if (isCollaborationMode || saveConflict) return;
     const requestScope = documentAsyncScopeRef.current;
     const requestGeneration = saveRequestGenerationRef.current + 1;
     saveRequestGenerationRef.current = requestGeneration;
@@ -1082,10 +1103,18 @@ function DocumentShellContent({
     }
     if (requestGeneration !== saveRequestGenerationRef.current) return;
     setSaveState(draftVersionRef.current === savingVersion ? "failed" : "dirty");
-  }, [adoptServerRevision, document.id, draft, enterRevisionConflictRecovery, isActiveDocumentAsyncScope, saveConflict]);
+  }, [
+    adoptServerRevision,
+    document.id,
+    draft,
+    enterRevisionConflictRecovery,
+    isActiveDocumentAsyncScope,
+    isCollaborationMode,
+    saveConflict,
+  ]);
 
   useEffect(() => {
-    if (saveState !== "dirty" || saveConflict) {
+    if (isCollaborationMode || saveState !== "dirty" || saveConflict) {
       return;
     }
 
@@ -1094,7 +1123,7 @@ function DocumentShellContent({
     }, AUTOSAVE_DEBOUNCE_MS);
 
     return () => window.clearTimeout(timeoutId);
-  }, [saveConflict, saveDraft, saveState]);
+  }, [isCollaborationMode, saveConflict, saveDraft, saveState]);
 
   const loadServerConflictVersion = useCallback(() => {
     if (!saveConflict) return;
@@ -1201,9 +1230,10 @@ function DocumentShellContent({
   ]);
 
   useEffect(() => {
-    if (saveState !== "dirty" && saveState !== "failed" && saveState !== "saving") {
-      return;
-    }
+    const hasPendingLegacyChanges = saveState === "dirty"
+      || saveState === "failed"
+      || saveState === "saving";
+    if (isCollaborationMode ? !hasPendingCollaborationChanges : !hasPendingLegacyChanges) return;
 
     const handleBeforeUnload = (event: BeforeUnloadEvent) => {
       if (intentionalNavigationRef.current) return;
@@ -1213,7 +1243,7 @@ function DocumentShellContent({
 
     window.addEventListener("beforeunload", handleBeforeUnload);
     return () => window.removeEventListener("beforeunload", handleBeforeUnload);
-  }, [saveState]);
+  }, [hasPendingCollaborationChanges, isCollaborationMode, saveState]);
 
   const downloadDocxSnapshot = useCallback(async (
     snapshot: Pick<PendingDocxExport, "contentJson" | "title">,
@@ -1245,7 +1275,7 @@ function DocumentShellContent({
   }, [document.id]);
 
   const exportDocxDraft = useCallback(async () => {
-    if (isExportingDocx || pendingDocxExport) return;
+    if (isCollaborationMode || isExportingDocx || pendingDocxExport) return;
     docxExportRequestRef.current?.abort();
     const requestController = new AbortController();
     docxExportRequestRef.current = requestController;
@@ -1291,13 +1321,14 @@ function DocumentShellContent({
     downloadDocxSnapshot,
     draft.contentJson,
     draft.title,
+    isCollaborationMode,
     isExportingDocx,
     messages.errors.exportDocxFailed,
     pendingDocxExport,
   ]);
 
   const confirmLossyDocxExport = useCallback(async () => {
-    if (!pendingDocxExport || isExportingDocx) return;
+    if (isCollaborationMode || !pendingDocxExport || isExportingDocx) return;
     docxExportRequestRef.current?.abort();
     const requestController = new AbortController();
     docxExportRequestRef.current = requestController;
@@ -1317,7 +1348,7 @@ function DocumentShellContent({
         setIsExportingDocx(false);
       }
     }
-  }, [downloadDocxSnapshot, isExportingDocx, messages.errors.exportDocxFailed, pendingDocxExport]);
+  }, [downloadDocxSnapshot, isCollaborationMode, isExportingDocx, messages.errors.exportDocxFailed, pendingDocxExport]);
 
   const selectTemplate = useCallback((templateId: string) => {
     const nextTemplate = templates.find((template) => template.id === templateId) ?? null;
@@ -1338,7 +1369,7 @@ function DocumentShellContent({
   }, []);
 
   const runDocumentReview = useCallback(async () => {
-    if (!selectedTemplate) {
+    if (isCollaborationMode || !selectedTemplate) {
       return;
     }
 
@@ -1396,13 +1427,14 @@ function DocumentShellContent({
     } finally {
       if (isActiveDocumentAsyncScope(requestScope)) setIsReviewing(false);
     }
-  }, [document.id, draft.contentJson, isActiveDocumentAsyncScope, messages, selectedTemplate, templateVariables]);
+  }, [document.id, draft.contentJson, isActiveDocumentAsyncScope, isCollaborationMode, messages, selectedTemplate, templateVariables]);
 
   const updateProposalStatus = useCallback(async (
     proposalId: string,
     status: AiReviewProposal["status"],
     applyMode: AiProposalApplyMode = "replace",
   ) => {
+    if (isCollaborationMode) return;
     const requestScope = documentAsyncScopeRef.current;
     let previousProposal = reviewProposals.find((proposal) => proposal.id === proposalId);
     if (!previousProposal) {
@@ -1547,6 +1579,7 @@ function DocumentShellContent({
     document.id,
     draft,
     isActiveDocumentAsyncScope,
+    isCollaborationMode,
     messages.errors,
     messages.selectionResult.appliedNotice,
     reviewProposals,
@@ -1579,6 +1612,7 @@ function DocumentShellContent({
   }, [isActiveDocumentAsyncScope, messages.errors.updateProposalFailed]);
 
   const updatePendingProposalStatuses = useCallback(async (status: "accepted" | "rejected") => {
+    if (isCollaborationMode) return;
     if (proposalCursor !== null) {
       return;
     }
@@ -1755,6 +1789,7 @@ function DocumentShellContent({
     document.id,
     draft,
     isActiveDocumentAsyncScope,
+    isCollaborationMode,
     messages.errors.staleSelection,
     messages.errors.updateProposalFailed,
     recoverProjectProfileViolation,
@@ -1822,6 +1857,7 @@ function DocumentShellContent({
   }, [document.id, isActiveDocumentAsyncScope, isLoadingProposals, messages.errors.reviewFailed, proposalCursor]);
 
   const loadDocumentChanges = useCallback(async (cursor?: string) => {
+    if (isCollaborationMode) return;
     if (documentChangesLoadingRef.current || (cursor === undefined && documentChangesLoadedRef.current)) return;
     const requestScope = documentAsyncScopeRef.current;
     documentChangesLoadingRef.current = true;
@@ -1845,9 +1881,10 @@ function DocumentShellContent({
         setIsLoadingDocumentChanges(false);
       }
     }
-  }, [document.id, isActiveDocumentAsyncScope, messages.aiWorkspace.changeLoadFailed]);
+  }, [document.id, isActiveDocumentAsyncScope, isCollaborationMode, messages.aiWorkspace.changeLoadFailed]);
 
   const undoAppliedChange = useCallback(async (changeId: string) => {
+    if (isCollaborationMode) return;
     const change = documentChanges.find((item) => item.id === changeId);
     if (
       !change ||
@@ -1910,6 +1947,7 @@ function DocumentShellContent({
     adoptServerRevision,
     documentChanges,
     isActiveDocumentAsyncScope,
+    isCollaborationMode,
     messages.aiWorkspace.undoConflict,
     recoverProjectProfileViolation,
     recoverSessionRevisionConflict,
@@ -2032,6 +2070,7 @@ function DocumentShellContent({
     setIsSidebarOpen(false);
   }, []);
   const executeDocumentCommand = useCallback((commandId: DocumentCommandAction["id"]) => {
+    if (isCollaborationMode && isLegacyBodyCommand(commandId)) return;
     switch (commandId) {
       case "open-workspace":
         setWorkspaceOpen(true);
@@ -2055,7 +2094,7 @@ function DocumentShellContent({
       case "export-docx":
         void exportDocxDraft();
     }
-  }, [exportDocxDraft, openFind, runDocumentReview, saveDraft, setWorkspaceOpen]);
+  }, [exportDocxDraft, isCollaborationMode, openFind, runDocumentReview, saveDraft, setWorkspaceOpen]);
   const commandPaletteActions = useMemo(
     () => buildDocumentCommandRegistry({
       editorSurface,
@@ -2065,12 +2104,16 @@ function DocumentShellContent({
       saveState,
     }).map((definition): DocumentCommandAction => ({
       ...definition,
+      enabled: isCollaborationMode && isLegacyBodyCommand(definition.id)
+        ? false
+        : definition.enabled,
       execute: () => executeDocumentCommand(definition.id),
     })),
     [
       editorSurface,
       executeDocumentCommand,
       isExportingDocx,
+      isCollaborationMode,
       messages.commandPalette,
       saveConflict,
       saveState,
@@ -2133,6 +2176,7 @@ function DocumentShellContent({
         </Link>
         <button
           className="flex h-9 w-full items-center gap-2 rounded-md px-2.5 text-left text-zinc-700 hover:bg-zinc-100"
+          disabled={isCollaborationMode}
           onClick={() => {
             setWorkspaceOpen(true);
             setIsSidebarOpen(false);
@@ -2145,21 +2189,25 @@ function DocumentShellContent({
       </nav>
 
       <div className="min-h-0 flex-1 overflow-y-auto">
-        <DocumentOutlinePanel
-          activeItemId={activeOutlineItemId}
-          messages={messages.outline}
-          onSelectItem={selectOutlineItem}
-          outline={documentOutline}
-        />
+        {!isCollaborationMode ? (
+          <DocumentOutlinePanel
+            activeItemId={activeOutlineItemId}
+            messages={messages.outline}
+            onSelectItem={selectOutlineItem}
+            outline={documentOutline}
+          />
+        ) : null}
 
-        <DocumentMetadataPanel
-          language={language}
-          metadata={draft.metadataJson}
-          messages={messages.metadataPanel}
-          onChange={handleMetadataChange}
-          profile={projectProfile}
-          readiness={draft.readiness}
-        />
+        <fieldset className="m-0 min-w-0 border-0 p-0" disabled={isCollaborationMode}>
+          <DocumentMetadataPanel
+            language={language}
+            metadata={draft.metadataJson}
+            messages={messages.metadataPanel}
+            onChange={handleMetadataChange}
+            profile={projectProfile}
+            readiness={draft.readiness}
+          />
+        </fieldset>
 
         <PromptTemplatePanel
           messages={messages.templates}
@@ -2279,6 +2327,21 @@ function DocumentShellContent({
       </section>
     </AiWorkspacePanel>
   );
+  const collaborationProvider = collaborationRuntime?.session?.provider ?? null;
+  const collaborationEditorSession = useMemo(() => (
+    collaborationRuntime?.snapshot.hasCompletedInitialSync
+    && collaborationRuntime.session
+    && hasCollaborationAwareness(collaborationProvider)
+      ? {
+          document: collaborationRuntime.session.document,
+          provider: collaborationProvider,
+          writable: collaborationRuntime.snapshot.writable,
+        }
+      : null
+  ), [
+    collaborationProvider,
+    collaborationRuntime,
+  ]);
 
   return (
     <main className="flex h-dvh min-h-0 w-full min-w-0 overflow-hidden bg-white text-zinc-950">
@@ -2320,14 +2383,19 @@ function DocumentShellContent({
               className="shrink-0 text-xs font-medium text-zinc-500"
               role="status"
             >
-              {messages.saveState[saveState]}
+              {isCollaborationMode ? collaborationRuntime.snapshot.status : messages.saveState[saveState]}
             </div>
           </div>
           <div className="flex w-full min-w-0 items-center gap-2 overflow-x-auto pb-1 sm:w-auto sm:overflow-visible sm:pb-0">
             <button
               aria-label={editorSurface === "source" ? messages.header.editorView : messages.header.sourceView}
-              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-zinc-200 bg-white px-2.5 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50"
-              onClick={() => setEditorSurface((currentSurface) => (currentSurface === "source" ? "editor" : "source"))}
+              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-zinc-200 bg-white px-2.5 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-400"
+              disabled={isCollaborationMode}
+              onClick={() => {
+                if (!isCollaborationMode) {
+                  setEditorSurface((currentSurface) => (currentSurface === "source" ? "editor" : "source"));
+                }
+              }}
               type="button"
             >
               <Code2 aria-hidden="true" className="size-4" />
@@ -2338,7 +2406,7 @@ function DocumentShellContent({
             <button
               aria-label={isExportingDocx ? messages.header.exportingDocx : messages.header.exportDocx}
               className="inline-flex h-8 items-center gap-1.5 rounded-md border border-zinc-200 bg-white px-2.5 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-400"
-              disabled={isExportingDocx}
+              disabled={isCollaborationMode || isExportingDocx}
               onClick={exportDocxDraft}
               ref={exportTriggerRef}
               type="button"
@@ -2377,6 +2445,7 @@ function DocumentShellContent({
                   ? "border-zinc-950 bg-zinc-950 text-white hover:bg-zinc-800"
                   : "border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50",
               ].join(" ")}
+              disabled={isCollaborationMode}
               onClick={() => setWorkspaceOpen((currentValue) => !currentValue)}
               type="button"
             >
@@ -2389,7 +2458,12 @@ function DocumentShellContent({
             </button>
             <button
               className="inline-flex h-8 shrink-0 items-center justify-center rounded-md bg-zinc-950 px-3 text-sm font-medium text-white transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-300"
-              disabled={saveConflict !== null || saveState === "saved" || saveState === "saving"}
+              disabled={
+                isCollaborationMode
+                || saveConflict !== null
+                || saveState === "saved"
+                || saveState === "saving"
+              }
               onClick={saveDraft}
               type="button"
             >
@@ -2420,7 +2494,7 @@ function DocumentShellContent({
           </section>
         ) : null}
 
-        {docxExportError ? (
+        {!isCollaborationMode && docxExportError ? (
           <section
             aria-labelledby="docx-export-error-title"
             aria-live="assertive"
@@ -2444,7 +2518,7 @@ function DocumentShellContent({
           </section>
         ) : null}
 
-        {saveConflict ? (
+        {!isCollaborationMode && saveConflict ? (
           <section
             className="shrink-0 border-b border-amber-200 bg-amber-50 px-4 py-3 text-amber-950"
             role="alert"
@@ -2505,6 +2579,7 @@ function DocumentShellContent({
               ].join(" ")}
               onClick={() => setEditorSurface("source")}
               role="tab"
+              disabled={isCollaborationMode}
               type="button"
             >
               {messages.sourceView.sourceTab}
@@ -2512,39 +2587,61 @@ function DocumentShellContent({
           </div>
         </div>
 
-        {editorSurface === "editor" ? (
-          <DocumentEditor
-            key={document.id}
-            contentJson={draft.contentJson}
-            isFindOpen={isFindOpen}
-            isSelectionCommandLimitReached={isSelectionCommandLimitReached}
-            isSelectionCommandRunning={isRewritingSelection}
-            inlineSuggestions={inlineSuggestions}
-            language={language}
-            messages={messages.editor}
-            onChange={handleDraftChange}
-            onFindOpenChange={setIsFindOpen}
-            referenceCandidates={referenceDocuments}
-            resolvedPluginContributions={resolvedPluginContributions}
-            onApplySelectionAiResult={(proposalId, applyMode) =>
-              updateProposalStatusLocally(proposalId, "accepted", applyMode)
-            }
-            onDismissSelectionAiResult={() => setSelectionAiResult(null)}
-            onRetrySelectionAiResult={retrySelectionAiResult}
-            onSelectionCommand={handleSelectionCommand}
-            outlineFocusRequest={outlineFocusRequest}
-            runningSelectionCommand={selectionCommand?.command}
-            runningSelectionCommandLimit={MAX_CONCURRENT_SELECTION_COMMANDS}
-            runningSelectionCommands={runningSelectionCommands}
-            selectionAiResult={selectionAiResult}
-            title={draft.title}
-          />
+        {editorSurface === "editor" || isCollaborationMode ? (
+          collaborationEditorSession ? (
+            <DocumentEditor
+              key={`${document.id}:collaboration`}
+              isFindOpen={isFindOpen}
+              language={language}
+              messages={messages.editor}
+              mode={{
+                kind: "collaboration",
+                session: collaborationEditorSession,
+                title: draft.title,
+              }}
+              onFindOpenChange={setIsFindOpen}
+              outlineFocusRequest={outlineFocusRequest}
+              resolvedPluginContributions={resolvedPluginContributions}
+            />
+          ) : isCollaborationMode ? (
+            <CollaborationReadOnlyProjection
+              plainText={document.plainText}
+              title={draft.title}
+            />
+          ) : (
+            <DocumentEditor
+              key={document.id}
+              contentJson={draft.contentJson}
+              isFindOpen={isFindOpen}
+              isSelectionCommandLimitReached={isSelectionCommandLimitReached}
+              isSelectionCommandRunning={isRewritingSelection}
+              inlineSuggestions={inlineSuggestions}
+              language={language}
+              messages={messages.editor}
+              onChange={handleDraftChange}
+              onFindOpenChange={setIsFindOpen}
+              referenceCandidates={referenceDocuments}
+              resolvedPluginContributions={resolvedPluginContributions}
+              onApplySelectionAiResult={(proposalId, applyMode) =>
+                updateProposalStatusLocally(proposalId, "accepted", applyMode)
+              }
+              onDismissSelectionAiResult={() => setSelectionAiResult(null)}
+              onRetrySelectionAiResult={retrySelectionAiResult}
+              onSelectionCommand={handleSelectionCommand}
+              outlineFocusRequest={outlineFocusRequest}
+              runningSelectionCommand={selectionCommand?.command}
+              runningSelectionCommandLimit={MAX_CONCURRENT_SELECTION_COMMANDS}
+              runningSelectionCommands={runningSelectionCommands}
+              selectionAiResult={selectionAiResult}
+              title={draft.title}
+            />
+          )
         ) : (
           <DocumentSourceView contentJson={draft.contentJson} messages={messages.sourceView} title={draft.title} />
         )}
       </section>
 
-      {pendingDocxExport ? (
+      {!isCollaborationMode && pendingDocxExport ? (
         <DocumentInterchangeDialog
           actionsDisabled={isExportingDocx}
           cancelLabel={messages.documentInterchange.cancel}
@@ -2571,7 +2668,7 @@ function DocumentShellContent({
         </DocumentInterchangeDialog>
       ) : null}
 
-      {isWorkspaceOpen ? (
+      {isWorkspaceOpen && !isCollaborationMode ? (
         <>
           {renderWorkspacePanel("side")}
           {isCompactWorkspace ? (
@@ -2742,6 +2839,42 @@ function mergeMissingTemplateVariableDefaults(template: ShellTemplate | null, va
     },
     { ...values },
   );
+}
+
+function CollaborationReadOnlyProjection({
+  plainText,
+  title,
+}: {
+  plainText: string;
+  title: string;
+}) {
+  return (
+    <article
+      aria-label="Collaboration read-only projection"
+      className="min-h-0 flex-1 overflow-y-auto bg-white px-4 py-8 sm:px-16 lg:px-20"
+    >
+      <div className="mx-auto w-full max-w-[54rem]">
+        <h1 className="text-3xl font-semibold text-zinc-950">{title}</h1>
+        <p className="mt-8 whitespace-pre-wrap text-base leading-7 text-zinc-800">
+          {plainText}
+        </p>
+      </div>
+    </article>
+  );
+}
+
+function hasCollaborationAwareness(
+  provider: HocuspocusProvider | null,
+): provider is HocuspocusProvider & { awareness: Awareness } {
+  return provider?.awareness !== null && provider?.awareness !== undefined;
+}
+
+function isLegacyBodyCommand(commandId: DocumentCommandAction["id"]) {
+  return commandId === "open-workspace"
+    || commandId === "review-document"
+    || commandId === "show-source"
+    || commandId === "save-document"
+    || commandId === "export-docx";
 }
 
 function getInitialTemplate(templates: readonly ShellTemplate[], defaultTemplateId?: string) {

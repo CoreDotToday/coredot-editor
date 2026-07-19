@@ -40,6 +40,7 @@ type BlockGutterControlsProps = {
   onBlockPointerDragMove?: (point: SelectionBlockDragPoint) => void;
   pluginActions?: EditorBlockAction[];
   pluginContext?: EditorBlockHostContext;
+  structuralTransformsEnabled?: boolean;
   top: number;
 };
 
@@ -59,6 +60,7 @@ export function BlockGutterControls({
   onBlockPointerDragMove,
   pluginActions = [],
   pluginContext,
+  structuralTransformsEnabled = true,
   top,
 }: BlockGutterControlsProps) {
   const [isBlockMenuOpen, setIsBlockMenuOpen] = useState(false);
@@ -84,9 +86,13 @@ export function BlockGutterControls({
   const messages = editorMessages[language].selectionMenu.blockControls;
   const style: CSSProperties = { left, top };
   const blockActions = [
-    { action: "moveUp", icon: ArrowUp, label: messages.moveUp },
-    { action: "moveDown", icon: ArrowDown, label: messages.moveDown },
-    ...(isListItem
+    ...(structuralTransformsEnabled
+      ? [
+          { action: "moveUp", icon: ArrowUp, label: messages.moveUp },
+          { action: "moveDown", icon: ArrowDown, label: messages.moveDown },
+        ] as const
+      : []),
+    ...(isListItem && structuralTransformsEnabled
       ? [
           { action: "outdentListItem", icon: IndentDecrease, label: messages.outdentListItem },
           { action: "indentListItem", icon: IndentIncrease, label: messages.indentListItem },
@@ -185,7 +191,7 @@ export function BlockGutterControls({
             onBlockDragEnd?.();
           }}
           onPointerDown={(event) => {
-            if (isRunning || event.button !== 0) return;
+            if (!structuralTransformsEnabled || isRunning || event.button !== 0) return;
 
             blockPointerDragRef.current = {
               isDragging: false,
@@ -268,7 +274,7 @@ export function BlockGutterControls({
               {label}
             </button>
           ))}
-          {pluginActions.map((action, index) => {
+          {(structuralTransformsEnabled ? pluginActions : []).map((action, index) => {
             const isEnabled = pluginContext
               ? invokeEditorPluginContribution(
                   "blockAction",
