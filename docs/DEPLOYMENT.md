@@ -117,7 +117,9 @@ Back up the database, stop application writers, and then claim it:
 pnpm db:claim-local-workspace -- --workspace=clerk:org:YOUR_ORG_ID
 ```
 
-The command trims and validates the target, refuses `local`, reports counts for documents, templates, AI runs, proposals, and settings, and moves only rows whose `workspace_id` is `local`. It preflights built-in-template and settings conflicts, performs all updates in one transaction, and verifies foreign keys before commit. A conflict or failed check rolls the transaction back without partial movement.
+The command trims and validates the target, refuses `local`, and reports counts for the complete workspace-owned graph. That graph includes documents and templates, request budgets, AI runs/proposals/conversations/messages, document change history, settings, and all collaboration documents, updates, actions, approval records, authorization epochs, anchors, change mappings, and AI-run snapshots. It moves only rows whose `workspace_id` is `local`.
+
+Before moving anything, the command checks built-in template keys, document creation keys, AI idempotency keys, conversation creation keys, request-budget identities, collaboration authorization epochs, and singleton settings for collisions in the target workspace. It never merges colliding records. All updates run in one transaction with deferred foreign keys, followed by a database-wide foreign-key check before commit; a conflict or failed check rolls back the entire graph without partial movement. Run all database migrations before claiming so the current collaboration tables participate in the transfer.
 
 The claim is intentionally one-way: after a successful commit, use the database backup to roll back. Do not rerun it with another target expecting already-claimed rows to move; a second run is a no-op because it only selects `local` rows.
 

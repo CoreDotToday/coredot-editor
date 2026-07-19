@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { check, foreignKey, index, integer, primaryKey, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { blob, check, foreignKey, index, integer, primaryKey, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 import { nanoid } from "nanoid";
 
 export type TiptapJson = {
@@ -10,6 +10,9 @@ export type TiptapJson = {
 export type DocumentReadiness = "draft" | "needs_review" | "ready" | "approved";
 export type DocumentMetadataValue = boolean | number | string | string[] | null;
 export type DocumentMetadata = Record<string, DocumentMetadataValue>;
+export type CollaborationUpdateOriginKind = "client" | "migration" | "proposal_command" | "repair" | "undo_command";
+export type CollaborationActionType = "proposal_apply" | "proposal_batch_apply" | "repair" | "selective_undo";
+export type CollaborationActionStatus = "applied" | "failed" | "pending";
 export type DocumentChangeSnapshot = {
   title: string;
   contentJson: TiptapJson;
@@ -351,6 +354,466 @@ export const documentChangeProposals = sqliteTable(
   ],
 );
 
+export const collaborationDocuments = sqliteTable(
+  "collaboration_documents",
+  {
+    workspaceId: text("workspace_id").notNull(),
+    documentId: text("document_id").notNull(),
+    generation: integer("generation").notNull(),
+    schemaVersion: integer("schema_version").notNull(),
+    schemaFingerprint: text("schema_fingerprint").notNull(),
+    checkpointBlob: blob("checkpoint_blob", { mode: "buffer" }).notNull(),
+    checkpointChecksum: text("checkpoint_checksum").notNull(),
+    headSeq: integer("head_seq").notNull().default(0),
+    checkpointSeq: integer("checkpoint_seq").notNull().default(0),
+    projectedSeq: integer("projected_seq").notNull().default(0),
+    lastCheckpointAt: integer("last_checkpoint_at", { mode: "timestamp_ms" }).notNull(),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+    updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.workspaceId, table.documentId],
+      name: "collaboration_documents_pk",
+    }),
+    uniqueIndex("collaboration_documents_workspace_document_generation_unique").on(
+      table.workspaceId,
+      table.documentId,
+      table.generation,
+    ),
+    foreignKey({
+      columns: [table.workspaceId, table.documentId],
+      foreignColumns: [documents.workspaceId, documents.id],
+      name: "collaboration_documents_workspace_document_fk",
+    }).onDelete("cascade"),
+    check(
+      "collaboration_documents_generation_check",
+      sql`typeof(${table.generation}) = 'integer' and ${table.generation} between 1 and 9007199254740991`,
+    ),
+    check(
+      "collaboration_documents_schema_version_check",
+      sql`typeof(${table.schemaVersion}) = 'integer' and ${table.schemaVersion} between 1 and 9007199254740991`,
+    ),
+    check(
+      "collaboration_documents_sequence_check",
+      sql`typeof(${table.headSeq}) = 'integer' and ${table.headSeq} between 0 and 9007199254740991
+        and typeof(${table.checkpointSeq}) = 'integer' and ${table.checkpointSeq} between 0 and 9007199254740991
+        and typeof(${table.projectedSeq}) = 'integer' and ${table.projectedSeq} between 0 and 9007199254740991
+        and ${table.checkpointSeq} <= ${table.projectedSeq}
+        and ${table.projectedSeq} <= ${table.headSeq}`,
+    ),
+    check(
+      "collaboration_documents_schema_fingerprint_check",
+      sql`length(${table.schemaFingerprint}) = 64 and ${table.schemaFingerprint} not glob '*[^0-9a-f]*'`,
+    ),
+    check(
+      "collaboration_documents_checkpoint_checksum_check",
+      sql`length(${table.checkpointChecksum}) = 64 and ${table.checkpointChecksum} not glob '*[^0-9a-f]*'`,
+    ),
+  ],
+);
+
+export const collaborationActions = sqliteTable(
+  "collaboration_actions",
+  {
+    id: text("id").primaryKey().$defaultFn(() => nanoid()),
+    workspaceId: text("workspace_id").notNull(),
+    documentId: text("document_id").notNull(),
+    generation: integer("generation").notNull(),
+    commandId: text("command_id").notNull(),
+    actionType: text("action_type", {
+      enum: ["proposal_apply", "proposal_batch_apply", "selective_undo", "repair"],
+    }).notNull(),
+    principalId: text("principal_id").notNull(),
+    requestId: text("request_id").notNull(),
+    baseHeadSeq: integer("base_head_seq").notNull(),
+    appliedHeadSeq: integer("applied_head_seq"),
+    proposalId: text("proposal_id"),
+    documentChangeId: text("document_change_id"),
+    status: text("status", { enum: ["pending", "applied", "failed"] }).notNull(),
+    failureCategory: text("failure_category"),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+    updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+  },
+  (table) => [
+    uniqueIndex("collaboration_actions_workspace_id_document_generation_unique").on(
+      table.workspaceId,
+      table.id,
+      table.documentId,
+      table.generation,
+    ),
+    uniqueIndex("collaboration_actions_workspace_command_unique").on(table.workspaceId, table.commandId),
+    index("collaboration_actions_workspace_document_generation_created_id_idx").on(
+      table.workspaceId,
+      table.documentId,
+      table.generation,
+      table.createdAt,
+      table.id,
+    ),
+    foreignKey({
+      columns: [table.workspaceId, table.documentId, table.generation],
+      foreignColumns: [
+        collaborationDocuments.workspaceId,
+        collaborationDocuments.documentId,
+        collaborationDocuments.generation,
+      ],
+      name: "collaboration_actions_document_generation_fk",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.workspaceId, table.proposalId, table.documentId],
+      foreignColumns: [aiProposals.workspaceId, aiProposals.id, aiProposals.documentId],
+      name: "collaboration_actions_proposal_fk",
+    }),
+    foreignKey({
+      columns: [table.workspaceId, table.documentChangeId, table.documentId],
+      foreignColumns: [documentChanges.workspaceId, documentChanges.id, documentChanges.documentId],
+      name: "collaboration_actions_document_change_fk",
+    }),
+    check(
+      "collaboration_actions_generation_check",
+      sql`typeof(${table.generation}) = 'integer' and ${table.generation} between 1 and 9007199254740991`,
+    ),
+    check(
+      "collaboration_actions_type_check",
+      sql`${table.actionType} in ('proposal_apply', 'proposal_batch_apply', 'selective_undo', 'repair')`,
+    ),
+    check("collaboration_actions_status_check", sql`${table.status} in ('pending', 'applied', 'failed')`),
+    check(
+      "collaboration_actions_sequence_check",
+      sql`typeof(${table.baseHeadSeq}) = 'integer' and ${table.baseHeadSeq} between 0 and 9007199254740991
+        and (${table.appliedHeadSeq} is null or (
+          typeof(${table.appliedHeadSeq}) = 'integer'
+          and ${table.appliedHeadSeq} between 0 and 9007199254740991
+          and ${table.appliedHeadSeq} >= ${table.baseHeadSeq}
+        ))`,
+    ),
+    check(
+      "collaboration_actions_state_check",
+      sql`(${table.status} = 'pending' and ${table.appliedHeadSeq} is null and ${table.failureCategory} is null)
+        or (${table.status} = 'applied' and ${table.appliedHeadSeq} is not null and ${table.failureCategory} is null)
+        or (${table.status} = 'failed' and ${table.appliedHeadSeq} is null and ${table.failureCategory} is not null)`,
+    ),
+  ],
+);
+
+export const collaborationUpdates = sqliteTable(
+  "collaboration_updates",
+  {
+    workspaceId: text("workspace_id").notNull(),
+    documentId: text("document_id").notNull(),
+    generation: integer("generation").notNull(),
+    seq: integer("seq").notNull(),
+    updateBlob: blob("update_blob", { mode: "buffer" }).notNull(),
+    checksum: text("checksum").notNull(),
+    idempotencyKey: text("idempotency_key").notNull(),
+    originKind: text("origin_kind", {
+      enum: ["client", "proposal_command", "undo_command", "migration", "repair"],
+    }).notNull(),
+    principalId: text("principal_id"),
+    requestId: text("request_id"),
+    sessionId: text("session_id"),
+    semanticActionId: text("semantic_action_id"),
+    diagnosticJson: text("diagnostic_json", { mode: "json" }).$type<Record<string, unknown>>(),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.workspaceId, table.documentId, table.generation, table.seq],
+      name: "collaboration_updates_pk",
+    }),
+    uniqueIndex("collaboration_updates_document_generation_idempotency_unique").on(
+      table.workspaceId,
+      table.documentId,
+      table.generation,
+      table.idempotencyKey,
+    ),
+    foreignKey({
+      columns: [table.workspaceId, table.documentId, table.generation],
+      foreignColumns: [
+        collaborationDocuments.workspaceId,
+        collaborationDocuments.documentId,
+        collaborationDocuments.generation,
+      ],
+      name: "collaboration_updates_document_generation_fk",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.workspaceId, table.semanticActionId, table.documentId, table.generation],
+      foreignColumns: [
+        collaborationActions.workspaceId,
+        collaborationActions.id,
+        collaborationActions.documentId,
+        collaborationActions.generation,
+      ],
+      name: "collaboration_updates_semantic_action_fk",
+    }),
+    check(
+      "collaboration_updates_sequence_check",
+      sql`typeof(${table.generation}) = 'integer' and ${table.generation} between 1 and 9007199254740991
+        and typeof(${table.seq}) = 'integer' and ${table.seq} between 1 and 9007199254740991`,
+    ),
+    check(
+      "collaboration_updates_checksum_check",
+      sql`length(${table.checksum}) = 64 and ${table.checksum} not glob '*[^0-9a-f]*'`,
+    ),
+    check(
+      "collaboration_updates_origin_check",
+      sql`${table.originKind} in ('client', 'proposal_command', 'undo_command', 'migration', 'repair')`,
+    ),
+  ],
+);
+
+export const collaborationAuthorizationEpochs = sqliteTable(
+  "collaboration_authorization_epochs",
+  {
+    workspaceId: text("workspace_id").notNull(),
+    principalId: text("principal_id").notNull(),
+    epoch: integer("epoch").notNull(),
+    updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.workspaceId, table.principalId],
+      name: "collaboration_authorization_epochs_pk",
+    }),
+    check(
+      "collaboration_authorization_epochs_epoch_check",
+      sql`typeof(${table.epoch}) = 'integer' and ${table.epoch} between 0 and 9007199254740991`,
+    ),
+  ],
+);
+
+export const documentApprovals = sqliteTable(
+  "document_approvals",
+  {
+    id: text("id").primaryKey().$defaultFn(() => nanoid()),
+    workspaceId: text("workspace_id").notNull(),
+    documentId: text("document_id").notNull(),
+    generation: integer("generation").notNull(),
+    approvedHeadSeq: integer("approved_head_seq").notNull(),
+    approvedStateVector: blob("approved_state_vector", { mode: "buffer" }).notNull(),
+    approvedContentHash: text("approved_content_hash").notNull(),
+    principalId: text("principal_id").notNull(),
+    requestId: text("request_id").notNull(),
+    approvedAt: integer("approved_at", { mode: "timestamp_ms" }).notNull(),
+    invalidatedSeq: integer("invalidated_seq"),
+    invalidatedPrincipalId: text("invalidated_principal_id"),
+    invalidatedAt: integer("invalidated_at", { mode: "timestamp_ms" }),
+  },
+  (table) => [
+    uniqueIndex("document_approvals_active_document_unique")
+      .on(table.workspaceId, table.documentId)
+      .where(sql`${table.invalidatedAt} is null`),
+    index("document_approvals_workspace_document_generation_approved_id_idx").on(
+      table.workspaceId,
+      table.documentId,
+      table.generation,
+      table.approvedAt,
+      table.id,
+    ),
+    foreignKey({
+      columns: [table.workspaceId, table.documentId, table.generation],
+      foreignColumns: [
+        collaborationDocuments.workspaceId,
+        collaborationDocuments.documentId,
+        collaborationDocuments.generation,
+      ],
+      name: "document_approvals_document_generation_fk",
+    }).onDelete("cascade"),
+    check(
+      "document_approvals_sequence_check",
+      sql`typeof(${table.generation}) = 'integer' and ${table.generation} between 1 and 9007199254740991
+        and typeof(${table.approvedHeadSeq}) = 'integer'
+        and ${table.approvedHeadSeq} between 0 and 9007199254740991`,
+    ),
+    check(
+      "document_approvals_content_hash_check",
+      sql`length(${table.approvedContentHash}) = 64 and ${table.approvedContentHash} not glob '*[^0-9a-f]*'`,
+    ),
+    check(
+      "document_approvals_invalidation_check",
+      sql`(${table.invalidatedSeq} is null and ${table.invalidatedPrincipalId} is null and ${table.invalidatedAt} is null)
+        or (${table.invalidatedSeq} is not null and ${table.invalidatedPrincipalId} is not null
+          and ${table.invalidatedAt} is not null
+          and typeof(${table.invalidatedSeq}) = 'integer'
+          and ${table.invalidatedSeq} between 1 and 9007199254740991
+          and ${table.invalidatedSeq} > ${table.approvedHeadSeq})`,
+    ),
+  ],
+);
+
+export const collaborationProposalAnchors = sqliteTable(
+  "collaboration_proposal_anchors",
+  {
+    workspaceId: text("workspace_id").notNull(),
+    proposalId: text("proposal_id").notNull(),
+    documentId: text("document_id").notNull(),
+    generation: integer("generation").notNull(),
+    schemaFingerprint: text("schema_fingerprint").notNull(),
+    baseHeadSeq: integer("base_head_seq").notNull(),
+    baseStateVector: blob("base_state_vector", { mode: "buffer" }).notNull(),
+    startRelative: blob("start_relative", { mode: "buffer" }).notNull(),
+    startAssoc: integer("start_assoc").notNull(),
+    endRelative: blob("end_relative", { mode: "buffer" }).notNull(),
+    endAssoc: integer("end_assoc").notNull(),
+    targetHash: text("target_hash").notNull(),
+    targetPreview: text("target_preview").notNull(),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.workspaceId, table.proposalId],
+      name: "collaboration_proposal_anchors_pk",
+    }),
+    foreignKey({
+      columns: [table.workspaceId, table.documentId, table.generation],
+      foreignColumns: [
+        collaborationDocuments.workspaceId,
+        collaborationDocuments.documentId,
+        collaborationDocuments.generation,
+      ],
+      name: "collaboration_proposal_anchors_document_generation_fk",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.workspaceId, table.proposalId, table.documentId],
+      foreignColumns: [aiProposals.workspaceId, aiProposals.id, aiProposals.documentId],
+      name: "collaboration_proposal_anchors_proposal_fk",
+    }).onDelete("cascade"),
+    check(
+      "collaboration_proposal_anchors_sequence_check",
+      sql`typeof(${table.generation}) = 'integer' and ${table.generation} between 1 and 9007199254740991
+        and typeof(${table.baseHeadSeq}) = 'integer'
+        and ${table.baseHeadSeq} between 0 and 9007199254740991`,
+    ),
+    check(
+      "collaboration_proposal_anchors_schema_fingerprint_check",
+      sql`length(${table.schemaFingerprint}) = 64 and ${table.schemaFingerprint} not glob '*[^0-9a-f]*'`,
+    ),
+    check(
+      "collaboration_proposal_anchors_target_hash_check",
+      sql`length(${table.targetHash}) = 64 and ${table.targetHash} not glob '*[^0-9a-f]*'`,
+    ),
+    check(
+      "collaboration_proposal_anchors_association_check",
+      sql`${table.startAssoc} = -1 and ${table.endAssoc} = 1`,
+    ),
+  ],
+);
+
+export const collaborationDocumentChanges = sqliteTable(
+  "collaboration_document_changes",
+  {
+    workspaceId: text("workspace_id").notNull(),
+    changeId: text("change_id").notNull(),
+    documentId: text("document_id").notNull(),
+    generation: integer("generation").notNull(),
+    actionId: text("action_id").notNull(),
+    forwardSeq: integer("forward_seq").notNull(),
+    inverseUpdate: blob("inverse_update", { mode: "buffer" }).notNull(),
+    affectedStartRelative: blob("affected_start_relative", { mode: "buffer" }).notNull(),
+    affectedEndRelative: blob("affected_end_relative", { mode: "buffer" }).notNull(),
+    postconditionFingerprint: text("postcondition_fingerprint").notNull(),
+    baseHeadSeq: integer("base_head_seq").notNull(),
+    resultingHeadSeq: integer("resulting_head_seq").notNull(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.workspaceId, table.changeId],
+      name: "collaboration_document_changes_pk",
+    }),
+    uniqueIndex("collaboration_document_changes_workspace_action_unique").on(
+      table.workspaceId,
+      table.actionId,
+    ),
+    foreignKey({
+      columns: [table.workspaceId, table.documentId, table.generation],
+      foreignColumns: [
+        collaborationDocuments.workspaceId,
+        collaborationDocuments.documentId,
+        collaborationDocuments.generation,
+      ],
+      name: "collaboration_document_changes_document_generation_fk",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.workspaceId, table.changeId, table.documentId],
+      foreignColumns: [documentChanges.workspaceId, documentChanges.id, documentChanges.documentId],
+      name: "collaboration_document_changes_change_fk",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.workspaceId, table.actionId, table.documentId, table.generation],
+      foreignColumns: [
+        collaborationActions.workspaceId,
+        collaborationActions.id,
+        collaborationActions.documentId,
+        collaborationActions.generation,
+      ],
+      name: "collaboration_document_changes_action_fk",
+    }),
+    check(
+      "collaboration_document_changes_sequence_check",
+      sql`typeof(${table.generation}) = 'integer' and ${table.generation} between 1 and 9007199254740991
+        and typeof(${table.baseHeadSeq}) = 'integer' and ${table.baseHeadSeq} between 0 and 9007199254740991
+        and typeof(${table.forwardSeq}) = 'integer' and ${table.forwardSeq} between 1 and 9007199254740991
+        and typeof(${table.resultingHeadSeq}) = 'integer'
+        and ${table.resultingHeadSeq} between 1 and 9007199254740991
+        and ${table.forwardSeq} > ${table.baseHeadSeq}
+        and ${table.resultingHeadSeq} >= ${table.forwardSeq}`,
+    ),
+    check(
+      "collaboration_document_changes_postcondition_check",
+      sql`length(${table.postconditionFingerprint}) = 64
+        and ${table.postconditionFingerprint} not glob '*[^0-9a-f]*'`,
+    ),
+  ],
+);
+
+export const collaborationAiRunSnapshots = sqliteTable(
+  "collaboration_ai_run_snapshots",
+  {
+    workspaceId: text("workspace_id").notNull(),
+    aiRunId: text("ai_run_id").notNull(),
+    documentId: text("document_id").notNull(),
+    generation: integer("generation").notNull(),
+    headSeq: integer("head_seq").notNull(),
+    stateVector: blob("state_vector", { mode: "buffer" }).notNull(),
+    schemaFingerprint: text("schema_fingerprint").notNull(),
+    contentHash: text("content_hash").notNull(),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.workspaceId, table.aiRunId],
+      name: "collaboration_ai_run_snapshots_pk",
+    }),
+    foreignKey({
+      columns: [table.workspaceId, table.documentId, table.generation],
+      foreignColumns: [
+        collaborationDocuments.workspaceId,
+        collaborationDocuments.documentId,
+        collaborationDocuments.generation,
+      ],
+      name: "collaboration_ai_run_snapshots_document_generation_fk",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.workspaceId, table.aiRunId, table.documentId],
+      foreignColumns: [aiRuns.workspaceId, aiRuns.id, aiRuns.documentId],
+      name: "collaboration_ai_run_snapshots_ai_run_fk",
+    }).onDelete("cascade"),
+    check(
+      "collaboration_ai_run_snapshots_sequence_check",
+      sql`typeof(${table.generation}) = 'integer' and ${table.generation} between 1 and 9007199254740991
+        and typeof(${table.headSeq}) = 'integer' and ${table.headSeq} between 0 and 9007199254740991`,
+    ),
+    check(
+      "collaboration_ai_run_snapshots_schema_fingerprint_check",
+      sql`length(${table.schemaFingerprint}) = 64 and ${table.schemaFingerprint} not glob '*[^0-9a-f]*'`,
+    ),
+    check(
+      "collaboration_ai_run_snapshots_content_hash_check",
+      sql`length(${table.contentHash}) = 64 and ${table.contentHash} not glob '*[^0-9a-f]*'`,
+    ),
+  ],
+);
+
 export const appSettings = sqliteTable(
   "app_settings",
   {
@@ -434,6 +897,18 @@ export type NewAiWorkspaceMessageRecord = typeof aiWorkspaceMessages.$inferInser
 export type DocumentChangeRecord = typeof documentChanges.$inferSelect;
 export type NewDocumentChangeRecord = typeof documentChanges.$inferInsert;
 export type DocumentChangeProposalRecord = typeof documentChangeProposals.$inferSelect;
+export type CollaborationDocumentRecord = typeof collaborationDocuments.$inferSelect;
+export type NewCollaborationDocumentRecord = typeof collaborationDocuments.$inferInsert;
+export type CollaborationUpdateRecord = typeof collaborationUpdates.$inferSelect;
+export type NewCollaborationUpdateRecord = typeof collaborationUpdates.$inferInsert;
+export type CollaborationActionRecord = typeof collaborationActions.$inferSelect;
+export type NewCollaborationActionRecord = typeof collaborationActions.$inferInsert;
+export type CollaborationAuthorizationEpochRecord = typeof collaborationAuthorizationEpochs.$inferSelect;
+export type DocumentApprovalRecord = typeof documentApprovals.$inferSelect;
+export type NewDocumentApprovalRecord = typeof documentApprovals.$inferInsert;
+export type CollaborationProposalAnchorRecord = typeof collaborationProposalAnchors.$inferSelect;
+export type CollaborationDocumentChangeRecord = typeof collaborationDocumentChanges.$inferSelect;
+export type CollaborationAiRunSnapshotRecord = typeof collaborationAiRunSnapshots.$inferSelect;
 export type AppSettingsRecord = typeof appSettings.$inferSelect;
 export type NewAppSettingsRecord = typeof appSettings.$inferInsert;
 export type RequestBudgetBucketRecord = typeof requestBudgetBuckets.$inferSelect;
