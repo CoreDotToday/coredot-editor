@@ -25,6 +25,8 @@ export const COLLABORATION_STORAGE_LIMITS = {
 const COLLABORATION_STORAGE_LIMIT_SQL = Object.fromEntries(
   Object.entries(COLLABORATION_STORAGE_LIMITS).map(([key, value]) => [key, sql.raw(String(value))]),
 ) as Record<keyof typeof COLLABORATION_STORAGE_LIMITS, ReturnType<typeof sql.raw>>;
+const COLLABORATION_KEY_BOUNDARY_WHITESPACE_SQL =
+  sql`char(9) || char(10) || char(11) || char(12) || char(13) || char(160) || ' '`;
 export type DocumentChangeSnapshot = {
   title: string;
   contentJson: TiptapJson;
@@ -525,7 +527,7 @@ export const collaborationActions = sqliteTable(
     check(
       "collaboration_actions_command_id_check",
       sql`typeof(${table.commandId}) = 'text'
-        and ${table.commandId} = trim(${table.commandId}, char(9) || char(10) || char(13) || ' ')
+        and ${table.commandId} = trim(${table.commandId}, ${COLLABORATION_KEY_BOUNDARY_WHITESPACE_SQL})
         and length(cast(${table.commandId} as blob)) between 1 and ${COLLABORATION_STORAGE_LIMIT_SQL.correctnessKeyBytes}`,
     ),
     check(
@@ -612,7 +614,7 @@ export const collaborationUpdates = sqliteTable(
     check(
       "collaboration_updates_idempotency_key_check",
       sql`typeof(${table.idempotencyKey}) = 'text'
-        and ${table.idempotencyKey} = trim(${table.idempotencyKey}, char(9) || char(10) || char(13) || ' ')
+        and ${table.idempotencyKey} = trim(${table.idempotencyKey}, ${COLLABORATION_KEY_BOUNDARY_WHITESPACE_SQL})
         and length(cast(${table.idempotencyKey} as blob)) between 1 and ${COLLABORATION_STORAGE_LIMIT_SQL.correctnessKeyBytes}`,
     ),
     check(

@@ -93,7 +93,7 @@ CREATE TABLE `collaboration_actions` (
 			or (`status` = 'failed' and `applied_head_seq` is null and `failure_category` is not null)),
 	CONSTRAINT `collaboration_actions_command_id_check`
 		CHECK (typeof(`command_id`) = 'text'
-			and `command_id` = trim(`command_id`, char(9) || char(10) || char(13) || ' ')
+			and `command_id` = trim(`command_id`, char(9) || char(10) || char(11) || char(12) || char(13) || char(160) || ' ')
 			and length(cast(`command_id` as blob)) between 1 and 256),
 	CONSTRAINT `collaboration_actions_failure_category_check`
 		CHECK (`failure_category` is null or (
@@ -149,7 +149,7 @@ CREATE TABLE `collaboration_updates` (
 			and length(`update_blob`) between 1 and 10485760),
 	CONSTRAINT `collaboration_updates_idempotency_key_check`
 		CHECK (typeof(`idempotency_key`) = 'text'
-			and `idempotency_key` = trim(`idempotency_key`, char(9) || char(10) || char(13) || ' ')
+			and `idempotency_key` = trim(`idempotency_key`, char(9) || char(10) || char(11) || char(12) || char(13) || char(160) || ' ')
 			and length(cast(`idempotency_key` as blob)) between 1 and 256),
 	CONSTRAINT `collaboration_updates_diagnostic_json_check`
 		CHECK (`diagnostic_json` is null or (

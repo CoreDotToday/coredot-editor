@@ -2,7 +2,15 @@ import { createClient, type Client } from "@libsql/client";
 import { getTableName, type SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/libsql";
 import { migrate } from "drizzle-orm/libsql/migrator";
-import { getTableConfig, SQLiteSyncDialect, type AnySQLiteTable } from "drizzle-orm/sqlite-core";
+import {
+  blob,
+  getTableConfig,
+  integer,
+  sqliteTable,
+  SQLiteSyncDialect,
+  text,
+  type AnySQLiteTable,
+} from "drizzle-orm/sqlite-core";
 import { copyFile, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -37,6 +45,11 @@ const TARGET_PREVIEW_BYTES = 1024;
 const CORRECTNESS_KEY_BYTES = 256;
 const HASH_A = "a".repeat(64);
 const HASH_B = "b".repeat(64);
+const parityTypeProbe = sqliteTable("parity_type_probe", {
+  binaryValue: blob("binary_value", { mode: "buffer" }),
+  integerValue: integer("integer_value"),
+  textValue: text("text_value"),
+});
 const COLLABORATION_SCHEMA_TABLES = [
   collaborationDocuments,
   collaborationUpdates,
@@ -81,6 +94,19 @@ describe("collaboration migration", () => {
     for (const table of COLLABORATION_SCHEMA_TABLES) {
       await expectTableParity(client, table);
     }
+  });
+
+  it("detects SQLite column affinity drift in handwritten SQL", async () => {
+    const client = await createDatabase("parity-affinity-drift");
+    await client.execute(`CREATE TABLE parity_type_probe (
+      binary_value text,
+      integer_value blob,
+      text_value integer
+    )`);
+
+    await expect(expectTableParity(client, parityTypeProbe)).rejects.toThrow(
+      "parity_type_probe columns",
+    );
   });
 
   it("retains retired generations and permits exactly one current generation", async () => {
@@ -253,6 +279,17 @@ describe("collaboration migration", () => {
     ];
 
     await expectAllReject(client, cases);
+
+    for (const internalWhitespace of ["\u000b", "\u000c", "\u00a0"]) {
+      await expect(client.execute({
+        sql: "UPDATE collaboration_actions SET command_id = ? WHERE id = 'action-a'",
+        args: [`key${internalWhitespace}part`],
+      })).resolves.toBeDefined();
+      await expect(client.execute({
+        sql: "UPDATE collaboration_updates SET idempotency_key = ? WHERE seq = 1",
+        args: [`key${internalWhitespace}part`],
+      })).resolves.toBeDefined();
+    }
   });
 
   it("applies the fresh migration chain with Workspace-safe collaboration constraints", async () => {
@@ -699,6 +736,7 @@ async function expectTableParity(client: Client, table: AnySQLiteTable) {
     name: column.name,
     notNull: column.notNull,
     primaryOrder: primaryOrder.get(column.name) ?? 0,
+    sqlType: normalizeSqliteAffinity(column.getSQLType()),
   }));
   const tableInfo = await client.execute(`PRAGMA table_info(${config.name})`);
   const actualColumns = tableInfo.rows.map((row) => ({
@@ -706,6 +744,7 @@ async function expectTableParity(client: Client, table: AnySQLiteTable) {
     name: String(row.name),
     notNull: Boolean(row.notnull),
     primaryOrder: Number(row.pk),
+    sqlType: normalizeSqliteAffinity(row.type),
   }));
   expect(actualColumns, `${config.name} columns`).toEqual(expectedColumns);
 
@@ -812,11 +851,42 @@ function normalizeDefaultValue(value: unknown) {
   return String(value).trim().replace(/^\((.*)\)$/u, "$1");
 }
 
+function normalizeSqliteAffinity(value: unknown) {
+  const declaredType = String(value ?? "").trim().toUpperCase();
+  if (declaredType.includes("INT")) return "INTEGER";
+  if (/(CHAR|CLOB|TEXT)/u.test(declaredType)) return "TEXT";
+  if (!declaredType || declaredType.includes("BLOB")) return "BLOB";
+  if (/(REAL|FLOA|DOUB)/u.test(declaredType)) return "REAL";
+  return "NUMERIC";
+}
+
 function correctnessKeyCases(table: string, column: string, where: string) {
+  const extendedBoundaryWhitespace = [
+    { label: "vertical tab", value: "\u000b" },
+    { label: "form feed", value: "\u000c" },
+    { label: "non-breaking space", value: "\u00a0" },
+  ];
+
   return [
     { label: `${table}.${column} empty`, statement: `UPDATE ${table} SET ${column} = '' WHERE ${where}` },
     { label: `${table}.${column} blank`, statement: `UPDATE ${table} SET ${column} = '   ' WHERE ${where}` },
     { label: `${table}.${column} surrounding whitespace`, statement: `UPDATE ${table} SET ${column} = ' key ' WHERE ${where}` },
+    ...extendedBoundaryWhitespace.flatMap(({ label, value }) => [
+      {
+        label: `${table}.${column} ${label} only`,
+        statement: {
+          sql: `UPDATE ${table} SET ${column} = ? WHERE ${where}`,
+          args: [value],
+        },
+      },
+      {
+        label: `${table}.${column} surrounding ${label}`,
+        statement: {
+          sql: `UPDATE ${table} SET ${column} = ? WHERE ${where}`,
+          args: [`${value}key${value}`],
+        },
+      },
+    ]),
     {
       label: `${table}.${column} blob`,
       statement: `UPDATE ${table} SET ${column} = CAST('key' AS BLOB) WHERE ${where}`,
