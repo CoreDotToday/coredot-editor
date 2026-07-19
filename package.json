@@ -113,6 +113,7 @@
   },
   "pnpm": {
     "overrides": {
+      "@babel/core": "^7.29.6",
       "esbuild": "^0.25.12",
       "js-yaml": "^4.2.0",
       "postcss": "^8.5.14",

@@ -1,13 +1,28 @@
-import { describe, expect, it } from "vitest";
-import { NextRequest } from "next/server";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PUBLIC_API_ROUTES, isPublicApiPath } from "@/features/auth/public-api-routes";
-import { shouldProtectWithClerk } from "./proxy";
 
-function request(pathname: string) {
-  return new NextRequest(`http://localhost${pathname}`);
-}
+const clerkServerMocks = vi.hoisted(() => {
+  const clerkProxy = vi.fn();
+
+  return {
+    clerkMiddleware: vi.fn(() => clerkProxy),
+    clerkProxy,
+    createRouteMatcher: vi.fn(() => vi.fn()),
+  };
+});
+
+vi.mock("@clerk/nextjs/server", () => clerkServerMocks);
 
 describe("Clerk proxy protection", () => {
+  beforeEach(() => {
+    clerkServerMocks.clerkMiddleware.mockClear();
+    clerkServerMocks.createRouteMatcher.mockClear();
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it("keeps the public operations inventory exact", () => {
     expect(PUBLIC_API_ROUTES).toEqual(["/api/health", "/api/ready"]);
     expect(isPublicApiPath("/api/health")).toBe(true);
@@ -17,21 +32,15 @@ describe("Clerk proxy protection", () => {
     expect(isPublicApiPath("/api/documents")).toBe(false);
   });
 
-  it("allows only the declared public operations endpoints as public APIs", () => {
-    expect(shouldProtectWithClerk(request("/api/health"))).toBe(false);
-    expect(shouldProtectWithClerk(request("/api/ready"))).toBe(false);
-  });
+  it("uses Clerk only to provide auth context to protected resources", async () => {
+    vi.stubEnv("AUTH_MODE", "clerk");
+    vi.resetModules();
 
-  it("lets API requests reach the centralized JSON auth seam", () => {
-    expect(shouldProtectWithClerk(request("/api/documents"))).toBe(false);
-    expect(shouldProtectWithClerk(request("/api/documents/doc-1"))).toBe(false);
-  });
+    const proxyModule = await import("./proxy");
 
-  it("continues protecting private pages while allowing public pages", () => {
-    expect(shouldProtectWithClerk(request("/documents"))).toBe(true);
-    expect(shouldProtectWithClerk(request("/templates"))).toBe(true);
-    expect(shouldProtectWithClerk(request("/"))).toBe(false);
-    expect(shouldProtectWithClerk(request("/sign-in"))).toBe(false);
-    expect(shouldProtectWithClerk(request("/sign-up/verify"))).toBe(false);
+    expect(clerkServerMocks.createRouteMatcher).not.toHaveBeenCalled();
+    expect(clerkServerMocks.clerkMiddleware).toHaveBeenCalledOnce();
+    expect(clerkServerMocks.clerkMiddleware).toHaveBeenCalledWith();
+    expect(proxyModule.default).toBe(clerkServerMocks.clerkProxy);
   });
 });
