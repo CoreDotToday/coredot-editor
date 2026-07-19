@@ -39,6 +39,7 @@ describe("collaboration client configuration", () => {
       },
       dependencies,
     )).resolves.toEqual({
+      currentPrincipalId: TEST_REQUEST_CONTEXT.principalId,
       documentId: "document-a",
       kind: "collaboration",
       room: "collab:v1:vitest-workspace:document-a:g3",
@@ -84,6 +85,7 @@ describe("collaboration client configuration", () => {
       },
       dependencies,
     )).resolves.toEqual({
+      currentPrincipalId: TEST_REQUEST_CONTEXT.principalId,
       documentId: "document-a",
       kind: "collaboration",
       room: "collab:v1:vitest-workspace:document-a:g3",

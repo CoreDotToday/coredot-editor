@@ -18,6 +18,7 @@ import { createBrowserCollaborationSchemaFingerprint } from "./schema-fingerprin
 import { deferCollaborationResourceCleanup } from "./deferred-resource-cleanup";
 
 export type CollaborationSessionConfiguration = {
+  currentPrincipalId: string;
   documentId: string;
   projectProfile: ProjectProfile;
   room: string;
@@ -171,6 +172,7 @@ export function useCollaborationSession(
       }
     };
   }, [
+    configuration.currentPrincipalId,
     configuration.documentId,
     configuration.projectProfile,
     configuration.room,
@@ -207,6 +209,7 @@ function createFatalStore(
 
 function createConfigurationIdentity(configuration: CollaborationSessionConfiguration) {
   return JSON.stringify([
+    configuration.currentPrincipalId,
     configuration.documentId,
     configuration.room,
     configuration.schemaFingerprint,

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type DragEvent, type FocusEvent, type MouseEvent } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, useSyncExternalStore, type DragEvent, type FocusEvent, type MouseEvent } from "react";
 import CharacterCount from "@tiptap/extension-character-count";
 import Placeholder from "@tiptap/extension-placeholder";
 import { EditorContent, useEditor } from "@tiptap/react";
@@ -245,12 +245,24 @@ export function DocumentEditor(props: DocumentEditorProps) {
     fields: YjsFieldStore | null;
     value: string;
   }>({ baseTitle: "", fields: null, value: "" });
-  const displayedTitle = collaborationFields
-    && collaborationTitleDraft.fields === collaborationFields
-    && collaborationTitleDraft.baseTitle === title
-    ? collaborationTitleDraft.value
-    : title;
   const isWritable = isLegacyMode || mode.session.writable;
+  let currentCollaborationTitleDraft = collaborationTitleDraft;
+  if (
+    collaborationFields
+    && collaborationTitleDraft.fields === collaborationFields
+    && (!isWritable || collaborationTitleDraft.baseTitle !== title)
+  ) {
+    currentCollaborationTitleDraft = { baseTitle: title, fields: null, value: title };
+    setCollaborationTitleDraft(currentCollaborationTitleDraft);
+  }
+  const displayedTitle = isWritable
+    && collaborationFields
+    && currentCollaborationTitleDraft.fields === collaborationFields
+    && currentCollaborationTitleDraft.baseTitle === title
+    ? currentCollaborationTitleDraft.value
+    : title;
+  const collaborationTitleErrorId = useId();
+  const isCollaborationTitleInvalid = !isLegacyMode && displayedTitle.trim().length === 0;
   const canRunAiCommands = onSelectionCommand !== undefined;
   const [selectionMenu, setSelectionMenu] = useState<SelectionMenuState | null>(null);
   const [blockGutter, setBlockGutter] = useState<BlockGutterState | null>(null);
@@ -834,7 +846,10 @@ export function DocumentEditor(props: DocumentEditorProps) {
       <div className="px-4 pt-6 pb-2 sm:pt-8 sm:pr-8 sm:pl-16 lg:pl-20">
         <div className="mx-auto w-full max-w-[54rem]">
           <input
+            aria-describedby={isCollaborationTitleInvalid ? collaborationTitleErrorId : undefined}
+            aria-invalid={isCollaborationTitleInvalid || undefined}
             aria-label={messages.titleLabel}
+            aria-required={!isLegacyMode || undefined}
             className="w-full bg-transparent text-2xl font-semibold leading-tight tracking-normal text-zinc-950 outline-none placeholder:text-zinc-400 sm:text-3xl"
             maxLength={isLegacyMode ? undefined : COLLABORATION_TITLE_MAX_LENGTH}
             onBlur={() => {
@@ -848,8 +863,18 @@ export function DocumentEditor(props: DocumentEditorProps) {
             }}
             onChange={(event) => handleTitleChange(event.target.value)}
             readOnly={!isWritable}
+            required={!isLegacyMode}
             value={displayedTitle}
           />
+          {isCollaborationTitleInvalid ? (
+            <p
+              className="mt-2 text-sm font-medium text-rose-700"
+              id={collaborationTitleErrorId}
+              role="status"
+            >
+              {messages.titleRequired}
+            </p>
+          ) : null}
         </div>
       </div>
       <div className="relative min-h-0 flex-1">

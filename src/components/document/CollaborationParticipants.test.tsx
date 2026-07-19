@@ -1,6 +1,12 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
+import {
+  applyAwarenessUpdate,
+  Awareness,
+  encodeAwarenessUpdate,
+} from "y-protocols/awareness";
+import * as Y from "yjs";
 
 import {
   CollaborationParticipants,
@@ -61,6 +67,48 @@ describe("CollaborationParticipants", () => {
     disclosure.focus();
     await user.keyboard("{Enter}");
     expect(screen.getByRole("list", { name: "Participant details" })).toBeVisible();
+  });
+
+  it("merges a noncanonical local Awareness session into its verified remote Principal group", async () => {
+    const user = userEvent.setup();
+    const localDocument = new Y.Doc();
+    const remoteDocument = new Y.Doc();
+    const localAwareness = new Awareness(localDocument);
+    const remoteAwareness = new Awareness(remoteDocument);
+    localAwareness.setLocalState({
+      user: { displayName: "unverified local", token: "must-not-render" },
+    });
+    remoteAwareness.setLocalState(
+      canonicalState("Alice", "#1d4ed8", "principal-current", "remote-tab"),
+    );
+    applyAwarenessUpdate(
+      localAwareness,
+      encodeAwarenessUpdate(remoteAwareness, [remoteAwareness.clientID]),
+      "remote-test",
+    );
+
+    render(
+      <CollaborationParticipants
+        awareness={localAwareness}
+        currentPrincipalId="principal-current"
+        language="en"
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Open participant list (1 participant)" }))
+      .toBeInTheDocument();
+    expect(screen.getByRole("img", { name: /Alice.*current user.*2 sessions/i }))
+      .toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent(/unverified local|must-not-render|principal-current/);
+    await user.click(screen.getByRole("button", { name: "Open participant list (1 participant)" }));
+    expect(screen.getAllByRole("listitem")).toHaveLength(2);
+    expect(screen.getByRole("list", { name: "Participant details" }))
+      .toHaveTextContent("Alice (current user) · 2 sessions");
+
+    localAwareness.destroy();
+    remoteAwareness.destroy();
+    localDocument.destroy();
+    remoteDocument.destroy();
   });
 
   it("ignores non-canonical states and never renders extra identity keys", async () => {
@@ -142,6 +190,39 @@ describe("CollaborationParticipants", () => {
       borderColor: first,
       color: "#ffffff",
     });
+  });
+
+  it("keeps all 64 bounded participants keyboard-accessible in a viewport-constrained list", async () => {
+    const user = userEvent.setup();
+    const awareness = new FakeAwareness(1, Array.from({ length: 64 }, (_, index) => [
+      index + 1,
+      canonicalState(
+        `Participant ${String(index).padStart(2, "0")}`,
+        "#000000",
+        `principal-${index}`,
+        `session-${index}`,
+      ),
+    ]));
+    render(<CollaborationParticipants awareness={awareness} language="en" />);
+
+    const disclosure = screen.getByRole("button", { name: "Open participant list (64 participants)" });
+    disclosure.focus();
+    await user.keyboard("{Enter}");
+
+    const details = screen.getByRole("list", { name: "Participant details" });
+    expect(details).toHaveClass(
+      "max-h-[min(24rem,calc(100dvh-6rem))]",
+      "max-w-[calc(100vw-1rem)]",
+      "overflow-y-auto",
+      "overscroll-contain",
+      "focus-visible:outline-2",
+    );
+    expect(details).toHaveAttribute("tabindex", "0");
+    details.focus();
+    expect(details).toHaveFocus();
+    const items = within(details).getAllByRole("listitem");
+    expect(items).toHaveLength(64);
+    expect(items.at(-1)).toHaveAccessibleName(/Participant 63.*1 session/);
   });
 });
 

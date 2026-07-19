@@ -181,6 +181,7 @@ type DocumentShellProps = {
 };
 
 type CollaborationRuntime = {
+  currentPrincipalId: string;
   fields: YjsFieldStore | null;
   session: CollaborationSession | null;
   snapshot: CollaborationSessionSnapshot;
@@ -467,6 +468,7 @@ function CollaborativeDocumentShellContent(
     <DocumentShellContent
       {...props}
       collaborationRuntime={{
+        currentPrincipalId: props.collaboration.currentPrincipalId,
         fields: fieldsReady && fieldResource?.session === session ? fieldResource.fields : null,
         session,
         snapshot,
@@ -2375,6 +2377,7 @@ function DocumentShellContent({
           metadataDisabled={isCollaborationMode && (
             !activeCollaborationFields || !collaborationRuntime?.snapshot.writable
           )}
+          metadataDraftIdentity={activeCollaborationFields ?? projectProfile}
           messages={messages.metadataPanel}
           onMetadataFieldChange={handleMetadataFieldChange}
           onReadinessChange={handleReadinessChange}
@@ -2544,8 +2547,8 @@ function DocumentShellContent({
       ) : null}
 
       <section aria-label={messages.editor.workspaceLabel} className="flex min-w-0 flex-1 flex-col bg-white">
-        <header className="flex min-h-14 shrink-0 flex-col gap-2 border-b border-zinc-200 bg-white px-3 py-2 sm:h-14 sm:flex-row sm:items-center sm:justify-between sm:px-4 sm:py-0">
-          <div className="flex min-w-0 items-center gap-3">
+        <header className="flex min-h-14 min-w-0 shrink-0 flex-col gap-2 border-b border-zinc-200 bg-white px-3 py-2 sm:px-4 xl:flex-row xl:items-center xl:justify-between xl:py-0">
+          <div className="flex w-full min-w-0 flex-wrap items-center gap-x-3 gap-y-2 xl:flex-nowrap">
             <button
               aria-label={messages.shell.openSidebar}
               className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-zinc-600 hover:bg-zinc-100 hover:text-zinc-950 lg:hidden"
@@ -2554,12 +2557,12 @@ function DocumentShellContent({
             >
               <PanelLeftOpen aria-hidden="true" className="size-4" />
             </button>
-            <p className="max-w-[34rem] truncate text-sm font-medium text-zinc-800">
+            <p className="min-w-0 max-w-[34rem] flex-[1_1_8rem] truncate text-sm font-medium text-zinc-800">
               {(activeCollaborationFields ? collaborationTitle : draft.title) || messages.shell.untitledDocument}
             </p>
             {isCollaborationMode ? (
               <CollaborationStatus
-                className="shrink-0 font-medium"
+                className="flex-[1_1_12rem] font-medium xl:flex-initial"
                 language={language}
                 snapshot={collaborationRuntime.snapshot}
               />
@@ -2576,11 +2579,13 @@ function DocumentShellContent({
             {isCollaborationMode ? (
               <CollaborationParticipants
                 awareness={collaborationProvider?.awareness ?? null}
+                className="ml-auto shrink-0"
+                currentPrincipalId={collaborationRuntime.currentPrincipalId}
                 language={language}
               />
             ) : null}
           </div>
-          <div className="flex w-full min-w-0 items-center gap-2 overflow-x-auto pb-1 sm:w-auto sm:overflow-visible sm:pb-0">
+          <div className="flex w-full min-w-0 items-center gap-2 overflow-x-auto pb-1 xl:w-auto xl:overflow-visible xl:pb-0">
             <button
               aria-label={editorSurface === "source" ? messages.header.editorView : messages.header.sourceView}
               className="inline-flex h-8 items-center gap-1.5 rounded-md border border-zinc-200 bg-white px-2.5 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-400"

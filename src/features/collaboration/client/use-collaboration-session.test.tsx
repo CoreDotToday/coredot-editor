@@ -12,6 +12,7 @@ import {
 } from "./use-collaboration-session";
 
 const configuration = {
+  currentPrincipalId: "principal-a",
   documentId: "document-a",
   projectProfile: getProjectProfile("default"),
   room: "collab:v1:workspace-a:document-a:g1",
@@ -145,7 +146,7 @@ describe("useCollaborationSession", () => {
     expect(destroyDocument).toHaveBeenCalledOnce();
   });
 
-  it("destroys each successful session and document exactly once across configuration churn", async () => {
+  it("destroys each successful session and document exactly once across document and Principal churn", async () => {
     const documents: Y.Doc[] = [];
     const destroyDocuments: Array<ReturnType<typeof vi.spyOn>> = [];
     const destroySessions: Array<ReturnType<typeof vi.fn>> = [];
@@ -174,21 +175,28 @@ describe("useCollaborationSession", () => {
       fingerprintSchema: async () => configuration.schemaFingerprint,
     };
     const { result, rerender, unmount } = renderHook(
-      ({ documentId }) => useCollaborationSession({
+      ({ currentPrincipalId, documentId }) => useCollaborationSession({
         ...configuration,
+        currentPrincipalId,
         documentId,
         room: `collab:v1:workspace-a:${documentId}:g1`,
       }, dependencies),
-      { initialProps: { documentId: "document-a" } },
+      { initialProps: { currentPrincipalId: "principal-a", documentId: "document-a" } },
     );
 
     await waitFor(() => expect(dependencies.createSession).toHaveBeenCalledTimes(1));
-    rerender({ documentId: "document-b" });
+    rerender({ currentPrincipalId: "principal-a", documentId: "document-b" });
     await waitFor(() => expect(dependencies.createSession).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(result.current.session?.room).toBe("collab:v1:workspace-a:document-b:g1"));
 
     expect(destroySessions[0]).toHaveBeenCalledOnce();
     expect(destroyDocuments[0]).toHaveBeenCalledOnce();
+
+    rerender({ currentPrincipalId: "principal-b", documentId: "document-b" });
+    await waitFor(() => expect(dependencies.createSession).toHaveBeenCalledTimes(3));
+    expect(destroySessions[1]).toHaveBeenCalledOnce();
+    expect(destroyDocuments[1]).toHaveBeenCalledOnce();
+
     unmount();
     expect(destroySessions.every((destroy) => destroy.mock.calls.length === 1)).toBe(true);
     expect(destroyDocuments.every((destroy) => destroy.mock.calls.length === 1)).toBe(true);

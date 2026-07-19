@@ -80,6 +80,17 @@ describe("CollaborationStatus", () => {
     expect(screen.getByRole("status")).not.toHaveTextContent("b".repeat(64));
     expect(screen.getByRole("status")).not.toHaveTextContent("c".repeat(64));
   });
+
+  it.each(["ko", "en"] as const)(
+    "allows long %s status copy to wrap within a narrow collaboration header",
+    (language) => {
+      render(<CollaborationStatus language={language} snapshot={snapshotFor("fatal")} />);
+
+      const status = screen.getByRole("status");
+      expect(status).toHaveClass("max-w-full", "min-w-0");
+      expect(status.lastElementChild).toHaveClass("min-w-0", "break-words");
+    },
+  );
 });
 
 function snapshotFor(

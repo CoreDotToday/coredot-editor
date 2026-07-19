@@ -41,6 +41,7 @@ export type YjsFieldStore = {
 type SharedRoot = Y.Doc["share"] extends Map<string, infer Root> ? Root : never;
 
 export function createYjsFieldStore(options: {
+  allowPreSyncEmptyTitle?: boolean;
   document: Y.Doc;
   onInvalid?: () => void;
   projectProfile: ProjectProfile;
@@ -53,9 +54,11 @@ export function createYjsFieldStore(options: {
   const metadataListeners = new Set<() => void>();
   let destroyed = false;
   let failClosed = false;
-  // The client Y.Doc is intentionally empty until the first provider sync.
-  // Empty remains invalid as a write and after any observed title transaction.
-  let titleSnapshot = readTitle(roots.title, { allowPreSyncEmpty: true });
+  // Production attaches only after provider sync and therefore validates
+  // strictly. Isolated pre-sync consumers must explicitly opt into empty.
+  let titleSnapshot = readTitle(roots.title, {
+    allowPreSyncEmpty: options.allowPreSyncEmptyTitle === true,
+  });
   let metadataSnapshot = readMetadata(roots.metadata, options.projectProfile);
 
   const failClosedStore = () => {
@@ -230,6 +233,7 @@ function validateTitle(title: unknown): asserts title is string {
     typeof title !== "string"
     || title.trim().length === 0
     || title.length > COLLABORATION_TITLE_MAX_LENGTH
+    || hasUnpairedSurrogate(title)
   ) {
     throw new YjsFieldStoreError("title_invalid");
   }
@@ -309,22 +313,42 @@ function metadataValueEqual(
 }
 
 function commonPrefixLength(left: string, right: string) {
-  const maximum = Math.min(left.length, right.length);
-  let index = 0;
-  while (index < maximum && left[index] === right[index]) index += 1;
-  return index;
+  const leftCodePoints = Array.from(left);
+  const rightCodePoints = Array.from(right);
+  const maximum = Math.min(leftCodePoints.length, rightCodePoints.length);
+  let codeUnitLength = 0;
+  for (let index = 0; index < maximum; index += 1) {
+    if (leftCodePoints[index] !== rightCodePoints[index]) break;
+    codeUnitLength += leftCodePoints[index]!.length;
+  }
+  return codeUnitLength;
 }
 
 function commonSuffixLength(left: string, right: string, prefixLength: number) {
-  const maximum = Math.min(left.length, right.length) - prefixLength;
-  let length = 0;
-  while (
-    length < maximum
-    && left[left.length - 1 - length] === right[right.length - 1 - length]
-  ) {
-    length += 1;
+  const leftCodePoints = Array.from(left.slice(prefixLength));
+  const rightCodePoints = Array.from(right.slice(prefixLength));
+  const maximum = Math.min(leftCodePoints.length, rightCodePoints.length);
+  let codeUnitLength = 0;
+  for (let offset = 1; offset <= maximum; offset += 1) {
+    const leftCodePoint = leftCodePoints.at(-offset);
+    if (leftCodePoint !== rightCodePoints.at(-offset)) break;
+    codeUnitLength += leftCodePoint!.length;
   }
-  return length;
+  return codeUnitLength;
+}
+
+function hasUnpairedSurrogate(value: string) {
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return true;
+      index += 1;
+    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function isWritable(writable: () => boolean) {

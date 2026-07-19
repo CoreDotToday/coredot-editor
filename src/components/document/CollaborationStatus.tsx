@@ -34,7 +34,7 @@ export function CollaborationStatus({
     <span
       aria-atomic="true"
       aria-live="polite"
-      className={`inline-flex min-w-0 items-center gap-2 text-xs text-slate-600 ${className}`.trim()}
+      className={`inline-flex max-w-full min-w-0 items-center gap-2 text-xs text-slate-600 ${className}`.trim()}
       data-collaboration-status={snapshot.status}
       role="status"
     >
@@ -42,7 +42,7 @@ export function CollaborationStatus({
         aria-hidden="true"
         className={`size-2 shrink-0 rounded-full ${STATUS_DOT_CLASSES[snapshot.status]}`}
       />
-      <span>{message}</span>
+      <span className="min-w-0 break-words">{message}</span>
     </span>
   );
 }

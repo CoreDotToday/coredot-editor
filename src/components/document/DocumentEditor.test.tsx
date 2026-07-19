@@ -12,6 +12,7 @@ import { createCollaborationDocumentCodec } from "@/features/collaboration/docum
 import { prepareBaseExtensionsForCollaboration } from "@/features/collaboration/client/collaboration-editor-extensions";
 import { createYjsFieldStore } from "@/features/collaboration/client/yjs-field-store";
 import { getProjectProfile } from "@/features/projects/default-project-profiles";
+import { editorMessages } from "@/features/i18n/editor-language";
 import {
   getBlockActionRangeAtPosition,
   getListItemBlockActionRangeByPath,
@@ -148,6 +149,11 @@ describe("DocumentEditor", () => {
     await user.clear(titleInput);
     expect(titleInput).toHaveValue("");
     expect(sharedDocument.getText("title").toString()).toBe("Remote title");
+    expect(titleInput).toBeRequired();
+    expect(titleInput).toHaveAttribute("aria-invalid", "true");
+    expect(titleInput).toHaveAccessibleDescription(
+      "제목은 필수입니다. 빈 제목은 저장되지 않았습니다.",
+    );
     act(() => {
       const remoteTitle = sharedDocument.getText("title");
       sharedDocument.transact(() => {
@@ -155,6 +161,25 @@ describe("DocumentEditor", () => {
         remoteTitle.insert(0, "Remote override");
       }, "remote-title-while-local-empty");
     });
+    expect(titleInput).toHaveValue("Remote override");
+    act(() => {
+      const remoteTitle = sharedDocument.getText("title");
+      sharedDocument.transact(() => {
+        remoteTitle.delete(0, remoteTitle.length);
+        remoteTitle.insert(0, "Remote title");
+      }, "remote-title-return-to-draft-base");
+    });
+    expect(titleInput).toHaveValue("Remote title");
+    act(() => {
+      const remoteTitle = sharedDocument.getText("title");
+      sharedDocument.transact(() => {
+        remoteTitle.delete(0, remoteTitle.length);
+        remoteTitle.insert(0, "Remote override");
+      }, "remote-title-after-draft-reset");
+    });
+    expect(titleInput).toHaveValue("Remote override");
+    await user.clear(titleInput);
+    fireEvent.blur(titleInput);
     expect(titleInput).toHaveValue("Remote override");
     await user.clear(titleInput);
     await user.type(titleInput, "Replacement title");
@@ -165,6 +190,67 @@ describe("DocumentEditor", () => {
     expect(update).toHaveBeenCalled();
 
     unmount();
+    fields.destroy();
+    sharedDocument.destroy();
+  });
+
+  it("restores the canonical title immediately when write permission is downgraded during a blank draft", async () => {
+    const user = userEvent.setup();
+    const sharedDocument = createCollaborationDocumentCodec(getProjectProfile("default")).bootstrap({
+      contentJson: { type: "doc", content: [{ type: "paragraph" }] },
+      metadataJson: {},
+      plainText: "",
+      title: "Canonical title",
+    });
+    const provider = { awareness: new Awareness(sharedDocument) };
+    const fields = createYjsFieldStore({
+      document: sharedDocument,
+      projectProfile: getProjectProfile("default"),
+      writable: () => true,
+    });
+    const writableSession = { document: sharedDocument, fields, provider, writable: true };
+    const { rerender } = render(
+      <DocumentEditor
+        language="en"
+        messages={editorMessages.en.editor}
+        mode={{ kind: "collaboration", session: writableSession }}
+      />,
+    );
+    const titleInput = screen.getByRole("textbox", { name: "Document title" });
+
+    await user.clear(titleInput);
+    expect(titleInput).toHaveValue("");
+    expect(titleInput).toHaveAttribute("aria-invalid", "true");
+    expect(titleInput).toHaveAccessibleDescription(
+      "A title is required. The blank title was not saved.",
+    );
+
+    rerender(
+      <DocumentEditor
+        language="en"
+        messages={editorMessages.en.editor}
+        mode={{
+          kind: "collaboration",
+          session: { ...writableSession, writable: false },
+        }}
+      />,
+    );
+
+    expect(titleInput).toHaveValue("Canonical title");
+    expect(titleInput).toHaveAttribute("readonly");
+    expect(titleInput).not.toHaveAttribute("aria-invalid", "true");
+
+    rerender(
+      <DocumentEditor
+        language="en"
+        messages={editorMessages.en.editor}
+        mode={{ kind: "collaboration", session: writableSession }}
+      />,
+    );
+    expect(titleInput).toHaveValue("Canonical title");
+    expect(titleInput).not.toHaveAttribute("readonly");
+
+    provider.awareness.destroy();
     fields.destroy();
     sharedDocument.destroy();
   });

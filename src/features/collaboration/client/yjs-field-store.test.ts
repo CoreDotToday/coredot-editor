@@ -15,6 +15,7 @@ describe("Yjs field store", () => {
     const localDocument = new Y.Doc();
     const remoteDocument = createDocument("Synced title");
     const store = createYjsFieldStore({
+      allowPreSyncEmptyTitle: true,
       document: localDocument,
       projectProfile: profile,
       writable: () => false,
@@ -57,6 +58,21 @@ describe("Yjs field store", () => {
     expect(document.getText("title")).toBe(title);
     expect(title.toString()).toBe("shared-BETA-tail");
     expect(deltas).toEqual([[{ retain: 7 }, { delete: 5 }, { insert: "BETA" }]]);
+  });
+
+  it("uses Unicode-safe Y.Text boundaries and converges an emoji replacement exactly", () => {
+    const [localDocument, peerDocument] = createPeerDocuments("😀a");
+    const store = createYjsFieldStore({
+      document: localDocument,
+      projectProfile: profile,
+      writable: () => true,
+    });
+
+    expect(store.setTitle("😁a")).toBe(true);
+    applyMissingUpdate(localDocument, peerDocument);
+
+    expect(localDocument.getText("title").toString()).toBe("😁a");
+    expect(peerDocument.getText("title").toString()).toBe("😁a");
   });
 
   it("converges concurrent title edits from two peers", () => {
@@ -183,6 +199,16 @@ describe("Yjs field store", () => {
       expect.objectContaining({ category: "title_invalid" }),
     );
     expect(store.getTitleSnapshot()).toBe("Shared title");
+  });
+
+  it("rejects unpaired surrogate title input without changing or encoding it", () => {
+    const document = createDocument("Shared title");
+    const store = createYjsFieldStore({ document, projectProfile: profile, writable: () => true });
+
+    expect(() => store.setTitle("broken-\ud83d-title")).toThrowError(
+      expect.objectContaining({ category: "title_invalid" }),
+    );
+    expect(document.getText("title").toString()).toBe("Shared title");
   });
 
   it("publishes remote title and metadata updates through independent subscriptions", () => {
@@ -314,6 +340,18 @@ describe("Yjs field store", () => {
         category: "shared_type_mismatch",
         message: "Collaborative field store is unavailable",
       }));
+  });
+
+  it("rejects an empty canonical title by default after synchronization", () => {
+    const document = new Y.Doc();
+    document.getText("title");
+    document.getMap("metadata");
+
+    expect(() => createYjsFieldStore({
+      document,
+      projectProfile: profile,
+      writable: () => true,
+    })).toThrowError(expect.objectContaining({ category: "title_invalid" }));
   });
 
   it("rejects initially invalid field content with bounded errors", () => {

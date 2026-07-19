@@ -306,6 +306,7 @@ function createDocumentWithContent(id: string, title: string, paragraphText: str
 
 function createCollaborationConfiguration() {
   return {
+    currentPrincipalId: "principal-current",
     documentId: "doc_1",
     kind: "collaboration" as const,
     room: "organization:org_1:document:doc_1",
@@ -718,6 +719,48 @@ describe("DocumentShell", () => {
     });
   });
 
+  it("keeps long collaboration status and participants reachable in the wrapping mobile header", async () => {
+    const session = createMockCollaborationSession("Responsive title");
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session,
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        pendingDurableAcknowledgementChecksums: ["a".repeat(64)],
+        permission: "write",
+        status: "storage_delayed",
+        transportSynced: true,
+        writable: true,
+      }),
+    });
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocumentWithContent("doc_1", "Durable title", "Durable projection")}
+        templates={[]}
+      />,
+    );
+
+    await screen.findByRole("textbox", { name: "문서 제목" });
+    const status = document.querySelector("[data-collaboration-status]");
+    if (!(status instanceof HTMLElement)) throw new Error("Collaboration status is not rendered");
+    const header = status.closest("header");
+    const identityRow = status.parentElement;
+    const participants = screen.getByRole("region", { name: "문서 공동 편집 참여자" });
+
+    expect(header).toHaveClass("min-h-14", "min-w-0", "xl:flex-row");
+    expect(header).not.toHaveClass("h-14");
+    expect(header).not.toHaveClass("sm:h-14");
+    expect(header).not.toHaveClass("xl:h-14");
+    expect(header).not.toHaveClass("sm:flex-row");
+    expect(identityRow).toHaveClass("w-full", "flex-wrap", "gap-y-2", "xl:flex-nowrap");
+    expect(identityRow).not.toHaveClass("sm:flex-nowrap");
+    expect(status).toHaveClass("flex-[1_1_12rem]", "xl:flex-initial");
+    expect(status).not.toHaveClass("sm:flex-initial");
+    expect(participants).toHaveClass("ml-auto", "shrink-0");
+  });
+
   it("fails closed every SQL-backed body surface in collaboration mode", async () => {
     const user = userEvent.setup();
     vi.mocked(useCollaborationSession).mockReturnValue({
@@ -871,6 +914,39 @@ describe("DocumentShell", () => {
     expect(await screen.findByRole("textbox", { name: "문서 제목" })).toHaveAttribute("readonly");
     expect(screen.getByRole("textbox", { name: "소유자" })).toBeDisabled();
     expect(screen.getByRole("combobox", { name: "준비 상태" })).toBeDisabled();
+  });
+
+  it("fails closed to the durable projection when a synchronized Yjs title is empty", async () => {
+    const session = createMockCollaborationSession("");
+    const markFatal = vi.spyOn(session.store, "markFatal");
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session,
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        permission: "write",
+        status: "synced",
+        transportSynced: true,
+        writable: true,
+      }),
+    });
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocumentWithContent("doc_1", "Durable title", "Durable SQL body")}
+        templates={[]}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(markFatal).toHaveBeenCalledTimes(1);
+      expect(session.destroy).toHaveBeenCalledTimes(1);
+      const projection = screen.getByRole("article", { name: "Collaboration read-only projection" });
+      expect(projection).toHaveTextContent("Durable title");
+      expect(projection).toHaveTextContent("Durable SQL body");
+      expect(screen.queryByTestId("mock-editor-mode")).not.toBeInTheDocument();
+    });
   });
 
   it("fences title and metadata writes immediately when session permission is downgraded", async () => {

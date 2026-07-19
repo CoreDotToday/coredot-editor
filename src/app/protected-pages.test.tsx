@@ -250,6 +250,7 @@ describe("protected server pages", () => {
 
   it("passes only the public exact-room collaboration bootstrap to the client shell", async () => {
     vi.mocked(resolveCollaborationClientConfiguration).mockResolvedValueOnce({
+      currentPrincipalId: workspaceBContext.principalId,
       documentId: "workspace-b-document",
       kind: "collaboration",
       room: "collab:v1:workspace-b:workspace-b-document:g4",
@@ -260,13 +261,14 @@ describe("protected server pages", () => {
     const page = await DocumentPage({ params: Promise.resolve({ id: "workspace-b-document" }) });
 
     expect(page.props.collaboration).toEqual({
+      currentPrincipalId: workspaceBContext.principalId,
       documentId: "workspace-b-document",
       kind: "collaboration",
       room: "collab:v1:workspace-b:workspace-b-document:g4",
       schemaFingerprint: "a".repeat(64),
       websocketUrl: "wss://collaboration.example.test/",
     });
-    expect(JSON.stringify(page.props.collaboration)).not.toMatch(/token|signing|private/i);
+    expect(JSON.stringify(page.props.collaboration)).not.toMatch(/token|signing|private|role|email/i);
   });
 
   it("invokes notFound and skips downstream queries for a cross-workspace document id", async () => {

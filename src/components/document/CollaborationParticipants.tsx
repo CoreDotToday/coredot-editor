@@ -15,6 +15,7 @@ type CollaborationParticipantsProps = {
   awareness: CollaborationAwareness | null;
   className?: string;
   compactLimit?: number;
+  currentPrincipalId?: string;
   language?: EditorLanguage;
 };
 
@@ -71,6 +72,7 @@ export function CollaborationParticipants({
   awareness,
   className = "",
   compactLimit = 3,
+  currentPrincipalId,
   language = "ko",
 }: CollaborationParticipantsProps) {
   const [, setAwarenessRevision] = useState(0);
@@ -84,7 +86,7 @@ export function CollaborationParticipants({
     return () => awareness.off("change", handleChange);
   }, [awareness]);
 
-  const participants = collectParticipants(awareness, language);
+  const participants = collectParticipants(awareness, currentPrincipalId, language);
   const copy = labels[language];
 
   if (!awareness) {
@@ -132,9 +134,10 @@ export function CollaborationParticipants({
 
       <ul
         aria-label={copy.details}
-        className="absolute right-0 top-full z-30 mt-2 min-w-60 space-y-1 rounded-lg border border-slate-200 bg-white p-2 text-sm text-slate-800 shadow-lg"
+        className="absolute right-0 top-full z-30 mt-2 max-h-[min(24rem,calc(100dvh-6rem))] min-w-60 max-w-[calc(100vw-1rem)] space-y-1 overflow-y-auto overscroll-contain rounded-lg border border-slate-200 bg-white p-2 text-sm text-slate-800 shadow-lg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-800"
         hidden={!expanded}
         id={detailsId}
+        tabIndex={0}
       >
         {participants.map((participant) => {
           const sessionCount = participant.sessionIds.size;
@@ -201,9 +204,13 @@ function participantDetailLabel(
 
 function collectParticipants(
   awareness: CollaborationAwareness | null,
+  currentPrincipalId: string | undefined,
   language: EditorLanguage,
 ): Participant[] {
   if (!awareness) return [];
+  const verifiedCurrentPrincipalId = isBoundedIdentityString(currentPrincipalId)
+    ? currentPrincipalId
+    : null;
   const groups = new Map<string, Participant>();
   const allStates = awareness.getStates();
   const localState = allStates.get(awareness.clientID);
@@ -218,7 +225,13 @@ function collectParticipants(
   for (const [clientId, state] of states) {
     const identity = parseCanonicalIdentity(state);
     if (!identity) continue;
-    const current = clientId === awareness.clientID;
+    const isLocal = clientId === awareness.clientID;
+    if (
+      isLocal
+      && verifiedCurrentPrincipalId
+      && identity.principalId !== verifiedCurrentPrincipalId
+    ) continue;
+    const current = isLocal;
     if (current) foundCanonicalLocalState = true;
     const existing = groups.get(identity.principalId);
     if (existing) {
@@ -238,14 +251,26 @@ function collectParticipants(
   }
 
   if (!foundCanonicalLocalState) {
-    const principalId = `__local_unverified__:${awareness.clientID}`;
-    groups.set(principalId, {
-      color: getAccessibleParticipantColor("", principalId),
-      current: true,
-      displayName: labels[language].you,
-      principalId,
-      sessionIds: new Set([principalId]),
-    });
+    const principalId = verifiedCurrentPrincipalId
+      ?? `__local_unverified__:${awareness.clientID}`;
+    const localSessionId = `__local_session__:${awareness.clientID}`;
+    const existing = groups.get(principalId);
+    if (existing) {
+      if (existing.sessionIds.size >= MAX_SESSIONS_PER_PRINCIPAL) {
+        const lastRemoteSession = [...existing.sessionIds].at(-1);
+        if (lastRemoteSession) existing.sessionIds.delete(lastRemoteSession);
+      }
+      existing.sessionIds.add(localSessionId);
+      existing.current = true;
+    } else {
+      groups.set(principalId, {
+        color: getAccessibleParticipantColor("", principalId),
+        current: true,
+        displayName: labels[language].you,
+        principalId,
+        sessionIds: new Set([localSessionId]),
+      });
+    }
   }
 
   return [...groups.values()].toSorted(compareParticipants);

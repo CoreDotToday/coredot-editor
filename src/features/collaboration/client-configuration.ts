@@ -17,6 +17,7 @@ type CollaborationIdentity = {
 export type CollaborationClientConfiguration =
   | { kind: "legacy" }
   | {
+      currentPrincipalId: string;
       documentId: string;
       kind: "collaboration";
       room: string;
@@ -70,6 +71,7 @@ export async function resolveCollaborationClientConfiguration(
   if (!identity) return { kind: "legacy" };
 
   return {
+    currentPrincipalId: context.principalId,
     documentId,
     kind: "collaboration",
     room: createCollaborationRoomName({

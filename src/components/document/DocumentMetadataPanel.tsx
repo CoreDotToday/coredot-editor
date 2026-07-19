@@ -1,6 +1,6 @@
 "use client";
 
-import { useId } from "react";
+import { useId, useState } from "react";
 import type { DocumentMetadata, DocumentMetadataValue, DocumentReadiness } from "@/db/schema";
 import { getProjectProfile } from "@/features/projects/default-project-profiles";
 import {
@@ -15,6 +15,7 @@ type DocumentMetadataPanelProps = {
   language?: ProjectLocale;
   metadata: DocumentMetadata;
   metadataDisabled?: boolean;
+  metadataDraftIdentity?: object;
   messages?: DocumentMetadataPanelMessages;
   onMetadataFieldChange: (key: string, value: DocumentMetadataValue | undefined) => void;
   onReadinessChange: (next: DocumentReadiness) => void;
@@ -55,6 +56,7 @@ export function DocumentMetadataPanel({
   language = "ko",
   metadata,
   metadataDisabled = false,
+  metadataDraftIdentity,
   messages = defaultMessages,
   onMetadataFieldChange,
   onReadinessChange,
@@ -104,9 +106,10 @@ export function DocumentMetadataPanel({
           <MetadataFieldInput
             field={field}
             disabled={metadataDisabled}
-            key={field.id}
+            key={`${profile.id}:${field.id}:${field.type}:${metadataDisabled ? "disabled" : "enabled"}`}
             label={field.labels[language]}
             language={language}
+            metadataDraftIdentity={metadataDraftIdentity ?? profile}
             onChange={(value) => updateMetadata(field.id, value)}
             value={metadata[field.id]}
           />
@@ -121,6 +124,7 @@ function MetadataFieldInput({
   field,
   label,
   language,
+  metadataDraftIdentity,
   onChange,
   value,
 }: {
@@ -128,11 +132,46 @@ function MetadataFieldInput({
   field: ProjectMetadataField;
   label: string;
   language: ProjectLocale;
+  metadataDraftIdentity: object;
   onChange: (value: DocumentMetadataValue | undefined) => void;
   value: DocumentMetadata[string];
 }) {
   const hint = getMetadataFieldHint(field, language);
   const hintId = hint ? `metadata-field-${field.id}-hint` : undefined;
+  const canonicalStringValue = field.type === "tags"
+    ? Array.isArray(value) ? value.join(", ") : getStringMetadata(value)
+    : getStringMetadata(value);
+  const supportsRawDraft = field.type === "tags" || field.type === "text";
+  const [inputState, setInputState] = useState<MetadataInputState>(() => ({
+    draft: null,
+    identity: metadataDraftIdentity,
+    observedCanonical: canonicalStringValue,
+  }));
+  let currentInputState = inputState;
+  if (inputState.identity !== metadataDraftIdentity) {
+    currentInputState = {
+      draft: null,
+      identity: metadataDraftIdentity,
+      observedCanonical: canonicalStringValue,
+    };
+    setInputState(currentInputState);
+  } else if (inputState.observedCanonical !== canonicalStringValue) {
+    const keepDraft = inputState.draft !== null && (
+      canonicalStringValue === inputState.draft.baseCanonical ||
+      canonicalStringValue === inputState.draft.expectedCanonical
+    );
+    currentInputState = {
+      draft: keepDraft ? inputState.draft : null,
+      identity: metadataDraftIdentity,
+      observedCanonical: canonicalStringValue,
+    };
+    setInputState(currentInputState);
+  }
+  const draft = currentInputState.draft;
+  const draftMatchesCanonical = draft !== null && (
+    canonicalStringValue === draft.baseCanonical || canonicalStringValue === draft.expectedCanonical
+  );
+
   if (field.type === "boolean") {
     return (
       <label className="block">
@@ -182,9 +221,6 @@ function MetadataFieldInput({
       </label>
     );
   }
-  const stringValue = field.type === "tags"
-    ? Array.isArray(value) ? value.join(", ") : getStringMetadata(value)
-    : getStringMetadata(value);
   if (field.type === "select") {
     return (
       <label className="block">
@@ -197,7 +233,7 @@ function MetadataFieldInput({
           disabled={disabled}
           onChange={(event) => onChange(event.currentTarget.value)}
           required={field.required}
-          value={stringValue}
+          value={canonicalStringValue}
         >
           <option value="" />
           {field.options?.map((option) => <option key={option} value={option}>{option}</option>)}
@@ -216,18 +252,74 @@ function MetadataFieldInput({
         className="mt-1 h-9 w-full rounded-md border border-zinc-200 bg-white px-2 text-sm text-zinc-800 outline-none focus:border-zinc-500 disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-400"
         disabled={disabled}
         maxLength={getMetadataInputMaxLength(field)}
-        onChange={(event) => onChange(
-          field.type === "tags"
-            ? event.currentTarget.value.split(",").map((tag) => tag.trim()).filter(Boolean)
-            : event.currentTarget.value,
-        )}
+        onBlur={() => {
+          if (!draft || !draftMatchesCanonical) {
+            setInputState({ draft: null, identity: metadataDraftIdentity, observedCanonical: canonicalStringValue });
+            return;
+          }
+          if (canonicalStringValue !== draft.expectedCanonical) {
+            onChange(getEditableMetadataValue(field, draft.raw));
+          }
+          setInputState({ draft: null, identity: metadataDraftIdentity, observedCanonical: canonicalStringValue });
+        }}
+        onChange={(event) => {
+          const raw = event.currentTarget.value;
+          const nextValue = getEditableMetadataValue(field, raw);
+          if (supportsRawDraft && event.currentTarget.ownerDocument.activeElement === event.currentTarget) {
+            setInputState({
+              draft: {
+                baseCanonical: canonicalStringValue,
+                expectedCanonical: getCanonicalEditableValue(field, nextValue),
+                raw,
+              },
+              identity: metadataDraftIdentity,
+              observedCanonical: canonicalStringValue,
+            });
+          }
+          onChange(nextValue);
+        }}
+        onFocus={() => {
+          if (!supportsRawDraft) return;
+          setInputState({
+            draft: {
+              baseCanonical: canonicalStringValue,
+              expectedCanonical: canonicalStringValue,
+              raw: canonicalStringValue,
+            },
+            identity: metadataDraftIdentity,
+            observedCanonical: canonicalStringValue,
+          });
+        }}
         required={field.required}
         type={field.type === "date" ? "date" : "text"}
-        value={stringValue}
+        value={supportsRawDraft && draftMatchesCanonical ? draft!.raw : canonicalStringValue}
       />
       {hint ? <span className="mt-1 block text-xs text-zinc-400" id={hintId}>{hint}</span> : null}
     </label>
   );
+}
+
+type MetadataInputDraft = {
+  baseCanonical: string;
+  expectedCanonical: string;
+  raw: string;
+};
+
+type MetadataInputState = {
+  draft: MetadataInputDraft | null;
+  identity: object;
+  observedCanonical: string;
+};
+
+function getEditableMetadataValue(field: ProjectMetadataField, raw: string): DocumentMetadataValue {
+  return field.type === "tags"
+    ? raw.split(",").map((tag) => tag.trim()).filter(Boolean)
+    : raw;
+}
+
+function getCanonicalEditableValue(field: ProjectMetadataField, value: DocumentMetadataValue) {
+  if (field.type === "tags") return Array.isArray(value) ? value.join(", ") : "";
+  return typeof value === "string" ? value.trim() : "";
 }
 
 function getMetadataInputMaxLength(field: ProjectMetadataField) {

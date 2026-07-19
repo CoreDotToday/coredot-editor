@@ -1,11 +1,15 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { DocumentMetadataPanel } from "./DocumentMetadataPanel";
 import type { DocumentMetadata, DocumentReadiness } from "@/db/schema";
 import { getProjectProfile } from "@/features/projects/default-project-profiles";
-import { defineProjectProfile } from "@/features/projects/project-profile";
+import {
+  defineProjectProfile,
+  validateProjectMetadata,
+  type ProjectProfile,
+} from "@/features/projects/project-profile";
 
 describe("DocumentMetadataPanel", () => {
   it("edits readiness and common metadata fields", async () => {
@@ -259,4 +263,173 @@ describe("DocumentMetadataPanel", () => {
     expect(handleMetadataFieldChange).toHaveBeenLastCalledWith("owner", "Finance");
     expect(handleReadinessChange).not.toHaveBeenCalled();
   });
+
+  it("preserves spaces while a controlled text field receives canonical metadata after every keystroke", async () => {
+    const user = userEvent.setup();
+    const handleChange = vi.fn();
+
+    renderCanonicalHarness({
+      handleChange,
+      profile: getProjectProfile("research-writing"),
+    });
+
+    const owner = screen.getByRole("textbox", { name: "소유자" });
+    const researchQuestion = screen.getByRole("textbox", { name: "연구 질문" });
+    await user.type(owner, "Jane Doe");
+    await user.type(researchQuestion, "How do teams decide?");
+
+    expect(owner).toHaveValue("Jane Doe");
+    expect(researchQuestion).toHaveValue("How do teams decide?");
+    expect(handleChange).toHaveBeenCalledWith("owner", "Jane Doe");
+    expect(handleChange).toHaveBeenLastCalledWith("researchQuestion", "How do teams decide?");
+  });
+
+  it("preserves tag separators while a controlled tags field receives normalized arrays", async () => {
+    const user = userEvent.setup();
+    const handleChange = vi.fn();
+
+    renderCanonicalHarness({ handleChange, profile: getProjectProfile("default") });
+
+    const tags = screen.getByRole("textbox", { name: "태그" });
+    await user.type(tags, "alpha, beta");
+
+    expect(tags).toHaveValue("alpha, beta");
+    expect(handleChange).toHaveBeenLastCalledWith("tags", ["alpha", "beta"]);
+  });
+
+  it("drops a focused draft when a different remote canonical value arrives and does not overwrite it on blur", async () => {
+    const user = userEvent.setup();
+    const handleChange = vi.fn();
+    let replaceMetadata: (metadata: DocumentMetadata) => void = () => {
+      throw new Error("Harness is not ready");
+    };
+
+    function Harness() {
+      const [metadata, setMetadata] = useState<DocumentMetadata>({ owner: "Alice" });
+      replaceMetadata = setMetadata;
+      return (
+        <DocumentMetadataPanel
+          metadata={metadata}
+          onMetadataFieldChange={(key, value) => {
+            handleChange(key, value);
+            setMetadata((current) => normalizeMetadataChange(getProjectProfile("default"), current, key, value));
+          }}
+          onReadinessChange={vi.fn()}
+          readiness="draft"
+        />
+      );
+    }
+
+    render(<Harness />);
+    const owner = screen.getByRole("textbox", { name: "소유자" });
+    await user.click(owner);
+    await user.type(owner, " ");
+    expect(owner).toHaveValue("Alice ");
+    const localCallCount = handleChange.mock.calls.length;
+
+    act(() => replaceMetadata({ owner: "Bob" }));
+    expect(owner).toHaveValue("Bob");
+    fireEvent.blur(owner);
+
+    expect(handleChange).toHaveBeenCalledTimes(localCallCount);
+    expect(owner).toHaveValue("Bob");
+  });
+
+  it("clears focused drafts on permission downgrade and Project Profile replacement", async () => {
+    const user = userEvent.setup();
+    const metadata = { owner: "Alice" } satisfies DocumentMetadata;
+    const defaultProfile = getProjectProfile("default");
+    const replacementProfile = defineProjectProfile({
+      ...defaultProfile,
+      id: "replacement-profile",
+      metadataFields: defaultProfile.metadataFields.map((field) => ({ ...field })),
+    });
+    const props = {
+      metadata,
+      onMetadataFieldChange: vi.fn(),
+      onReadinessChange: vi.fn(),
+      profile: defaultProfile,
+      readiness: "draft" as const,
+    };
+    const { rerender } = render(<DocumentMetadataPanel {...props} />);
+    const owner = screen.getByRole("textbox", { name: "소유자" });
+
+    await user.click(owner);
+    await user.type(owner, " ");
+    expect(owner).toHaveValue("Alice ");
+
+    rerender(<DocumentMetadataPanel {...props} metadataDisabled />);
+    expect(screen.getByRole("textbox", { name: "소유자" })).toBeDisabled();
+    expect(screen.getByRole("textbox", { name: "소유자" })).toHaveValue("Alice");
+
+    rerender(<DocumentMetadataPanel {...props} profile={defaultProfile} />);
+    const enabledOwner = screen.getByRole("textbox", { name: "소유자" });
+    await user.click(enabledOwner);
+    await user.type(enabledOwner, " ");
+    expect(enabledOwner).toHaveValue("Alice ");
+
+    rerender(<DocumentMetadataPanel {...props} profile={replacementProfile} />);
+    expect(screen.getByRole("textbox", { name: "소유자" })).toHaveValue("Alice");
+  });
+
+  it("clears a focused draft when the collaborative field-store identity rotates", async () => {
+    const user = userEvent.setup();
+    const firstIdentity = {};
+    const props = {
+      metadata: { owner: "Alice" },
+      metadataDraftIdentity: firstIdentity,
+      onMetadataFieldChange: vi.fn(),
+      onReadinessChange: vi.fn(),
+      readiness: "draft" as const,
+    };
+    const { rerender } = render(<DocumentMetadataPanel {...props} />);
+    const owner = screen.getByRole("textbox", { name: "소유자" });
+    await user.click(owner);
+    await user.type(owner, " ");
+    expect(owner).toHaveValue("Alice ");
+
+    rerender(<DocumentMetadataPanel {...props} metadataDraftIdentity={{}} />);
+
+    expect(screen.getByRole("textbox", { name: "소유자" })).toHaveValue("Alice");
+  });
 });
+
+function renderCanonicalHarness({
+  handleChange,
+  profile,
+}: {
+  handleChange: (key: string, value: DocumentMetadata[string] | undefined) => void;
+  profile: ProjectProfile;
+}) {
+  function Harness() {
+    const [metadata, setMetadata] = useState<DocumentMetadata>({});
+    return (
+      <DocumentMetadataPanel
+        metadata={metadata}
+        onMetadataFieldChange={(key, value) => {
+          handleChange(key, value);
+          setMetadata((current) => normalizeMetadataChange(profile, current, key, value));
+        }}
+        onReadinessChange={vi.fn()}
+        profile={profile}
+        readiness="draft"
+      />
+    );
+  }
+
+  return render(<Harness />);
+}
+
+function normalizeMetadataChange(
+  profile: ProjectProfile,
+  current: DocumentMetadata,
+  key: string,
+  value: DocumentMetadata[string] | undefined,
+) {
+  const candidate = { ...current };
+  if (value === undefined) delete candidate[key];
+  else candidate[key] = value;
+  const result = validateProjectMetadata(profile, candidate, current, { enforceRequired: false });
+  if (!result.ok) throw new Error(`Invalid test metadata for ${result.fieldId}`);
+  return result.value;
+}
