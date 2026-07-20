@@ -8,7 +8,7 @@ import {
   findUniqueCollaborativeTextRange,
   type CollaborativeProposalAnchor,
 } from "@/features/collaboration/proposal-command";
-import { hashCanonicalMaterialization } from "@/features/collaboration/exact-document-materialization";
+import { hashCanonicalJson } from "@/features/collaboration/canonical-hashing";
 import {
   CollaborationPersistenceError,
   type CollaborationSnapshot,
@@ -201,7 +201,7 @@ export async function prepareAiCommandRequest(scope: WorkspaceScope, {
       const stateVector = Y.encodeStateVector(collaborationSnapshot.document);
       preparedCollaborationSnapshot = {
         checkpoint: dependencies.collaborationCodec.encodeCheckpoint(collaborationSnapshot.document),
-        contentHash: hashCanonicalMaterialization(materialization),
+        contentHash: hashCanonicalJson(materialization),
         generation: collaborationSnapshot.generation,
         headSeq: collaborationSnapshot.headSeq,
         schemaFingerprint: collaborationSnapshot.schemaFingerprint,

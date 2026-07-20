@@ -1,5 +1,3 @@
-import { createHash } from "node:crypto";
-
 import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import * as Y from "yjs";
 
@@ -14,6 +12,7 @@ import {
   type DocumentRecord,
 } from "@/db/schema";
 import type { RequestContext, WorkspaceScope } from "@/features/auth/request-context";
+import { hashCanonicalJson } from "@/features/collaboration/canonical-hashing";
 import type { CollaborationDocumentCodec } from "@/features/collaboration/contracts";
 import { createCollaborationDocumentCodec } from "@/features/collaboration/document-codec";
 import {
@@ -546,24 +545,11 @@ function unwrapOutcome(outcome: WorkflowOutcome) {
 }
 
 function hashCanonicalMaterialization(value: unknown) {
-  return createHash("sha256").update(canonicalJson(value), "utf8").digest("hex");
-}
-
-function canonicalJson(value: unknown): string {
-  if (value === null || typeof value === "boolean" || typeof value === "string") {
-    return JSON.stringify(value);
+  try {
+    return hashCanonicalJson(value);
+  } catch {
+    throw new InvalidWorkflowInputError();
   }
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) throw new InvalidWorkflowInputError();
-    return JSON.stringify(value);
-  }
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-  if (typeof value === "object") {
-    const record = value as Record<string, unknown>;
-    return `{${Object.keys(record).sort().map((key) =>
-      `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`;
-  }
-  throw new InvalidWorkflowInputError();
 }
 
 function validateContextAndDocument(context: RequestContext, documentId: string) {

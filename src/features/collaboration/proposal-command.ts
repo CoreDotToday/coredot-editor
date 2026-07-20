@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { getSchema } from "@tiptap/core";
-import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
+import { Fragment, Slice, type Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { Transform } from "@tiptap/pm/transform";
 import { initProseMirrorDoc, updateYFragment } from "y-prosemirror";
 import * as Y from "yjs";
@@ -279,19 +279,26 @@ function applyItem(
   entry: { from: number; item: CollaborativeProposalCommandItem; to: number },
 ) {
   const { from, item, to } = entry;
+  const lines = item.replacementText.split(/\r\n|\r|\n/);
   if (item.mode === "replace") {
-    return item.replacementText.length === 0
-      ? transform.delete(from, to)
-      : transform.replaceWith(from, to, transform.doc.type.schema.text(item.replacementText));
+    if (item.replacementText.length === 0) return transform.delete(from, to);
+    if (lines.length === 1) {
+      return transform.replaceWith(from, to, transform.doc.type.schema.text(item.replacementText));
+    }
+    const paragraphs = Fragment.from(lines.map((line) => createParagraph(transform, line)));
+    return transform.replace(from, to, new Slice(paragraphs, 1, 1));
   }
   const insertionPosition = afterContainingTopLevelBlock(transform.doc, to);
+  return transform.insert(
+    insertionPosition,
+    lines.map((line) => createParagraph(transform, line)),
+  );
+}
+
+function createParagraph(transform: Transform, line: string) {
   const paragraph = transform.doc.type.schema.nodes.paragraph;
   if (!paragraph) throw new Error("Document schema has no paragraph");
-  const node = paragraph.create(
-    null,
-    item.replacementText.length === 0 ? undefined : transform.doc.type.schema.text(item.replacementText),
-  );
-  return transform.insert(insertionPosition, node);
+  return paragraph.create(null, line.length === 0 ? undefined : transform.doc.type.schema.text(line));
 }
 
 function afterContainingTopLevelBlock(document: ProseMirrorNode, position: number) {

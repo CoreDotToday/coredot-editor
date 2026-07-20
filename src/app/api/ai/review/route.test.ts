@@ -654,6 +654,90 @@ describe("POST /api/ai/review", () => {
     );
   });
 
+  it("skips non-anchorable collaborative findings instead of failing the run", async () => {
+    const document = collaborationCodec.bootstrap({
+      contentJson: {
+        type: "doc",
+        content: [
+          { type: "paragraph", content: [{ type: "text", text: "line1  " }] },
+          { type: "paragraph", content: [{ type: "text", text: "line2" }] },
+          { type: "paragraph", content: [{ type: "text", text: "growth was good" }] },
+        ],
+      },
+      metadataJson: {},
+      plainText: "line1\nline2\ngrowth was good",
+      title: "Whitespace divergence",
+    });
+    const checkpoint = collaborationCodec.encodeCheckpoint(document);
+    const stateVector = Y.encodeStateVector(document);
+    document.destroy();
+    vi.mocked(loadAiCollaborationSnapshot).mockResolvedValueOnce({
+      checkpointSeq: 0,
+      document: collaborationCodec.loadCheckpoint(checkpoint),
+      documentId: "doc_1",
+      generation: 2,
+      headSeq: 9,
+      projectedSeq: 5,
+      schemaFingerprint: collaborationCodec.fingerprint(),
+      schemaVersion: 1,
+    });
+    vi.mocked(getDocumentById).mockResolvedValueOnce(documentRecord);
+    vi.mocked(getPromptTemplateById).mockResolvedValueOnce(templateRecord);
+    vi.mocked(createAiProvider).mockReturnValueOnce({
+      capabilities: { coreTodayProxy: false, reasoningEffort: false, streaming: "buffered", structuredReview: true },
+      generateReview: vi.fn(async () => ({
+        findings: [
+          {
+            problem: "Trimmed away",
+            reason: "Materialized text trims trailing whitespace",
+            replacementText: "merged line",
+            targetText: "line1\nline2",
+          },
+          {
+            problem: "Unclear",
+            reason: "Be exact",
+            replacementText: "revenue grew 8%",
+            targetText: "growth was good",
+          },
+        ],
+        summary: "One anchorable finding.",
+      })),
+      generateText: vi.fn(),
+      model: "stub-editor",
+      name: "stub",
+      streamText: vi.fn(),
+    });
+
+    const response = await POST(createJsonRequest({
+      collaborationBarrier: {
+        generation: 2,
+        stateVector: Buffer.from(stateVector).toString("base64url"),
+      },
+      command: "Review",
+      documentId: "doc_1",
+      templateId: "tpl_1",
+      variables: {},
+    }, "collaboration-review-skip"));
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      proposals: [{ targetText: "growth was good" }],
+      run: { id: "run_1", status: "completed" },
+      skippedProposalCount: 1,
+    });
+    expect(failAiRun).not.toHaveBeenCalled();
+    expect(completeAiRunWithProposals).toHaveBeenCalledWith(
+      localWorkspace,
+      "run_1",
+      "attempt-token-1",
+      expect.any(String),
+      [expect.objectContaining({
+        anchor: expect.objectContaining({ generation: 2 }),
+        targetText: "growth was good",
+      })],
+    );
+  });
+
   it("rejects missing or mismatched collaboration barriers before provider and claim", async () => {
     for (const collaborationBarrier of [undefined, { generation: 1, stateVector: "AA" }]) {
       const collaborative = createCollaborativeSnapshot("growth was good");

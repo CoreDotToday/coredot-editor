@@ -22,6 +22,7 @@ import { createDocumentWorkflowNotificationOutbox } from "@/features/documents/d
 import type { ProposalApplyMode } from "@/features/proposals/proposal-transaction";
 import { resolveActiveProjectProfile } from "@/features/projects/active-project-profile";
 
+import { hashCanonicalJson } from "./canonical-hashing";
 import { createCollaborationCommandDeliveryOutbox } from "./command-delivery-outbox";
 import { createCollaborationDocumentCodec } from "./document-codec";
 import {
@@ -703,7 +704,7 @@ function isValidInput(input: CollaborativeProposalApplyInput) {
 }
 
 function fingerprintCommand(value: unknown) {
-  return createHash("sha256").update(canonicalJson(value), "utf8").digest("hex");
+  return hashCanonicalJson(value);
 }
 
 function createActionId(workspaceId: string, documentId: string, commandId: string) {
@@ -713,21 +714,6 @@ function createActionId(workspaceId: string, documentId: string, commandId: stri
     kind: "collaboration_proposal_action",
     workspaceId,
   });
-}
-
-function canonicalJson(value: unknown): string {
-  if (value === null || typeof value === "string" || typeof value === "boolean" || typeof value === "number") {
-    return JSON.stringify(value);
-  }
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-  if (typeof value === "object") {
-    return `{${Object.entries(value as Record<string, unknown>)
-      .filter(([, item]) => item !== undefined)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`)
-      .join(",")}}`;
-  }
-  throw new TypeError("Invalid command fingerprint input");
 }
 
 function sha256(value: string) {

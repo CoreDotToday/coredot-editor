@@ -118,6 +118,52 @@ describe("collaborative Proposal commands", () => {
     ]);
   });
 
+  it("splits a multi-line replacement into paragraphs instead of embedding newlines", () => {
+    const document = createDocument("alpha beta gamma");
+
+    expect(applyCollaborativeProposalBatch(document, identity(document), [{
+      anchor: anchorFor(document, 7, 11),
+      mode: "replace",
+      proposalId: "proposal_multiline_replace",
+      replacementText: "line one\r\nline two",
+    }])).toMatchObject({ ok: true });
+
+    expect(codec.materialize(document).contentJson.content).toEqual([
+      { type: "paragraph", content: [{ type: "text", text: "alpha line one" }] },
+      { type: "paragraph", content: [{ type: "text", text: "line two gamma" }] },
+    ]);
+  });
+
+  it("inserts one paragraph per line for a multi-line insert-below replacement", () => {
+    const document = codec.bootstrap({
+      contentJson: {
+        type: "doc",
+        content: [
+          { type: "paragraph", content: [{ type: "text", text: "alpha beta" }] },
+          { type: "paragraph", content: [{ type: "text", text: "gamma" }] },
+        ],
+      },
+      metadataJson: {},
+      plainText: "alpha beta\ngamma",
+      title: "Multi-line insert below",
+    });
+    const target = findUniqueCollaborativeTextRange(document, "beta")!;
+
+    expect(applyCollaborativeProposalBatch(document, identity(document), [{
+      anchor: anchorFor(document, target.from, target.to),
+      mode: "insert_below",
+      proposalId: "proposal_multiline_insert",
+      replacementText: "first\nsecond",
+    }])).toMatchObject({ ok: true });
+
+    expect(codec.materialize(document).contentJson.content).toEqual([
+      { type: "paragraph", content: [{ type: "text", text: "alpha beta" }] },
+      { type: "paragraph", content: [{ type: "text", text: "first" }] },
+      { type: "paragraph", content: [{ type: "text", text: "second" }] },
+      { type: "paragraph", content: [{ type: "text", text: "gamma" }] },
+    ]);
+  });
+
   it("rejects two non-overlapping targets that share one insert-below footprint", () => {
     const document = createDocument("alpha beta gamma");
     const before = Y.encodeStateAsUpdate(document);

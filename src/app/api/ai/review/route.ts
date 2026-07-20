@@ -174,30 +174,46 @@ function aiExecutionResponse<T>(execution: AiExecutionResult<T>) {
 }
 
 function prepareReviewFinalization(review: ReviewResult, prepared: PreparedAiCommandContext) {
-  const validFindings = review.findings
-    .map((finding) => ({
-      finding,
-      occurrenceIndex: getUniqueOccurrenceIndex(prepared.reviewedText, finding.targetText),
-    }))
-    .filter(({ finding, occurrenceIndex }) =>
-      occurrenceIndex !== null &&
-      applyProposalToText(prepared.reviewedText, finding.targetText, finding.replacementText).ok,
-    );
   return {
     outputText: JSON.stringify(review),
-    proposals: validFindings.map(({ finding, occurrenceIndex }) => ({
-      ...(prepared.collaborationSnapshot ? {
-        anchor: createAiCollaborativeProposalAnchor(prepared.collaborationSnapshot, {
-          targetText: finding.targetText,
-        }),
-      } : {}),
-      documentId: prepared.document.id,
-      occurrenceIndex,
-      targetText: finding.targetText,
-      replacementText: finding.replacementText,
-      explanation: formatFindingExplanation(finding),
-    })),
+    proposals: review.findings.flatMap((finding) => {
+      const occurrenceIndex = getUniqueOccurrenceIndex(prepared.reviewedText, finding.targetText);
+      if (
+        occurrenceIndex === null
+        || !applyProposalToText(prepared.reviewedText, finding.targetText, finding.replacementText).ok
+      ) {
+        return [];
+      }
+      const anchor = prepared.collaborationSnapshot
+        ? createSkippableCollaborativeAnchor(prepared.collaborationSnapshot, finding.targetText)
+        : undefined;
+      if (prepared.collaborationSnapshot && !anchor) return [];
+      return [{
+        ...(anchor ? { anchor } : {}),
+        documentId: prepared.document.id,
+        occurrenceIndex,
+        targetText: finding.targetText,
+        replacementText: finding.replacementText,
+        explanation: formatFindingExplanation(finding),
+      }];
+    }),
   };
+}
+
+/**
+ * A finding can be unique in the trimmed reviewed text yet unresolvable in the
+ * exact projection (whitespace/blank-line divergence). Dropping it keeps the
+ * provider result durable instead of failing the whole run after spend.
+ */
+function createSkippableCollaborativeAnchor(
+  snapshot: NonNullable<PreparedAiCommandContext["collaborationSnapshot"]>,
+  targetText: string,
+) {
+  try {
+    return createAiCollaborativeProposalAnchor(snapshot, { targetText });
+  } catch {
+    return undefined;
+  }
 }
 
 function mapDurableReviewResult(durable: DurableAiOperation) {
