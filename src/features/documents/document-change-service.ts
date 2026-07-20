@@ -4,6 +4,7 @@ import { db } from "@/db/client";
 import { withSerializedDocumentWrite } from "@/db/document-write-queue";
 import {
   aiProposals,
+  collaborationDocumentChanges,
   collaborationDocuments,
   documentChangeProposals,
   documentChanges,
@@ -76,7 +77,18 @@ export type DocumentChangeIdentity = Pick<
   DocumentChangeRecord,
   "afterRevision" | "batchId" | "createdAt" | "documentId" | "id" | "kind" | "undoneAt"
 >;
-export type DocumentChangeHistoryItem = DocumentChangeIdentity & { proposals: DocumentChangeHistoryProposal[] };
+/**
+ * Legacy items expose `afterRevision` for snapshot undo preconditions;
+ * collaborative items expose the durable `resultingHeadSeq` and a server-owned
+ * `canUndo` because collaboration mode never undoes by document revision.
+ */
+export type DocumentChangeHistoryItem =
+  & Omit<DocumentChangeIdentity, "afterRevision">
+  & { proposals: DocumentChangeHistoryProposal[] }
+  & (
+    | { afterRevision: number; mode: "legacy" }
+    | { canUndo: boolean; mode: "collaboration"; resultingHeadSeq: number }
+  );
 export type ListDocumentChangesInput = { cursor?: string; documentId: string; limit?: number };
 export type DocumentChangeHistoryPage = {
   changes: DocumentChangeHistoryItem[];
@@ -384,6 +396,20 @@ export function createDocumentChangeService(
       if (pageRows.length === 0) return { changes: [], nextCursor: null };
 
       const changeIds = pageRows.map(({ id }) => id);
+      const collaborationRows = await retrySqliteContention(async () => database
+        .select({
+          changeId: collaborationDocumentChanges.changeId,
+          resultingHeadSeq: collaborationDocumentChanges.resultingHeadSeq,
+        })
+        .from(collaborationDocumentChanges)
+        .where(and(
+          eq(collaborationDocumentChanges.workspaceId, context.workspaceId),
+          eq(collaborationDocumentChanges.documentId, input.documentId),
+          inArray(collaborationDocumentChanges.changeId, changeIds),
+        )));
+      const resultingHeadSeqByChangeId = new Map(
+        collaborationRows.map(({ changeId, resultingHeadSeq }) => [changeId, resultingHeadSeq]),
+      );
       const links = await retrySqliteContention(async () => database
         .select()
         .from(documentChangeProposals)
@@ -415,27 +441,37 @@ export function createDocumentChangeService(
       }
 
       return {
-        changes: pageRows.map((change) => ({
-          id: change.id,
-          documentId: change.documentId,
-          kind: change.kind,
-          batchId: change.batchId,
-          afterRevision: change.afterRevision,
-          createdAt: change.createdAt,
-          undoneAt: change.undoneAt,
-          proposals: (linksByChangeId.get(change.id) ?? []).flatMap((link) => {
-            const proposal = proposalById.get(link.proposalId);
-            return proposal
-              ? [{
-                  id: proposal.id,
-                  targetText: proposal.targetText.slice(0, HISTORY_TARGET_PREVIEW_CODE_UNITS),
-                  replacementText: proposal.replacementText.slice(0, HISTORY_REPLACEMENT_PREVIEW_CODE_UNITS),
-                  appliedMode: link.appliedMode,
-                  ordinal: link.ordinal,
-                }]
-              : [];
-          }),
-        })),
+        changes: pageRows.map((change): DocumentChangeHistoryItem => {
+          const base = {
+            id: change.id,
+            documentId: change.documentId,
+            kind: change.kind,
+            batchId: change.batchId,
+            createdAt: change.createdAt,
+            undoneAt: change.undoneAt,
+            proposals: (linksByChangeId.get(change.id) ?? []).flatMap((link) => {
+              const proposal = proposalById.get(link.proposalId);
+              return proposal
+                ? [{
+                    id: proposal.id,
+                    targetText: proposal.targetText.slice(0, HISTORY_TARGET_PREVIEW_CODE_UNITS),
+                    replacementText: proposal.replacementText.slice(0, HISTORY_REPLACEMENT_PREVIEW_CODE_UNITS),
+                    appliedMode: link.appliedMode,
+                    ordinal: link.ordinal,
+                  }]
+                : [];
+            }),
+          };
+          const resultingHeadSeq = resultingHeadSeqByChangeId.get(change.id);
+          return resultingHeadSeq === undefined
+            ? { ...base, afterRevision: change.afterRevision, mode: "legacy" }
+            : {
+                ...base,
+                canUndo: change.undoneAt === null,
+                mode: "collaboration",
+                resultingHeadSeq,
+              };
+        }),
         nextCursor: hasNextPage ? pageRows.at(-1)?.id ?? null : null,
       };
     },

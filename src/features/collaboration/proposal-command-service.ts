@@ -8,6 +8,7 @@ import { db } from "@/db/client";
 import {
   aiProposals,
   collaborationActions,
+  collaborationDocumentChanges,
   collaborationDocuments,
   collaborationProposalAnchors,
   documentChangeProposals,
@@ -37,6 +38,7 @@ import {
   type CollaborativeProposalCommandItem,
 } from "./proposal-command";
 import type { CollaborationDatabase, CollaborationTransaction } from "./repository";
+import { captureCollaborativeInverse, type StoredCollaborativeInverse } from "./selective-undo";
 
 const COMMAND_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/u;
 
@@ -70,10 +72,13 @@ export type CollaborativeProposalApplyResult =
 type ProposalPlan = {
   actionType: "proposal_apply" | "proposal_batch_apply";
   afterMaterialization: ReturnType<ReturnType<typeof createCollaborationDocumentCodec>["materialize"]>;
+  baseHeadSeq: number;
   beforeMaterialization: ReturnType<ReturnType<typeof createCollaborationDocumentCodec>["materialize"]>;
   beforeReadiness: DocumentRecord["readiness"];
   commandFingerprint: string;
   items: Array<{ mode: ProposalApplyMode; proposal: AiProposalRecord }>;
+  /** Null only when the command was a canonical Yjs no-op. */
+  storedInverse: StoredCollaborativeInverse | null;
 };
 
 class CollaborativeProposalRollback extends Error {
@@ -322,7 +327,14 @@ async function planProposalCommand(options: {
   transaction: CollaborationTransaction;
   workspaceId: string;
 }): Promise<
-  | { ok: false; reason: "proposal_overlap_conflict" | "proposal_status_conflict" | "proposal_target_conflict" }
+  | {
+      ok: false;
+      reason:
+        | "proposal_overlap_conflict"
+        | "proposal_status_conflict"
+        | "proposal_target_conflict"
+        | "unavailable";
+    }
   | { ok: true; plan: ProposalPlan; update: Uint8Array }
 > {
   if (options.input.observedHeadSeq > options.snapshot.headSeq) {
@@ -345,6 +357,7 @@ async function planProposalCommand(options: {
   const working = options.codec.loadCheckpoint(Y.encodeStateAsUpdate(options.snapshot.document));
   try {
     const beforeMaterialization = options.codec.materialize(working);
+    const baseState = Y.encodeStateAsUpdate(working);
     const before = Y.encodeStateVector(working);
     const commandItems: CollaborativeProposalCommandItem[] = loaded.items.map(({ anchor, mode, proposal }) => ({
       anchor,
@@ -359,21 +372,39 @@ async function planProposalCommand(options: {
       stateVector: Y.encodeStateVector(working),
     }, commandItems);
     if (!applied.ok) return applied;
+    const update = Y.encodeStateAsUpdate(working, before);
+    let storedInverse: StoredCollaborativeInverse | null = null;
+    if (!isCanonicalNoopUpdate(update)) {
+      const capture = captureCollaborativeInverse({
+        baseState,
+        changedRange: applied.changedRange,
+        forwardUpdate: update,
+      });
+      if (!capture.ok) return { ok: false, reason: "unavailable" };
+      storedInverse = capture.inverse;
+    }
     return {
       ok: true,
       plan: {
         actionType: options.actionType,
         afterMaterialization: options.codec.materialize(working),
+        baseHeadSeq: options.snapshot.headSeq,
         beforeMaterialization,
         beforeReadiness: documentRow.readiness,
         commandFingerprint: options.commandFingerprint,
         items: loaded.items.map(({ mode, proposal }) => ({ mode, proposal })),
+        storedInverse,
       },
-      update: Y.encodeStateAsUpdate(working, before),
+      update,
     };
   } finally {
     working.destroy();
   }
+}
+
+/** An update with no structs and an empty delete set encodes as `[0, 0]`. */
+function isCanonicalNoopUpdate(update: Uint8Array) {
+  return update.byteLength <= 2 && update.every((byte) => byte === 0);
 }
 
 async function commitProposalCommand(options: {
@@ -475,6 +506,22 @@ async function commitProposalCommand(options: {
       workspaceId: options.context.workspaceId,
     })),
   );
+  if (options.position.changed && options.plan.storedInverse) {
+    await options.transaction.insert(collaborationDocumentChanges).values({
+      actionId: options.actionId,
+      affectedEndRelative: Buffer.from(options.plan.storedInverse.affectedRange.end),
+      affectedStartRelative: Buffer.from(options.plan.storedInverse.affectedRange.start),
+      baseHeadSeq: options.plan.baseHeadSeq,
+      changeId,
+      documentId: options.documentId,
+      forwardSeq: options.position.seq,
+      generation: options.position.generation,
+      inverseUpdate: Buffer.from(options.plan.storedInverse.inverseUpdate),
+      postconditionFingerprint: options.plan.storedInverse.postconditionFingerprint,
+      resultingHeadSeq: options.receipt.headSeq,
+      workspaceId: options.context.workspaceId,
+    });
+  }
   const [action] = await options.transaction.update(collaborationActions).set({
     appliedHeadSeq: options.receipt.headSeq,
     documentChangeId: changeId,

@@ -21,6 +21,13 @@ import {
 const TARGET_PREVIEW_BYTES = 1024;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 
+/**
+ * Transaction origin of every collaborative Proposal command. Selective undo
+ * captures inverse updates from exactly this origin, so command mutations and
+ * their undo boundary always agree.
+ */
+export const COLLABORATION_PROPOSAL_COMMAND_ORIGIN = "collaboration-proposal-command";
+
 export type CollaborativeProposalAnchor = {
   baseHeadSeq: number;
   baseStateVector: Uint8Array;
@@ -51,6 +58,8 @@ export type CollaborativeProposalDocumentIdentity = {
 export type CollaborativeProposalCommandResult =
   | {
       affectedRanges: Array<{ from: number; proposalId: string; to: number }>;
+      /** Post-command span covering every replacement and insertion. */
+      changedRange: { from: number; to: number };
       ok: true;
       proposalIds: string[];
     }
@@ -156,13 +165,25 @@ export function createCollaborativeProposalCommandCodec(
           isOMark,
           mapping,
         });
-      }, "collaboration-proposal-command");
+      }, COLLABORATION_PROPOSAL_COMMAND_ORIGIN);
+      const changedRange = resolved.reduce(
+        (range, { from, insertionPosition, to }) => {
+          const spanFrom = insertionPosition ?? from;
+          const spanTo = insertionPosition ?? to;
+          return {
+            from: Math.min(range.from, transform.mapping.map(spanFrom, -1)),
+            to: Math.max(range.to, transform.mapping.map(spanTo, 1)),
+          };
+        },
+        { from: Number.POSITIVE_INFINITY, to: 0 },
+      );
       return {
         affectedRanges: resolved.map(({ from, item, to }) => ({
           from,
           proposalId: item.proposalId,
           to,
         })),
+        changedRange,
         ok: true,
         proposalIds,
       };

@@ -18,7 +18,12 @@ const MAX_IDENTIFIER_BYTES = 256;
 
 export type CollaborativeProposalCommand = CollaborationCommandIdentity;
 export type CollaborativeProposalBatchCommand = CollaborationCommandIdentity;
-export type CollaborativeUndoCommand = CollaborationCommandIdentity;
+/**
+ * Selective undo targets one durable Document Change. The optional `changeId`
+ * keeps replayed identities compatible with pre-undo callers while letting the
+ * planner resolve the stored inverse for that exact change.
+ */
+export type CollaborativeUndoCommand = CollaborationCommandIdentity & { changeId?: string };
 
 type CollaborationCommandIdentity = {
   commandId: string;
@@ -279,7 +284,8 @@ export function createCollaborativeDocumentGateway(options: {
 
     getSnapshot,
 
-    undoChange(context, command) {
+    async undoChange(context, command) {
+      if (command.changeId !== undefined) validateIdentifier(command.changeId);
       return applyCommand(context, command, "undo_command", options.planners.undo);
     },
   };

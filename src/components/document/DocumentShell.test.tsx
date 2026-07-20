@@ -1609,7 +1609,101 @@ describe("DocumentShell", () => {
     expect(screen.getByText("수락됨")).toBeInTheDocument();
 
     await user.click(screen.getByRole("tab", { name: "변경내역" }));
-    expect(screen.getByRole("button", { name: "growth was good 변경 되돌리기" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "growth was good 변경 되돌리기" })).toBeEnabled();
+  });
+
+  it("undoes a collaborative change as a semantic command without replacing Y.Doc", async () => {
+    const user = userEvent.setup();
+    const session = createMockCollaborationSession("Live title");
+    vi.mocked(session.flushPendingUpdates).mockResolvedValue({ generation: 2, stateVector: new Uint8Array([1]) });
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session,
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        permission: "write",
+        status: "synced",
+        transportSynced: true,
+        writable: true,
+      }),
+    });
+    const proposal = createProposal("proposal_1");
+    const before = Y.encodeStateAsUpdate(session.document);
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      if (input === "/api/documents/doc_1/workflow" && init?.method === "GET") {
+        return collaborationWorkflowResponse();
+      }
+      if (input === "/api/proposals/proposal_1/apply" && init?.method === "POST") {
+        return jsonResponse({
+          ...createProposalApplyResponse(
+            proposal,
+            createDocumentWithContent("doc_1", "Ignored title", "Must not enter Y.Doc"),
+          ),
+          collaboration: { generation: 2, headSeq: 8 },
+          replayed: false,
+        });
+      }
+      if (typeof input === "string" && input.startsWith("/api/document-changes?")) {
+        return jsonResponse({ changes: [], nextCursor: null });
+      }
+      if (input === "/api/document-changes/change_1/undo" && init?.method === "POST") {
+        return jsonResponse({
+          change: {
+            id: "change_1",
+            documentId: "doc_1",
+            kind: "single",
+            batchId: null,
+            afterRevision: 1,
+            createdAt: "2026-01-01T00:00:00.000Z",
+            undoneAt: "2026-01-01T00:01:00.000Z",
+          },
+          collaboration: { generation: 2, headSeq: 9 },
+          document: createDocumentWithContent("doc_1", "Ignored undo title", "Must not enter Y.Doc either"),
+          proposals: [{
+            ...createProposal("proposal_1"),
+            documentId: "doc_1",
+            status: "pending",
+            appliedMode: null,
+          }],
+          replayed: false,
+        });
+      }
+      throw new Error(`Unexpected request: ${String(input)}`);
+    });
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocumentWithContent("doc_1", "SQL title", "Stale SQL body")}
+        proposals={[proposal]}
+        templates={[createTemplate("tpl_1", "Board review")]}
+      />,
+    );
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) =>
+      input === "/api/documents/doc_1/workflow")).toBe(true));
+    await user.click(screen.getByRole("button", { name: "growth was good 제안으로 교체" }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) =>
+      input === "/api/proposals/proposal_1/apply")).toBe(true));
+
+    await user.click(screen.getByRole("tab", { name: "변경내역" }));
+    const undoButton = await screen.findByRole("button", { name: "growth was good 변경 되돌리기" });
+    expect(undoButton).toBeEnabled();
+    await user.click(undoButton);
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) =>
+      input === "/api/document-changes/change_1/undo")).toBe(true));
+
+    const undoCall = fetchMock.mock.calls.find(([input]) => input === "/api/document-changes/change_1/undo")!;
+    expect(JSON.parse(String(undoCall[1]?.body))).toEqual({
+      commandId: expect.stringMatching(/^[0-9a-f-]{36}$/u),
+      observedHeadSeq: 8,
+    });
+    expect(session.flushPendingUpdates).toHaveBeenCalledTimes(2);
+    expect(Y.encodeStateAsUpdate(session.document)).toEqual(before);
+    await waitFor(() => expect(
+      screen.getByRole("button", { name: "growth was good 변경 되돌리기" }),
+    ).toBeDisabled());
+    await user.click(screen.getByRole("tab", { name: "검토" }));
+    expect(await screen.findByRole("button", { name: "growth was good 제안으로 교체" })).toBeInTheDocument();
   });
 
   it("marks the proposal workspace busy and inert only while a deferred command is pending", async () => {
@@ -1944,7 +2038,7 @@ describe("DocumentShell", () => {
 
     expect(await screen.findByText("수락됨")).toBeInTheDocument();
     await user.click(screen.getByRole("tab", { name: "변경내역" }));
-    expect(screen.getByRole("button", { name: "only target 변경 되돌리기" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "only target 변경 되돌리기" })).toBeEnabled();
   });
 
   it("adopts a delayed committed single result while preserving a newer workflow head", async () => {
@@ -2015,7 +2109,7 @@ describe("DocumentShell", () => {
 
     await waitFor(() => expect(screen.queryByRole("button", { name: "alpha 제안으로 교체" })).not.toBeInTheDocument());
     await user.click(screen.getByRole("tab", { name: "변경내역" }));
-    expect(screen.getByRole("button", { name: "alpha 변경 되돌리기" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "alpha 변경 되돌리기" })).toBeEnabled();
     await user.click(screen.getByRole("tab", { name: "검토" }));
     await user.click(screen.getByRole("button", { name: "beta 제안으로 교체" }));
     await waitFor(() => expect(fetchMock.mock.calls.some(([input]) =>
@@ -2094,7 +2188,7 @@ describe("DocumentShell", () => {
 
     await waitFor(() => expect(screen.getAllByText("수락됨")).toHaveLength(2));
     await user.click(screen.getByRole("tab", { name: "변경내역" }));
-    expect(screen.getByRole("button", { name: "alpha · beta 변경 되돌리기" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "alpha · beta 변경 되돌리기" })).toBeEnabled();
 
     view.rerender(
       <DocumentShell

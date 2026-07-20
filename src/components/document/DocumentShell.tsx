@@ -80,6 +80,7 @@ import {
   type DocumentWorkflowState,
   type CollaborativeProposalApplyPayload,
   type CollaborativeProposalBatchApplyPayload,
+  type CollaborativeUndoPayload,
 } from "@/features/documents/document-session-client";
 import { extractPlainTextFromTiptap } from "@/features/documents/tiptap-text";
 import {
@@ -264,6 +265,11 @@ type CachedCollaborationCommand =
       expectedGeneration: number;
       kind: "single";
       payload: CollaborativeProposalApplyPayload;
+    }
+  | {
+      expectedGeneration: number;
+      kind: "undo";
+      payload: CollaborativeUndoPayload;
     };
 
 type ReviewResponse = {
@@ -525,17 +531,24 @@ const documentSessionClient = createDocumentSessionClient((input, init) => fetch
 function createHistoryChange(
   change: DocumentSessionChange,
   proposals: DocumentSessionProposal[],
+  collaboration?: { generation: number; headSeq: number },
 ): DocumentSessionHistoryChange {
-  return {
-    ...change,
-    proposals: proposals.map((proposal, ordinal) => ({
-      id: proposal.id,
-      targetText: proposal.targetText,
-      replacementText: proposal.replacementText,
-      appliedMode: proposal.appliedMode ?? proposal.defaultApplyMode ?? "replace",
-      ordinal,
-    })),
-  };
+  const historyProposals = proposals.map((proposal, ordinal) => ({
+    id: proposal.id,
+    targetText: proposal.targetText,
+    replacementText: proposal.replacementText,
+    appliedMode: proposal.appliedMode ?? proposal.defaultApplyMode ?? "replace",
+    ordinal,
+  }));
+  return collaboration
+    ? {
+        ...change,
+        canUndo: change.undoneAt === null,
+        mode: "collaboration",
+        proposals: historyProposals,
+        resultingHeadSeq: collaboration.headSeq,
+      }
+    : { ...change, mode: "legacy", proposals: historyProposals };
 }
 
 function mergeDocumentChanges(
@@ -2290,7 +2303,7 @@ function DocumentShellContent({
         setReviewProposals((currentProposals) => currentProposals.map((proposal) =>
           proposal.id === proposalId ? updatedProposal : proposal));
         setDocumentChanges((currentChanges) => [
-          createHistoryChange(response.change, response.proposals),
+          createHistoryChange(response.change, response.proposals, response.collaboration),
           ...currentChanges.filter((change) => change.id !== response.change.id),
         ]);
         adoptServerRevision(response.document.revision);
@@ -2566,7 +2579,7 @@ function DocumentShellContent({
         setReviewProposals((currentProposals) => currentProposals.map((proposal) =>
           updatedProposalById.get(proposal.id) ?? proposal));
         setDocumentChanges((currentChanges) => [
-          createHistoryChange(response.change, response.proposals),
+          createHistoryChange(response.change, response.proposals, response.collaboration),
           ...currentChanges.filter((change) => change.id !== response.change.id),
         ]);
         adoptServerRevision(response.document.revision);
@@ -2811,7 +2824,6 @@ function DocumentShellContent({
   }, [document.id, isActiveDocumentAsyncScope, isLoadingProposals, messages.errors.reviewFailed, proposalCursor]);
 
   const loadDocumentChanges = useCallback(async (cursor?: string) => {
-    if (isCollaborationMode) return;
     if (documentChangesLoadingRef.current || (cursor === undefined && documentChangesLoadedRef.current)) return;
     const requestScope = documentAsyncScopeRef.current;
     documentChangesLoadingRef.current = true;
@@ -2835,13 +2847,102 @@ function DocumentShellContent({
         setIsLoadingDocumentChanges(false);
       }
     }
-  }, [document.id, isActiveDocumentAsyncScope, isCollaborationMode, messages.aiWorkspace.changeLoadFailed]);
+  }, [document.id, isActiveDocumentAsyncScope, messages.aiWorkspace.changeLoadFailed]);
 
   const undoAppliedChange = useCallback(async (changeId: string) => {
-    if (isCollaborationMode) return;
     const change = documentChanges.find((item) => item.id === changeId);
+    if (isCollaborationMode) {
+      if (
+        !change ||
+        change.mode !== "collaboration" ||
+        !change.canUndo ||
+        change.undoneAt !== null
+      ) {
+        setUndoChangeError(messages.aiWorkspace.undoConflict);
+        return;
+      }
+      if (collaborationCommandPendingRef.current) return;
+      const observedPosition = collaborationPositionRef.current
+        ?? workflowStateRef.current?.collaboration
+        ?? null;
+      if (!observedPosition) {
+        setUndoChangeError(messages.aiWorkspace.undoConflict);
+        return;
+      }
+      const requestScope = documentAsyncScopeRef.current;
+      const commandKey = `${document.id}:undo:${changeId}`;
+      const cachedCommand = collaborationCommandRetryRef.current.get(commandKey);
+      const command: Extract<CachedCollaborationCommand, { kind: "undo" }> = cachedCommand?.kind === "undo"
+        ? cachedCommand
+        : {
+            expectedGeneration: observedPosition.generation,
+            kind: "undo",
+            payload: {
+              commandId: crypto.randomUUID(),
+              observedHeadSeq: observedPosition.headSeq,
+            },
+          };
+      collaborationCommandRetryRef.current.set(commandKey, command);
+      collaborationPositionRef.current = observedPosition;
+      collaborationCommandPendingRef.current = true;
+      setCollaborationCommandPendingDocumentId(document.id);
+      setProjectProfileViolation(null);
+      setUndoChangeError("");
+      let commandWasSubmitted = false;
+      try {
+        const response = await runWithCollaborationFlushController(async (signal) => {
+          const durableBarrier = await flushCollaborationBarrier(signal, requestScope);
+          if (durableBarrier.generation < command.expectedGeneration) {
+            throw new CollaborationActionError();
+          }
+          if (!isActiveDocumentAsyncScope(requestScope)) throw new CollaborationActionError();
+          commandWasSubmitted = true;
+          return documentSessionClient.undoCollaborativeChange(changeId, command.payload, {
+            expectedDocumentId: document.id,
+            expectedGeneration: command.expectedGeneration,
+            signal,
+          });
+        });
+        const expectedPosition = {
+          generation: command.expectedGeneration,
+          headSeq: command.payload.observedHeadSeq,
+        };
+        if (!acceptCollaborationPosition(response.collaboration, requestScope, expectedPosition)) {
+          throw new CollaborationActionError();
+        }
+        const updatedProposalById = new Map(response.proposals.map((proposal) => [proposal.id, proposal]));
+        setReviewProposals((currentProposals) => {
+          const currentProposalIds = new Set(currentProposals.map((proposal) => proposal.id));
+          return [
+            ...currentProposals.map((proposal) => updatedProposalById.get(proposal.id) ?? proposal),
+            ...response.proposals.filter((proposal) => !currentProposalIds.has(proposal.id)),
+          ];
+        });
+        setDocumentChanges((currentChanges) => currentChanges.map((item) =>
+          item.id === changeId
+            ? createHistoryChange(response.change, response.proposals, response.collaboration)
+            : item));
+        adoptServerRevision(response.document.revision);
+        setUndoChangeError("");
+        collaborationCommandRetryRef.current.delete(commandKey);
+      } catch (error) {
+        if (!commandWasSubmitted || !shouldRetainCollaborationCommand(error)) {
+          collaborationCommandRetryRef.current.delete(commandKey);
+        }
+        if (isActiveDocumentAsyncScope(requestScope)) {
+          setUndoChangeError(messages.aiWorkspace.undoConflict);
+        }
+      } finally {
+        if (isActiveDocumentAsyncScope(requestScope)) {
+          collaborationCommandPendingRef.current = false;
+          setCollaborationCommandPendingDocumentId(null);
+        }
+      }
+      return;
+    }
     if (
       !change ||
+      change.mode === "collaboration" ||
       change.undoneAt !== null ||
       saveState !== "saved" ||
       change.afterRevision !== serverRevisionRef.current
@@ -2898,13 +2999,17 @@ function DocumentShellContent({
       }
     }
   }, [
+    acceptCollaborationPosition,
     adoptServerRevision,
+    document.id,
     documentChanges,
+    flushCollaborationBarrier,
     isActiveDocumentAsyncScope,
     isCollaborationMode,
     messages.aiWorkspace.undoConflict,
     recoverProjectProfileViolation,
     recoverSessionRevisionConflict,
+    runWithCollaborationFlushController,
     saveState,
   ]);
 
@@ -2989,11 +3094,12 @@ function DocumentShellContent({
       documentChanges.map((change): AiWorkspaceChangeItem => ({
         appliedAt: new Date(change.createdAt),
         appliedMode: change.proposals[0]?.appliedMode ?? "replace",
-        canUndo:
-          !isCollaborationMode &&
-          change.undoneAt === null &&
-          saveState === "saved" &&
-          change.afterRevision === serverRevision,
+        canUndo: change.mode === "collaboration"
+          ? isCollaborationMode && change.canUndo && change.undoneAt === null
+          : !isCollaborationMode &&
+            change.undoneAt === null &&
+            saveState === "saved" &&
+            change.afterRevision === serverRevision,
         id: change.id,
         replacementText: change.proposals.map((proposal) => proposal.replacementText).join(" · "),
         targetText: change.proposals.map((proposal) => proposal.targetText).join(" · "),

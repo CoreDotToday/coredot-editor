@@ -814,6 +814,139 @@ describe("document session client", () => {
     });
   });
 
+  it("accepts discriminated legacy and collaborative history items", async () => {
+    const legacyItem = {
+      ...change,
+      mode: "legacy",
+      proposals: [{
+        id: "proposal_1",
+        targetText: "old",
+        replacementText: "new",
+        appliedMode: "replace",
+        ordinal: 0,
+      }],
+    };
+    const collaborationBase: Partial<typeof change> = { ...change };
+    delete collaborationBase.afterRevision;
+    const collaborationItem = {
+      ...collaborationBase,
+      canUndo: true,
+      id: "change_2",
+      mode: "collaboration",
+      proposals: [],
+      resultingHeadSeq: 9,
+    };
+    const client = createDocumentSessionClient(vi.fn().mockResolvedValue(jsonResponse({
+      changes: [collaborationItem, legacyItem],
+      nextCursor: null,
+    })));
+
+    await expect(client.listChanges("doc_1")).resolves.toEqual({
+      changes: [collaborationItem, legacyItem],
+      nextCursor: null,
+    });
+  });
+
+  it("rejects a collaborative history item without its undo capability fields", async () => {
+    const malformedItem = {
+      ...change,
+      mode: "collaboration",
+      proposals: [],
+    };
+    const client = createDocumentSessionClient(vi.fn().mockResolvedValue(jsonResponse({
+      changes: [malformedItem],
+      nextCursor: null,
+    })));
+
+    await expect(client.listChanges("doc_1")).rejects.toMatchObject({
+      name: "DocumentSessionRequestError",
+    });
+  });
+
+  it("sends only the semantic collaborative undo command and validates the undone change", async () => {
+    const pendingProposal = {
+      appliedMode: null,
+      command: null,
+      defaultApplyMode: "replace",
+      documentId: "doc_1",
+      explanation: "Clearer",
+      id: "proposal_1",
+      occurrenceIndex: null,
+      replacementText: "new",
+      source: "review",
+      status: "pending",
+      targetFrom: null,
+      targetText: "old",
+      targetTo: null,
+    };
+    const request = vi.fn().mockResolvedValue(jsonResponse({
+      change: { ...change, undoneAt: "2026-01-02T00:00:00.000Z" },
+      collaboration: { generation: 2, headSeq: 9 },
+      document: serverDocument,
+      proposals: [pendingProposal],
+      replayed: false,
+    }));
+    const client = createDocumentSessionClient(request);
+
+    await expect(client.undoCollaborativeChange("change_1", {
+      commandId: "undo-command-1",
+      observedHeadSeq: 8,
+    }, {
+      expectedDocumentId: "doc_1",
+      expectedGeneration: 2,
+    })).resolves.toMatchObject({
+      change: { id: "change_1", undoneAt: "2026-01-02T00:00:00.000Z" },
+      collaboration: { generation: 2, headSeq: 9 },
+      proposals: [{ id: "proposal_1", status: "pending" }],
+      replayed: false,
+    });
+    expect(request).toHaveBeenCalledWith(
+      "/api/document-changes/change_1/undo",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(JSON.parse(String(request.mock.calls[0]?.[1]?.body))).toEqual({
+      commandId: "undo-command-1",
+      observedHeadSeq: 8,
+    });
+  });
+
+  it("maps bounded collaborative undo failures onto stable typed reasons", async () => {
+    const client = createDocumentSessionClient(vi.fn().mockResolvedValue(jsonResponse({
+      error: "Document change undo conflict",
+      reason: "undo_conflict",
+    }, 409)));
+
+    await expect(client.undoCollaborativeChange("change_1", {
+      commandId: "undo-command-2",
+      observedHeadSeq: 8,
+    }, {
+      expectedDocumentId: "doc_1",
+      expectedGeneration: 2,
+    })).rejects.toMatchObject({
+      name: "DocumentCollaborativeProposalRequestError",
+      reason: "undo_conflict",
+      status: 409,
+    });
+  });
+
+  it("rejects a collaborative undo response whose change was not actually undone", async () => {
+    const client = createDocumentSessionClient(vi.fn().mockResolvedValue(jsonResponse({
+      change,
+      collaboration: { generation: 2, headSeq: 9 },
+      document: serverDocument,
+      proposals: [],
+      replayed: false,
+    })));
+
+    await expect(client.undoCollaborativeChange("change_1", {
+      commandId: "undo-command-3",
+      observedHeadSeq: 8,
+    }, {
+      expectedDocumentId: "doc_1",
+      expectedGeneration: 2,
+    })).rejects.toMatchObject({ reason: "malformed_response" });
+  });
+
   it("loads paginated durable history and creates a full draft", async () => {
     const historyChange = {
       ...change,

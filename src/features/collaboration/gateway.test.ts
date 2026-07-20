@@ -140,6 +140,19 @@ describe("CollaborativeDocumentGateway", () => {
     expect(result.generation).toBe(2);
   });
 
+  it("rejects a selective undo command with an unsafe change id before planning", async () => {
+    const publish = vi.fn();
+    const fixture = createFixture({ publish });
+
+    await expect(fixture.gateway.undoChange(context, {
+      changeId: " change-1",
+      commandId: "undo-command-invalid-change",
+      documentId: "document-a",
+      generation: 1,
+    })).rejects.toMatchObject({ category: "invalid_input" });
+    expect(publish).not.toHaveBeenCalled();
+  });
+
   it("never publishes when durable append fails", async () => {
     const publish = vi.fn();
     const fixture = createFixture({ appendFailure: new Error("storage"), publish });

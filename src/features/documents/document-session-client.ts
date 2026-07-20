@@ -106,15 +106,26 @@ export type DocumentSessionCollaborativeChangeResponse = DocumentSessionChangeRe
   replayed: boolean;
 };
 
-export type DocumentSessionHistoryChange = DocumentSessionChange & {
-  proposals: Array<{
-    id: string;
-    targetText: string;
-    replacementText: string;
-    appliedMode: ProposalApplyMode;
-    ordinal: number;
-  }>;
+export type DocumentSessionHistoryProposal = {
+  id: string;
+  targetText: string;
+  replacementText: string;
+  appliedMode: ProposalApplyMode;
+  ordinal: number;
 };
+
+/**
+ * Legacy history items undo by document revision; collaborative items undo by
+ * durable command with a server-owned `canUndo`. Items without a `mode` come
+ * from pre-collaboration servers and are treated as legacy.
+ */
+export type DocumentSessionHistoryChange =
+  & Omit<DocumentSessionChange, "afterRevision">
+  & { proposals: DocumentSessionHistoryProposal[] }
+  & (
+    | { afterRevision: number; mode?: "legacy" }
+    | { afterRevision?: number; canUndo: boolean; mode: "collaboration"; resultingHeadSeq: number }
+  );
 
 export type DocumentSaveResult =
   | { kind: "saved"; document: DocumentSessionDocument }
@@ -171,6 +182,13 @@ export type CollaborativeProposalErrorReason =
   | "unavailable"
   | "unknown";
 
+export type CollaborativeUndoErrorReason = CollaborativeProposalErrorReason | "undo_conflict";
+
+export type CollaborativeUndoPayload = {
+  commandId: string;
+  observedHeadSeq: number;
+};
+
 export const COLLABORATIVE_PROPOSAL_CLIENT_TIMEOUT_MS = 15_000;
 
 type RequestFunction = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -211,7 +229,7 @@ export class DocumentCollaborativeProposalRequestError extends DocumentSessionRe
   constructor(
     status: number,
     body: Record<string, unknown>,
-    readonly reason: CollaborativeProposalErrorReason,
+    readonly reason: CollaborativeUndoErrorReason,
   ) {
     super(status, body);
     this.name = "DocumentCollaborativeProposalRequestError";
@@ -323,6 +341,17 @@ const collaborativeProposalServerReasonSchema = z.enum([
 const collaborativeProposalErrorBodySchema = z.object({
   error: z.string(),
   reason: collaborativeProposalServerReasonSchema,
+}).strict();
+const collaborativeUndoServerReasonSchema = z.enum([
+  "idempotency_conflict",
+  "invalid_request",
+  "not_found",
+  "unavailable",
+  "undo_conflict",
+]);
+const collaborativeUndoErrorBodySchema = z.object({
+  error: z.string(),
+  reason: collaborativeUndoServerReasonSchema,
 }).strict();
 
 export function createDocumentSessionClient(request: RequestFunction = fetch) {
@@ -451,6 +480,72 @@ export function createDocumentSessionClient(request: RequestFunction = fetch) {
     };
   }
 
+  async function requestCollaborativeUndo(
+    changeId: string,
+    payload: CollaborativeUndoPayload,
+    options: CollaborativeProposalRequestOptions,
+  ): Promise<DocumentSessionCollaborativeChangeResponse> {
+    const url = `/api/document-changes/${encodeURIComponent(changeId)}/undo`;
+    let exchange: { body: Record<string, unknown>; response: Response };
+    try {
+      exchange = await requestWithWorkflowDeadline(request, url, {
+        body: JSON.stringify(payload),
+        headers: { "Content-Type": "application/json" },
+        method: "POST",
+        signal: options.signal,
+      }, async (response) => ({ body: await readBody(response), response }),
+      options.timeoutMs ?? COLLABORATIVE_PROPOSAL_CLIENT_TIMEOUT_MS);
+    } catch (error) {
+      if (error instanceof DocumentWorkflowTimeoutError) {
+        throw new DocumentCollaborativeProposalRequestError(0, {}, "timeout");
+      }
+      if (options.signal?.aborted) {
+        throw new DocumentCollaborativeProposalRequestError(0, {}, "aborted");
+      }
+      throw new DocumentCollaborativeProposalRequestError(0, {}, "network_error");
+    }
+
+    const { body, response } = exchange;
+    if (!response.ok) {
+      const parsedError = collaborativeUndoErrorBodySchema.safeParse(body);
+      throw new DocumentCollaborativeProposalRequestError(
+        response.status,
+        body,
+        parsedError.success ? parsedError.data.reason : "unknown",
+      );
+    }
+
+    const parsed = collaborativeBatchResponseSchema.safeParse(body);
+    if (!parsed.success) {
+      throw new DocumentCollaborativeProposalRequestError(response.status, body, "malformed_response");
+    }
+    const parsedBody = parsed.data;
+    const collaborationPositionIsValid = parsedBody.collaboration.generation === options.expectedGeneration
+      ? parsedBody.collaboration.headSeq >= payload.observedHeadSeq
+      : parsedBody.collaboration.generation === options.expectedGeneration + 1;
+    if (
+      parsedBody.document.id !== options.expectedDocumentId
+      || parsedBody.change.documentId !== options.expectedDocumentId
+      || parsedBody.change.id !== changeId
+      || parsedBody.change.undoneAt === null
+      || !collaborationPositionIsValid
+      || parsedBody.proposals.some((proposal) =>
+        proposal.status !== "pending"
+        || proposal.appliedMode !== null
+        || proposal.documentId !== options.expectedDocumentId)
+    ) {
+      throw new DocumentCollaborativeProposalRequestError(response.status, body, "malformed_response");
+    }
+
+    return {
+      change: parsedBody.change,
+      collaboration: parsedBody.collaboration,
+      document: parsedBody.document,
+      proposals: parsedBody.proposals,
+      replayed: parsedBody.replayed,
+    };
+  }
+
   return {
     async save(
       documentId: string,
@@ -542,6 +637,14 @@ export function createDocumentSessionClient(request: RequestFunction = fetch) {
         { expectedRevision },
         "plural",
       );
+    },
+
+    undoCollaborativeChange(
+      changeId: string,
+      payload: CollaborativeUndoPayload,
+      options: CollaborativeProposalRequestOptions,
+    ) {
+      return requestCollaborativeUndo(changeId, payload, options);
     },
 
     async listChanges(
@@ -783,13 +886,18 @@ function parseWorkflowErrorReason(value: unknown): DocumentWorkflowErrorReason {
 }
 
 function isDocumentSessionChange(value: unknown): value is DocumentSessionChange {
+  return isDocumentSessionChangeBase(value) &&
+    isNonNegativeSafeInteger((value as Record<string, unknown>).afterRevision);
+}
+
+function isDocumentSessionChangeBase(
+  value: unknown,
+): value is Omit<DocumentSessionChange, "afterRevision"> {
   if (!isRecord(value)) return false;
   return typeof value.id === "string" &&
     typeof value.documentId === "string" &&
     (value.kind === "single" || value.kind === "batch") &&
     (value.batchId === null || typeof value.batchId === "string") &&
-    Number.isSafeInteger(value.afterRevision) &&
-    Number(value.afterRevision) >= 0 &&
     typeof value.createdAt === "string" &&
     (value.undoneAt === null || typeof value.undoneAt === "string");
 }
@@ -813,7 +921,22 @@ function isDocumentSessionProposal(value: unknown): value is DocumentSessionProp
 function isDocumentSessionHistoryChange(value: unknown): value is DocumentSessionHistoryChange {
   if (!isRecord(value)) return false;
   const proposals = value.proposals;
-  if (!Array.isArray(proposals) || !isDocumentSessionChange(value)) return false;
+  if (!Array.isArray(proposals) || !isDocumentSessionChangeBase(value)) return false;
+  const record = value as Record<string, unknown>;
+  if (record.mode === "collaboration") {
+    if (
+      typeof record.canUndo !== "boolean" ||
+      !isNonNegativeSafeInteger(record.resultingHeadSeq) ||
+      (record.afterRevision !== undefined && !isNonNegativeSafeInteger(record.afterRevision))
+    ) {
+      return false;
+    }
+  } else if (
+    (record.mode !== undefined && record.mode !== "legacy") ||
+    !isNonNegativeSafeInteger(record.afterRevision)
+  ) {
+    return false;
+  }
   return proposals.every((proposal) =>
     isRecord(proposal) &&
     typeof proposal.id === "string" &&
