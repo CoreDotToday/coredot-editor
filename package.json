@@ -80,7 +80,7 @@
     "@tiptap/pm": "3.27.4",
     "@tiptap/react": "3.27.4",
     "@tiptap/starter-kit": "3.27.4",
-    "@xmldom/xmldom": "^0.8.13",
+    "@xmldom/xmldom": "^0.9.10",
     "ai": "^6.0.226",
     "docx": "^9.7.1",
     "drizzle-orm": "^0.45.2",
