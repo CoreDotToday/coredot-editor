@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   COLLABORATION_TELEMETRY_METRICS,
   emitAiExecutionTelemetry,
+  emitCollaborationCommandConflict,
   emitCollaborationTelemetry,
   type AiExecutionTelemetryEvent,
   type CollaborationTelemetryEvent,
@@ -360,5 +361,56 @@ describe("collaboration telemetry", () => {
       type: "collaboration_metric",
       value: 1,
     })).not.toThrow();
+  });
+
+  it("emits a command_conflict only for bounded conflict outcomes and returns the result unchanged", () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+
+    const conflict = { ok: false as const, reason: "proposal_target_conflict" as const };
+    expect(emitCollaborationCommandConflict(conflict)).toBe(conflict);
+    const undoConflict = { ok: false as const, reason: "undo_conflict" as const };
+    expect(emitCollaborationCommandConflict(undoConflict)).toBe(undoConflict);
+    const statusConflict = { ok: false as const, reason: "proposal_status_conflict" as const };
+    expect(emitCollaborationCommandConflict(statusConflict)).toBe(statusConflict);
+
+    expect(info.mock.calls.map((call) => JSON.parse(call[0] as string))).toEqual([
+      {
+        category: "proposal_target_conflict",
+        kind: "counter",
+        metric: "command_conflict",
+        type: "collaboration_metric",
+        unit: "count",
+        value: 1,
+      },
+      {
+        category: "undo_conflict",
+        kind: "counter",
+        metric: "command_conflict",
+        type: "collaboration_metric",
+        unit: "count",
+        value: 1,
+      },
+      {
+        category: "proposal_status_conflict",
+        kind: "counter",
+        metric: "command_conflict",
+        type: "collaboration_metric",
+        unit: "count",
+        value: 1,
+      },
+    ]);
+  });
+
+  it("stays silent for successful or non-conflict command outcomes", () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+
+    const success = { ok: true as const, result: { content: "document-content-secret" } };
+    expect(emitCollaborationCommandConflict(success)).toBe(success);
+    const unavailable = { ok: false as const, reason: "unavailable" as const };
+    expect(emitCollaborationCommandConflict(unavailable)).toBe(unavailable);
+    const invalid = { ok: false as const, reason: "invalid_request" as const };
+    expect(emitCollaborationCommandConflict(invalid)).toBe(invalid);
+
+    expect(info).not.toHaveBeenCalled();
   });
 });

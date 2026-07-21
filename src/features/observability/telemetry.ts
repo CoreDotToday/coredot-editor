@@ -69,6 +69,7 @@ const COLLABORATION_CLOSE_CATEGORIES = new Set([
 const COLLABORATION_CONFLICT_CATEGORIES = new Set([
   "idempotency_conflict",
   "proposal_overlap_conflict",
+  "proposal_status_conflict",
   "proposal_target_conflict",
   "sequence_conflict",
   "undo_conflict",
@@ -162,6 +163,34 @@ export function emitCollaborationTelemetry(event: CollaborationTelemetryEvent) {
   } catch {
     // Telemetry is best-effort and must never affect the operation it describes.
   }
+}
+
+/**
+ * Emits one `command_conflict` sample when a collaborative command outcome
+ * carries a bounded conflict reason, then returns the outcome unchanged so it
+ * can wrap a service return expression. Success and non-conflict failures
+ * (unavailable, invalid_request, not_found) emit nothing.
+ */
+export function emitCollaborationCommandConflict<T>(result: T): T {
+  try {
+    if (
+      result
+      && typeof result === "object"
+      && (result as { ok?: unknown }).ok === false
+    ) {
+      const reason = (result as { reason?: unknown }).reason;
+      if (typeof reason === "string" && COLLABORATION_CONFLICT_CATEGORIES.has(reason)) {
+        emitCollaborationTelemetry({
+          category: reason,
+          metric: "command_conflict",
+          type: "collaboration_metric",
+        });
+      }
+    }
+  } catch {
+    // Telemetry is best-effort and must never affect the operation it describes.
+  }
+  return result;
 }
 
 export function emitAiExecutionTelemetry(event: AiExecutionTelemetryEvent) {

@@ -696,6 +696,87 @@ describe("the pinned Hocuspocus durable message lifecycle", () => {
     }
   });
 
+  it("emits privacy-safe collaboration telemetry across the connection lifecycle", async () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const collectMetrics = () => info.mock.calls
+      .map((call) => {
+        try {
+          return JSON.parse(call[0] as string) as Record<string, unknown>;
+        } catch {
+          return null;
+        }
+      })
+      .filter((record): record is Record<string, unknown> => (
+        record !== null && record.type === "collaboration_metric"
+      ));
+    const fixture = await createFixture({ append: async (input) => receipt(input) });
+    try {
+      const writer = await fixture.connect("principal:telemetry-writer");
+      writer.document.getText("test").insert(0, "telemetry secret text");
+      await eventually(() => expect(fixture.changedAppendInputs.length).toBeGreaterThan(0));
+
+      // A rejected token surfaces a bounded auth category.
+      const rejectedSocket = new HocuspocusProviderWebsocket({
+        WebSocketPolyfill: OriginWebSocket,
+        url: fixture.webSocketUrl,
+      });
+      const rejected = new HocuspocusProvider({
+        document: new Y.Doc(),
+        name: room,
+        token: "invalid-token",
+        websocketProvider: rejectedSocket,
+      });
+      const authFailed = new Promise<void>((resolve) => {
+        rejected.on("authenticationFailed", () => resolve());
+      });
+      rejected.attach();
+      await authFailed;
+      rejected.destroy();
+      rejectedSocket.destroy();
+
+      writer.provider.destroy();
+      writer.websocketProvider.destroy();
+      await fixture.beginDrain();
+
+      await eventually(() => {
+        const names = new Set(collectMetrics().map((record) => record.metric));
+        for (const expected of [
+          "connection_opened",
+          "room_reload",
+          "recovery_duration_ms",
+          "head_projection_lag",
+          "update_bytes",
+          "durable_append_latency_ms",
+          "auth_rejected",
+          "connection_closed",
+          "checkpoint_duration_ms",
+          "drain_duration_ms",
+        ]) {
+          expect(names, `expected metric ${expected}`).toContain(expected);
+        }
+      });
+
+      const metrics = collectMetrics();
+      const authRejected = metrics.find((record) => record.metric === "auth_rejected");
+      expect(authRejected).toMatchObject({ category: "authorization_revoked" });
+      const updateBytes = metrics.find((record) => record.metric === "update_bytes");
+      expect(updateBytes?.value as number).toBeGreaterThan(0);
+      for (const record of metrics) {
+        expect(Object.keys(record).toSorted().every((key) => (
+          ["category", "kind", "metric", "type", "unit", "value"].includes(key)
+        ))).toBe(true);
+      }
+      const everything = JSON.stringify(info.mock.calls);
+      expect(everything).not.toContain("telemetry secret text");
+      expect(everything).not.toContain("invalid-token");
+      expect(everything).not.toContain("principal:telemetry-writer");
+      expect(everything).not.toContain(workspaceId);
+    } finally {
+      await fixture.destroy();
+      info.mockRestore();
+    }
+  });
+
   it("fails closed and destroys the real provider when refreshed authentication is rejected", async () => {
     const fixture = await createFixture({ append: async (input) => receipt(input) });
     try {

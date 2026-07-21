@@ -19,6 +19,7 @@ import {
 } from "@/db/schema";
 import type { RequestContext } from "@/features/auth/request-context";
 import { createDocumentWorkflowNotificationOutbox } from "@/features/documents/document-workflow-notification-outbox";
+import { emitCollaborationCommandConflict } from "@/features/observability/telemetry";
 import { resolveActiveProjectProfile } from "@/features/projects/active-project-profile";
 import { appDocumentSchemaProfileRuntime } from "@/plugins/app-document-schema-profile-runtime.mjs";
 import {
@@ -235,7 +236,7 @@ export function createCollaborativeSelectiveUndoService(options: {
   const deliveryOutbox = createCollaborationCommandDeliveryOutbox({ database });
   const workflowOutbox = createDocumentWorkflowNotificationOutbox({ database });
 
-  return {
+  const service = {
     async undo(
       context: RequestContext,
       input: CollaborativeUndoInput,
@@ -405,6 +406,15 @@ export function createCollaborativeSelectiveUndoService(options: {
         }
         return { ok: false, reason: "unavailable" };
       }
+    },
+  };
+
+  return {
+    async undo(
+      context: RequestContext,
+      input: CollaborativeUndoInput,
+    ): Promise<CollaborativeUndoResult> {
+      return emitCollaborationCommandConflict(await service.undo(context, input));
     },
   };
 }

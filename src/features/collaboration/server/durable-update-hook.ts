@@ -9,6 +9,7 @@ import {
 } from "y-protocols/sync";
 
 import type { WorkspaceScope } from "@/features/auth/request-context";
+import { emitCollaborationTelemetry } from "@/features/observability/telemetry";
 
 import {
   CollaborationPersistenceError,
@@ -203,6 +204,12 @@ export function createDurableUpdateHooks(options: {
           );
           growth = reservedGrowth;
 
+          emitCollaborationTelemetry({
+            metric: "update_bytes",
+            type: "collaboration_metric",
+            value: parsed.payload.byteLength,
+          });
+          const appendStartedAt = performance.now();
           const receipt = await trackInFlight(
             inFlightAppends,
             options.persistence.appendAuthorizedClientUpdate(
@@ -220,6 +227,11 @@ export function createDurableUpdateHooks(options: {
               },
             ),
           );
+          emitCollaborationTelemetry({
+            metric: "durable_append_latency_ms",
+            type: "collaboration_metric",
+            value: performance.now() - appendStartedAt,
+          });
           reservedGrowth.commit();
           try {
             assertAvailable(connection, options, rejectConnection);

@@ -20,6 +20,7 @@ import {
 } from "@/db/schema";
 import type { RequestContext } from "@/features/auth/request-context";
 import { createDocumentWorkflowNotificationOutbox } from "@/features/documents/document-workflow-notification-outbox";
+import { emitCollaborationCommandConflict } from "@/features/observability/telemetry";
 import type { ProposalApplyMode } from "@/features/proposals/proposal-transaction";
 import { resolveActiveProjectProfile } from "@/features/projects/active-project-profile";
 
@@ -101,7 +102,7 @@ export function createCollaborativeProposalService(options: {
   const deliveryOutbox = createCollaborationCommandDeliveryOutbox({ database });
   const workflowOutbox = createDocumentWorkflowNotificationOutbox({ database });
 
-  return {
+  const service = {
     async apply(
       context: RequestContext,
       input: CollaborativeProposalApplyInput,
@@ -276,6 +277,15 @@ export function createCollaborativeProposalService(options: {
         }
         return { ok: false, reason: "unavailable" };
       }
+    },
+  };
+
+  return {
+    async apply(
+      context: RequestContext,
+      input: CollaborativeProposalApplyInput,
+    ): Promise<CollaborativeProposalApplyResult> {
+      return emitCollaborationCommandConflict(await service.apply(context, input));
     },
   };
 }

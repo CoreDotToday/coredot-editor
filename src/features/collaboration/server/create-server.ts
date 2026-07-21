@@ -10,6 +10,7 @@ import {
 import * as Y from "yjs";
 
 import type { WorkspaceScope } from "@/features/auth/request-context";
+import { emitCollaborationTelemetry } from "@/features/observability/telemetry";
 
 import {
   createCollaborationCapabilityAuthority,
@@ -193,8 +194,15 @@ export function createCollaborationSidecar(options: {
         payload.connectionConfig.readOnly = verified.permission === "read";
         return { ...verified, reservationKey };
       } catch (error) {
-        if (error instanceof CollaborationConnectionError) throw error;
-        throw new CollaborationConnectionError("authorization_revoked");
+        const rejection = error instanceof CollaborationConnectionError
+          ? error
+          : new CollaborationConnectionError("authorization_revoked");
+        emitCollaborationTelemetry({
+          category: rejection.reason,
+          metric: "auth_rejected",
+          type: "collaboration_metric",
+        });
+        throw rejection;
       }
     },
 
@@ -256,10 +264,27 @@ export function createCollaborationSidecar(options: {
         ) {
           throw new CollaborationConnectionError("authorization_revoked");
         }
+        const loadStartedAt = performance.now();
         const snapshot = await options.persistence.load(
           { workspaceId: context.workspaceId },
           context.documentId,
         );
+        emitCollaborationTelemetry({
+          metric: "room_reload",
+          type: "collaboration_metric",
+        });
+        emitCollaborationTelemetry({
+          metric: "recovery_duration_ms",
+          type: "collaboration_metric",
+          value: performance.now() - loadStartedAt,
+        });
+        if (snapshot) {
+          emitCollaborationTelemetry({
+            metric: "head_projection_lag",
+            type: "collaboration_metric",
+            value: snapshot.headSeq - snapshot.projectedSeq,
+          });
+        }
         if (health.isDraining) {
           throw new CollaborationConnectionError("server_draining");
         }
@@ -290,6 +315,10 @@ export function createCollaborationSidecar(options: {
       }
       resources.attachConnection(context.reservationKey, connection);
       removePendingReservation(context.reservationKey);
+      emitCollaborationTelemetry({
+        metric: "connection_opened",
+        type: "collaboration_metric",
+      });
     },
 
     beforeHandleMessage({ connection, update }) {
@@ -318,6 +347,10 @@ export function createCollaborationSidecar(options: {
       if (connection) {
         blocked.add(connection);
         awareness.release(connection, documentName);
+        emitCollaborationTelemetry({
+          metric: "connection_closed",
+          type: "collaboration_metric",
+        });
       }
     },
 
@@ -329,6 +362,7 @@ export function createCollaborationSidecar(options: {
   let drainPromise: Promise<void> | undefined;
   const beginDrain = () => {
     drainPromise ??= (async () => {
+      const drainStartedAt = performance.now();
       health.beginDrain();
       const documents = new Map<string, { documentId: string; workspaceId: string }>();
       const captureRoom = (room: string) => {
@@ -353,11 +387,17 @@ export function createCollaborationSidecar(options: {
           const snapshot = await options.persistence.load(scope, identity.documentId);
           if (!snapshot) throw new Error("collaboration document unavailable");
           try {
+            const checkpointStartedAt = performance.now();
             await options.persistence.checkpoint(
               scope,
               identity.documentId,
               snapshot.generation,
             );
+            emitCollaborationTelemetry({
+              metric: "checkpoint_duration_ms",
+              type: "collaboration_metric",
+              value: performance.now() - checkpointStartedAt,
+            });
           } finally {
             snapshot.document.destroy();
           }
@@ -371,6 +411,12 @@ export function createCollaborationSidecar(options: {
         }
       } catch {
         throw new CollaborationShutdownError("checkpoint_failed");
+      } finally {
+        emitCollaborationTelemetry({
+          metric: "drain_duration_ms",
+          type: "collaboration_metric",
+          value: performance.now() - drainStartedAt,
+        });
       }
     })();
     return drainPromise;
