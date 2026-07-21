@@ -2,15 +2,15 @@
 
 Build an AI-assisted document product from a working full-stack starter.
 
-[![CI](https://github.com/CoreDotToday/coredot-editor/actions/workflows/ci.yml/badge.svg)](https://github.com/CoreDotToday/coredot-editor/actions/workflows/ci.yml)
-[![Docs](https://github.com/CoreDotToday/coredot-editor/actions/workflows/docs.yml/badge.svg)](https://coredottoday.github.io/coredot-editor/)
+[![CI](https://github.com/CoreDotToday/coredoteditor/actions/workflows/ci.yml/badge.svg)](https://github.com/CoreDotToday/coredoteditor/actions/workflows/ci.yml)
+[![Docs](https://github.com/CoreDotToday/coredoteditor/actions/workflows/docs.yml/badge.svg)](https://coredottoday.github.io/coredoteditor/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-black.svg)](LICENSE)
 
 Coredot Editor combines a Tiptap workspace, Proposal-based AI changes, durable history, Clerk Workspaces, SQLite/libSQL persistence, and fidelity-aware DOCX interchange in one Next.js application.
 
 It is an application starter to clone and adapt. It is not an npm editor component, a hosted SaaS service, or a promise of full Microsoft Word compatibility.
 
-[Documentation](https://coredottoday.github.io/coredot-editor/) · [Product tour](docs/product-tour.md) · [Getting started](docs/getting-started.md) · [Architecture](docs/ARCHITECTURE.md)
+[Documentation](https://coredottoday.github.io/coredoteditor/) · [Product tour](docs/product-tour.md) · [Getting started](docs/getting-started.md) · [Architecture](docs/ARCHITECTURE.md)
 
 [![Coredot Editor with a document list, Tiptap canvas, and AI workspace](docs/assets/screenshots/workspace.webp)](docs/assets/screenshots/workspace.webp)
 
