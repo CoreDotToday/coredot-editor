@@ -24,9 +24,19 @@ export function applyScopedBlockMove(
   // delete+insert copies the node and can attach concurrent source edits to a
   // different block. Keep the legacy planner, but fail closed for Yjs bodies.
   if (isCollaborationEditor(editor)) return null;
-  const result = moveDocumentBlock(editor.getJSON() as TiptapJson, intent);
+  const currentJson = editor.getJSON() as TiptapJson;
+  const result = moveDocumentBlock(currentJson, intent);
   if (!result.changed) return null;
-  if (intent.source.kind === "topLevel" && result.destination.kind === "topLevel") {
+  if (
+    intent.source.kind === "topLevel"
+    && result.destination.kind === "topLevel"
+    && isPureTopLevelReorder(
+      currentJson,
+      intent.source.path[0],
+      result.destination.path[0],
+      result.contentJson,
+    )
+  ) {
     return applyTopLevelBlockMove(
       editor,
       intent.source.path[0],
@@ -36,6 +46,25 @@ export function applyScopedBlockMove(
       : null;
   }
   return applyScopedDocumentJson(editor, result.contentJson) ? result.destination : null;
+}
+
+/**
+ * The identity-preserving delete+insert shortcut is only valid when the planned
+ * result is exactly the current document with one top-level child relocated.
+ * Drops between list items also report a top-level destination but split the
+ * surrounding list, so they must go through the scoped JSON replacement.
+ */
+function isPureTopLevelReorder(
+  currentJson: TiptapJson,
+  sourceIndex: number,
+  destinationIndex: number,
+  plannedJson: TiptapJson,
+) {
+  const children = Array.isArray(currentJson.content) ? [...currentJson.content] : [];
+  if (sourceIndex < 0 || sourceIndex >= children.length) return false;
+  const [moved] = children.splice(sourceIndex, 1);
+  children.splice(destinationIndex, 0, moved);
+  return JSON.stringify({ ...currentJson, content: children }) === JSON.stringify(plannedJson);
 }
 
 function applyTopLevelBlockMove(

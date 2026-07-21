@@ -72,10 +72,18 @@ async function createCollaborativeDocument(
       ? "saved"
       : null;
   }, { timeout: 30_000 }).toBe("saved");
-  const capability = await page.request.post(
-    `/api/documents/${encodeURIComponent(documentId)}/collaboration-capability`,
-  );
-  expect(capability.ok()).toBe(true);
+  // The capability issuer reports transient SQLite write contention as a
+  // retryable 503 with Retry-After; honor that contract instead of failing on
+  // the first busy write from a parallel worker.
+  await expect.poll(async () => {
+    const capability = await page.request.post(
+      `/api/documents/${encodeURIComponent(documentId)}/collaboration-capability`,
+    );
+    if (capability.ok()) return "issued";
+    const body = await capability.text();
+    if (capability.status() === 503) return `retryable 503: ${body}`;
+    throw new Error(`capability POST failed: ${String(capability.status())} ${body}`);
+  }, { timeout: 15_000 }).toBe("issued");
 
   await page.reload();
   await expect(collaborationStatus(page)).toHaveAttribute(

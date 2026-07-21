@@ -128,16 +128,24 @@ export function useCollaborationSession(
         const controller = new AbortController();
         requestControllers.add(controller);
         try {
-          const response = await dependencies.fetch(
-            `/api/documents/${encodeURIComponent(configuration.documentId)}/collaboration-capability`,
-            {
-              cache: "no-store",
-              method: "POST",
-              signal: controller.signal,
-            },
-          );
-          if (!response.ok) throw new Error("Collaboration capability unavailable");
-          return await response.json() as CollaborationCapability;
+          for (let attempt = 1; ; attempt += 1) {
+            const response = await dependencies.fetch(
+              `/api/documents/${encodeURIComponent(configuration.documentId)}/collaboration-capability`,
+              {
+                cache: "no-store",
+                method: "POST",
+                signal: controller.signal,
+              },
+            );
+            if (response.ok) return await response.json() as CollaborationCapability;
+            // The issuer answers transient persistence contention with a
+            // retryable 503 + Retry-After; honor it a bounded number of times
+            // so one busy write does not degrade the session permanently.
+            if (response.status !== 503 || attempt >= CAPABILITY_ISSUE_ATTEMPTS) {
+              throw new Error("Collaboration capability unavailable");
+            }
+            await abortableDelay(readRetryAfterMs(response), controller.signal);
+          }
         } finally {
           requestControllers.delete(controller);
         }
@@ -205,6 +213,36 @@ function createFatalStore(
   }
   store.markFatal();
   return store;
+}
+
+const CAPABILITY_ISSUE_ATTEMPTS = 3;
+const DEFAULT_CAPABILITY_RETRY_DELAY_MS = 300;
+const MAX_CAPABILITY_RETRY_DELAY_MS = 2000;
+
+function readRetryAfterMs(response: Response) {
+  const retryAfterSeconds = Number.parseInt(response.headers.get("retry-after") ?? "", 10);
+  if (!Number.isSafeInteger(retryAfterSeconds) || retryAfterSeconds < 0) {
+    return DEFAULT_CAPABILITY_RETRY_DELAY_MS;
+  }
+  return Math.min(retryAfterSeconds * 1000, MAX_CAPABILITY_RETRY_DELAY_MS);
+}
+
+function abortableDelay(milliseconds: number, signal: AbortSignal) {
+  return new Promise<void>((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new Error("Collaboration capability request aborted"));
+      return;
+    }
+    const timeout = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, milliseconds);
+    const onAbort = () => {
+      clearTimeout(timeout);
+      reject(new Error("Collaboration capability request aborted"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 function createConfigurationIdentity(configuration: CollaborationSessionConfiguration) {

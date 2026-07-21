@@ -73,6 +73,53 @@ describe("useCollaborationSession", () => {
     expect(JSON.stringify(result.current.snapshot)).not.toContain("sensitive-short-lived-token");
   });
 
+  it("retries a retryable 503 capability response before succeeding", async () => {
+    const responses = [
+      new Response(null, { headers: { "retry-after": "0" }, status: 503 }),
+      new Response(null, { headers: { "retry-after": "0" }, status: 503 }),
+      new Response(JSON.stringify({
+        expiresInSeconds: 60,
+        room: configuration.room,
+        token: "token-after-retry",
+      }), { headers: { "content-type": "application/json" }, status: 200 }),
+    ];
+    const fetch = vi.fn(async () => responses.shift()!);
+    const harness = createHarness({ fetch });
+    renderHook(() => useCollaborationSession(configuration, harness.dependencies));
+    await waitFor(() => expect(harness.createSession).toHaveBeenCalledOnce());
+
+    const factoryOptions = harness.createSession.mock.calls[0]![0];
+    await expect(factoryOptions.issueCapability()).resolves.toMatchObject({
+      token: "token-after-retry",
+    });
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it("gives up on capability issuance after bounded 503 retries", async () => {
+    const fetch = vi.fn(async () => new Response(null, {
+      headers: { "retry-after": "0" },
+      status: 503,
+    }));
+    const harness = createHarness({ fetch });
+    renderHook(() => useCollaborationSession(configuration, harness.dependencies));
+    await waitFor(() => expect(harness.createSession).toHaveBeenCalledOnce());
+
+    const factoryOptions = harness.createSession.mock.calls[0]![0];
+    await expect(factoryOptions.issueCapability()).rejects.toThrow("Collaboration capability unavailable");
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not retry a non-retryable capability failure", async () => {
+    const fetch = vi.fn(async () => new Response(null, { status: 404 }));
+    const harness = createHarness({ fetch });
+    renderHook(() => useCollaborationSession(configuration, harness.dependencies));
+    await waitFor(() => expect(harness.createSession).toHaveBeenCalledOnce());
+
+    const factoryOptions = harness.createSession.mock.calls[0]![0];
+    await expect(factoryOptions.issueCapability()).rejects.toThrow("Collaboration capability unavailable");
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps an initialized document in fatal read-only mode when its public URL is unavailable", () => {
     const harness = createHarness();
     const { result } = renderHook(() => useCollaborationSession(

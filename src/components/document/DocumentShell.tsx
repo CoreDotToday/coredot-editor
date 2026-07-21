@@ -3530,7 +3530,7 @@ function DocumentShellContent({
               />
             ) : null}
           </div>
-          <div className="flex w-full min-w-0 items-center gap-2 overflow-x-auto pb-1 xl:w-auto xl:overflow-visible xl:pb-0">
+          <div className="flex w-full min-w-0 items-center gap-2 overflow-x-auto pb-1 xl:w-auto xl:shrink-0 xl:overflow-visible xl:pb-0">
             <button
               aria-label={editorSurface === "source" ? messages.header.editorView : messages.header.sourceView}
               className="inline-flex h-8 items-center gap-1.5 rounded-md border border-zinc-200 bg-white px-2.5 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-400"

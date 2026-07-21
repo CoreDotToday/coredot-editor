@@ -272,6 +272,38 @@ describe("scoped collaborative block transactions", () => {
     })).toMatchObject({ kind: "topLevel", path: [2] });
     expect(editor.getJSON()).toEqual(paragraphDocument("Bravo", "Charlie", "Alpha"));
   });
+
+  it("splits the list when a top-level paragraph is dropped between list items", () => {
+    const editor = new Editor({
+      content: {
+        content: [
+          paragraph("Loose"),
+          { content: [listItem("First"), listItem("Second")], type: "bulletList" },
+        ],
+        type: "doc",
+      } as JSONContent,
+      extensions: createDocumentSchemaExtensions(),
+    });
+    editors.push(editor);
+    const range = requiredRange(getTopLevelBlockActionRangeByIndex(editor, 0));
+    const source = requiredLocation(createDocumentBlockLocation(range));
+
+    expect(applyScopedBlockMove(editor, {
+      source,
+      target: { index: 1, kind: "betweenListItemsSlot", listPath: [1] },
+    })).toMatchObject({ kind: "topLevel", path: [1] });
+    expect(editor.getJSON()).toEqual({
+      content: [
+        { content: [listItem("First")], type: "bulletList" },
+        paragraph("Loose"),
+        { content: [listItem("Second")], type: "bulletList" },
+        // The schema's trailing-node behavior keeps an empty paragraph after a
+        // final non-paragraph block.
+        { type: "paragraph" },
+      ],
+      type: "doc",
+    });
+  });
 });
 
 function createPeers(contentJson: TiptapJson) {
