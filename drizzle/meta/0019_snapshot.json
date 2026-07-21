@@ -1,0 +1,3675 @@
+{
+  "version": "6",
+  "dialect": "sqlite",
+  "id": "f81e0437-735c-4fc6-8543-b3b4ae700d62",
+  "prevId": "37ce1c7c-44e4-4c8a-86b1-b640549d410b",
+  "tables": {
+    "ai_proposals": {
+      "name": "ai_proposals",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "workspace_id": {
+          "name": "workspace_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "ai_run_id": {
+          "name": "ai_run_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "document_id": {
+          "name": "document_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "target_text": {
+          "name": "target_text",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "replacement_text": {
+          "name": "replacement_text",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "explanation": {
+          "name": "explanation",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "source": {
+          "name": "source",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'review'"
+        },
+        "command": {
+          "name": "command",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "occurrence_index": {
+          "name": "occurrence_index",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "target_from": {
+          "name": "target_from",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "target_to": {
+          "name": "target_to",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "default_apply_mode": {
+          "name": "default_apply_mode",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'replace'"
+        },
+        "result_ordinal": {
+          "name": "result_ordinal",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "applied_mode": {
+          "name": "applied_mode",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'pending'"
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "ai_proposals_ai_run_id_idx": {
+          "name": "ai_proposals_ai_run_id_idx",
+          "columns": [
+            "ai_run_id"
+          ],
+          "isUnique": false
+        },
+        "ai_proposals_document_id_idx": {
+          "name": "ai_proposals_document_id_idx",
+          "columns": [
+            "document_id"
+          ],
+          "isUnique": false
+        },
+        "ai_proposals_workspace_document_created_id_idx": {
+          "name": "ai_proposals_workspace_document_created_id_idx",
+          "columns": [
+            "workspace_id",
+            "document_id",
+            "created_at",
+            "id"
+          ],
+          "isUnique": false
+        },
+        "ai_proposals_workspace_run_result_ordinal_unique": {
+          "name": "ai_proposals_workspace_run_result_ordinal_unique",
+          "columns": [
+            "workspace_id",
+            "ai_run_id",
+            "result_ordinal"
+          ],
+          "isUnique": true
+        },
+        "ai_proposals_workspace_id_id_document_id_unique": {
+          "name": "ai_proposals_workspace_id_id_document_id_unique",
+          "columns": [
+            "workspace_id",
+            "id",
+            "document_id"
+          ],
+          "isUnique": true
+        }
+      },
+      "foreignKeys": {
+        "ai_proposals_workspace_document_fk": {
+          "name": "ai_proposals_workspace_document_fk",
+          "tableFrom": "ai_proposals",
+          "tableTo": "documents",
+          "columnsFrom": [
+            "workspace_id",
+            "document_id"
+          ],
+          "columnsTo": [
+            "workspace_id",
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "ai_proposals_workspace_run_document_fk": {
+          "name": "ai_proposals_workspace_run_document_fk",
+          "tableFrom": "ai_proposals",
+          "tableTo": "ai_runs",
+          "columnsFrom": [
+            "workspace_id",
+            "ai_run_id",
+            "document_id"
+          ],
+          "columnsTo": [
+            "workspace_id",
+            "id",
+            "document_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "ai_proposals_source_check": {
+          "name": "ai_proposals_source_check",
+          "value": "\"ai_proposals\".\"source\" in ('selection', 'review')"
+        },
+        "ai_proposals_default_apply_mode_check": {
+          "name": "ai_proposals_default_apply_mode_check",
+          "value": "\"ai_proposals\".\"default_apply_mode\" in ('replace', 'insert_below')"
+        },
+        "ai_proposals_applied_mode_check": {
+          "name": "ai_proposals_applied_mode_check",
+          "value": "\"ai_proposals\".\"applied_mode\" is null or \"ai_proposals\".\"applied_mode\" in ('replace', 'insert_below')"
+        },
+        "ai_proposals_status_check": {
+          "name": "ai_proposals_status_check",
+          "value": "\"ai_proposals\".\"status\" in ('pending', 'accepted', 'rejected')"
+        }
+      }
+    },
+    "ai_runs": {
+      "name": "ai_runs",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "workspace_id": {
+          "name": "workspace_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "document_id": {
+          "name": "document_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "prompt_template_id": {
+          "name": "prompt_template_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "command_type": {
+          "name": "command_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "provider": {
+          "name": "provider",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "model": {
+          "name": "model",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "idempotency_key": {
+          "name": "idempotency_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "operation_fingerprint": {
+          "name": "operation_fingerprint",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "retry_not_before_at": {
+          "name": "retry_not_before_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "execution_token": {
+          "name": "execution_token",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "input_summary_json": {
+          "name": "input_summary_json",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "output_text": {
+          "name": "output_text",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "''"
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "was_applied": {
+          "name": "was_applied",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": false
+        },
+        "error_message": {
+          "name": "error_message",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "ai_runs_document_id_idx": {
+          "name": "ai_runs_document_id_idx",
+          "columns": [
+            "document_id"
+          ],
+          "isUnique": false
+        },
+        "ai_runs_prompt_template_id_idx": {
+          "name": "ai_runs_prompt_template_id_idx",
+          "columns": [
+            "prompt_template_id"
+          ],
+          "isUnique": false
+        },
+        "ai_runs_status_updated_idx": {
+          "name": "ai_runs_status_updated_idx",
+          "columns": [
+            "status",
+            "updated_at"
+          ],
+          "isUnique": false
+        },
+        "ai_runs_workspace_document_created_id_idx": {
+          "name": "ai_runs_workspace_document_created_id_idx",
+          "columns": [
+            "workspace_id",
+            "document_id",
+            "created_at",
+            "id"
+          ],
+          "isUnique": false
+        },
+        "ai_runs_workspace_idempotency_key_unique": {
+          "name": "ai_runs_workspace_idempotency_key_unique",
+          "columns": [
+            "workspace_id",
+            "idempotency_key"
+          ],
+          "isUnique": true
+        },
+        "ai_runs_workspace_id_id_document_id_unique": {
+          "name": "ai_runs_workspace_id_id_document_id_unique",
+          "columns": [
+            "workspace_id",
+            "id",
+            "document_id"
+          ],
+          "isUnique": true
+        }
+      },
+      "foreignKeys": {
+        "ai_runs_prompt_template_id_prompt_templates_id_fk": {
+          "name": "ai_runs_prompt_template_id_prompt_templates_id_fk",
+          "tableFrom": "ai_runs",
+          "tableTo": "prompt_templates",
+          "columnsFrom": [
+            "prompt_template_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "ai_runs_workspace_document_fk": {
+          "name": "ai_runs_workspace_document_fk",
+          "tableFrom": "ai_runs",
+          "tableTo": "documents",
+          "columnsFrom": [
+            "workspace_id",
+            "document_id"
+          ],
+          "columnsTo": [
+            "workspace_id",
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "ai_runs_command_type_check": {
+          "name": "ai_runs_command_type_check",
+          "value": "\"ai_runs\".\"command_type\" in ('selection_rewrite', 'document_review')"
+        },
+        "ai_runs_status_check": {
+          "name": "ai_runs_status_check",
+          "value": "\"ai_runs\".\"status\" in ('pending', 'streaming', 'completed', 'failed')"
+        }
+      }
+    },
+    "ai_workspace_conversations": {
+      "name": "ai_workspace_conversations",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "workspace_id": {
+          "name": "workspace_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "document_id": {
+          "name": "document_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_by_principal_id": {
+          "name": "created_by_principal_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "creation_key": {
+          "name": "creation_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "creation_fingerprint": {
+          "name": "creation_fingerprint",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "title": {
+          "name": "title",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "command": {
+          "name": "command",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'idle'"
+        },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 1
+        },
+        "message_count": {
+          "name": "message_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 1
+        },
+        "latest_ai_run_id": {
+          "name": "latest_ai_run_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "latest_proposal_id": {
+          "name": "latest_proposal_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "archived_at": {
+          "name": "archived_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "retention_expires_at": {
+          "name": "retention_expires_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "ai_workspace_conversations_workspace_id_document_unique": {
+          "name": "ai_workspace_conversations_workspace_id_document_unique",
+          "columns": [
+            "workspace_id",
+            "id",
+            "document_id"
+          ],
+          "isUnique": true
+        },
+        "ai_workspace_conversations_workspace_creation_key_unique": {
+          "name": "ai_workspace_conversations_workspace_creation_key_unique",
+          "columns": [
+            "workspace_id",
+            "creation_key"
+          ],
+          "isUnique": true
+        },
+        "ai_workspace_conversations_workspace_document_updated_idx": {
+          "name": "ai_workspace_conversations_workspace_document_updated_idx",
+          "columns": [
+            "workspace_id",
+            "document_id",
+            "archived_at",
+            "updated_at",
+            "id"
+          ],
+          "isUnique": false
+        },
+        "ai_workspace_conversations_retention_expires_idx": {
+          "name": "ai_workspace_conversations_retention_expires_idx",
+          "columns": [
+            "retention_expires_at"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "ai_workspace_conversations_workspace_document_fk": {
+          "name": "ai_workspace_conversations_workspace_document_fk",
+          "tableFrom": "ai_workspace_conversations",
+          "tableTo": "documents",
+          "columnsFrom": [
+            "workspace_id",
+            "document_id"
+          ],
+          "columnsTo": [
+            "workspace_id",
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "ai_workspace_conversations_latest_run_fk": {
+          "name": "ai_workspace_conversations_latest_run_fk",
+          "tableFrom": "ai_workspace_conversations",
+          "tableTo": "ai_runs",
+          "columnsFrom": [
+            "workspace_id",
+            "latest_ai_run_id",
+            "document_id"
+          ],
+          "columnsTo": [
+            "workspace_id",
+            "id",
+            "document_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "ai_workspace_conversations_latest_proposal_fk": {
+          "name": "ai_workspace_conversations_latest_proposal_fk",
+          "tableFrom": "ai_workspace_conversations",
+          "tableTo": "ai_proposals",
+          "columnsFrom": [
+            "workspace_id",
+            "latest_proposal_id",
+            "document_id"
+          ],
+          "columnsTo": [
+            "workspace_id",
+            "id",
+            "document_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "ai_workspace_conversations_status_check": {
+          "name": "ai_workspace_conversations_status_check",
+          "value": "\"ai_workspace_conversations\".\"status\" in ('idle', 'failed')"
+        },
+        "ai_workspace_conversations_version_check": {
+          "name": "ai_workspace_conversations_version_check",
+          "value": "\"ai_workspace_conversations\".\"version\" >= 1"
+        },
+        "ai_workspace_conversations_message_count_check": {
+          "name": "ai_workspace_conversations_message_count_check",
+          "value": "\"ai_workspace_conversations\".\"message_count\" >= 1"
+        },
+        "ai_workspace_conversations_retention_check": {
+          "name": "ai_workspace_conversations_retention_check",
+          "value": "\"ai_workspace_conversations\".\"retention_expires_at\" is null or \"ai_workspace_conversations\".\"retention_expires_at\" > \"ai_workspace_conversations\".\"created_at\""
+        }
+      }
+    },
+    "ai_workspace_messages": {
+      "name": "ai_workspace_messages",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "workspace_id": {
+          "name": "workspace_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "conversation_id": {
+          "name": "conversation_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "document_id": {
+          "name": "document_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "mutation_key": {
+          "name": "mutation_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "mutation_fingerprint": {
+          "name": "mutation_fingerprint",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "ordinal": {
+          "name": "ordinal",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "role": {
+          "name": "role",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "content": {
+          "name": "content",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "command": {
+          "name": "command",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "scope_label": {
+          "name": "scope_label",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "ai_run_id": {
+          "name": "ai_run_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "proposal_id": {
+          "name": "proposal_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "retention_expires_at": {
+          "name": "retention_expires_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "ai_workspace_messages_conversation_ordinal_unique": {
+          "name": "ai_workspace_messages_conversation_ordinal_unique",
+          "columns": [
+            "workspace_id",
+            "conversation_id",
+            "ordinal"
+          ],
+          "isUnique": true
+        },
+        "ai_workspace_messages_conversation_mutation_key_unique": {
+          "name": "ai_workspace_messages_conversation_mutation_key_unique",
+          "columns": [
+            "workspace_id",
+            "conversation_id",
+            "mutation_key"
+          ],
+          "isUnique": true
+        },
+        "ai_workspace_messages_workspace_run_idx": {
+          "name": "ai_workspace_messages_workspace_run_idx",
+          "columns": [
+            "workspace_id",
+            "ai_run_id"
+          ],
+          "isUnique": false
+        },
+        "ai_workspace_messages_workspace_proposal_idx": {
+          "name": "ai_workspace_messages_workspace_proposal_idx",
+          "columns": [
+            "workspace_id",
+            "proposal_id"
+          ],
+          "isUnique": false
+        },
+        "ai_workspace_messages_retention_expires_idx": {
+          "name": "ai_workspace_messages_retention_expires_idx",
+          "columns": [
+            "retention_expires_at"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "ai_workspace_messages_conversation_fk": {
+          "name": "ai_workspace_messages_conversation_fk",
+          "tableFrom": "ai_workspace_messages",
+          "tableTo": "ai_workspace_conversations",
+          "columnsFrom": [
+            "workspace_id",
+            "conversation_id",
+            "document_id"
+          ],
+          "columnsTo": [
+            "workspace_id",
+            "id",
+            "document_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "ai_workspace_messages_run_fk": {
+          "name": "ai_workspace_messages_run_fk",
+          "tableFrom": "ai_workspace_messages",
+          "tableTo": "ai_runs",
+          "columnsFrom": [
+            "workspace_id",
+            "ai_run_id",
+            "document_id"
+          ],
+          "columnsTo": [
+            "workspace_id",
+            "id",
+            "document_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "ai_workspace_messages_proposal_fk": {
+          "name": "ai_workspace_messages_proposal_fk",
+          "tableFrom": "ai_workspace_messages",
+          "tableTo": "ai_proposals",
+          "columnsFrom": [
+            "workspace_id",
+            "proposal_id",
+            "document_id"
+          ],
+          "columnsTo": [
+            "workspace_id",
+            "id",
+            "document_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "ai_workspace_messages_ordinal_check": {
+          "name": "ai_workspace_messages_ordinal_check",
+          "value": "\"ai_workspace_messages\".\"ordinal\" >= 0"
+        },
+        "ai_workspace_messages_role_check": {
+          "name": "ai_workspace_messages_role_check",
+          "value": "\"ai_workspace_messages\".\"role\" in ('assistant', 'user')"
+        }
+      }
+    },
+    "app_settings": {
+      "name": "app_settings",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "workspace_id": {
+          "name": "workspace_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "ai_provider": {
+          "name": "ai_provider",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'stub'"
+        },
+        "ai_model": {
+          "name": "ai_model",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'stub-editor'"
+        },
+        "ai_base_url": {
+          "name": "ai_base_url",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "ai_max_completion_tokens": {
+          "name": "ai_max_completion_tokens",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "ai_reasoning_effort": {
+          "name": "ai_reasoning_effort",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "app_settings_workspace_id_unique": {
+          "name": "app_settings_workspace_id_unique",
+          "columns": [
+            "workspace_id"
+          ],
+          "isUnique": true
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "app_settings_ai_provider_check": {
+          "name": "app_settings_ai_provider_check",
+          "value": "\"app_settings\".\"ai_provider\" in ('stub', 'openai', 'coredot', 'anthropic', 'gemini')"
+        },
+        "app_settings_ai_reasoning_effort_check": {
+          "name": "app_settings_ai_reasoning_effort_check",
+          "value": "\"app_settings\".\"ai_reasoning_effort\" is null or \"app_settings\".\"ai_reasoning_effort\" in ('none', 'minimal', 'low', 'medium', 'high', 'xhigh')"
+        },
+        "app_settings_ai_max_completion_tokens_check": {
+          "name": "app_settings_ai_max_completion_tokens_check",
+          "value": "\"app_settings\".\"ai_max_completion_tokens\" is null or \"app_settings\".\"ai_max_completion_tokens\" > 0"
+        }
+      }
+    },
+    "collaboration_actions": {
+      "name": "collaboration_actions",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "workspace_id": {
+          "name": "workspace_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "document_id": {
+          "name": "document_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "generation": {
+          "name": "generation",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "command_id": {
+          "name": "command_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "command_fingerprint": {
+          "name": "command_fingerprint",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "action_type": {
+          "name": "action_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "principal_id": {
+          "name": "principal_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "request_id": {
+          "name": "request_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "base_head_seq": {
+          "name": "base_head_seq",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "applied_head_seq": {
+          "name": "applied_head_seq",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "proposal_id": {
+          "name": "proposal_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "document_change_id": {
+          "name": "document_change_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "failure_category": {
+          "name": "failure_category",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "collaboration_actions_workspace_id_document_generation_unique": {
+          "name": "collaboration_actions_workspace_id_document_generation_unique",
+          "columns": [
+            "workspace_id",
+            "id",
+            "document_id",
+            "generation"
+          ],
+          "isUnique": true
+        },
+        "collaboration_actions_workspace_command_unique": {
+          "name": "collaboration_actions_workspace_command_unique",
+          "columns": [
+            "workspace_id",
+            "command_id"
+          ],
+          "isUnique": true
+        },
+        "collaboration_actions_delivery_identity_unique": {
+          "name": "collaboration_actions_delivery_identity_unique",
+          "columns": [
+            "workspace_id",
+            "id",
+            "document_id",
+            "generation",
+            "command_id",
+            "command_fingerprint"
+          ],
+          "isUnique": true
+        },
+        "collaboration_actions_workspace_document_generation_created_id_idx": {
+          "name": "collaboration_actions_workspace_document_generation_created_id_idx",
+          "columns": [
+            "workspace_id",
+            "document_id",
+            "generation",
+            "created_at",
+            "id"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "collaboration_actions_document_generation_fk": {
+          "name": "collaboration_actions_document_generation_fk",
+          "tableFrom": "collaboration_actions",
+          "tableTo": "collaboration_documents",
+          "columnsFrom": [
+            "workspace_id",
+            "document_id",
+            "generation"
+          ],
+          "columnsTo": [
+            "workspace_id",
+            "document_id",
+            "generation"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "collaboration_actions_proposal_fk": {
+          "name": "collaboration_actions_proposal_fk",
+          "tableFrom": "collaboration_actions",
+          "tableTo": "ai_proposals",
+          "columnsFrom": [
+            "workspace_id",
+            "proposal_id",
+            "document_id"
+          ],
+          "columnsTo": [
+            "workspace_id",
+            "id",
+            "document_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "collaboration_actions_document_change_fk": {
+          "name": "collaboration_actions_document_change_fk",
+          "tableFrom": "collaboration_actions",
+          "tableTo": "document_changes",
+          "columnsFrom": [
+            "workspace_id",
+            "document_change_id",
+            "document_id"
+          ],
+          "columnsTo": [
+            "workspace_id",
+            "id",
+            "document_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "collaboration_actions_generation_check": {
+          "name": "collaboration_actions_generation_check",
+          "value": "typeof(\"collaboration_actions\".\"generation\") = 'integer' and \"collaboration_actions\".\"generation\" between 1 and 9007199254740991"
+        },
+        "collaboration_actions_type_check": {
+          "name": "collaboration_actions_type_check",
+          "value": "\"collaboration_actions\".\"action_type\" in ('proposal_apply', 'proposal_batch_apply', 'selective_undo', 'repair')"
+        },
+        "collaboration_actions_status_check": {
+          "name": "collaboration_actions_status_check",
+          "value": "\"collaboration_actions\".\"status\" in ('pending', 'applied', 'failed')"
+        },
+        "collaboration_actions_sequence_check": {
+          "name": "collaboration_actions_sequence_check",
+          "value": "typeof(\"collaboration_actions\".\"base_head_seq\") = 'integer' and \"collaboration_actions\".\"base_head_seq\" between 0 and 9007199254740991\n        and (\"collaboration_actions\".\"applied_head_seq\" is null or (\n          typeof(\"collaboration_actions\".\"applied_head_seq\") = 'integer'\n          and \"collaboration_actions\".\"applied_head_seq\" between 0 and 9007199254740991\n          and \"collaboration_actions\".\"applied_head_seq\" >= \"collaboration_actions\".\"base_head_seq\"\n        ))"
+        },
+        "collaboration_actions_state_check": {
+          "name": "collaboration_actions_state_check",
+          "value": "(\"collaboration_actions\".\"status\" = 'pending' and \"collaboration_actions\".\"applied_head_seq\" is null and \"collaboration_actions\".\"failure_category\" is null)\n        or (\"collaboration_actions\".\"status\" = 'applied' and \"collaboration_actions\".\"applied_head_seq\" is not null and \"collaboration_actions\".\"failure_category\" is null)\n        or (\"collaboration_actions\".\"status\" = 'failed' and \"collaboration_actions\".\"applied_head_seq\" is null and \"collaboration_actions\".\"failure_category\" is not null)"
+        },
+        "collaboration_actions_command_id_check": {
+          "name": "collaboration_actions_command_id_check",
+          "value": "typeof(\"collaboration_actions\".\"command_id\") = 'text'\n        and \"collaboration_actions\".\"command_id\" = trim(\"collaboration_actions\".\"command_id\", char(9) || char(10) || char(11) || char(12) || char(13) || char(160) || ' ')\n        and length(cast(\"collaboration_actions\".\"command_id\" as blob)) between 1 and 256"
+        },
+        "collaboration_actions_command_fingerprint_check": {
+          "name": "collaboration_actions_command_fingerprint_check",
+          "value": "typeof(\"collaboration_actions\".\"command_fingerprint\") = 'text'\n        and length(\"collaboration_actions\".\"command_fingerprint\") = 64\n        and \"collaboration_actions\".\"command_fingerprint\" not glob '*[^0-9a-f]*'"
+        },
+        "collaboration_actions_failure_category_check": {
+          "name": "collaboration_actions_failure_category_check",
+          "value": "\"collaboration_actions\".\"failure_category\" is null or (\n        typeof(\"collaboration_actions\".\"failure_category\") = 'text'\n        and \"collaboration_actions\".\"failure_category\" = trim(\"collaboration_actions\".\"failure_category\", char(9) || char(10) || char(13) || ' ')\n        and length(cast(\"collaboration_actions\".\"failure_category\" as blob)) between 1 and 128\n      )"
+        }
+      }
+    },
+    "collaboration_ai_run_snapshots": {
+      "name": "collaboration_ai_run_snapshots",
+      "columns": {
+        "workspace_id": {
+          "name": "workspace_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "ai_run_id": {
+          "name": "ai_run_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "document_id": {
+          "name": "document_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "generation": {
+          "name": "generation",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "head_seq": {
+          "name": "head_seq",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "state_vector": {
+          "name": "state_vector",
+          "type": "blob",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "schema_fingerprint": {
+          "name": "schema_fingerprint",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "content_hash": {
+          "name": "content_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "collaboration_ai_run_snapshots_document_generation_history_idx": {
+          "name": "collaboration_ai_run_snapshots_document_generation_history_idx",
+          "columns": [
+            "workspace_id",
+            "document_id",
+            "generation",
+            "created_at",
+            "ai_run_id"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "collaboration_ai_run_snapshots_document_generation_fk": {
+          "name": "collaboration_ai_run_snapshots_document_generation_fk",
+          "tableFrom": "collaboration_ai_run_snapshots",
+          "tableTo": "collaboration_documents",
+          "columnsFrom": [
+            "workspace_id",
+            "document_id",
+            "generation"
+          ],
+          "columnsTo": [
+            "workspace_id",
+            "document_id",
+            "generation"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "collaboration_ai_run_snapshots_ai_run_fk": {
+          "name": "collaboration_ai_run_snapshots_ai_run_fk",
+          "tableFrom": "collaboration_ai_run_snapshots",
+          "tableTo": "ai_runs",
+          "columnsFrom": [
+            "workspace_id",
+            "ai_run_id",
+            "document_id"
+          ],
+          "columnsTo": [
+            "workspace_id",
+            "id",
+            "document_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "collaboration_ai_run_snapshots_pk": {
+          "columns": [
+            "workspace_id",
+            "ai_run_id"
+          ],
+          "name": "collaboration_ai_run_snapshots_pk"
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "collaboration_ai_run_snapshots_sequence_check": {
+          "name": "collaboration_ai_run_snapshots_sequence_check",
+          "value": "typeof(\"collaboration_ai_run_snapshots\".\"generation\") = 'integer' and \"collaboration_ai_run_snapshots\".\"generation\" between 1 and 9007199254740991\n        and typeof(\"collaboration_ai_run_snapshots\".\"head_seq\") = 'integer' and \"collaboration_ai_run_snapshots\".\"head_seq\" between 0 and 9007199254740991"
+        },
+        "collaboration_ai_run_snapshots_schema_fingerprint_check": {
+          "name": "collaboration_ai_run_snapshots_schema_fingerprint_check",
+          "value": "typeof(\"collaboration_ai_run_snapshots\".\"schema_fingerprint\") = 'text'\n        and length(\"collaboration_ai_run_snapshots\".\"schema_fingerprint\") = 64\n        and \"collaboration_ai_run_snapshots\".\"schema_fingerprint\" not glob '*[^0-9a-f]*'"
+        },
+        "collaboration_ai_run_snapshots_content_hash_check": {
+          "name": "collaboration_ai_run_snapshots_content_hash_check",
+          "value": "typeof(\"collaboration_ai_run_snapshots\".\"content_hash\") = 'text'\n        and length(\"collaboration_ai_run_snapshots\".\"content_hash\") = 64\n        and \"collaboration_ai_run_snapshots\".\"content_hash\" not glob '*[^0-9a-f]*'"
+        },
+        "collaboration_ai_run_snapshots_state_vector_check": {
+          "name": "collaboration_ai_run_snapshots_state_vector_check",
+          "value": "typeof(\"collaboration_ai_run_snapshots\".\"state_vector\") = 'blob'\n        and length(\"collaboration_ai_run_snapshots\".\"state_vector\") between 1 and 1048576"
+        }
+      }
+    },
+    "collaboration_authorization_epochs": {
+      "name": "collaboration_authorization_epochs",
+      "columns": {
+        "workspace_id": {
+          "name": "workspace_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "principal_id": {
+          "name": "principal_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "epoch": {
+          "name": "epoch",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {
+        "collaboration_authorization_epochs_pk": {
+          "columns": [
+            "workspace_id",
+            "principal_id"
+          ],
+          "name": "collaboration_authorization_epochs_pk"
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "collaboration_authorization_epochs_epoch_check": {
+          "name": "collaboration_authorization_epochs_epoch_check",
+          "value": "typeof(\"collaboration_authorization_epochs\".\"epoch\") = 'integer' and \"collaboration_authorization_epochs\".\"epoch\" between 0 and 9007199254740991"
+        }
+      }
+    },
+    "collaboration_command_delivery_jobs": {
+      "name": "collaboration_command_delivery_jobs",
+      "columns": {
+        "workspace_id": {
+          "name": "workspace_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "action_id": {
+          "name": "action_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "command_id": {
+          "name": "command_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "command_fingerprint": {
+          "name": "command_fingerprint",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "document_id": {
+          "name": "document_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "generation": {
+          "name": "generation",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "seq": {
+          "name": "seq",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "checksum": {
+          "name": "checksum",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'pending'"
+        },
+        "attempts": {
+          "name": "attempts",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "next_attempt_at": {
+          "name": "next_attempt_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "failure_category": {
+          "name": "failure_category",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "collaboration_command_delivery_jobs_update_unique": {
+          "name": "collaboration_command_delivery_jobs_update_unique",
+          "columns": [
+            "workspace_id",
+            "document_id",
+            "generation",
+            "seq"
+          ],
+          "isUnique": true
+        },
+        "collaboration_command_delivery_jobs_due_idx": {
+          "name": "collaboration_command_delivery_jobs_due_idx",
+          "columns": [
+            "status",
+            "next_attempt_at",
+            "created_at",
+            "workspace_id",
+            "document_id",
+            "generation",
+            "seq"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "collaboration_command_delivery_jobs_action_fk": {
+          "name": "collaboration_command_delivery_jobs_action_fk",
+          "tableFrom": "collaboration_command_delivery_jobs",
+          "tableTo": "collaboration_actions",
+          "columnsFrom": [
+            "workspace_id",
+            "action_id",
+            "document_id",
+            "generation",
+            "command_id",
+            "command_fingerprint"
+          ],
+          "columnsTo": [
+            "workspace_id",
+            "id",
+            "document_id",
+            "generation",
+            "command_id",
+            "command_fingerprint"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "collaboration_command_delivery_jobs_update_fk": {
+          "name": "collaboration_command_delivery_jobs_update_fk",
+          "tableFrom": "collaboration_command_delivery_jobs",
+          "tableTo": "collaboration_updates",
+          "columnsFrom": [
+            "workspace_id",
+            "document_id",
+            "generation",
+            "seq",
+            "checksum"
+          ],
+          "columnsTo": [
+            "workspace_id",
+            "document_id",
+            "generation",
+            "seq",
+            "checksum"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "collaboration_command_delivery_jobs_pk": {
+          "columns": [
+            "workspace_id",
+            "action_id"
+          ],
+          "name": "collaboration_command_delivery_jobs_pk"
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "collaboration_command_delivery_jobs_sequence_check": {
+          "name": "collaboration_command_delivery_jobs_sequence_check",
+          "value": "typeof(\"collaboration_command_delivery_jobs\".\"generation\") = 'integer'\n        and \"collaboration_command_delivery_jobs\".\"generation\" between 1 and 9007199254740991\n        and typeof(\"collaboration_command_delivery_jobs\".\"seq\") = 'integer'\n        and \"collaboration_command_delivery_jobs\".\"seq\" between 1 and 9007199254740991"
+        },
+        "collaboration_command_delivery_jobs_checksum_check": {
+          "name": "collaboration_command_delivery_jobs_checksum_check",
+          "value": "typeof(\"collaboration_command_delivery_jobs\".\"checksum\") = 'text'\n        and length(\"collaboration_command_delivery_jobs\".\"checksum\") = 64\n        and \"collaboration_command_delivery_jobs\".\"checksum\" not glob '*[^0-9a-f]*'"
+        },
+        "collaboration_command_delivery_jobs_command_fingerprint_check": {
+          "name": "collaboration_command_delivery_jobs_command_fingerprint_check",
+          "value": "typeof(\"collaboration_command_delivery_jobs\".\"command_fingerprint\") = 'text'\n        and length(\"collaboration_command_delivery_jobs\".\"command_fingerprint\") = 64\n        and \"collaboration_command_delivery_jobs\".\"command_fingerprint\" not glob '*[^0-9a-f]*'"
+        },
+        "collaboration_command_delivery_jobs_retry_state_check": {
+          "name": "collaboration_command_delivery_jobs_retry_state_check",
+          "value": "(\n          \"collaboration_command_delivery_jobs\".\"status\" = 'pending'\n          and typeof(\"collaboration_command_delivery_jobs\".\"attempts\") = 'integer'\n          and \"collaboration_command_delivery_jobs\".\"attempts\" between 0 and 4\n          and typeof(\"collaboration_command_delivery_jobs\".\"next_attempt_at\") = 'integer'\n          and \"collaboration_command_delivery_jobs\".\"next_attempt_at\" >= \"collaboration_command_delivery_jobs\".\"created_at\"\n          and (\n            (\"collaboration_command_delivery_jobs\".\"attempts\" = 0 and \"collaboration_command_delivery_jobs\".\"failure_category\" is null)\n            or (\"collaboration_command_delivery_jobs\".\"attempts\" > 0 and \"collaboration_command_delivery_jobs\".\"failure_category\" = 'delivery_failed')\n          )\n        ) or (\n          \"collaboration_command_delivery_jobs\".\"status\" = 'exhausted'\n          and \"collaboration_command_delivery_jobs\".\"attempts\" = 5\n          and \"collaboration_command_delivery_jobs\".\"next_attempt_at\" is null\n          and \"collaboration_command_delivery_jobs\".\"failure_category\" = 'delivery_failed'\n        )"
+        },
+        "collaboration_command_delivery_jobs_timestamps_check": {
+          "name": "collaboration_command_delivery_jobs_timestamps_check",
+          "value": "typeof(\"collaboration_command_delivery_jobs\".\"created_at\") = 'integer'\n        and typeof(\"collaboration_command_delivery_jobs\".\"updated_at\") = 'integer'\n        and \"collaboration_command_delivery_jobs\".\"updated_at\" >= \"collaboration_command_delivery_jobs\".\"created_at\""
+        }
+      }
+    },
+    "collaboration_document_changes": {
+      "name": "collaboration_document_changes",
+      "columns": {
+        "workspace_id": {
+          "name": "workspace_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "change_id": {
+          "name": "change_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "document_id": {
+          "name": "document_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "generation": {
+          "name": "generation",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "action_id": {
+          "name": "action_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "forward_seq": {
+          "name": "forward_seq",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "inverse_update": {
+          "name": "inverse_update",
+          "type": "blob",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "affected_start_relative": {
+          "name": "affected_start_relative",
+          "type": "blob",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "affected_end_relative": {
+          "name": "affected_end_relative",
+          "type": "blob",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "postcondition_fingerprint": {
+          "name": "postcondition_fingerprint",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "base_head_seq": {
+          "name": "base_head_seq",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "resulting_head_seq": {
+          "name": "resulting_head_seq",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "collaboration_document_changes_workspace_action_unique": {
+          "name": "collaboration_document_changes_workspace_action_unique",
+          "columns": [
+            "workspace_id",
+            "action_id"
+          ],
+          "isUnique": true
+        },
+        "collaboration_document_changes_document_generation_history_idx": {
+          "name": "collaboration_document_changes_document_generation_history_idx",
+          "columns": [
+            "workspace_id",
+            "document_id",
+            "generation",
+            "resulting_head_seq",
+            "change_id"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "collaboration_document_changes_document_generation_fk": {
+          "name": "collaboration_document_changes_document_generation_fk",
+          "tableFrom": "collaboration_document_changes",
+          "tableTo": "collaboration_documents",
+          "columnsFrom": [
+            "workspace_id",
+            "document_id",
+            "generation"
+          ],
+          "columnsTo": [
+            "workspace_id",
+            "document_id",
+            "generation"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "collaboration_document_changes_change_fk": {
+          "name": "collaboration_document_changes_change_fk",
+          "tableFrom": "collaboration_document_changes",
+          "tableTo": "document_changes",
+          "columnsFrom": [
+            "workspace_id",
+            "change_id",
+            "document_id"
+          ],
+          "columnsTo": [
+            "workspace_id",
+            "id",
+            "document_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "collaboration_document_changes_action_fk": {
+          "name": "collaboration_document_changes_action_fk",
+          "tableFrom": "collaboration_document_changes",
+          "tableTo": "collaboration_actions",
+          "columnsFrom": [
+            "workspace_id",
+            "action_id",
+            "document_id",
+            "generation"
+          ],
+          "columnsTo": [
+            "workspace_id",
+            "id",
+            "document_id",
+            "generation"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "collaboration_document_changes_pk": {
+          "columns": [
+            "workspace_id",
+            "change_id"
+          ],
+          "name": "collaboration_document_changes_pk"
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "collaboration_document_changes_sequence_check": {
+          "name": "collaboration_document_changes_sequence_check",
+          "value": "typeof(\"collaboration_document_changes\".\"generation\") = 'integer' and \"collaboration_document_changes\".\"generation\" between 1 and 9007199254740991\n        and typeof(\"collaboration_document_changes\".\"base_head_seq\") = 'integer' and \"collaboration_document_changes\".\"base_head_seq\" between 0 and 9007199254740991\n        and typeof(\"collaboration_document_changes\".\"forward_seq\") = 'integer' and \"collaboration_document_changes\".\"forward_seq\" between 1 and 9007199254740991\n        and typeof(\"collaboration_document_changes\".\"resulting_head_seq\") = 'integer'\n        and \"collaboration_document_changes\".\"resulting_head_seq\" between 1 and 9007199254740991\n        and \"collaboration_document_changes\".\"forward_seq\" > \"collaboration_document_changes\".\"base_head_seq\"\n        and \"collaboration_document_changes\".\"resulting_head_seq\" >= \"collaboration_document_changes\".\"forward_seq\""
+        },
+        "collaboration_document_changes_postcondition_check": {
+          "name": "collaboration_document_changes_postcondition_check",
+          "value": "typeof(\"collaboration_document_changes\".\"postcondition_fingerprint\") = 'text'\n        and length(\"collaboration_document_changes\".\"postcondition_fingerprint\") = 64\n        and \"collaboration_document_changes\".\"postcondition_fingerprint\" not glob '*[^0-9a-f]*'"
+        },
+        "collaboration_document_changes_inverse_update_check": {
+          "name": "collaboration_document_changes_inverse_update_check",
+          "value": "typeof(\"collaboration_document_changes\".\"inverse_update\") = 'blob'\n        and length(\"collaboration_document_changes\".\"inverse_update\") between 1 and 10485760"
+        },
+        "collaboration_document_changes_relative_positions_check": {
+          "name": "collaboration_document_changes_relative_positions_check",
+          "value": "typeof(\"collaboration_document_changes\".\"affected_start_relative\") = 'blob'\n        and length(\"collaboration_document_changes\".\"affected_start_relative\") between 1 and 65536\n        and typeof(\"collaboration_document_changes\".\"affected_end_relative\") = 'blob'\n        and length(\"collaboration_document_changes\".\"affected_end_relative\") between 1 and 65536"
+        }
+      }
+    },
+    "collaboration_documents": {
+      "name": "collaboration_documents",
+      "columns": {
+        "workspace_id": {
+          "name": "workspace_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "document_id": {
+          "name": "document_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "generation": {
+          "name": "generation",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "is_current": {
+          "name": "is_current",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": true
+        },
+        "schema_version": {
+          "name": "schema_version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "schema_fingerprint": {
+          "name": "schema_fingerprint",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "checkpoint_blob": {
+          "name": "checkpoint_blob",
+          "type": "blob",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "checkpoint_checksum": {
+          "name": "checkpoint_checksum",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "head_seq": {
+          "name": "head_seq",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "checkpoint_seq": {
+          "name": "checkpoint_seq",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "projected_seq": {
+          "name": "projected_seq",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "last_checkpoint_at": {
+          "name": "last_checkpoint_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "collaboration_documents_current_unique": {
+          "name": "collaboration_documents_current_unique",
+          "columns": [
+            "workspace_id",
+            "document_id"
+          ],
+          "isUnique": true,
+          "where": "\"collaboration_documents\".\"is_current\" = 1"
+        },
+        "collaboration_documents_workspace_document_generation_idx": {
+          "name": "collaboration_documents_workspace_document_generation_idx",
+          "columns": [
+            "workspace_id",
+            "document_id",
+            "generation"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "collaboration_documents_workspace_document_fk": {
+          "name": "collaboration_documents_workspace_document_fk",
+          "tableFrom": "collaboration_documents",
+          "tableTo": "documents",
+          "columnsFrom": [
+            "workspace_id",
+            "document_id"
+          ],
+          "columnsTo": [
+            "workspace_id",
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "collaboration_documents_pk": {
+          "columns": [
+            "workspace_id",
+            "document_id",
+            "generation"
+          ],
+          "name": "collaboration_documents_pk"
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "collaboration_documents_generation_check": {
+          "name": "collaboration_documents_generation_check",
+          "value": "typeof(\"collaboration_documents\".\"generation\") = 'integer' and \"collaboration_documents\".\"generation\" between 1 and 9007199254740991"
+        },
+        "collaboration_documents_is_current_check": {
+          "name": "collaboration_documents_is_current_check",
+          "value": "typeof(\"collaboration_documents\".\"is_current\") = 'integer' and \"collaboration_documents\".\"is_current\" in (0, 1)"
+        },
+        "collaboration_documents_schema_version_check": {
+          "name": "collaboration_documents_schema_version_check",
+          "value": "typeof(\"collaboration_documents\".\"schema_version\") = 'integer' and \"collaboration_documents\".\"schema_version\" between 1 and 9007199254740991"
+        },
+        "collaboration_documents_sequence_check": {
+          "name": "collaboration_documents_sequence_check",
+          "value": "typeof(\"collaboration_documents\".\"head_seq\") = 'integer' and \"collaboration_documents\".\"head_seq\" between 0 and 9007199254740991\n        and typeof(\"collaboration_documents\".\"checkpoint_seq\") = 'integer' and \"collaboration_documents\".\"checkpoint_seq\" between 0 and 9007199254740991\n        and typeof(\"collaboration_documents\".\"projected_seq\") = 'integer' and \"collaboration_documents\".\"projected_seq\" between 0 and 9007199254740991\n        and \"collaboration_documents\".\"checkpoint_seq\" <= \"collaboration_documents\".\"projected_seq\"\n        and \"collaboration_documents\".\"projected_seq\" <= \"collaboration_documents\".\"head_seq\""
+        },
+        "collaboration_documents_schema_fingerprint_check": {
+          "name": "collaboration_documents_schema_fingerprint_check",
+          "value": "typeof(\"collaboration_documents\".\"schema_fingerprint\") = 'text'\n        and length(\"collaboration_documents\".\"schema_fingerprint\") = 64\n        and \"collaboration_documents\".\"schema_fingerprint\" not glob '*[^0-9a-f]*'"
+        },
+        "collaboration_documents_checkpoint_checksum_check": {
+          "name": "collaboration_documents_checkpoint_checksum_check",
+          "value": "typeof(\"collaboration_documents\".\"checkpoint_checksum\") = 'text'\n        and length(\"collaboration_documents\".\"checkpoint_checksum\") = 64\n        and \"collaboration_documents\".\"checkpoint_checksum\" not glob '*[^0-9a-f]*'"
+        },
+        "collaboration_documents_checkpoint_blob_check": {
+          "name": "collaboration_documents_checkpoint_blob_check",
+          "value": "typeof(\"collaboration_documents\".\"checkpoint_blob\") = 'blob'\n        and length(\"collaboration_documents\".\"checkpoint_blob\") between 1 and 10485760"
+        }
+      }
+    },
+    "collaboration_noop_receipts": {
+      "name": "collaboration_noop_receipts",
+      "columns": {
+        "workspace_id": {
+          "name": "workspace_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "document_id": {
+          "name": "document_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "idempotency_key": {
+          "name": "idempotency_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "generation": {
+          "name": "generation",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "head_seq": {
+          "name": "head_seq",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "checksum": {
+          "name": "checksum",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "origin_kind": {
+          "name": "origin_kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "principal_id": {
+          "name": "principal_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "request_id": {
+          "name": "request_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "session_id": {
+          "name": "session_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "semantic_action_id": {
+          "name": "semantic_action_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "collaboration_noop_receipts_document_generation_fk": {
+          "name": "collaboration_noop_receipts_document_generation_fk",
+          "tableFrom": "collaboration_noop_receipts",
+          "tableTo": "collaboration_documents",
+          "columnsFrom": [
+            "workspace_id",
+            "document_id",
+            "generation"
+          ],
+          "columnsTo": [
+            "workspace_id",
+            "document_id",
+            "generation"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "collaboration_noop_receipts_semantic_action_fk": {
+          "name": "collaboration_noop_receipts_semantic_action_fk",
+          "tableFrom": "collaboration_noop_receipts",
+          "tableTo": "collaboration_actions",
+          "columnsFrom": [
+            "workspace_id",
+            "semantic_action_id",
+            "document_id",
+            "generation"
+          ],
+          "columnsTo": [
+            "workspace_id",
+            "id",
+            "document_id",
+            "generation"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "collaboration_noop_receipts_pk": {
+          "columns": [
+            "workspace_id",
+            "document_id",
+            "idempotency_key"
+          ],
+          "name": "collaboration_noop_receipts_pk"
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "collaboration_noop_receipts_sequence_check": {
+          "name": "collaboration_noop_receipts_sequence_check",
+          "value": "typeof(\"collaboration_noop_receipts\".\"generation\") = 'integer' and \"collaboration_noop_receipts\".\"generation\" between 1 and 9007199254740991\n        and typeof(\"collaboration_noop_receipts\".\"head_seq\") = 'integer' and \"collaboration_noop_receipts\".\"head_seq\" between 0 and 9007199254740991"
+        },
+        "collaboration_noop_receipts_checksum_check": {
+          "name": "collaboration_noop_receipts_checksum_check",
+          "value": "typeof(\"collaboration_noop_receipts\".\"checksum\") = 'text'\n        and length(\"collaboration_noop_receipts\".\"checksum\") = 64\n        and \"collaboration_noop_receipts\".\"checksum\" not glob '*[^0-9a-f]*'"
+        },
+        "collaboration_noop_receipts_origin_check": {
+          "name": "collaboration_noop_receipts_origin_check",
+          "value": "\"collaboration_noop_receipts\".\"origin_kind\" in ('client', 'proposal_command', 'undo_command', 'migration', 'repair')"
+        },
+        "collaboration_noop_receipts_idempotency_key_check": {
+          "name": "collaboration_noop_receipts_idempotency_key_check",
+          "value": "typeof(\"collaboration_noop_receipts\".\"idempotency_key\") = 'text'\n        and \"collaboration_noop_receipts\".\"idempotency_key\" = trim(\"collaboration_noop_receipts\".\"idempotency_key\", char(9) || char(10) || char(11) || char(12) || char(13) || char(160) || ' ')\n        and length(cast(\"collaboration_noop_receipts\".\"idempotency_key\" as blob)) between 1 and 256"
+        },
+        "collaboration_noop_receipts_audit_identity_check": {
+          "name": "collaboration_noop_receipts_audit_identity_check",
+          "value": "(\"collaboration_noop_receipts\".\"principal_id\" is null or (\n          typeof(\"collaboration_noop_receipts\".\"principal_id\") = 'text'\n          and \"collaboration_noop_receipts\".\"principal_id\" = trim(\"collaboration_noop_receipts\".\"principal_id\", char(9) || char(10) || char(11) || char(12) || char(13) || char(160) || ' ')\n          and length(cast(\"collaboration_noop_receipts\".\"principal_id\" as blob)) between 1 and 256\n        )) and (\"collaboration_noop_receipts\".\"request_id\" is null or (\n          typeof(\"collaboration_noop_receipts\".\"request_id\") = 'text'\n          and \"collaboration_noop_receipts\".\"request_id\" = trim(\"collaboration_noop_receipts\".\"request_id\", char(9) || char(10) || char(11) || char(12) || char(13) || char(160) || ' ')\n          and length(cast(\"collaboration_noop_receipts\".\"request_id\" as blob)) between 1 and 256\n        )) and (\"collaboration_noop_receipts\".\"session_id\" is null or (\n          typeof(\"collaboration_noop_receipts\".\"session_id\") = 'text'\n          and \"collaboration_noop_receipts\".\"session_id\" = trim(\"collaboration_noop_receipts\".\"session_id\", char(9) || char(10) || char(11) || char(12) || char(13) || char(160) || ' ')\n          and length(cast(\"collaboration_noop_receipts\".\"session_id\" as blob)) between 1 and 256\n        )) and (\"collaboration_noop_receipts\".\"semantic_action_id\" is null or (\n          typeof(\"collaboration_noop_receipts\".\"semantic_action_id\") = 'text'\n          and \"collaboration_noop_receipts\".\"semantic_action_id\" = trim(\"collaboration_noop_receipts\".\"semantic_action_id\", char(9) || char(10) || char(11) || char(12) || char(13) || char(160) || ' ')\n          and length(cast(\"collaboration_noop_receipts\".\"semantic_action_id\" as blob)) between 1 and 256\n        ))"
+        }
+      }
+    },
+    "collaboration_proposal_anchors": {
+      "name": "collaboration_proposal_anchors",
+      "columns": {
+        "workspace_id": {
+          "name": "workspace_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "proposal_id": {
+          "name": "proposal_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "document_id": {
+          "name": "document_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "generation": {
+          "name": "generation",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "schema_fingerprint": {
+          "name": "schema_fingerprint",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "base_head_seq": {
+          "name": "base_head_seq",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "base_state_vector": {
+          "name": "base_state_vector",
+          "type": "blob",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "start_relative": {
+          "name": "start_relative",
+          "type": "blob",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "start_assoc": {
+          "name": "start_assoc",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "end_relative": {
+          "name": "end_relative",
+          "type": "blob",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "end_assoc": {
+          "name": "end_assoc",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "target_hash": {
+          "name": "target_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "target_preview": {
+          "name": "target_preview",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "collaboration_proposal_anchors_document_generation_history_idx": {
+          "name": "collaboration_proposal_anchors_document_generation_history_idx",
+          "columns": [
+            "workspace_id",
+            "document_id",
+            "generation",
+            "created_at",
+            "proposal_id"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "collaboration_proposal_anchors_document_generation_fk": {
+          "name": "collaboration_proposal_anchors_document_generation_fk",
+          "tableFrom": "collaboration_proposal_anchors",
+          "tableTo": "collaboration_documents",
+          "columnsFrom": [
+            "workspace_id",
+            "document_id",
+            "generation"
+          ],
+          "columnsTo": [
+            "workspace_id",
+            "document_id",
+            "generation"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "collaboration_proposal_anchors_proposal_fk": {
+          "name": "collaboration_proposal_anchors_proposal_fk",
+          "tableFrom": "collaboration_proposal_anchors",
+          "tableTo": "ai_proposals",
+          "columnsFrom": [
+            "workspace_id",
+            "proposal_id",
+            "document_id"
+          ],
+          "columnsTo": [
+            "workspace_id",
+            "id",
+            "document_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "collaboration_proposal_anchors_pk": {
+          "columns": [
+            "workspace_id",
+            "proposal_id"
+          ],
+          "name": "collaboration_proposal_anchors_pk"
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "collaboration_proposal_anchors_sequence_check": {
+          "name": "collaboration_proposal_anchors_sequence_check",
+          "value": "typeof(\"collaboration_proposal_anchors\".\"generation\") = 'integer' and \"collaboration_proposal_anchors\".\"generation\" between 1 and 9007199254740991\n        and typeof(\"collaboration_proposal_anchors\".\"base_head_seq\") = 'integer'\n        and \"collaboration_proposal_anchors\".\"base_head_seq\" between 0 and 9007199254740991"
+        },
+        "collaboration_proposal_anchors_schema_fingerprint_check": {
+          "name": "collaboration_proposal_anchors_schema_fingerprint_check",
+          "value": "typeof(\"collaboration_proposal_anchors\".\"schema_fingerprint\") = 'text'\n        and length(\"collaboration_proposal_anchors\".\"schema_fingerprint\") = 64\n        and \"collaboration_proposal_anchors\".\"schema_fingerprint\" not glob '*[^0-9a-f]*'"
+        },
+        "collaboration_proposal_anchors_target_hash_check": {
+          "name": "collaboration_proposal_anchors_target_hash_check",
+          "value": "typeof(\"collaboration_proposal_anchors\".\"target_hash\") = 'text'\n        and length(\"collaboration_proposal_anchors\".\"target_hash\") = 64\n        and \"collaboration_proposal_anchors\".\"target_hash\" not glob '*[^0-9a-f]*'"
+        },
+        "collaboration_proposal_anchors_association_check": {
+          "name": "collaboration_proposal_anchors_association_check",
+          "value": "\"collaboration_proposal_anchors\".\"start_assoc\" = -1 and \"collaboration_proposal_anchors\".\"end_assoc\" = 1"
+        },
+        "collaboration_proposal_anchors_state_vector_check": {
+          "name": "collaboration_proposal_anchors_state_vector_check",
+          "value": "typeof(\"collaboration_proposal_anchors\".\"base_state_vector\") = 'blob'\n        and length(\"collaboration_proposal_anchors\".\"base_state_vector\") between 1 and 1048576"
+        },
+        "collaboration_proposal_anchors_relative_positions_check": {
+          "name": "collaboration_proposal_anchors_relative_positions_check",
+          "value": "typeof(\"collaboration_proposal_anchors\".\"start_relative\") = 'blob'\n        and length(\"collaboration_proposal_anchors\".\"start_relative\") between 1 and 65536\n        and typeof(\"collaboration_proposal_anchors\".\"end_relative\") = 'blob'\n        and length(\"collaboration_proposal_anchors\".\"end_relative\") between 1 and 65536"
+        },
+        "collaboration_proposal_anchors_target_preview_check": {
+          "name": "collaboration_proposal_anchors_target_preview_check",
+          "value": "typeof(\"collaboration_proposal_anchors\".\"target_preview\") = 'text'\n        and length(cast(\"collaboration_proposal_anchors\".\"target_preview\" as blob)) between 0 and 1024"
+        }
+      }
+    },
+    "collaboration_room_closure_jobs": {
+      "name": "collaboration_room_closure_jobs",
+      "columns": {
+        "workspace_id": {
+          "name": "workspace_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "document_id": {
+          "name": "document_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "generation": {
+          "name": "generation",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "reason": {
+          "name": "reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'pending'"
+        },
+        "attempts": {
+          "name": "attempts",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "next_attempt_at": {
+          "name": "next_attempt_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "failure_category": {
+          "name": "failure_category",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "collaboration_room_closure_jobs_due_idx": {
+          "name": "collaboration_room_closure_jobs_due_idx",
+          "columns": [
+            "status",
+            "next_attempt_at",
+            "created_at",
+            "workspace_id",
+            "document_id",
+            "generation"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "collaboration_room_closure_jobs_document_fk": {
+          "name": "collaboration_room_closure_jobs_document_fk",
+          "tableFrom": "collaboration_room_closure_jobs",
+          "tableTo": "collaboration_documents",
+          "columnsFrom": [
+            "workspace_id",
+            "document_id",
+            "generation"
+          ],
+          "columnsTo": [
+            "workspace_id",
+            "document_id",
+            "generation"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "collaboration_room_closure_jobs_pk": {
+          "columns": [
+            "workspace_id",
+            "document_id",
+            "generation",
+            "reason"
+          ],
+          "name": "collaboration_room_closure_jobs_pk"
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "collaboration_room_closure_jobs_generation_check": {
+          "name": "collaboration_room_closure_jobs_generation_check",
+          "value": "typeof(\"collaboration_room_closure_jobs\".\"generation\") = 'integer' and \"collaboration_room_closure_jobs\".\"generation\" between 1 and 9007199254740991"
+        },
+        "collaboration_room_closure_jobs_reason_check": {
+          "name": "collaboration_room_closure_jobs_reason_check",
+          "value": "\"collaboration_room_closure_jobs\".\"reason\" = 'archived'"
+        },
+        "collaboration_room_closure_jobs_retry_state_check": {
+          "name": "collaboration_room_closure_jobs_retry_state_check",
+          "value": "(\n          \"collaboration_room_closure_jobs\".\"status\" = 'pending'\n          and typeof(\"collaboration_room_closure_jobs\".\"attempts\") = 'integer'\n          and \"collaboration_room_closure_jobs\".\"attempts\" between 0 and 4\n          and typeof(\"collaboration_room_closure_jobs\".\"next_attempt_at\") = 'integer'\n          and \"collaboration_room_closure_jobs\".\"next_attempt_at\" >= \"collaboration_room_closure_jobs\".\"created_at\"\n          and (\n            (\"collaboration_room_closure_jobs\".\"attempts\" = 0 and \"collaboration_room_closure_jobs\".\"failure_category\" is null)\n            or (\"collaboration_room_closure_jobs\".\"attempts\" > 0 and \"collaboration_room_closure_jobs\".\"failure_category\" = 'delivery_failed')\n          )\n        ) or (\n          \"collaboration_room_closure_jobs\".\"status\" = 'exhausted'\n          and \"collaboration_room_closure_jobs\".\"attempts\" = 5\n          and \"collaboration_room_closure_jobs\".\"next_attempt_at\" is null\n          and \"collaboration_room_closure_jobs\".\"failure_category\" = 'delivery_failed'\n        )"
+        },
+        "collaboration_room_closure_jobs_timestamps_check": {
+          "name": "collaboration_room_closure_jobs_timestamps_check",
+          "value": "typeof(\"collaboration_room_closure_jobs\".\"created_at\") = 'integer'\n        and typeof(\"collaboration_room_closure_jobs\".\"updated_at\") = 'integer'\n        and \"collaboration_room_closure_jobs\".\"updated_at\" >= \"collaboration_room_closure_jobs\".\"created_at\""
+        }
+      }
+    },
+    "collaboration_updates": {
+      "name": "collaboration_updates",
+      "columns": {
+        "workspace_id": {
+          "name": "workspace_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "document_id": {
+          "name": "document_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "generation": {
+          "name": "generation",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "seq": {
+          "name": "seq",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "update_blob": {
+          "name": "update_blob",
+          "type": "blob",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "checksum": {
+          "name": "checksum",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "idempotency_key": {
+          "name": "idempotency_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "origin_kind": {
+          "name": "origin_kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "principal_id": {
+          "name": "principal_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "request_id": {
+          "name": "request_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "session_id": {
+          "name": "session_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "semantic_action_id": {
+          "name": "semantic_action_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "diagnostic_json": {
+          "name": "diagnostic_json",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "collaboration_updates_document_generation_idempotency_unique": {
+          "name": "collaboration_updates_document_generation_idempotency_unique",
+          "columns": [
+            "workspace_id",
+            "document_id",
+            "generation",
+            "idempotency_key"
+          ],
+          "isUnique": true
+        },
+        "collaboration_updates_exact_checksum_unique": {
+          "name": "collaboration_updates_exact_checksum_unique",
+          "columns": [
+            "workspace_id",
+            "document_id",
+            "generation",
+            "seq",
+            "checksum"
+          ],
+          "isUnique": true
+        }
+      },
+      "foreignKeys": {
+        "collaboration_updates_document_generation_fk": {
+          "name": "collaboration_updates_document_generation_fk",
+          "tableFrom": "collaboration_updates",
+          "tableTo": "collaboration_documents",
+          "columnsFrom": [
+            "workspace_id",
+            "document_id",
+            "generation"
+          ],
+          "columnsTo": [
+            "workspace_id",
+            "document_id",
+            "generation"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "collaboration_updates_semantic_action_fk": {
+          "name": "collaboration_updates_semantic_action_fk",
+          "tableFrom": "collaboration_updates",
+          "tableTo": "collaboration_actions",
+          "columnsFrom": [
+            "workspace_id",
+            "semantic_action_id",
+            "document_id",
+            "generation"
+          ],
+          "columnsTo": [
+            "workspace_id",
+            "id",
+            "document_id",
+            "generation"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "collaboration_updates_pk": {
+          "columns": [
+            "workspace_id",
+            "document_id",
+            "generation",
+            "seq"
+          ],
+          "name": "collaboration_updates_pk"
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "collaboration_updates_sequence_check": {
+          "name": "collaboration_updates_sequence_check",
+          "value": "typeof(\"collaboration_updates\".\"generation\") = 'integer' and \"collaboration_updates\".\"generation\" between 1 and 9007199254740991\n        and typeof(\"collaboration_updates\".\"seq\") = 'integer' and \"collaboration_updates\".\"seq\" between 1 and 9007199254740991"
+        },
+        "collaboration_updates_checksum_check": {
+          "name": "collaboration_updates_checksum_check",
+          "value": "typeof(\"collaboration_updates\".\"checksum\") = 'text'\n        and length(\"collaboration_updates\".\"checksum\") = 64\n        and \"collaboration_updates\".\"checksum\" not glob '*[^0-9a-f]*'"
+        },
+        "collaboration_updates_origin_check": {
+          "name": "collaboration_updates_origin_check",
+          "value": "\"collaboration_updates\".\"origin_kind\" in ('client', 'proposal_command', 'undo_command', 'migration', 'repair')"
+        },
+        "collaboration_updates_update_blob_check": {
+          "name": "collaboration_updates_update_blob_check",
+          "value": "typeof(\"collaboration_updates\".\"update_blob\") = 'blob'\n        and length(\"collaboration_updates\".\"update_blob\") between 1 and 10485760"
+        },
+        "collaboration_updates_idempotency_key_check": {
+          "name": "collaboration_updates_idempotency_key_check",
+          "value": "typeof(\"collaboration_updates\".\"idempotency_key\") = 'text'\n        and \"collaboration_updates\".\"idempotency_key\" = trim(\"collaboration_updates\".\"idempotency_key\", char(9) || char(10) || char(11) || char(12) || char(13) || char(160) || ' ')\n        and length(cast(\"collaboration_updates\".\"idempotency_key\" as blob)) between 1 and 256"
+        },
+        "collaboration_updates_diagnostic_json_check": {
+          "name": "collaboration_updates_diagnostic_json_check",
+          "value": "\"collaboration_updates\".\"diagnostic_json\" is null or (\n        typeof(\"collaboration_updates\".\"diagnostic_json\") = 'text'\n        and length(cast(\"collaboration_updates\".\"diagnostic_json\" as blob)) between 2 and 4096\n        and case when json_valid(\"collaboration_updates\".\"diagnostic_json\")\n          then json_type(\"collaboration_updates\".\"diagnostic_json\") = 'object'\n          else 0\n        end\n      )"
+        }
+      }
+    },
+    "collaboration_workflow_notification_jobs": {
+      "name": "collaboration_workflow_notification_jobs",
+      "columns": {
+        "workspace_id": {
+          "name": "workspace_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "document_id": {
+          "name": "document_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "generation": {
+          "name": "generation",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "workflow_revision": {
+          "name": "workflow_revision",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'pending'"
+        },
+        "attempts": {
+          "name": "attempts",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "next_attempt_at": {
+          "name": "next_attempt_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "failure_category": {
+          "name": "failure_category",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "collaboration_workflow_notification_jobs_due_idx": {
+          "name": "collaboration_workflow_notification_jobs_due_idx",
+          "columns": [
+            "status",
+            "next_attempt_at",
+            "created_at",
+            "workspace_id",
+            "document_id",
+            "generation"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "collaboration_workflow_notification_jobs_document_fk": {
+          "name": "collaboration_workflow_notification_jobs_document_fk",
+          "tableFrom": "collaboration_workflow_notification_jobs",
+          "tableTo": "collaboration_documents",
+          "columnsFrom": [
+            "workspace_id",
+            "document_id",
+            "generation"
+          ],
+          "columnsTo": [
+            "workspace_id",
+            "document_id",
+            "generation"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "collaboration_workflow_notification_jobs_pk": {
+          "columns": [
+            "workspace_id",
+            "document_id"
+          ],
+          "name": "collaboration_workflow_notification_jobs_pk"
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "collaboration_workflow_notification_jobs_version_check": {
+          "name": "collaboration_workflow_notification_jobs_version_check",
+          "value": "typeof(\"collaboration_workflow_notification_jobs\".\"generation\") = 'integer'\n        and \"collaboration_workflow_notification_jobs\".\"generation\" between 1 and 9007199254740991\n        and typeof(\"collaboration_workflow_notification_jobs\".\"workflow_revision\") = 'integer'\n        and \"collaboration_workflow_notification_jobs\".\"workflow_revision\" between 1 and 9007199254740991"
+        },
+        "collaboration_workflow_notification_jobs_retry_state_check": {
+          "name": "collaboration_workflow_notification_jobs_retry_state_check",
+          "value": "(\n          \"collaboration_workflow_notification_jobs\".\"status\" = 'pending'\n          and typeof(\"collaboration_workflow_notification_jobs\".\"attempts\") = 'integer'\n          and \"collaboration_workflow_notification_jobs\".\"attempts\" between 0 and 4\n          and typeof(\"collaboration_workflow_notification_jobs\".\"next_attempt_at\") = 'integer'\n          and \"collaboration_workflow_notification_jobs\".\"next_attempt_at\" >= \"collaboration_workflow_notification_jobs\".\"created_at\"\n          and (\n            (\"collaboration_workflow_notification_jobs\".\"attempts\" = 0 and \"collaboration_workflow_notification_jobs\".\"failure_category\" is null)\n            or (\"collaboration_workflow_notification_jobs\".\"attempts\" > 0 and \"collaboration_workflow_notification_jobs\".\"failure_category\" = 'delivery_failed')\n          )\n        ) or (\n          \"collaboration_workflow_notification_jobs\".\"status\" = 'exhausted'\n          and \"collaboration_workflow_notification_jobs\".\"attempts\" = 5\n          and \"collaboration_workflow_notification_jobs\".\"next_attempt_at\" is null\n          and \"collaboration_workflow_notification_jobs\".\"failure_category\" = 'delivery_failed'\n        )"
+        },
+        "collaboration_workflow_notification_jobs_timestamps_check": {
+          "name": "collaboration_workflow_notification_jobs_timestamps_check",
+          "value": "typeof(\"collaboration_workflow_notification_jobs\".\"created_at\") = 'integer'\n        and typeof(\"collaboration_workflow_notification_jobs\".\"updated_at\") = 'integer'\n        and \"collaboration_workflow_notification_jobs\".\"updated_at\" >= \"collaboration_workflow_notification_jobs\".\"created_at\""
+        }
+      }
+    },
+    "document_approvals": {
+      "name": "document_approvals",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "workspace_id": {
+          "name": "workspace_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "document_id": {
+          "name": "document_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "generation": {
+          "name": "generation",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "approved_head_seq": {
+          "name": "approved_head_seq",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "approved_state_vector": {
+          "name": "approved_state_vector",
+          "type": "blob",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "approved_content_hash": {
+          "name": "approved_content_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "principal_id": {
+          "name": "principal_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "request_id": {
+          "name": "request_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "approved_at": {
+          "name": "approved_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "invalidated_seq": {
+          "name": "invalidated_seq",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "invalidated_principal_id": {
+          "name": "invalidated_principal_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "invalidated_at": {
+          "name": "invalidated_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "revoked_at": {
+          "name": "revoked_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "revoked_principal_id": {
+          "name": "revoked_principal_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "revoked_request_id": {
+          "name": "revoked_request_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "document_approvals_active_document_unique": {
+          "name": "document_approvals_active_document_unique",
+          "columns": [
+            "workspace_id",
+            "document_id"
+          ],
+          "isUnique": true,
+          "where": "\"document_approvals\".\"invalidated_at\" is null and \"document_approvals\".\"revoked_at\" is null"
+        },
+        "document_approvals_workspace_document_generation_approved_id_idx": {
+          "name": "document_approvals_workspace_document_generation_approved_id_idx",
+          "columns": [
+            "workspace_id",
+            "document_id",
+            "generation",
+            "approved_at",
+            "id"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "document_approvals_document_generation_fk": {
+          "name": "document_approvals_document_generation_fk",
+          "tableFrom": "document_approvals",
+          "tableTo": "collaboration_documents",
+          "columnsFrom": [
+            "workspace_id",
+            "document_id",
+            "generation"
+          ],
+          "columnsTo": [
+            "workspace_id",
+            "document_id",
+            "generation"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "document_approvals_sequence_check": {
+          "name": "document_approvals_sequence_check",
+          "value": "typeof(\"document_approvals\".\"generation\") = 'integer' and \"document_approvals\".\"generation\" between 1 and 9007199254740991\n        and typeof(\"document_approvals\".\"approved_head_seq\") = 'integer'\n        and \"document_approvals\".\"approved_head_seq\" between 0 and 9007199254740991"
+        },
+        "document_approvals_content_hash_check": {
+          "name": "document_approvals_content_hash_check",
+          "value": "typeof(\"document_approvals\".\"approved_content_hash\") = 'text'\n        and length(\"document_approvals\".\"approved_content_hash\") = 64\n        and \"document_approvals\".\"approved_content_hash\" not glob '*[^0-9a-f]*'"
+        },
+        "document_approvals_state_vector_check": {
+          "name": "document_approvals_state_vector_check",
+          "value": "typeof(\"document_approvals\".\"approved_state_vector\") = 'blob'\n        and length(\"document_approvals\".\"approved_state_vector\") between 1 and 1048576"
+        },
+        "document_approvals_invalidation_check": {
+          "name": "document_approvals_invalidation_check",
+          "value": "(\"document_approvals\".\"invalidated_seq\" is null and \"document_approvals\".\"invalidated_principal_id\" is null and \"document_approvals\".\"invalidated_at\" is null)\n        or (\"document_approvals\".\"invalidated_seq\" is not null and \"document_approvals\".\"invalidated_principal_id\" is not null\n          and \"document_approvals\".\"invalidated_at\" is not null\n          and typeof(\"document_approvals\".\"invalidated_seq\") = 'integer'\n          and \"document_approvals\".\"invalidated_seq\" between 1 and 9007199254740991\n          and \"document_approvals\".\"invalidated_seq\" > \"document_approvals\".\"approved_head_seq\")"
+        },
+        "document_approvals_revocation_check": {
+          "name": "document_approvals_revocation_check",
+          "value": "(\n          \"document_approvals\".\"revoked_at\" is null\n          and \"document_approvals\".\"revoked_principal_id\" is null\n          and \"document_approvals\".\"revoked_request_id\" is null\n        ) or (\n          \"document_approvals\".\"revoked_at\" is not null\n          and typeof(\"document_approvals\".\"revoked_at\") = 'integer'\n          and \"document_approvals\".\"revoked_at\" >= \"document_approvals\".\"approved_at\"\n          and typeof(\"document_approvals\".\"revoked_principal_id\") = 'text'\n          and \"document_approvals\".\"revoked_principal_id\" = trim(\n            \"document_approvals\".\"revoked_principal_id\",\n            char(9) || char(10) || char(11) || char(12) || char(13) || char(160) || ' '\n          )\n          and length(cast(\"document_approvals\".\"revoked_principal_id\" as blob)) between 1\n            and 256\n          and typeof(\"document_approvals\".\"revoked_request_id\") = 'text'\n          and \"document_approvals\".\"revoked_request_id\" = trim(\n            \"document_approvals\".\"revoked_request_id\",\n            char(9) || char(10) || char(11) || char(12) || char(13) || char(160) || ' '\n          )\n          and length(cast(\"document_approvals\".\"revoked_request_id\" as blob)) between 1\n            and 256\n          and \"document_approvals\".\"invalidated_seq\" is null\n          and \"document_approvals\".\"invalidated_principal_id\" is null\n          and \"document_approvals\".\"invalidated_at\" is null\n        )"
+        }
+      }
+    },
+    "document_change_proposals": {
+      "name": "document_change_proposals",
+      "columns": {
+        "workspace_id": {
+          "name": "workspace_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "change_id": {
+          "name": "change_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "document_id": {
+          "name": "document_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "proposal_id": {
+          "name": "proposal_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "applied_mode": {
+          "name": "applied_mode",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "ordinal": {
+          "name": "ordinal",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "document_change_proposals_workspace_change_ordinal_unique": {
+          "name": "document_change_proposals_workspace_change_ordinal_unique",
+          "columns": [
+            "workspace_id",
+            "change_id",
+            "ordinal"
+          ],
+          "isUnique": true
+        },
+        "document_change_proposals_workspace_proposal_idx": {
+          "name": "document_change_proposals_workspace_proposal_idx",
+          "columns": [
+            "workspace_id",
+            "proposal_id"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "document_change_proposals_change_fk": {
+          "name": "document_change_proposals_change_fk",
+          "tableFrom": "document_change_proposals",
+          "tableTo": "document_changes",
+          "columnsFrom": [
+            "workspace_id",
+            "change_id",
+            "document_id"
+          ],
+          "columnsTo": [
+            "workspace_id",
+            "id",
+            "document_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "document_change_proposals_proposal_fk": {
+          "name": "document_change_proposals_proposal_fk",
+          "tableFrom": "document_change_proposals",
+          "tableTo": "ai_proposals",
+          "columnsFrom": [
+            "workspace_id",
+            "proposal_id",
+            "document_id"
+          ],
+          "columnsTo": [
+            "workspace_id",
+            "id",
+            "document_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "document_change_proposals_pk": {
+          "columns": [
+            "workspace_id",
+            "change_id",
+            "proposal_id"
+          ],
+          "name": "document_change_proposals_pk"
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "document_change_proposals_mode_check": {
+          "name": "document_change_proposals_mode_check",
+          "value": "\"document_change_proposals\".\"applied_mode\" in ('replace', 'insert_below')"
+        },
+        "document_change_proposals_ordinal_check": {
+          "name": "document_change_proposals_ordinal_check",
+          "value": "\"document_change_proposals\".\"ordinal\" >= 0"
+        }
+      }
+    },
+    "document_changes": {
+      "name": "document_changes",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "workspace_id": {
+          "name": "workspace_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "document_id": {
+          "name": "document_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "principal_id": {
+          "name": "principal_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "request_id": {
+          "name": "request_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "batch_id": {
+          "name": "batch_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "before_snapshot_json": {
+          "name": "before_snapshot_json",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "after_revision": {
+          "name": "after_revision",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "undone_at": {
+          "name": "undone_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "document_changes_workspace_document_created_idx": {
+          "name": "document_changes_workspace_document_created_idx",
+          "columns": [
+            "workspace_id",
+            "document_id",
+            "created_at"
+          ],
+          "isUnique": false
+        },
+        "document_changes_workspace_id_document_unique": {
+          "name": "document_changes_workspace_id_document_unique",
+          "columns": [
+            "workspace_id",
+            "id",
+            "document_id"
+          ],
+          "isUnique": true
+        }
+      },
+      "foreignKeys": {
+        "document_changes_workspace_document_fk": {
+          "name": "document_changes_workspace_document_fk",
+          "tableFrom": "document_changes",
+          "tableTo": "documents",
+          "columnsFrom": [
+            "workspace_id",
+            "document_id"
+          ],
+          "columnsTo": [
+            "workspace_id",
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "document_changes_kind_check": {
+          "name": "document_changes_kind_check",
+          "value": "\"document_changes\".\"kind\" in ('single', 'batch')"
+        },
+        "document_changes_after_revision_check": {
+          "name": "document_changes_after_revision_check",
+          "value": "\"document_changes\".\"after_revision\" > 0"
+        },
+        "document_changes_batch_id_check": {
+          "name": "document_changes_batch_id_check",
+          "value": "(\"document_changes\".\"kind\" = 'single' and \"document_changes\".\"batch_id\" is null) or (\"document_changes\".\"kind\" = 'batch' and \"document_changes\".\"batch_id\" is not null)"
+        }
+      }
+    },
+    "documents": {
+      "name": "documents",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "workspace_id": {
+          "name": "workspace_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "creation_key": {
+          "name": "creation_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "title": {
+          "name": "title",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "content_json": {
+          "name": "content_json",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "plain_text": {
+          "name": "plain_text",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "''"
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'draft'"
+        },
+        "readiness": {
+          "name": "readiness",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'draft'"
+        },
+        "metadata_json": {
+          "name": "metadata_json",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'{}'"
+        },
+        "revision": {
+          "name": "revision",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "documents_readiness_idx": {
+          "name": "documents_readiness_idx",
+          "columns": [
+            "readiness"
+          ],
+          "isUnique": false
+        },
+        "documents_workspace_status_updated_id_idx": {
+          "name": "documents_workspace_status_updated_id_idx",
+          "columns": [
+            "workspace_id",
+            "status",
+            "updated_at",
+            "id"
+          ],
+          "isUnique": false
+        },
+        "documents_workspace_creation_key_unique": {
+          "name": "documents_workspace_creation_key_unique",
+          "columns": [
+            "workspace_id",
+            "creation_key"
+          ],
+          "isUnique": true
+        },
+        "documents_workspace_id_id_unique": {
+          "name": "documents_workspace_id_id_unique",
+          "columns": [
+            "workspace_id",
+            "id"
+          ],
+          "isUnique": true
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "documents_status_check": {
+          "name": "documents_status_check",
+          "value": "\"documents\".\"status\" in ('draft', 'archived')"
+        },
+        "documents_readiness_check": {
+          "name": "documents_readiness_check",
+          "value": "\"documents\".\"readiness\" in ('draft', 'needs_review', 'ready', 'approved')"
+        },
+        "documents_revision_check": {
+          "name": "documents_revision_check",
+          "value": "\"documents\".\"revision\" >= 0"
+        }
+      }
+    },
+    "prompt_templates": {
+      "name": "prompt_templates",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "workspace_id": {
+          "name": "workspace_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "builtin_key": {
+          "name": "builtin_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "description": {
+          "name": "description",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "category": {
+          "name": "category",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "system_prompt": {
+          "name": "system_prompt",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "variable_schema_json": {
+          "name": "variable_schema_json",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "is_default": {
+          "name": "is_default",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": false
+        },
+        "is_active": {
+          "name": "is_active",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "prompt_templates_workspace_active_name_idx": {
+          "name": "prompt_templates_workspace_active_name_idx",
+          "columns": [
+            "workspace_id",
+            "is_active",
+            "name"
+          ],
+          "isUnique": false
+        },
+        "prompt_templates_workspace_id_id_unique": {
+          "name": "prompt_templates_workspace_id_id_unique",
+          "columns": [
+            "workspace_id",
+            "id"
+          ],
+          "isUnique": true
+        },
+        "prompt_templates_workspace_builtin_key_unique": {
+          "name": "prompt_templates_workspace_builtin_key_unique",
+          "columns": [
+            "workspace_id",
+            "builtin_key"
+          ],
+          "isUnique": true
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "request_budget_buckets": {
+      "name": "request_budget_buckets",
+      "columns": {
+        "workspace_id": {
+          "name": "workspace_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "principal_id": {
+          "name": "principal_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "policy_id": {
+          "name": "policy_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "window_start": {
+          "name": "window_start",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "request_count": {
+          "name": "request_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "request_budget_buckets_expires_at_idx": {
+          "name": "request_budget_buckets_expires_at_idx",
+          "columns": [
+            "expires_at"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {
+        "request_budget_buckets_pk": {
+          "columns": [
+            "workspace_id",
+            "principal_id",
+            "policy_id",
+            "window_start"
+          ],
+          "name": "request_budget_buckets_pk"
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "request_budget_buckets_request_count_check": {
+          "name": "request_budget_buckets_request_count_check",
+          "value": "\"request_budget_buckets\".\"request_count\" > 0"
+        }
+      }
+    }
+  },
+  "views": {},
+  "enums": {},
+  "_meta": {
+    "schemas": {},
+    "tables": {},
+    "columns": {}
+  },
+  "internal": {
+    "indexes": {}
+  }
+}

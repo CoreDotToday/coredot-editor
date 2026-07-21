@@ -7,7 +7,6 @@ import {
   emptyDocument,
   listDocumentSummaries,
 } from "@/features/documents/document-repository";
-import { documentReadinessValues } from "@/features/documents/document-metadata";
 import { toPublicDocument } from "@/features/documents/document-public";
 import { createProtectedOptionsHandler, createProtectedRouteHandler } from "@/features/auth/route-context";
 import { enforceRequestBudget } from "@/features/security/request-budget";
@@ -35,8 +34,7 @@ const createDocumentSchema = z.object({
     z.string(),
     z.union([z.string(), z.number().finite(), z.boolean(), z.array(z.string()), z.null()]),
   ).optional(),
-  readiness: z.enum(documentReadinessValues).optional(),
-});
+}).strict();
 const documentCreationKeySchema = z.string().min(16).max(128).regex(/^[A-Za-z0-9_-]+$/);
 
 const optionsHandler = createProtectedOptionsHandler(["GET", "POST"]);
@@ -101,9 +99,10 @@ const postHandler = createProtectedRouteHandler(async (context, request: Request
   if (creationKeyResult.data && !body.contentJson) {
     return NextResponse.json({ error: "Idempotent creation requires a full document draft" }, { status: 400 });
   }
-  const projectState = validateProjectDocumentState(resolveActiveProjectProfile(), {
+  const projectProfile = resolveActiveProjectProfile();
+  const projectState = validateProjectDocumentState(projectProfile, {
     metadataJson: body.metadataJson ?? {},
-    readiness: body.readiness ?? "draft",
+    readiness: projectProfile.readiness[0]!.id,
   });
   if (!projectState.ok) {
     return NextResponse.json({
@@ -117,20 +116,18 @@ const postHandler = createProtectedRouteHandler(async (context, request: Request
       title: body.title,
       contentJson: body.contentJson,
       metadataJson: projectState.value.metadataJson,
-      readiness: projectState.value.readiness,
     }, creationKeyResult.data);
     return NextResponse.json({
       document: toPublicDocument(creation.document),
       replayed: creation.replayed,
     }, { status: creation.replayed ? 200 : 201 });
   }
-  const hasDraftState = body.contentJson !== undefined || body.metadataJson !== undefined || body.readiness !== undefined;
+  const hasDraftState = body.contentJson !== undefined || body.metadataJson !== undefined;
   const document = hasDraftState
     ? await createDocumentFromDraft(context, {
         title: body.title,
         contentJson: body.contentJson ?? emptyDocument,
         metadataJson: projectState.value.metadataJson,
-        readiness: projectState.value.readiness,
       })
     : await createDocumentDraft(context, body.title);
   return NextResponse.json({ document: toPublicDocument(document) }, { status: 201 });

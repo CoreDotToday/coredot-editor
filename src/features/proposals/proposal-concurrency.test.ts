@@ -38,7 +38,7 @@ function content(text: string): TiptapJson {
 }
 
 function draft(text: string) {
-  return { title: "Concurrent draft", contentJson: content(text), metadataJson: {}, readiness: "draft" as const };
+  return { title: "Concurrent draft", contentJson: content(text), metadataJson: {} };
 }
 
 async function createConcurrencyDatabase(options: { wal?: boolean } = {}) {
@@ -68,6 +68,12 @@ async function createConcurrencyDatabase(options: { wal?: boolean } = {}) {
     );
     CREATE UNIQUE INDEX documents_workspace_id_id_unique ON documents(workspace_id, id);
     CREATE UNIQUE INDEX documents_workspace_creation_key_unique ON documents(workspace_id, creation_key);
+    CREATE TABLE collaboration_documents (
+      workspace_id text NOT NULL,
+      document_id text NOT NULL,
+      generation integer NOT NULL,
+      PRIMARY KEY(workspace_id, document_id, generation)
+    );
     CREATE TABLE ai_proposals (
       id text PRIMARY KEY NOT NULL,
       workspace_id text NOT NULL,

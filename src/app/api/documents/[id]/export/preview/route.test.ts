@@ -1,4 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  ExactCollaborationMaterializationError,
+  loadExactCollaborationMaterialization,
+} from "@/features/collaboration/exact-document-materialization";
 import { getDocumentById } from "@/features/documents/document-repository";
 import { tiptapJsonToDocxBuffer } from "@/features/documents/docx-conversion";
 import { RESOURCE_LIMITS } from "@/features/security/resource-policy";
@@ -8,6 +12,14 @@ import { POST } from "./route";
 vi.mock("@/features/documents/document-repository", () => ({
   getDocumentById: vi.fn(),
 }));
+
+vi.mock("@/features/collaboration/exact-document-materialization", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@/features/collaboration/exact-document-materialization")>();
+  return {
+    ...original,
+    loadExactCollaborationMaterialization: vi.fn(),
+  };
+});
 
 vi.mock("@/features/documents/docx-conversion", () => ({
   docxBufferToTiptapJson: vi.fn(),
@@ -65,6 +77,7 @@ function mockDocument() {
 describe("POST /api/documents/[id]/export/preview", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(loadExactCollaborationMaterialization).mockResolvedValue({ kind: "legacy" });
   });
 
   it("returns 429 before lookup or parsing when the budget is exhausted", async () => {
@@ -181,5 +194,63 @@ describe("POST /api/documents/[id]/export/preview", () => {
 
     expect(response.status).toBe(404);
     expect(tiptapJsonToDocxBuffer).not.toHaveBeenCalled();
+  });
+
+  it("previews exact collaboration content and returns snapshot diagnostics", async () => {
+    mockDocument();
+    vi.mocked(loadExactCollaborationMaterialization).mockResolvedValueOnce({
+      diagnostics: {
+        contentHash: "c".repeat(64),
+        generation: 4,
+        headSeq: 29,
+        schemaFingerprint: "d".repeat(64),
+      },
+      kind: "collaboration",
+      materialization: {
+        contentJson: {
+          type: "doc",
+          content: [{
+            type: "table",
+            content: [{ type: "tableRow", content: [{ type: "tableCell", content: [{ type: "paragraph" }] }] }],
+          }],
+        },
+        metadataJson: {},
+        plainText: "",
+        title: "Canonical",
+      },
+    });
+
+    const response = await POST(createJsonRequest({
+      contentJson: { type: "doc", content: [{ type: "paragraph" }] },
+    }), createContext());
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      collaboration: {
+        contentHash: "c".repeat(64),
+        generation: 4,
+        headSeq: 29,
+        schemaFingerprint: "d".repeat(64),
+      },
+      fidelity: {
+        items: expect.arrayContaining([{ feature: "table", outcome: "approximated" }]),
+        requiresAcknowledgement: true,
+      },
+    });
+  });
+
+  it("returns a stable conflict without previewing stale fallback content when collaboration state is corrupt", async () => {
+    mockDocument();
+    vi.mocked(loadExactCollaborationMaterialization).mockRejectedValueOnce(
+      new ExactCollaborationMaterializationError("conflict"),
+    );
+
+    const response = await POST(createJsonRequest({ contentJson: { type: "doc" } }), createContext());
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      code: "collaboration_state_conflict",
+      error: "Collaboration state is not safe to materialize",
+    });
   });
 });

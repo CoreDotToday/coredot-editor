@@ -1,10 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
+import * as Y from "yjs";
+import { createCollaborationDocumentCodec } from "@/features/collaboration/document-codec";
+import { hashCanonicalMaterialization } from "@/features/collaboration/exact-document-materialization";
+import { getProjectProfile } from "@/features/projects/default-project-profiles";
 import { prepareAiCommandRequest } from "./ai-command-service";
 import type { AiCommandServiceDependencies } from "./ai-command-service";
 import type { AiCommandPayload } from "./types";
 
 const workspaceA = { workspaceId: "workspace_a" };
 const workspaceB = { workspaceId: "workspace_b" };
+const collaborationCodec = createCollaborationDocumentCodec(getProjectProfile("default"));
 
 const basePayload: AiCommandPayload = {
   afterContext: "",
@@ -35,6 +40,7 @@ function createDependencies(overrides: Partial<AiCommandServiceDependencies> = {
       name: "stub" as const,
       streamText: vi.fn(),
     })),
+    collaborationCodec,
     getAiSettings: vi.fn(async (scope) => ({
       aiBaseUrl: null,
       aiMaxCompletionTokens: null,
@@ -77,11 +83,14 @@ function createDependencies(overrides: Partial<AiCommandServiceDependencies> = {
     })),
     hydrateAiReferenceDocuments: vi.fn(async () => [
       {
+        generation: null,
         id: "doc_ref",
+        projectedSeq: null,
         text: "Server reference text",
         title: "Server title",
       },
     ]),
+    loadCollaborationSnapshot: vi.fn(async () => null),
   };
 
   return {
@@ -105,7 +114,9 @@ describe("prepareAiCommandRequest", () => {
     expect(result.reviewedText).toBe("Persisted document text");
     expect(result.referencedDocuments).toEqual([
       {
+        generation: null,
         id: "doc_ref",
+        projectedSeq: null,
         text: "Server reference text",
         title: "Server title",
       },
@@ -118,6 +129,106 @@ describe("prepareAiCommandRequest", () => {
       basePayload.references,
       { currentDocumentId: "doc_1" },
     );
+  });
+
+  it("uses one exact durable collaborative snapshot for AI text and proposal anchoring", async () => {
+    const materialization = {
+      contentJson: {
+        type: "doc" as const,
+        content: [{ type: "paragraph", content: [{ type: "text", text: "Exact body" }] }],
+      },
+      metadataJson: { owner: "board" },
+      plainText: "Exact body",
+      title: "Exact title",
+    };
+    const durable = collaborationCodec.bootstrap(materialization);
+    const checkpoint = collaborationCodec.encodeCheckpoint(durable);
+    const stateVector = Y.encodeStateVector(durable);
+    durable.destroy();
+    const dependencies = createDependencies({
+      loadCollaborationSnapshot: vi.fn(async () => ({
+        checkpointSeq: 0,
+        document: collaborationCodec.loadCheckpoint(checkpoint),
+        documentId: "doc_1",
+        generation: 3,
+        headSeq: 7,
+        projectedSeq: 5,
+        schemaFingerprint: collaborationCodec.fingerprint(),
+        schemaVersion: 1,
+      })),
+    });
+
+    const result = await prepareAiCommandRequest(workspaceA, {
+      deferProviderCreation: true,
+      dependencies,
+      payload: {
+        ...basePayload,
+        collaborationBarrier: {
+          generation: 3,
+          stateVector: Buffer.from(stateVector).toString("base64url"),
+        },
+        documentText: "Untrusted browser text",
+      },
+      useSubmittedDocumentText: true,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.reviewedText).toBe("Exact body");
+    expect(result.document).toMatchObject({
+      contentJson: materialization.contentJson,
+      metadataJson: materialization.metadataJson,
+      plainText: materialization.plainText,
+      title: materialization.title,
+    });
+    expect(result.collaborationSnapshot).toMatchObject({
+      contentHash: hashCanonicalMaterialization(materialization),
+      generation: 3,
+      headSeq: 7,
+      schemaFingerprint: collaborationCodec.fingerprint(),
+      schemaVersion: 1,
+      stateVector,
+    });
+    const restored = collaborationCodec.loadCheckpoint(result.collaborationSnapshot!.checkpoint);
+    expect(collaborationCodec.materialize(restored)).toEqual(materialization);
+    restored.destroy();
+  });
+
+  it("fails closed when initialized collaboration lacks an exact compatible browser barrier", async () => {
+    const durable = collaborationCodec.bootstrap({
+      contentJson: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "Exact" }] }] },
+      metadataJson: {},
+      plainText: "Exact",
+      title: "Exact",
+    });
+    const checkpoint = collaborationCodec.encodeCheckpoint(durable);
+    durable.destroy();
+    const dependencies = createDependencies({
+      loadCollaborationSnapshot: vi.fn(async () => ({
+        checkpointSeq: 0,
+        document: collaborationCodec.loadCheckpoint(checkpoint),
+        documentId: "doc_1",
+        generation: 2,
+        headSeq: 0,
+        projectedSeq: 0,
+        schemaFingerprint: collaborationCodec.fingerprint(),
+        schemaVersion: 1,
+      })),
+    });
+
+    await expect(prepareAiCommandRequest(workspaceA, {
+      deferProviderCreation: true,
+      dependencies,
+      payload: basePayload,
+    })).resolves.toMatchObject({ ok: false, status: 409 });
+    await expect(prepareAiCommandRequest(workspaceA, {
+      deferProviderCreation: true,
+      dependencies,
+      payload: {
+        ...basePayload,
+        collaborationBarrier: { generation: 1, stateVector: "AA" },
+      },
+    })).resolves.toMatchObject({ ok: false, status: 409 });
   });
 
   it("uses submitted document text for unsaved draft review payloads", async () => {

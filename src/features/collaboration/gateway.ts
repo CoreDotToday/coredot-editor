@@ -1,0 +1,428 @@
+import * as Y from "yjs";
+
+import type { RequestContext, WorkspaceScope } from "@/features/auth/request-context";
+import type { CollaborationUpdateOriginKind } from "@/db/schema";
+
+import type {
+  AppendCollaborationUpdate,
+  CollaborationPersistence,
+  CollaborationSnapshot,
+  DurableUpdateReplay,
+  DurableUpdateReplayIdentity,
+  DurableUpdateReceipt,
+} from "./persistence";
+import { createCollaborationRoomName } from "./room-name";
+
+const MAX_STATE_VECTOR_BYTES = 1024 * 1024;
+const MAX_IDENTIFIER_BYTES = 256;
+
+export type CollaborativeProposalCommand = CollaborationCommandIdentity;
+export type CollaborativeProposalBatchCommand = CollaborationCommandIdentity;
+/**
+ * Selective undo targets one durable Document Change. The optional `changeId`
+ * keeps replayed identities compatible with pre-undo callers while letting the
+ * planner resolve the stored inverse for that exact change.
+ */
+export type CollaborativeUndoCommand = CollaborationCommandIdentity & { changeId?: string };
+
+type CollaborationCommandIdentity = {
+  commandId: string;
+  documentId: string;
+  generation: number;
+};
+
+export type CollaborativeCommandResult = {
+  checksum: string;
+  documentId: string;
+  generation: number;
+  headSeq: number;
+  status: "applied";
+};
+
+export type DurableBarrier = {
+  documentId: string;
+  generation: number;
+  headSeq: number;
+  stateVector: Uint8Array;
+};
+
+export interface CollaborativeDocumentGateway {
+  applyProposal(
+    context: RequestContext,
+    command: CollaborativeProposalCommand,
+  ): Promise<CollaborativeCommandResult>;
+  applyProposalBatch(
+    context: RequestContext,
+    command: CollaborativeProposalBatchCommand,
+  ): Promise<CollaborativeCommandResult>;
+  closeRoom(
+    scope: WorkspaceScope,
+    documentId: string,
+    reason: "archived" | "revoked" | "schema_changed",
+  ): Promise<void>;
+  flushBarrier(
+    scope: WorkspaceScope,
+    documentId: string,
+    observedStateVector: Uint8Array,
+  ): Promise<DurableBarrier>;
+  getSnapshot(
+    scope: WorkspaceScope,
+    documentId: string,
+  ): Promise<CollaborationSnapshot>;
+  undoChange(
+    context: RequestContext,
+    command: CollaborativeUndoCommand,
+  ): Promise<CollaborativeCommandResult>;
+}
+
+export type CollaborationGatewayCategory =
+  | "invalid_input"
+  | "live_apply_failed"
+  | "not_durable"
+  | "not_found"
+  | "stale_generation"
+  | "unavailable";
+
+export class CollaborationGatewayError extends Error {
+  override readonly name = "CollaborationGatewayError";
+
+  constructor(readonly category: CollaborationGatewayCategory) {
+    super({
+      invalid_input: "Collaborative command input is invalid",
+      live_apply_failed: "Collaborative update is durable but live delivery failed",
+      not_durable: "Observed collaboration state is not durable",
+      not_found: "Collaboration document was not found",
+      stale_generation: "Collaboration generation is no longer current",
+      unavailable: "Collaboration gateway is unavailable",
+    }[category]);
+  }
+}
+
+type CommandPlanner<TCommand extends CollaborationCommandIdentity> = (
+  document: Y.Doc,
+  command: TCommand,
+  snapshot: CollaborationSnapshot,
+) => void | Promise<void>;
+
+export function createCollaborativeDocumentGateway(options: {
+  closeRoom(
+    room: string,
+    reason: "archived" | "revoked" | "room_rotated" | "schema_changed",
+  ): void | Promise<void>;
+  persistence: Pick<
+    CollaborationPersistence,
+    "appendValidatedUpdate" | "findDurableUpdateReplay" | "load"
+  >;
+  planners: {
+    proposal: CommandPlanner<CollaborativeProposalCommand>;
+    proposalBatch: CommandPlanner<CollaborativeProposalBatchCommand>;
+    undo: CommandPlanner<CollaborativeUndoCommand>;
+  };
+  publish(
+    scope: WorkspaceScope,
+    documentId: string,
+    generation: number,
+    update: Uint8Array,
+  ): void | Promise<void>;
+  publishWorkflowChanged(
+    scope: WorkspaceScope,
+    documentId: string,
+    generation: number,
+  ): void | Promise<void>;
+}): CollaborativeDocumentGateway {
+  const getSnapshot = async (scope: WorkspaceScope, documentId: string) => {
+    validateScope(scope, documentId);
+    const loaded = await load(options.persistence, scope, documentId);
+    try {
+      return { ...loaded, document: cloneDocument(loaded.document) };
+    } finally {
+      loaded.document.destroy();
+    }
+  };
+
+  const applyCommand = async <TCommand extends CollaborationCommandIdentity>(
+    context: RequestContext,
+    command: TCommand,
+    originKind: Extract<CollaborationUpdateOriginKind, "proposal_command" | "undo_command">,
+    planner: CommandPlanner<TCommand>,
+  ): Promise<CollaborativeCommandResult> => {
+    validateContextAndCommand(context, command);
+    const scope = { workspaceId: context.workspaceId };
+    const replayIdentity: DurableUpdateReplayIdentity = {
+      documentId: command.documentId,
+      idempotencyKey: command.commandId,
+      originKind,
+      principalId: context.principalId,
+      semanticActionId: command.commandId,
+    };
+    let durableReplay: DurableUpdateReplay | null;
+    try {
+      durableReplay = await options.persistence.findDurableUpdateReplay(
+        scope,
+        replayIdentity,
+      );
+    } catch {
+      throw new CollaborationGatewayError("unavailable");
+    }
+    if (durableReplay) {
+      await deliverDurableUpdate({
+        closeRoom: options.closeRoom,
+        command,
+        publish: options.publish,
+        publishWorkflowChanged: options.publishWorkflowChanged,
+        replay: durableReplay,
+        scope,
+      });
+      return commandResult(durableReplay.receipt);
+    }
+    const snapshot = await load(options.persistence, scope, command.documentId);
+    if (snapshot.generation !== command.generation) {
+      snapshot.document.destroy();
+      throw new CollaborationGatewayError("stale_generation");
+    }
+    const working = cloneDocument(snapshot.document);
+    snapshot.document.destroy();
+    let update: Uint8Array;
+    try {
+      const before = Y.encodeStateVector(working);
+      await planner(working, command, { ...snapshot, document: working });
+      update = Y.encodeStateAsUpdate(working, before);
+    } catch {
+      throw new CollaborationGatewayError("invalid_input");
+    } finally {
+      working.destroy();
+    }
+    let receipt: DurableUpdateReceipt;
+    try {
+      const input: AppendCollaborationUpdate = {
+        documentId: command.documentId,
+        generation: command.generation,
+        idempotencyKey: command.commandId,
+        originKind,
+        principalId: context.principalId,
+        requestId: context.requestId,
+        semanticActionId: command.commandId,
+        update,
+      };
+      receipt = await options.persistence.appendValidatedUpdate(scope, input);
+    } catch {
+      throw new CollaborationGatewayError("unavailable");
+    }
+    await deliverDurableUpdate({
+      closeRoom: options.closeRoom,
+      command,
+      publish: options.publish,
+      publishWorkflowChanged: options.publishWorkflowChanged,
+      replay: { receipt, update },
+      scope,
+    });
+    return commandResult(receipt);
+  };
+
+  return {
+    applyProposal(context, command) {
+      return applyCommand(
+        context,
+        command,
+        "proposal_command",
+        options.planners.proposal,
+      );
+    },
+
+    applyProposalBatch(context, command) {
+      return applyCommand(
+        context,
+        command,
+        "proposal_command",
+        options.planners.proposalBatch,
+      );
+    },
+
+    async closeRoom(scope, documentId, reason) {
+      validateScope(scope, documentId);
+      const snapshot = await load(options.persistence, scope, documentId);
+      try {
+        await options.closeRoom(createCollaborationRoomName({
+          documentId,
+          generation: snapshot.generation,
+          workspaceId: scope.workspaceId,
+        }), reason);
+      } finally {
+        snapshot.document.destroy();
+      }
+    },
+
+    async flushBarrier(scope, documentId, observedStateVector) {
+      validateScope(scope, documentId);
+      if (
+        !(observedStateVector instanceof Uint8Array)
+        || observedStateVector.byteLength < 1
+        || observedStateVector.byteLength > MAX_STATE_VECTOR_BYTES
+      ) {
+        throw new CollaborationGatewayError("invalid_input");
+      }
+      const snapshot = await load(options.persistence, scope, documentId);
+      try {
+        const observed = decodeStateVector(observedStateVector);
+        const durableVector = Y.encodeStateVector(snapshot.document);
+        const durable = decodeStateVector(durableVector);
+        for (const [client, clock] of observed) {
+          if ((durable.get(client) ?? 0) < clock) {
+            throw new CollaborationGatewayError("not_durable");
+          }
+        }
+        return {
+          documentId,
+          generation: snapshot.generation,
+          headSeq: snapshot.headSeq,
+          stateVector: durableVector,
+        };
+      } finally {
+        snapshot.document.destroy();
+      }
+    },
+
+    getSnapshot,
+
+    async undoChange(context, command) {
+      if (command.changeId !== undefined) validateIdentifier(command.changeId);
+      return applyCommand(context, command, "undo_command", options.planners.undo);
+    },
+  };
+}
+
+async function deliverDurableUpdate(options: {
+  closeRoom(
+    room: string,
+    reason: "archived" | "revoked" | "room_rotated" | "schema_changed",
+  ): void | Promise<void>;
+  command: CollaborationCommandIdentity;
+  publish(
+    scope: WorkspaceScope,
+    documentId: string,
+    generation: number,
+    update: Uint8Array,
+  ): void | Promise<void>;
+  publishWorkflowChanged(
+    scope: WorkspaceScope,
+    documentId: string,
+    generation: number,
+  ): void | Promise<void>;
+  replay: DurableUpdateReplay;
+  scope: WorkspaceScope;
+}) {
+  const { command, replay, scope } = options;
+  const sourceRoom = createCollaborationRoomName({
+    documentId: command.documentId,
+    generation: command.generation,
+    workspaceId: scope.workspaceId,
+  });
+  const targetRoom = createCollaborationRoomName({
+    documentId: command.documentId,
+    generation: replay.receipt.generation,
+    workspaceId: scope.workspaceId,
+  });
+  let sourceClosed = sourceRoom === targetRoom;
+  try {
+    if (!sourceClosed) {
+      await options.closeRoom(sourceRoom, "room_rotated");
+      sourceClosed = true;
+    }
+    // A durable no-op has no missing canonical state to reconcile live.
+    if (replay.update) {
+      await options.publish(
+        scope,
+        command.documentId,
+        replay.receipt.generation,
+        replay.update,
+      );
+    }
+    if (replay.receipt.workflowChanged) {
+      // This signal carries no workflow value and is never an authority
+      // boundary. Delivery is best effort because clients recover by reading
+      // the authoritative HTTP endpoint on focus, reconnect, and a timer.
+      await Promise.resolve()
+        .then(() => options.publishWorkflowChanged(
+          scope,
+          command.documentId,
+          replay.receipt.generation,
+        ))
+        .catch(() => undefined);
+    }
+  } catch {
+    const roomsToClose = sourceClosed ? [targetRoom] : [sourceRoom, targetRoom];
+    await Promise.allSettled(
+      [...new Set(roomsToClose)].map((room) => options.closeRoom(room, "room_rotated")),
+    );
+    throw new CollaborationGatewayError("live_apply_failed");
+  }
+}
+
+function commandResult(receipt: DurableUpdateReceipt): CollaborativeCommandResult {
+  return {
+    checksum: receipt.checksum,
+    documentId: receipt.documentId,
+    generation: receipt.generation,
+    headSeq: receipt.headSeq,
+    status: "applied",
+  };
+}
+
+async function load(
+  persistence: Pick<CollaborationPersistence, "load">,
+  scope: WorkspaceScope,
+  documentId: string,
+) {
+  try {
+    const snapshot = await persistence.load(scope, documentId);
+    if (!snapshot) throw new CollaborationGatewayError("not_found");
+    return snapshot;
+  } catch (error) {
+    if (error instanceof CollaborationGatewayError) throw error;
+    throw new CollaborationGatewayError("unavailable");
+  }
+}
+
+function cloneDocument(document: Y.Doc) {
+  const clone = new Y.Doc();
+  Y.applyUpdate(clone, Y.encodeStateAsUpdate(document));
+  return clone;
+}
+
+function decodeStateVector(encoded: Uint8Array) {
+  try {
+    return Y.decodeStateVector(encoded);
+  } catch {
+    throw new CollaborationGatewayError("invalid_input");
+  }
+}
+
+function validateScope(scope: WorkspaceScope, documentId: string) {
+  validateIdentifier(scope.workspaceId);
+  validateIdentifier(documentId);
+}
+
+function validateContextAndCommand(
+  context: RequestContext,
+  command: CollaborationCommandIdentity,
+) {
+  validateScope({ workspaceId: context.workspaceId }, command.documentId);
+  validateIdentifier(context.principalId);
+  validateIdentifier(context.requestId);
+  validateIdentifier(command.commandId);
+  if (!Number.isSafeInteger(command.generation) || command.generation < 1) {
+    throw new CollaborationGatewayError("invalid_input");
+  }
+}
+
+function validateIdentifier(value: unknown) {
+  if (
+    typeof value !== "string"
+    || Buffer.byteLength(value, "utf8") < 1
+    || Buffer.byteLength(value, "utf8") > MAX_IDENTIFIER_BYTES
+    || /^[\t\n\v\f\r\u00a0 ]|[\t\n\v\f\r\u00a0 ]$/.test(value)
+    || /[\u0000-\u001f\u007f-\u009f]/.test(value)
+  ) {
+    throw new CollaborationGatewayError("invalid_input");
+  }
+}

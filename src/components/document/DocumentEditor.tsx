@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type FocusEvent, type MouseEvent } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, useSyncExternalStore, type DragEvent, type FocusEvent, type MouseEvent } from "react";
 import CharacterCount from "@tiptap/extension-character-count";
 import Placeholder from "@tiptap/extension-placeholder";
 import { EditorContent, useEditor } from "@tiptap/react";
@@ -22,7 +22,6 @@ import type { TiptapJson } from "@/db/schema";
 import {
   createDocumentBlockLocation,
   createDocumentBlockMoveTarget,
-  moveDocumentBlock,
   type DocumentBlockDestination,
 } from "@/features/documents/block-movement";
 import {
@@ -32,9 +31,6 @@ import {
   replaceDocumentMatch,
   type DocumentFindOptions,
 } from "@/features/documents/document-find";
-import {
-  convertListItemToTopLevelParagraphInTiptapJson,
-} from "@/features/documents/tiptap-blocks";
 import {
   DEFAULT_EDITOR_LANGUAGE,
   editorMessages,
@@ -50,6 +46,8 @@ import type {
   EditorSelectionCommandMetadata,
 } from "@/plugins/types";
 import { invokeEditorPluginContribution } from "@/plugins/contribution-safety";
+import { appDocumentSchemaProfile } from "@/plugins/app-plugins";
+import { createCoreDocumentExtensions } from "@/plugins/builtin/core-document-plugin";
 import { mergeEditorPluginContributions } from "@/plugins/registry";
 import { useEditorPlugins } from "@/plugins/use-editor-plugins";
 import { AiSuggestionHighlight, setAiSuggestionHighlights, type AiSuggestionHighlightInput } from "./ai-suggestion-highlight";
@@ -72,8 +70,6 @@ import {
   getBlockActionRangeAtViewportY,
   getBlockActionRangeFromDomTarget,
   getListItemBlockActionRangeByPath,
-  getListItemOwnIndex,
-  getListItemParentPath,
   getTopLevelBlockActionRangeByIndex,
   readBlockGutterPosition,
   type BlockActionRange,
@@ -89,15 +85,26 @@ import {
   createEditorBlockDragSession,
   type EditorBlockDragSession,
 } from "./editor-block-drag-session";
+import {
+  applyScopedBlockMove,
+  applyScopedLastBlockDeletion,
+  applyScopedListItemConversion,
+  applyScopedOutdent,
+} from "./editor-block-transactions";
 import { DocumentFindBar } from "./DocumentFindBar";
 import { NotionModASelection } from "./notion-mod-a-selection";
 import { SelectionAiMenu } from "./SelectionAiMenu";
 import { SelectionAiResultPopover, type SelectionAiResultPreview } from "./SelectionAiResultPopover";
 import { SlashCommandMenu } from "./SlashCommandMenu";
+import {
+  createCollaborationEditorExtensions,
+  prepareBaseExtensionsForCollaboration,
+  type CollaborationEditorBinding,
+} from "@/features/collaboration/client/collaboration-editor-extensions";
+import type { YjsFieldStore } from "@/features/collaboration/client/yjs-field-store";
+import { COLLABORATION_TITLE_MAX_LENGTH } from "@/features/collaboration/contracts";
 
-type DocumentEditorProps = {
-  title: string;
-  contentJson: TiptapJson;
+type DocumentEditorCommonProps = {
   isFindOpen?: boolean;
   isSelectionCommandRunning?: boolean;
   isSelectionCommandLimitReached?: boolean;
@@ -105,7 +112,6 @@ type DocumentEditorProps = {
   language?: EditorLanguage;
   messages?: EditorMessages["editor"];
   referenceCandidates?: AiDocumentReferenceCandidate[];
-  onChange: (draft: { title: string; contentJson: TiptapJson }) => void;
   onFindOpenChange?: (isOpen: boolean) => void;
   onApplySelectionAiResult?: (proposalId: string, applyMode: "replace" | "insert_below") => void;
   onDismissSelectionAiResult?: () => void;
@@ -125,6 +131,29 @@ type DocumentEditorProps = {
   pluginContributions?: Partial<EditorPluginContributions>;
   resolvedPluginContributions?: EditorPluginContributions;
 };
+
+export type DocumentEditorMode =
+  | {
+      contentJson: TiptapJson;
+      kind: "legacy";
+      onChange: (draft: { title: string; contentJson: TiptapJson }) => void;
+      title: string;
+    }
+  | {
+      kind: "collaboration";
+      session: CollaborationEditorBinding & { fields: YjsFieldStore; writable: boolean };
+    };
+
+type DocumentEditorProps = DocumentEditorCommonProps & (
+  | { mode: DocumentEditorMode }
+  | {
+      /** Compatibility form for the disabled/legacy editor. */
+      contentJson: TiptapJson;
+      mode?: undefined;
+      onChange: (draft: { title: string; contentJson: TiptapJson }) => void;
+      title: string;
+    }
+);
 
 type SelectionMenuState = {
   blockIndex?: number | null;
@@ -167,9 +196,10 @@ type SelectionMenuPositionInput = {
 
 const SELECTION_MENU_GAP = 8;
 const SELECTION_MENU_HEIGHT = 84;
+const subscribeToNothing = () => () => undefined;
 
-export function DocumentEditor({
-  contentJson,
+export function DocumentEditor(props: DocumentEditorProps) {
+  const {
   inlineSuggestions = [],
   isFindOpen = false,
   isSelectionCommandLimitReached = false,
@@ -177,7 +207,6 @@ export function DocumentEditor({
   language = DEFAULT_EDITOR_LANGUAGE,
   messages = editorMessages[DEFAULT_EDITOR_LANGUAGE].editor,
   referenceCandidates = [],
-  onChange,
   onFindOpenChange,
   onApplySelectionAiResult,
   onDismissSelectionAiResult,
@@ -190,8 +219,51 @@ export function DocumentEditor({
   runningSelectionCommandLimit = 5,
   runningSelectionCommands = [],
   selectionAiResult = null,
-  title,
-}: DocumentEditorProps) {
+  } = props;
+  const mode: DocumentEditorMode = props.mode ?? {
+    contentJson: props.contentJson,
+    kind: "legacy",
+    onChange: props.onChange,
+    title: props.title,
+  };
+  const isLegacyMode = mode.kind === "legacy";
+  const collaborationSession = mode.kind === "collaboration" ? mode.session : null;
+  const collaborationDocument = collaborationSession?.document ?? null;
+  const collaborationProvider = collaborationSession?.provider ?? null;
+  const legacyOnChange = mode.kind === "legacy" ? mode.onChange : null;
+  const contentJson = isLegacyMode
+    ? mode.contentJson
+    : ({ type: "doc", content: [{ type: "paragraph" }] } satisfies TiptapJson);
+  const collaborationFields = collaborationSession?.fields ?? null;
+  const title = useSyncExternalStore(
+    collaborationFields?.subscribeTitle ?? subscribeToNothing,
+    collaborationFields?.getTitleSnapshot ?? (() => mode.kind === "legacy" ? mode.title : ""),
+    collaborationFields?.getTitleSnapshot ?? (() => mode.kind === "legacy" ? mode.title : ""),
+  );
+  const [collaborationTitleDraft, setCollaborationTitleDraft] = useState<{
+    baseTitle: string;
+    fields: YjsFieldStore | null;
+    value: string;
+  }>({ baseTitle: "", fields: null, value: "" });
+  const isWritable = isLegacyMode || mode.session.writable;
+  let currentCollaborationTitleDraft = collaborationTitleDraft;
+  if (
+    collaborationFields
+    && collaborationTitleDraft.fields === collaborationFields
+    && (!isWritable || collaborationTitleDraft.baseTitle !== title)
+  ) {
+    currentCollaborationTitleDraft = { baseTitle: title, fields: null, value: title };
+    setCollaborationTitleDraft(currentCollaborationTitleDraft);
+  }
+  const displayedTitle = isWritable
+    && collaborationFields
+    && currentCollaborationTitleDraft.fields === collaborationFields
+    && currentCollaborationTitleDraft.baseTitle === title
+    ? currentCollaborationTitleDraft.value
+    : title;
+  const collaborationTitleErrorId = useId();
+  const isCollaborationTitleInvalid = !isLegacyMode && displayedTitle.trim().length === 0;
+  const canRunAiCommands = onSelectionCommand !== undefined;
   const [selectionMenu, setSelectionMenu] = useState<SelectionMenuState | null>(null);
   const [blockGutter, setBlockGutter] = useState<BlockGutterState | null>(null);
   const [blockDropIndicator, setBlockDropIndicator] = useState<BlockDropIndicator | null>(null);
@@ -207,18 +279,24 @@ export function DocumentEditor({
   const [findReplaceText, setFindReplaceText] = useState("");
   const [findOptions, setFindOptions] = useState<DocumentFindOptions>({ caseSensitive: false, regex: false });
   const [activeFindIndex, setActiveFindIndex] = useState(0);
+  const [documentVersion, setDocumentVersion] = useState(0);
   const editorFrameRef = useRef<HTMLDivElement | null>(null);
   const blockGutterTargetRef = useRef<BlockActionRange | null>(null);
   const blockDragSessionRef = useRef<EditorBlockDragSession | null>(null);
   const blockDropTargetRef = useRef<BlockDropTarget | null>(null);
   const titleRef = useRef(title);
-  const onChangeRef = useRef(onChange);
+  const onChangeRef = useRef<((draft: { title: string; contentJson: TiptapJson }) => void) | null>(
+    legacyOnChange,
+  );
   const onSelectionCommandRef = useRef(onSelectionCommand);
-  const contentJsonSignature = useMemo(() => JSON.stringify(contentJson), [contentJson]);
+  const contentJsonSignature = useMemo(
+    () => isLegacyMode ? JSON.stringify(contentJson) : "collaboration",
+    [contentJson, isLegacyMode],
+  );
 
   useEffect(() => {
-    onChangeRef.current = onChange;
-  }, [onChange]);
+    onChangeRef.current = legacyOnChange;
+  }, [legacyOnChange]);
 
   useEffect(() => {
     onSelectionCommandRef.current = onSelectionCommand;
@@ -252,23 +330,45 @@ export function DocumentEditor({
     [defaultPluginContributions, pluginContributions, providedPluginContributions],
   );
 
-  const extensions = useMemo(
-    () => [
-      ...resolvedPluginContributions.tiptapExtensions,
+  const extensions = useMemo(() => {
+    const baseExtensions = isLegacyMode
+      ? resolvedPluginContributions.tiptapExtensions
+      : prepareBaseExtensionsForCollaboration(
+          // Collaborative documents accept only the schema profile that was
+          // fingerprinted during session setup. Runtime plugin extensions may
+          // still contribute UI, but cannot silently add schema-bearing nodes
+          // or marks to a shared body.
+          createCoreDocumentExtensions(appDocumentSchemaProfile),
+        );
+    return [
+      ...baseExtensions,
       Placeholder.configure({
         placeholder: messages.placeholder,
       }),
       CharacterCount,
       AiSuggestionHighlight,
       NotionModASelection,
-    ],
-    [messages.placeholder, resolvedPluginContributions.tiptapExtensions],
-  );
+      ...(collaborationDocument && collaborationProvider
+        ? createCollaborationEditorExtensions({
+            document: collaborationDocument,
+            provider: collaborationProvider,
+          })
+        : []),
+    ];
+  }, [
+    collaborationDocument,
+    collaborationProvider,
+    isLegacyMode,
+    messages.placeholder,
+    resolvedPluginContributions.tiptapExtensions,
+  ]);
 
   const editor = useEditor(
     {
       extensions,
-      content: contentJson as JSONContent,
+      ...(isLegacyMode ? { content: contentJson as JSONContent } : {}),
+      editable: isWritable,
+      enableInputRules: isLegacyMode,
       editorProps: {
         attributes: {
           "aria-label": messages.bodyLabel,
@@ -300,23 +400,28 @@ export function DocumentEditor({
         });
       },
       onUpdate: ({ editor: currentEditor }) => {
-        onChangeRef.current({
+        setDocumentVersion((currentVersion) => currentVersion + 1);
+        onChangeRef.current?.({
           title: titleRef.current,
           contentJson: currentEditor.getJSON() as TiptapJson,
         });
       },
     },
-    [extensions, messages.bodyLabel, updateBlockGutter],
+    [extensions, isLegacyMode, messages.bodyLabel, updateBlockGutter],
   );
 
   useEffect(() => {
-    if (!editor) return;
+    if (!editor || !isLegacyMode) return;
 
     const editorContentSignature = JSON.stringify(editor.getJSON());
     if (editorContentSignature !== contentJsonSignature) {
       editor.commands.setContent(contentJson as JSONContent, { emitUpdate: false });
     }
-  }, [contentJson, contentJsonSignature, editor]);
+  }, [contentJson, contentJsonSignature, editor, isLegacyMode]);
+
+  useEffect(() => {
+    if (editor && editor.isEditable !== isWritable) editor.setEditable(isWritable);
+  }, [editor, isWritable]);
 
   useEffect(() => {
     if (!editor) return;
@@ -353,13 +458,40 @@ export function DocumentEditor({
 
   const handleTitleChange = useCallback(
     (value: string) => {
+      if (!isLegacyMode) {
+        if (isWritable) {
+          setCollaborationTitleDraft({
+            baseTitle: title,
+            fields: collaborationFields,
+            value,
+          });
+          try {
+            if (collaborationFields?.setTitle(value) === false) {
+              setCollaborationTitleDraft({
+                baseTitle: title,
+                fields: collaborationFields,
+                value: title,
+              });
+            }
+          } catch {
+            if (value.trim().length > 0) {
+              setCollaborationTitleDraft({
+                baseTitle: title,
+                fields: collaborationFields,
+                value: title,
+              });
+            }
+          }
+        }
+        return;
+      }
       titleRef.current = value;
-      onChangeRef.current({
+      onChangeRef.current?.({
         title: value,
         contentJson: (editor?.getJSON() as TiptapJson | undefined) ?? contentJson,
       });
     },
-    [contentJson, editor],
+    [collaborationFields, contentJson, editor, isLegacyMode, isWritable, title],
   );
 
   const handleCommand = useCallback(
@@ -411,12 +543,13 @@ export function DocumentEditor({
   );
 
   const handleAddBlockBelow = useCallback(() => {
+    if (!isWritable) return;
     insertBlockBelow(editor, blockGutter?.target);
-  }, [blockGutter?.target, editor]);
+  }, [blockGutter?.target, editor, isWritable]);
 
   const handleBlockAction = useCallback(
     (action: SelectionBlockAction) => {
-      if (!editor) return;
+      if (!editor || !isWritable) return;
       const targetBlock =
         blockGutterTargetRef.current ?? blockGutter?.target ?? getTopLevelBlockActionRangeByIndex(editor, selectionMenu?.blockIndex);
 
@@ -431,23 +564,26 @@ export function DocumentEditor({
       }
 
       if (action === "moveUp" || action === "moveDown") {
+        if (!isLegacyMode) return;
         moveBlock(editor, targetBlock, action === "moveUp" ? "up" : "down");
         return;
       }
 
       if (action === "indentListItem" || action === "outdentListItem") {
+        if (!isLegacyMode) return;
         changeListItemLevel(editor, targetBlock, action === "indentListItem" ? "indent" : "outdent");
         return;
       }
 
       if (action === "convertListItemToText") {
+        if (!isLegacyMode) return;
         convertListItemToText(editor, targetBlock);
         return;
       }
 
-      deleteBlock(editor, targetBlock);
+      deleteBlock(editor, targetBlock, collaborationDocument);
     },
-    [blockGutter?.target, editor, selectionMenu?.blockIndex],
+    [blockGutter?.target, collaborationDocument, editor, isLegacyMode, isWritable, selectionMenu?.blockIndex],
   );
 
   const handleEditorFocus = useCallback((event: FocusEvent<HTMLDivElement>) => {
@@ -502,7 +638,7 @@ export function DocumentEditor({
   );
 
   const handleBlockDragStart = useCallback(() => {
-    if (!editor) return;
+    if (!editor || !isLegacyMode) return;
 
     const source =
       blockGutterTargetRef.current ??
@@ -513,7 +649,7 @@ export function DocumentEditor({
     blockDropTargetRef.current = null;
     setBlockDropIndicator(null);
     setBlockDragPreview(null);
-  }, [blockGutter?.target, editor, selectionMenu?.blockIndex]);
+  }, [blockGutter?.target, editor, isLegacyMode, selectionMenu?.blockIndex]);
 
   const handleBlockDragEnd = useCallback(() => {
     clearBlockDragState();
@@ -559,29 +695,27 @@ export function DocumentEditor({
       const session = blockDragSessionRef.current;
       const cachedDropTarget = blockDropTargetRef.current;
       clearBlockDragState();
-      if (!editor || !editorFrameRef.current || !session) return;
+      if (!editor || !editorFrameRef.current || !session || !isLegacyMode || !isWritable) return;
 
       const source = session.source;
       const dropTarget = cachedDropTarget ?? getBlockDropTarget(editor, editorFrameRef.current, source, point);
       if (!dropTarget) return;
 
-      const currentContent = editor.getJSON() as TiptapJson;
       const sourceLocation = createDocumentBlockLocation(source);
       const targetIntent = createDocumentBlockMoveTarget(dropTarget);
       if (!sourceLocation || !targetIntent) return;
-      const result = moveDocumentBlock(currentContent, {
+      const destination = applyScopedBlockMove(editor, {
         documentSignature: session.documentSignature,
         source: sourceLocation,
         target: targetIntent,
       });
-      if (!result.changed) return;
+      if (!destination) return;
 
       preserveEditorFrameScroll(editorFrameRef.current, () => {
-        executeEditorCommand(editor, "setContent", result.contentJson as JSONContent);
-        focusMovedBlock(editor, result.destination);
+        focusMovedBlock(editor, destination);
       });
     },
-    [clearBlockDragState, editor],
+    [clearBlockDragState, editor, isLegacyMode, isWritable],
   );
 
   const handleBlockDrop = useCallback(
@@ -598,13 +732,14 @@ export function DocumentEditor({
   const characterCount = editor?.storage.characterCount.characters() ?? 0;
   const wordCount = editor?.storage.characterCount.words() ?? 0;
   const findResult = useMemo(
-    () => {
-      void contentJsonSignature;
-      return editor && findQuery
-        ? findDocumentMatches(editor.state.doc, findQuery, findOptions)
-        : { error: null, matches: [] };
-    },
-    [contentJsonSignature, editor, findOptions, findQuery],
+    () => findDocumentMatchesAtVersion(
+      editor,
+      findQuery,
+      findOptions,
+      documentVersion,
+      contentJsonSignature,
+    ),
+    [contentJsonSignature, documentVersion, editor, findOptions, findQuery],
   );
   const normalizedFindIndex = findResult.matches.length > 0
     ? Math.min(activeFindIndex, findResult.matches.length - 1)
@@ -625,18 +760,21 @@ export function DocumentEditor({
   );
   const replaceCurrentFindMatch = useCallback(() => {
     const match = findResult.matches[normalizedFindIndex];
-    if (!editor || !match) return;
+    if (!editor || !isWritable || !match) return;
 
     replaceDocumentMatch(editor, match, findReplaceText);
-  }, [editor, findReplaceText, findResult.matches, normalizedFindIndex]);
+  }, [editor, findReplaceText, findResult.matches, isWritable, normalizedFindIndex]);
   const replaceAllFindMatches = useCallback(() => {
-    if (!editor || findResult.matches.length === 0) return;
+    if (!editor || !isWritable || findResult.matches.length === 0) return;
 
     replaceAllDocumentMatches(editor, findResult.matches, findReplaceText);
-  }, [editor, findReplaceText, findResult.matches]);
+  }, [editor, findReplaceText, findResult.matches, isWritable]);
   const commandTargets = editor ? getEditorAiCommandTargets(editor) : [];
   const commandTarget = getEditorAiCommandTargetFromTargets(commandTargets, preferredCommandScope);
-  const shouldShowSelectionMenu = selectionMenu !== null && !isSelectionCommandLimitReached && !selectionAiResult;
+  const shouldShowSelectionMenu = canRunAiCommands
+    && selectionMenu !== null
+    && !isSelectionCommandLimitReached
+    && !selectionAiResult;
   const shouldShowBlockGutter = blockGutter !== null && selectionMenu === null;
   const pluginHostContext: EditorHostContext | null = editor
     ? { editor, language, messages: editorMessages[language] }
@@ -663,10 +801,12 @@ export function DocumentEditor({
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-white">
       <EditorToolbar
-        editor={editor}
+        editor={isWritable ? editor : null}
+        historyEnabled={isLegacyMode}
         messages={messages.toolbar}
-        pluginContext={pluginHostContext}
+        pluginContext={isWritable && isLegacyMode ? pluginHostContext : null}
         pluginItems={resolvedPluginContributions.toolbarItems}
+        structuralTransformsEnabled={isLegacyMode}
       />
       {isFindOpen ? (
         <DocumentFindBar
@@ -698,6 +838,7 @@ export function DocumentEditor({
           onReplaceCurrent={replaceCurrentFindMatch}
           onReplaceTextChange={setFindReplaceText}
           query={findQuery}
+          readOnly={!isWritable}
           regex={findOptions.regex}
           replaceText={findReplaceText}
         />
@@ -705,11 +846,35 @@ export function DocumentEditor({
       <div className="px-4 pt-6 pb-2 sm:pt-8 sm:pr-8 sm:pl-16 lg:pl-20">
         <div className="mx-auto w-full max-w-[54rem]">
           <input
+            aria-describedby={isCollaborationTitleInvalid ? collaborationTitleErrorId : undefined}
+            aria-invalid={isCollaborationTitleInvalid || undefined}
             aria-label={messages.titleLabel}
+            aria-required={!isLegacyMode || undefined}
             className="w-full bg-transparent text-2xl font-semibold leading-tight tracking-normal text-zinc-950 outline-none placeholder:text-zinc-400 sm:text-3xl"
+            maxLength={isLegacyMode ? undefined : COLLABORATION_TITLE_MAX_LENGTH}
+            onBlur={() => {
+              if (collaborationFields && displayedTitle.trim().length === 0) {
+                setCollaborationTitleDraft({
+                  baseTitle: title,
+                  fields: collaborationFields,
+                  value: title,
+                });
+              }
+            }}
             onChange={(event) => handleTitleChange(event.target.value)}
-            value={title}
+            readOnly={!isWritable}
+            required={!isLegacyMode}
+            value={displayedTitle}
           />
+          {isCollaborationTitleInvalid ? (
+            <p
+              className="mt-2 text-sm font-medium text-rose-700"
+              id={collaborationTitleErrorId}
+              role="status"
+            >
+              {messages.titleRequired}
+            </p>
+          ) : null}
         </div>
       </div>
       <div className="relative min-h-0 flex-1">
@@ -727,7 +892,7 @@ export function DocumentEditor({
           />
           <BlockGutterControls
             isListItem={blockGutter?.target.kind === "listItem"}
-            isVisible={shouldShowBlockGutter}
+            isVisible={shouldShowBlockGutter && isWritable}
             language={language}
             left={blockGutter?.left ?? 0}
             onAddBlock={handleAddBlockBelow}
@@ -738,6 +903,7 @@ export function DocumentEditor({
             onBlockPointerDragMove={handleBlockPointerDragMove}
             pluginActions={resolvedPluginContributions.blockActions}
             pluginContext={pluginBlockHostContext}
+            structuralTransformsEnabled={isLegacyMode}
             top={blockGutter?.top ?? 0}
           />
           <BlockDropIndicator indicator={blockDropIndicator} />
@@ -766,11 +932,11 @@ export function DocumentEditor({
             top={selectionMenu?.top}
           />
           <SlashCommandMenu
-            editor={editor}
+            editor={isWritable && isLegacyMode ? editor : null}
             frameRef={editorFrameRef}
             language={language}
-            onAiCommand={handleFreeformCommand}
-            slashCommands={resolvedPluginContributions.slashCommands}
+            onAiCommand={isWritable && isLegacyMode && canRunAiCommands ? handleFreeformCommand : undefined}
+            slashCommands={isLegacyMode ? resolvedPluginContributions.slashCommands : []}
           />
           {visibleRunningCommands.map((runningCommand, index) => (
             <SelectionAiRunningStatus
@@ -794,7 +960,7 @@ export function DocumentEditor({
         <div className="pointer-events-none absolute inset-x-0 bottom-5 z-20 px-3 sm:px-4">
           <DocumentAiCommandBar
             availableScopes={commandTargets.map((target) => target.scope)}
-            disabled={!commandTarget}
+            disabled={!canRunAiCommands || !commandTarget}
             isAtCapacity={isSelectionCommandLimitReached}
             isRunning={isSelectionCommandRunning}
             language={language}
@@ -820,16 +986,37 @@ export function DocumentEditor({
   );
 }
 
+function findDocumentMatchesAtVersion(
+  editor: RuntimeEditor | null,
+  query: string,
+  options: DocumentFindOptions,
+  documentVersion: number,
+  contentJsonSignature: string,
+) {
+  // These values intentionally invalidate the memo for editor transactions
+  // and legacy prop synchronization, while the current document is read from
+  // the editor instance below.
+  void documentVersion;
+  void contentJsonSignature;
+  return editor && query
+    ? findDocumentMatches(editor.state.doc, query, options)
+    : { error: null, matches: [] };
+}
+
 function EditorToolbar({
   editor,
+  historyEnabled,
   messages,
   pluginContext,
   pluginItems,
+  structuralTransformsEnabled,
 }: {
   editor: RuntimeEditor | null;
+  historyEnabled: boolean;
   messages: EditorMessages["editor"]["toolbar"];
   pluginContext: EditorHostContext | null;
   pluginItems: EditorPluginContributions["toolbarItems"];
+  structuralTransformsEnabled: boolean;
 }) {
   const blockStyle = editor ? getActiveBlockStyle(editor) : "paragraph";
 
@@ -837,13 +1024,13 @@ function EditorToolbar({
     <div className="flex h-11 shrink-0 items-center gap-2 overflow-x-auto border-b border-zinc-200 bg-white px-2 sm:px-4">
       <div aria-label={messages.toolbarLabel} className="flex min-w-max items-center gap-1" role="toolbar">
         <ToolbarButton
-          disabled={!editor}
+          disabled={!editor || !historyEnabled}
           icon={Undo2}
           label={messages.undo}
           onClick={() => executeEditorCommand(editor, "undo")}
         />
         <ToolbarButton
-          disabled={!editor}
+          disabled={!editor || !historyEnabled}
           icon={Redo2}
           label={messages.redo}
           onClick={() => executeEditorCommand(editor, "redo")}
@@ -855,7 +1042,7 @@ function EditorToolbar({
           <select
             aria-label={messages.style}
             className="w-28 bg-transparent text-sm font-medium outline-none disabled:cursor-not-allowed"
-            disabled={!editor}
+            disabled={!editor || !structuralTransformsEnabled}
             onChange={(event) => applyBlockStyle(editor, event.currentTarget.value)}
             value={blockStyle}
           >
@@ -897,21 +1084,21 @@ function EditorToolbar({
         <span className="mx-1 h-5 w-px bg-zinc-200" />
         <ToolbarButton
           active={editor?.isActive("bulletList")}
-          disabled={!editor}
+          disabled={!editor || !structuralTransformsEnabled}
           icon={List}
           label={messages.bulletList}
           onClick={() => executeEditorCommand(editor, "toggleBulletList")}
         />
         <ToolbarButton
           active={editor?.isActive("orderedList")}
-          disabled={!editor}
+          disabled={!editor || !structuralTransformsEnabled}
           icon={ListOrdered}
           label={messages.orderedList}
           onClick={() => executeEditorCommand(editor, "toggleOrderedList")}
         />
         <ToolbarButton
           active={editor?.isActive("blockquote")}
-          disabled={!editor}
+          disabled={!editor || !structuralTransformsEnabled}
           icon={Quote}
           label={messages.blockquote}
           onClick={() => executeEditorCommand(editor, "toggleBlockquote")}
@@ -1045,12 +1232,16 @@ function duplicateBlock(editor: RuntimeEditor, target?: BlockActionRange | null)
   executeEditorCommand(editor, "focus", range.kind === "listItem" ? range.to + 2 : range.to + 1);
 }
 
-function deleteBlock(editor: RuntimeEditor, target?: BlockActionRange | null) {
+function deleteBlock(
+  editor: RuntimeEditor,
+  target?: BlockActionRange | null,
+  collaborationDocument?: CollaborationEditorBinding["document"] | null,
+) {
   const range = target ?? getCurrentBlockActionRange(editor);
   if (!range) return;
 
   if (range.kind === "topLevel" && editor.state.doc.childCount <= 1) {
-    executeEditorCommand(editor, "setContent", { type: "doc", content: [{ type: "paragraph" }] });
+    applyScopedLastBlockDeletion(editor, range, collaborationDocument);
     executeEditorCommand(editor, "focus", "end");
     return;
   }
@@ -1063,18 +1254,14 @@ function moveBlock(editor: RuntimeEditor, target: BlockActionRange | null | unde
   const range = target ?? getCurrentBlockActionRange(editor);
   if (!range) return;
 
-  const currentContent = editor.getJSON() as TiptapJson;
   const source = createDocumentBlockLocation(range);
   if (!source) return;
-  const result = moveDocumentBlock(currentContent, {
+  const destination = applyScopedBlockMove(editor, {
     source,
     target: { direction, kind: "relative" },
   });
 
-  if (!result.changed) return;
-
-  executeEditorCommand(editor, "setContent", result.contentJson as JSONContent);
-  focusMovedBlock(editor, result.destination);
+  if (destination) focusMovedBlock(editor, destination);
 }
 
 function changeListItemLevel(
@@ -1100,39 +1287,14 @@ function convertListItemToText(editor: RuntimeEditor, target: BlockActionRange |
   const range = target ?? getCurrentBlockActionRange(editor);
   if (range?.kind !== "listItem") return;
 
-  const sourceIndex = getListItemOwnIndex(range);
-  const sourceParentPath = getListItemParentPath(range);
-  if (typeof sourceIndex !== "number" || sourceParentPath.length > 0) {
-    return;
-  }
-
-  const result = convertListItemToTopLevelParagraphInTiptapJson(editor.getJSON() as TiptapJson, {
-    listIndex: range.topLevelIndex,
-    sourceIndex,
-  });
-  if (!result.changed) return;
-
-  const focusTopLevelIndex = getConvertedListItemTopLevelIndex(range.topLevelIndex, sourceIndex);
-  executeEditorCommand(editor, "setContent", result.contentJson as JSONContent);
-  focusMovedBlock(editor, {
-    kind: "topLevel",
-    path: [focusTopLevelIndex],
-  });
+  const destination = applyScopedListItemConversion(editor, range);
+  if (destination) focusMovedBlock(editor, destination);
 }
 
 function outdentListItem(editor: RuntimeEditor, range: BlockActionRange) {
-  const source = createDocumentBlockLocation(range);
-  if (source?.kind !== "listItem") return false;
-  const result = moveDocumentBlock(editor.getJSON() as TiptapJson, {
-    source,
-    target: { direction: "outdent", kind: "relative" },
-  });
-  if (!result.changed) {
-    return false;
-  }
-
-  executeEditorCommand(editor, "setContent", result.contentJson as JSONContent);
-  focusMovedBlock(editor, result.destination);
+  const destination = applyScopedOutdent(editor, range);
+  if (!destination) return false;
+  focusMovedBlock(editor, destination);
   return true;
 }
 
@@ -1227,10 +1389,6 @@ function findTextSelectionPositionInRange(editor: RuntimeEditor, from: number, t
   });
 
   return textSelectionPosition;
-}
-
-function getConvertedListItemTopLevelIndex(listIndex: number, sourceIndex: number) {
-  return listIndex + (sourceIndex > 0 ? 1 : 0);
 }
 
 function executeEditorCommand(editor: RuntimeEditor | null, commandName: string, ...args: unknown[]) {

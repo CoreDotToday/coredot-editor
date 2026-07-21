@@ -94,6 +94,24 @@ async function createIsolatedProposalDb() {
       UNIQUE(workspace_id, ai_run_id, result_ordinal)
     )
   `);
+  await db.run(sql`
+    CREATE TABLE collaboration_documents (
+      workspace_id text NOT NULL,
+      document_id text NOT NULL,
+      generation integer NOT NULL,
+      is_current integer NOT NULL,
+      PRIMARY KEY (workspace_id, document_id, generation)
+    )
+  `);
+  await db.run(sql`
+    CREATE TABLE collaboration_proposal_anchors (
+      workspace_id text NOT NULL,
+      proposal_id text NOT NULL,
+      document_id text NOT NULL,
+      generation integer NOT NULL,
+      PRIMARY KEY (workspace_id, proposal_id)
+    )
+  `);
 
   const now = new Date("2026-01-01T00:00:00.000Z");
   await db.insert(schema.documents).values([
@@ -343,6 +361,106 @@ describe("proposal repository", () => {
     );
 
     expect(restoredProposal).toMatchObject({ appliedMode: null, status: "pending" });
+  });
+
+  it("blocks an anchorless rejected proposal from returning to pending after collaboration initialization", async () => {
+    const db = await createIsolatedProposalDb();
+    const repository = createProposalRepository(db);
+    const proposal = await repository.createProposal(workspaceA, {
+      aiRunId: "run_1",
+      documentId: "doc_1",
+      targetText: "old",
+      replacementText: "new",
+      explanation: "Legacy proposal.",
+    });
+    await repository.updateProposalStatus(workspaceA, proposal.id, "rejected", undefined, {
+      expectedStatus: "pending",
+    });
+    await db.run(sql`
+      INSERT INTO collaboration_documents (workspace_id, document_id, generation, is_current)
+      VALUES (${workspaceA.workspaceId}, 'doc_1', 1, 1)
+    `);
+
+    await expect(repository.updateProposalStatus(
+      workspaceA,
+      proposal.id,
+      "pending",
+      undefined,
+      { expectedStatus: "rejected" },
+    )).rejects.toMatchObject({ reason: "collaboration_anchor_required" });
+    await expect(repository.getProposalById(workspaceA, proposal.id)).resolves.toMatchObject({
+      appliedMode: null,
+      status: "rejected",
+    });
+  });
+
+  it("allows an exactly anchored rejected collaborative proposal to return to pending", async () => {
+    const db = await createIsolatedProposalDb();
+    const repository = createProposalRepository(db);
+    const proposal = await repository.createProposal(workspaceA, {
+      aiRunId: "run_1",
+      documentId: "doc_1",
+      targetText: "old",
+      replacementText: "new",
+      explanation: "Collaborative proposal.",
+    });
+    await repository.updateProposalStatus(workspaceA, proposal.id, "rejected", undefined, {
+      expectedStatus: "pending",
+    });
+    await db.run(sql`
+      INSERT INTO collaboration_documents (workspace_id, document_id, generation, is_current)
+      VALUES (${workspaceA.workspaceId}, 'doc_1', 2, 1)
+    `);
+    await db.run(sql`
+      INSERT INTO collaboration_proposal_anchors (workspace_id, proposal_id, document_id, generation)
+      VALUES (${workspaceA.workspaceId}, ${proposal.id}, 'doc_1', 2)
+    `);
+
+    const restoredProposal = await repository.updateProposalStatus(
+      workspaceA,
+      proposal.id,
+      "pending",
+      undefined,
+      { expectedStatus: "rejected" },
+    );
+
+    expect(restoredProposal).toMatchObject({ appliedMode: null, status: "pending" });
+  });
+
+  it("does not treat an anchor from a superseded collaboration generation as exact", async () => {
+    const db = await createIsolatedProposalDb();
+    const repository = createProposalRepository(db);
+    const proposal = await repository.createProposal(workspaceA, {
+      aiRunId: "run_1",
+      documentId: "doc_1",
+      targetText: "old",
+      replacementText: "new",
+      explanation: "Stale collaborative proposal.",
+    });
+    await repository.updateProposalStatus(workspaceA, proposal.id, "rejected", undefined, {
+      expectedStatus: "pending",
+    });
+    await db.run(sql`
+      INSERT INTO collaboration_documents (workspace_id, document_id, generation, is_current)
+      VALUES
+        (${workspaceA.workspaceId}, 'doc_1', 1, 0),
+        (${workspaceA.workspaceId}, 'doc_1', 2, 1)
+    `);
+    await db.run(sql`
+      INSERT INTO collaboration_proposal_anchors (workspace_id, proposal_id, document_id, generation)
+      VALUES (${workspaceA.workspaceId}, ${proposal.id}, 'doc_1', 1)
+    `);
+
+    await expect(repository.updateProposalStatus(
+      workspaceA,
+      proposal.id,
+      "pending",
+      undefined,
+      { expectedStatus: "rejected" },
+    )).rejects.toMatchObject({ reason: "collaboration_anchor_required" });
+    await expect(repository.getProposalById(workspaceA, proposal.id)).resolves.toMatchObject({
+      status: "rejected",
+    });
   });
 
   it("does not update a proposal when the expected status is stale", async () => {

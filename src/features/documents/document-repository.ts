@@ -1,7 +1,12 @@
-import { and, desc, eq, inArray, lt, ne, or, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, lt, ne, notExists, or, sql } from "drizzle-orm";
 import { db } from "@/db/client";
 import { withSerializedDocumentWrite } from "@/db/document-write-queue";
-import { documents, type DocumentMetadata, type DocumentReadiness, type TiptapJson } from "@/db/schema";
+import {
+  collaborationDocuments,
+  documents,
+  type DocumentMetadata,
+  type TiptapJson,
+} from "@/db/schema";
 import { retrySqliteContention } from "@/db/sqlite-contention";
 import type { WorkspaceScope } from "@/features/auth/request-context";
 import { decodeCollectionCursor, encodeCollectionCursor } from "@/features/pagination/collection-cursor";
@@ -34,7 +39,7 @@ export function createDocumentRepository(
 
   return {
     async createDocumentDraft(scope: WorkspaceScope, title: string) {
-      const state = validateNewDocumentState(projectProfile, { metadataJson: {}, readiness: "draft" });
+      const state = validateNewDocumentState(projectProfile, {});
       const now = new Date();
       const rows = await database
         .insert(documents)
@@ -55,7 +60,7 @@ export function createDocumentRepository(
     },
 
     async createDocumentFromContent(scope: WorkspaceScope, title: string, contentJson: TiptapJson) {
-      const state = validateNewDocumentState(projectProfile, { metadataJson: {}, readiness: "draft" });
+      const state = validateNewDocumentState(projectProfile, {});
       const now = new Date();
       const rows = await database
         .insert(documents)
@@ -81,10 +86,9 @@ export function createDocumentRepository(
         title: string;
         contentJson: TiptapJson;
         metadataJson: DocumentMetadata;
-        readiness: DocumentReadiness;
       },
     ) {
-      const state = validateNewDocumentState(projectProfile, input);
+      const state = validateNewDocumentState(projectProfile, input.metadataJson);
       const now = new Date();
       const rows = await database
         .insert(documents)
@@ -110,11 +114,10 @@ export function createDocumentRepository(
         title: string;
         contentJson: TiptapJson;
         metadataJson: DocumentMetadata;
-        readiness: DocumentReadiness;
       },
       creationKey: string,
     ) {
-      const state = validateNewDocumentState(projectProfile, input);
+      const state = validateNewDocumentState(projectProfile, input.metadataJson);
       const now = new Date();
       const rows = await database
         .insert(documents)
@@ -314,7 +317,6 @@ export function createDocumentRepository(
         title: string;
         contentJson: TiptapJson;
         metadataJson?: DocumentMetadata;
-        readiness?: DocumentReadiness;
         expectedRevision: number;
       },
     ) {
@@ -330,13 +332,22 @@ export function createDocumentRepository(
           ))
           .limit(1);
         if (!current) return { status: "not_found" as const };
+        const [collaboration] = await database
+          .select({ generation: collaborationDocuments.generation })
+          .from(collaborationDocuments)
+          .where(and(
+            eq(collaborationDocuments.workspaceId, scope.workspaceId),
+            eq(collaborationDocuments.documentId, id),
+          ))
+          .limit(1);
+        if (collaboration) return { status: "collaboration_initialized" as const };
         if (current.revision !== input.expectedRevision) {
           return { latest: current, status: "revision_conflict" as const };
         }
 
         const stateResult = validateProjectDocumentState(projectProfile, {
           metadataJson: input.metadataJson ?? current.metadataJson,
-          readiness: input.readiness ?? current.readiness,
+          readiness: current.readiness,
         }, {
           metadataJson: current.metadataJson,
           readiness: current.readiness,
@@ -352,7 +363,6 @@ export function createDocumentRepository(
             contentJson: input.contentJson,
             metadataJson: normalizeDocumentMetadata(stateResult.value.metadataJson),
             plainText: extractPlainTextFromTiptap(input.contentJson),
-            readiness: normalizeDocumentReadiness(stateResult.value.readiness),
             revision: input.expectedRevision + 1,
             updatedAt: now,
           })
@@ -361,10 +371,27 @@ export function createDocumentRepository(
             eq(documents.id, id),
             eq(documents.status, "draft"),
             eq(documents.revision, input.expectedRevision),
+            notExists(database
+              .select({ generation: collaborationDocuments.generation })
+              .from(collaborationDocuments)
+              .where(and(
+                eq(collaborationDocuments.workspaceId, scope.workspaceId),
+                eq(collaborationDocuments.documentId, id),
+              ))),
           ))
           .returning());
         const savedDocument = rows[0];
         if (savedDocument) return { document: savedDocument, status: "success" as const };
+
+        const [initializedCollaboration] = await database
+          .select({ generation: collaborationDocuments.generation })
+          .from(collaborationDocuments)
+          .where(and(
+            eq(collaborationDocuments.workspaceId, scope.workspaceId),
+            eq(collaborationDocuments.documentId, id),
+          ))
+          .limit(1);
+        if (initializedCollaboration) return { status: "collaboration_initialized" as const };
 
         const [latest] = await database
           .select()
@@ -381,30 +408,17 @@ export function createDocumentRepository(
       });
     },
 
-    async archiveDocument(scope: WorkspaceScope, id: string) {
-      const now = new Date();
-      const rows = await database
-        .update(documents)
-        .set({ creationKey: null, status: "archived", updatedAt: now })
-        .where(
-          and(
-            eq(documents.workspaceId, scope.workspaceId),
-            eq(documents.id, id),
-            eq(documents.status, "draft"),
-          ),
-        )
-        .returning();
-
-      return rows[0] ?? null;
-    },
   };
 }
 
 function validateNewDocumentState(
   projectProfile: ProjectProfile,
-  input: { metadataJson: DocumentMetadata; readiness: DocumentReadiness },
+  metadataJson: DocumentMetadata,
 ) {
-  const result = validateProjectDocumentState(projectProfile, input);
+  const result = validateProjectDocumentState(projectProfile, {
+    metadataJson,
+    readiness: projectProfile.readiness[0]!.id,
+  });
   if (!result.ok) throw new ProjectProfileViolationError(result.violation);
   return result.value;
 }
@@ -473,4 +487,3 @@ export const getDocumentById = defaultRepository.getDocumentById;
 export const getDocumentsByIds = defaultRepository.getDocumentsByIds;
 export const listDocumentReferenceCandidates = defaultRepository.listDocumentReferenceCandidates;
 export const saveDocumentDraft = defaultRepository.saveDocumentDraft;
-export const archiveDocument = defaultRepository.archiveDocument;

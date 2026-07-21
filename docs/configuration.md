@@ -16,6 +16,16 @@ Coredot Editor keeps runtime configuration explicit. Server-side secrets live in
 | `NEXT_PUBLIC_CLERK_SIGN_UP_URL` | `/sign-up` | Public Clerk sign-up route. |
 | `TEST_PRINCIPAL_ID` | `test:principal:local` | Deterministic Principal used only by `AUTH_MODE=test`. |
 | `TEST_WORKSPACE_ID` | `test:workspace:local` | Deterministic owner Workspace used only by `AUTH_MODE=test`. |
+| `TEST_IDENTITY_SIGNING_SECRET` | empty | At least 32-byte HMAC secret enabling signed multi-identity test requests only when `AUTH_MODE=test` and `NODE_ENV` is not `production`. Keep it out of deployed environments. |
+| `COLLABORATION_MODE` | `disabled` | Real-time collaboration switch. `disabled` keeps the existing revision-aware editor; `self-hosted` initializes or opens Yjs collaboration through the Hocuspocus sidecar. Any other value fails closed. |
+| `COLLABORATION_WEBSOCKET_URL` | empty | Public `ws://` or `wss://` sidecar URL served to browsers. It must be an origin-only URL with path `/`. A missing or invalid value keeps initialized collaborative documents read-only instead of falling back to legacy autosave. |
+| `COLLABORATION_CAPABILITY_SIGNING_KEY_RING` | empty | Server-only JSON containing exactly one active ES256 or EdDSA private JWK used by Next.js to issue 60-second collaboration capabilities. Missing or invalid configuration fails closed before collaboration initialization. |
+| `COLLABORATION_CAPABILITY_VERIFICATION_KEY_RING` | empty | Public-only JSON key ring distributed to the collaboration sidecar. It may contain the current and previous public JWK during a bounded rotation overlap. |
+| `COLLABORATION_SERVER_ADDRESS` | `127.0.0.1` | Collaboration sidecar listener address. Use an explicit IP address or `localhost`; bind a non-loopback address only behind the deployment's trusted network boundary. |
+| `COLLABORATION_SERVER_PORT` | `1234` | Collaboration sidecar HTTP/WebSocket port from `0` through `65535`. Port `0` is intended for bounded tests that need an ephemeral port, not a stable production endpoint. |
+| `COLLABORATION_SHUTDOWN_GRACE_MS` | `10000` | Grace period for drain, checkpoint, connection close, and shutdown. Accepted values are 1,000 through 60,000 milliseconds. |
+| `COLLABORATION_ALLOWED_HOSTS` | none; required | Comma-separated exact HTTP `Host` allowlist for sidecar upgrades. Wildcards, whitespace, credentials, paths, query strings, and fragments are rejected; configure the externally routed sidecar hosts explicitly. |
+| `COLLABORATION_ALLOWED_ORIGINS` | none; required | Comma-separated exact `http://` or `https://` browser Origin allowlist. Entries must be origins only, without credentials, paths, query strings, or fragments. |
 | `AI_PROVIDER` | derived | Initial provider seed before `app_settings` exists: an explicit valid value wins, otherwise `COREDOT_API_KEY` selects `coredot`, then `OPENAI_API_KEY` selects `openai`, and otherwise the app uses `stub`. |
 | `OPENAI_API_KEY` | empty | Required for direct OpenAI calls. |
 | `OPENAI_MODEL` | `gpt-4.1-mini` | Initial direct OpenAI model. |
@@ -39,6 +49,80 @@ Production must set `AUTH_MODE=clerk`, `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, and 
 An active Clerk organization maps to `clerk:org:<organization-id>`. A signed-in user without an active organization maps to the personal owner Workspace `clerk:user:<user-id>`. Clerk organization roles normalize to `owner`, `admin`, or `member`. Repositories include Workspace predicates on resource reads and writes, and cross-Workspace identifiers resolve as not found.
 
 Members may work with documents, DOCX interchange, AI Runs, Proposals, Document Changes, and Conversations. Only owners/admins may mutate prompt templates and AI settings or test saved provider credentials. `PROJECT_PROFILE_ID` remains deployment-owned rather than a Workspace setting.
+
+### Collaboration capability keys
+
+The Next.js signer and collaboration-sidecar verifier use separate environment payloads. Never copy a private JWK into the verifier ring, a `NEXT_PUBLIC_*` variable, a client bundle, logs, or source control.
+
+Use separate deployment environment allowlists for the two processes:
+
+- The Next.js Web process receives `COLLABORATION_CAPABILITY_SIGNING_KEY_RING`. It issues capabilities and must not expose that private ring to the collaboration runtime or browser.
+- The collaboration sidecar receives `COLLABORATION_CAPABILITY_VERIFICATION_KEY_RING`, the five `COLLABORATION_SERVER_*`/allowlist settings above, and its database credentials. It never needs the private signing ring and intentionally refuses to start when `COLLABORATION_CAPABILITY_SIGNING_KEY_RING` is non-blank.
+
+This is a process boundary, not merely a naming convention: configure two separate service definitions or secret allowlists so the sidecar cannot read the Web process's signer secret.
+
+The signing value contains one active private key:
+
+```json
+{"activeKid":"collaboration-2026-07","keys":[{"alg":"ES256","kid":"collaboration-2026-07","privateJwk":{"kty":"EC","crv":"P-256","x":"...","y":"...","d":"..."}}]}
+```
+
+The verifier value contains only public keys. During rotation it may temporarily contain two entries:
+
+```json
+{"keys":[{"alg":"ES256","kid":"collaboration-2026-06","publicJwk":{"kty":"EC","crv":"P-256","x":"...","y":"..."}},{"alg":"ES256","kid":"collaboration-2026-07","publicJwk":{"kty":"EC","crv":"P-256","x":"...","y":"..."}}]}
+```
+
+Generate keys with Node.js 22 and the pinned `jose` dependency in a restricted environment. Use `ES256` for a P-256 key, or set `alg` to `EdDSA` to generate an Ed25519 key:
+
+```bash
+umask 077
+node --input-type=module <<'EOF' > /secure/path/collaboration-keypair.json
+import { exportJWK, generateKeyPair } from "jose";
+const alg = "ES256";
+const { privateKey, publicKey } = await generateKeyPair(alg, { extractable: true });
+process.stdout.write(JSON.stringify({ alg, privateJwk: await exportJWK(privateKey), publicJwk: await exportJWK(publicKey) }));
+EOF
+```
+
+Treat the generated file and signing JSON as secrets. Store them in the deployment secret manager, restrict the private value to the Next.js issuer, and give the sidecar only the public verifier JSON.
+
+Rotate without interrupting active clients:
+
+1. Generate a new key with a new stable `kid`.
+2. Deploy the verifier ring containing both old and new public keys.
+3. Switch the signing ring to the new private key.
+4. Wait longer than the 60-second capability lifetime and allow in-flight connections to refresh.
+5. Remove the retired public key from the verifier ring and destroy the retired private key according to the deployment retention policy.
+
+Unknown `kid`, wrong algorithms, malformed claims, expired tokens, and missing signing configuration fail closed with bounded errors. Raw JWTs and JWK material must never be logged.
+
+Access revocation is bounded by the capability lifetime plus in-flight refresh. The authorization-epoch check is enforced at connect, on every message, and inside command transactions, but no product surface currently advances an epoch; `bumpEpoch` in the collaboration authorization repository is reserved for a future administrative revocation surface. An access-permission change therefore takes effect when outstanding capabilities expire — no later than 60 seconds after issuance, because a Principal who lost access cannot obtain a fresh capability — while archiving a document closes its room immediately through the transactional closure outbox. Treat 60 seconds as the maximum access-revocation delay for this release, and do not assume instant revocation; an administrative connection-kill path that reduces the delay further is future work.
+
+### Collaboration resource limits
+
+The collaboration sidecar uses the following hard-coded, code-owned defaults. They are not environment-variable overrides or cluster-wide quotas: each sidecar process enforces them against its own live connections and resident documents. The last value within a limit is allowed and the next value is rejected. If you change these defaults in `src/features/collaboration/server/config.ts`, review the memory and traffic impact and deploy the same build to every sidecar instance.
+
+| Scope | Hard-coded default | Operational meaning |
+| --- | ---: | --- |
+| Connections per Workspace | 200 | Concurrent authenticated connections for one Workspace in one sidecar process. |
+| Connections per Principal | 5 | Concurrent connections for one Principal within one Workspace in one sidecar process. |
+| Connections per room | 50 | Concurrent connections to one exact generation-qualified collaboration room. |
+| Loaded documents | 64 | Maximum resident generation-qualified documents in one sidecar process. An unload releases the slot. |
+| Aggregate loaded-document bytes | 64 MiB | Process-wide resident-document accounting. Initial load uses the exact encoded snapshot size; accepted Yjs updates add their raw update bytes as a conservative upper bound until unload/reload resets the room to its exact snapshot size. |
+| Update messages | 120 per 1 second | Per authenticated connection. The one-second window begins with that connection's first counted update. |
+| Update bytes | 2 MiB per 1 second | Per authenticated connection and the same update window. Both the message and byte limits must remain within bounds. |
+| Awareness payload | 4 KiB | Maximum raw Awareness update payload passed to the server policy. The policy accepts one state entry per frame. |
+| Pending unauthenticated documents | 4 | Maximum document handshakes awaiting authentication on one WebSocket. |
+| Unauthenticated queue messages | 32 | Maximum queued non-auth messages across one WebSocket while document authentication is pending. |
+| Unauthenticated queue bytes | 256 KiB | Maximum aggregate queued bytes across that unauthenticated WebSocket. |
+| WebSocket payload | 512 KiB | Maximum inbound WebSocket message size enforced before collaboration protocol handling. |
+
+Awareness also has code-owned per-connection rate ceilings: 20 owned state changes per one-second window and 256 total Awareness frames per one-second window. The higher total ceiling includes canonical peer echoes and safe tombstones that are otherwise treated as no-ops, preventing no-op traffic from becoming unbounded.
+
+Limits fail closed and do not evict unrelated active rooms to make space. A connection-cap overflow denies the new authentication attempt; a loaded-document overflow rejects the new load while existing rooms remain resident. A client update that exceeds its rate/byte budget or the resident-byte budget is rejected as `update_rejected` before live broadcast. If a durable gateway update cannot fit the resident-byte budget, the exact loaded room is closed with `resource_limit`; clients reconnect and reload canonical durable state. Invalid or over-limit Awareness is rejected before broadcast. Pending-document, unauthenticated-queue, and WebSocket-payload overflows terminate the affected socket before it becomes a usable document connection. Connection counters are released on disconnect, document counters are released on unload, and the in-memory update windows reset after their one-second interval.
+
+These limits are protective process boundaries, not sizing recommendations or durable billing quotas. Capacity planning must account for the number of sidecar replicas, routing strategy, typical encoded snapshot size, update distribution, and reconnect behavior. Raise a limit only after load testing and memory-observability review; lower it only after validating that normal reconnect and multi-tab use remain usable.
 
 ## Project Profiles
 
@@ -155,6 +239,6 @@ pnpm e2e:production
 git diff --check
 ```
 
-`release:check` runs lint, TypeScript checks, the Vitest suite, development Playwright E2E, production-auth startup validation, the production build, and `pnpm security:audit`. The audit queries npm's public bulk advisory endpoint without credentials, reports every advisory severity, and blocks findings at the configured moderate-or-higher threshold. Lockfile, network, HTTP, or response-validation failures also block the release rather than passing without a result.
+`release:check` runs lint, TypeScript checks, the Vitest suite, development Playwright E2E, production-auth startup validation, the production Web build, the collaboration runtime manifest check, the Node 22 sidecar build, a bounded sidecar artifact startup smoke, the focused collaboration unit suite (`pnpm test:collaboration`), the real multi-client WebSocket harness (`pnpm collaboration:websocket-tests`), the Docker sidecar verification (`pnpm docker:collaboration:verify`, requires a local Docker daemon), and `pnpm security:audit`. The Playwright collaboration scenarios run inside `pnpm e2e` and can be run alone with `pnpm e2e:collaboration`. The sidecar smoke uses the already-installed Node executable; it does not download a runtime. It migrates an isolated temporary database, generates an ephemeral public verifier, starts the built artifact, checks exact `/live` and `/ready` responses, sends `SIGTERM`, requires a clean exit, and removes its temporary data. The audit queries npm's public bulk advisory endpoint without credentials, reports every advisory severity, and blocks findings at the configured moderate-or-higher threshold. Lockfile, network, HTTP, or response-validation failures also block the release rather than passing without a result.
 
-`e2e:production` creates and migrates an isolated temporary database, builds the app, starts the built artifact through `pnpm start` with Clerk mode and test-format smoke credentials, and verifies bounded health/readiness responses, public redirects, protected-page redirects, and protected API rejection. Cleanup is bounded even after failures. The strict MkDocs build and `git diff --check` finish documentation and patch hygiene verification.
+`e2e:production` creates and migrates an isolated temporary database, builds the app, starts the built artifact through `pnpm start` with Clerk mode and test-format smoke credentials, and verifies bounded health/readiness responses, public redirects, protected-page redirects, and protected API rejection. Cleanup is bounded even after failures. `collaboration:production-smoke` extends the same bounded process harness to the two-process deployment: it migrates an isolated database, builds both artifacts, starts the sidecar and the Web process with strictly separated signing/verification key material, asserts `/live`, `/ready`, capability-route authentication, sidecar WebSocket auth rejection, one real WSS convergence operation, a graceful `SIGTERM` drain, and released ports. The strict MkDocs build and `git diff --check` finish documentation and patch hygiene verification.

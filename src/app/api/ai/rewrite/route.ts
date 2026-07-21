@@ -12,6 +12,7 @@ import {
 } from "@/features/ai/ai-run-repository";
 import {
   createAiProviderForCommand,
+  createAiCollaborativeProposalAnchor,
   prepareAiCommandRequest,
   type PreparedAiCommandContext,
 } from "@/features/ai/ai-command-service";
@@ -139,11 +140,41 @@ const postHandler = createProtectedRouteHandler(async (context, request: Request
           status: 400 as const,
         };
       }
+      if (prepared.collaborationSnapshot) {
+        if (!body.selectionRange) {
+          return {
+            error: "An exact selection range is required for collaborative AI rewrite",
+            ok: false as const,
+            status: 400 as const,
+          };
+        }
+        try {
+          const collaborationSelectionAnchor = createAiCollaborativeProposalAnchor(
+            prepared.collaborationSnapshot,
+            { range: body.selectionRange, targetText: body.selectedText },
+          );
+          return { ok: true as const, value: { ...prepared, collaborationSelectionAnchor } };
+        } catch {
+          return {
+            error: "The collaborative selection no longer matches the exact document snapshot",
+            ok: false as const,
+            status: 409 as const,
+          };
+        }
+      }
       return { ok: true as const, value: prepared };
     },
     prepareFinalization: (rewriteResult, prepared) => ({
       outputText: rewriteResult.replacementText,
       proposals: [{
+        ...(prepared.collaborationSnapshot ? {
+          anchor: "collaborationSelectionAnchor" in prepared
+            ? prepared.collaborationSelectionAnchor
+            : createAiCollaborativeProposalAnchor(prepared.collaborationSnapshot, {
+                range: body.selectionRange!,
+                targetText: body.selectedText,
+              }),
+        } : {}),
         command: body.command,
         defaultApplyMode: body.defaultApplyMode ?? getDefaultApplyModeForCommand(body.command),
         documentId: prepared.document.id,
@@ -169,6 +200,16 @@ const postHandler = createProtectedRouteHandler(async (context, request: Request
         : providerResult;
     },
     runInput: (prepared: PreparedAiCommandContext) => ({
+      ...(prepared.collaborationSnapshot ? {
+        collaborationSnapshot: {
+          contentHash: prepared.collaborationSnapshot.contentHash,
+          documentId: prepared.document.id,
+          generation: prepared.collaborationSnapshot.generation,
+          headSeq: prepared.collaborationSnapshot.headSeq,
+          schemaFingerprint: prepared.collaborationSnapshot.schemaFingerprint,
+          stateVector: prepared.collaborationSnapshot.stateVector,
+        },
+      } : {}),
       commandType: "selection_rewrite" as const,
       documentId: prepared.document.id,
       inputSummaryJson: {

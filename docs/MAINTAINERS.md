@@ -12,10 +12,13 @@ This guide is for people maintaining a public fork of Coredot Editor.
 ```bash
 pnpm release:check
 pnpm e2e:production
+pnpm collaboration:production-smoke
 pnpm docs:build
 pnpm docs:check-links
 git diff --check
 ```
+
+`release:check` already includes the focused collaboration gates (`pnpm test:collaboration`, `pnpm collaboration:websocket-tests`, and `pnpm docker:collaboration:verify`); the Docker gate needs a local Docker daemon. `pnpm e2e` covers the two-principal browser collaboration scenarios, which can be re-run alone with `pnpm e2e:collaboration`. `pnpm collaboration:production-smoke` verifies the separate Web and sidecar production artifacts against one isolated migrated database with bounded child-process cleanup.
 
 5. Check `git status --short` for generated artifacts.
 6. Check that no real API keys are present outside ignored `.env*` files.

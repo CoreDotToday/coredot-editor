@@ -13,6 +13,7 @@ import { listProposalSummariesPage } from "@/features/proposals/proposal-reposit
 import { listActivePromptTemplates, listPromptTemplates } from "@/features/templates/template-repository";
 import { TEST_REQUEST_CONTEXT } from "@/test/auth-context";
 import { InvalidCollectionCursorError } from "@/features/pagination/collection-cursor";
+import { resolveCollaborationClientConfiguration } from "@/features/collaboration/client-configuration";
 import DocumentsPage from "./documents/page";
 import DocumentPage from "./documents/[id]/page";
 import TemplatesPage from "./templates/page";
@@ -70,6 +71,10 @@ vi.mock("@/features/ai/conversation-repository", () => ({
 
 vi.mock("@/features/proposals/proposal-repository", () => ({
   listProposalSummariesPage: vi.fn(async () => ({ items: [], nextCursor: null })),
+}));
+
+vi.mock("@/features/collaboration/client-configuration", () => ({
+  resolveCollaborationClientConfiguration: vi.fn(async () => ({ kind: "legacy" })),
 }));
 
 describe("protected server pages", () => {
@@ -186,6 +191,10 @@ describe("protected server pages", () => {
 
     expect(getProtectedPageContext).toHaveBeenCalledWith("/documents/workspace-b-document");
     expect(getDocumentById).toHaveBeenCalledWith(workspaceBContext, "workspace-b-document");
+    expect(resolveCollaborationClientConfiguration).toHaveBeenCalledWith(
+      workspaceBContext,
+      "workspace-b-document",
+    );
     expect(listActivePromptTemplates).toHaveBeenCalledWith(workspaceBContext);
     expect(listAiRunSummariesPage).toHaveBeenCalledWith(workspaceBContext, "workspace-b-document", { limit: 20 });
     expect(listConversations).toHaveBeenCalledWith(workspaceBContext, { documentId: "workspace-b-document" });
@@ -237,6 +246,29 @@ describe("protected server pages", () => {
       variableSchemaJson: { fields: [], required: [] },
     }]);
     expect(JSON.stringify(page.props.templates)).not.toMatch(/must-not-leak|systemPrompt|workspaceId/);
+  });
+
+  it("passes only the public exact-room collaboration bootstrap to the client shell", async () => {
+    vi.mocked(resolveCollaborationClientConfiguration).mockResolvedValueOnce({
+      currentPrincipalId: workspaceBContext.principalId,
+      documentId: "workspace-b-document",
+      kind: "collaboration",
+      room: "collab:v1:workspace-b:workspace-b-document:g4",
+      schemaFingerprint: "a".repeat(64),
+      websocketUrl: "wss://collaboration.example.test/",
+    });
+
+    const page = await DocumentPage({ params: Promise.resolve({ id: "workspace-b-document" }) });
+
+    expect(page.props.collaboration).toEqual({
+      currentPrincipalId: workspaceBContext.principalId,
+      documentId: "workspace-b-document",
+      kind: "collaboration",
+      room: "collab:v1:workspace-b:workspace-b-document:g4",
+      schemaFingerprint: "a".repeat(64),
+      websocketUrl: "wss://collaboration.example.test/",
+    });
+    expect(JSON.stringify(page.props.collaboration)).not.toMatch(/token|signing|private|role|email/i);
   });
 
   it("invokes notFound and skips downstream queries for a cross-workspace document id", async () => {

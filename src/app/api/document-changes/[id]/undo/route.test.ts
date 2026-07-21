@@ -1,10 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AiProposalRecord, DocumentChangeRecord, DocumentRecord } from "@/db/schema";
+import { undoCollaborativeDocumentChange } from "@/features/collaboration/selective-undo";
 import { undoDocumentChange } from "@/features/documents/document-change-service";
 import { TEST_REQUEST_CONTEXT } from "@/test/auth-context";
 import { POST } from "./route";
 
 vi.mock("@/features/documents/document-change-service", () => ({ undoDocumentChange: vi.fn() }));
+vi.mock("@/features/collaboration/selective-undo", () => ({ undoCollaborativeDocumentChange: vi.fn() }));
 
 const createdAt = new Date("2026-01-01T00:00:00.000Z");
 
@@ -103,9 +105,92 @@ describe("POST /api/document-changes/[id]/undo", () => {
     expect((await POST(request({ expectedRevision: 2 }), routeContext)).status).toBe(409);
   });
 
+  it("returns the stable collaboration fence conflict", async () => {
+    vi.mocked(undoDocumentChange).mockResolvedValueOnce({
+      ok: false,
+      reason: "collaboration_initialized",
+    });
+
+    const response = await POST(request({ expectedRevision: 1 }), routeContext);
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: "Document collaboration is already initialized",
+      reason: "collaboration_initialized",
+    });
+  });
+
   it("rejects missing or unsafe revision preconditions", async () => {
     expect((await POST(request({}), routeContext)).status).toBe(400);
     expect((await POST(request({ expectedRevision: -1 }), routeContext)).status).toBe(400);
+    expect((await POST(request({ expectedRevision: 1, readiness: "approved" }), routeContext)).status).toBe(400);
     expect(undoDocumentChange).not.toHaveBeenCalled();
+  });
+
+  it("dispatches a collaborative undo command and never calls the snapshot undo path", async () => {
+    const legacy = successResult();
+    vi.mocked(undoCollaborativeDocumentChange).mockResolvedValueOnce({
+      change: legacy.change,
+      collaboration: { generation: 2, headSeq: 9 },
+      document: legacy.document,
+      ok: true,
+      proposals: legacy.proposals,
+      replayed: false,
+    });
+
+    const response = await POST(
+      request({ commandId: "undo-command-1", observedHeadSeq: 8 }),
+      routeContext,
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      change: { id: "change_1", undoneAt: expect.any(String) },
+      collaboration: { generation: 2, headSeq: 9 },
+      document: { revision: 2 },
+      proposals: [{ status: "pending" }],
+      replayed: false,
+    });
+    expect(undoCollaborativeDocumentChange).toHaveBeenCalledWith(TEST_REQUEST_CONTEXT, {
+      changeId: "change_1",
+      commandId: "undo-command-1",
+      observedHeadSeq: 8,
+    });
+    expect(undoDocumentChange).not.toHaveBeenCalled();
+  });
+
+  it("maps bounded collaborative undo failures onto stable statuses", async () => {
+    vi.mocked(undoCollaborativeDocumentChange)
+      .mockResolvedValueOnce({ ok: false, reason: "undo_conflict" })
+      .mockResolvedValueOnce({ ok: false, reason: "idempotency_conflict" })
+      .mockResolvedValueOnce({ ok: false, reason: "not_found" })
+      .mockResolvedValueOnce({ ok: false, reason: "invalid_request" })
+      .mockResolvedValueOnce({ ok: false, reason: "unavailable" });
+    const payload = { commandId: "undo-command-2", observedHeadSeq: 3 };
+
+    const conflict = await POST(request(payload), routeContext);
+    expect(conflict.status).toBe(409);
+    await expect(conflict.json()).resolves.toEqual({
+      error: "Document change undo conflict",
+      reason: "undo_conflict",
+    });
+    expect((await POST(request(payload), routeContext)).status).toBe(409);
+    expect((await POST(request(payload), routeContext)).status).toBe(404);
+    expect((await POST(request(payload), routeContext)).status).toBe(400);
+    expect((await POST(request(payload), routeContext)).status).toBe(503);
+    expect(undoDocumentChange).not.toHaveBeenCalled();
+  });
+
+  it("rejects mixed legacy and collaborative undo payloads", async () => {
+    expect((await POST(
+      request({ commandId: "undo-command-3", expectedRevision: 1, observedHeadSeq: 3 }),
+      routeContext,
+    )).status).toBe(400);
+    expect((await POST(
+      request({ commandId: "bad command id", observedHeadSeq: 3 }),
+      routeContext,
+    )).status).toBe(400);
+    expect(undoDocumentChange).not.toHaveBeenCalled();
+    expect(undoCollaborativeDocumentChange).not.toHaveBeenCalled();
   });
 });

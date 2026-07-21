@@ -4,6 +4,7 @@ import {
   DocumentSessionConflictError,
   DocumentSessionInvalidProfileError,
   DocumentSessionRequestError,
+  DocumentWorkflowRequestError,
   type DocumentSessionDraft,
 } from "./document-session-client";
 
@@ -41,7 +42,7 @@ function jsonResponse(body: unknown, status = 200) {
 }
 
 describe("document session client", () => {
-  it("returns a parsed saved state and sends the revision precondition", async () => {
+  it("returns a parsed saved state and omits server-owned readiness from the legacy save payload", async () => {
     const request = vi.fn().mockResolvedValue(jsonResponse({ document: serverDocument }));
     const client = createDocumentSessionClient(request);
 
@@ -51,8 +52,248 @@ describe("document session client", () => {
     });
     expect(request).toHaveBeenCalledWith("/api/documents/doc_1", expect.objectContaining({
       method: "PUT",
-      body: JSON.stringify({ ...draft, expectedRevision: 3 }),
+      body: JSON.stringify({
+        contentJson: draft.contentJson,
+        expectedRevision: 3,
+        metadataJson: draft.metadataJson,
+        title: draft.title,
+      }),
     }));
+  });
+
+  it("reads a validated server-authoritative workflow state for legacy and collaboration documents", async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({
+        workflow: {
+          collaboration: null,
+          documentId: "doc/legacy",
+          readiness: "needs_review",
+          revision: 7,
+        },
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        workflow: {
+          collaboration: { generation: 3, headSeq: 11 },
+          documentId: "doc/collaborative",
+          readiness: "ready",
+          revision: 8,
+        },
+      }));
+    const client = createDocumentSessionClient(request);
+
+    await expect(client.readWorkflow("doc/legacy")).resolves.toEqual({
+      workflow: {
+        collaboration: null,
+        documentId: "doc/legacy",
+        readiness: "needs_review",
+        revision: 7,
+      },
+    });
+    await expect(client.readWorkflow("doc/collaborative")).resolves.toEqual({
+      workflow: {
+        collaboration: { generation: 3, headSeq: 11 },
+        documentId: "doc/collaborative",
+        readiness: "ready",
+        revision: 8,
+      },
+    });
+    expect(request).toHaveBeenNthCalledWith(
+      1,
+      "/api/documents/doc%2Flegacy/workflow",
+      expect.objectContaining({ method: "GET", signal: expect.any(AbortSignal) }),
+    );
+  });
+
+  it("posts readiness and approval commands without inventing a collaboration head", async () => {
+    const needsReview = {
+      collaboration: null,
+      documentId: "doc_1",
+      readiness: "needs_review",
+      revision: 4,
+    } as const;
+    const approved = {
+      collaboration: { generation: 2, headSeq: 14 },
+      documentId: "doc_1",
+      readiness: "approved",
+      revision: 5,
+    } as const;
+    const request = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ workflow: needsReview }))
+      .mockResolvedValueOnce(jsonResponse({ workflow: approved }));
+    const client = createDocumentSessionClient(request);
+
+    await expect(client.updateWorkflow("doc_1", {
+      expectedReadiness: "draft",
+      nextReadiness: "needs_review",
+    })).resolves.toEqual({ workflow: needsReview });
+    await expect(client.updateWorkflow("doc_1", {
+      expectedReadiness: "ready",
+      nextReadiness: "approved",
+      observedHeadSeq: 14,
+    })).resolves.toEqual({ workflow: approved });
+
+    expect(request).toHaveBeenNthCalledWith(1, "/api/documents/doc_1/workflow", expect.objectContaining({
+      body: JSON.stringify({ expectedReadiness: "draft", nextReadiness: "needs_review" }),
+      method: "POST",
+      signal: expect.any(AbortSignal),
+    }));
+    expect(request).toHaveBeenNthCalledWith(2, "/api/documents/doc_1/workflow", expect.objectContaining({
+      body: JSON.stringify({
+        expectedReadiness: "ready",
+        nextReadiness: "approved",
+        observedHeadSeq: 14,
+      }),
+      method: "POST",
+      signal: expect.any(AbortSignal),
+    }));
+  });
+
+  it.each([
+    { collaboration: null, documentId: "other", readiness: "draft", revision: 0 },
+    { collaboration: null, documentId: "doc_1", readiness: "invented", revision: 0 },
+    { collaboration: null, documentId: "doc_1", readiness: "draft", revision: -1 },
+    {
+      collaboration: { generation: 0, headSeq: 1 },
+      documentId: "doc_1",
+      readiness: "draft",
+      revision: 0,
+    },
+    {
+      collaboration: { generation: 1, headSeq: Number.MAX_SAFE_INTEGER + 1 },
+      documentId: "doc_1",
+      readiness: "draft",
+      revision: 0,
+    },
+  ])("rejects malformed or cross-document workflow success state: %o", async (workflow) => {
+    const client = createDocumentSessionClient(
+      vi.fn().mockResolvedValue(jsonResponse({ workflow })),
+    );
+
+    await expect(client.readWorkflow("doc_1")).rejects.toMatchObject({
+      name: "DocumentWorkflowRequestError",
+      reason: "malformed_response",
+      status: 200,
+    });
+  });
+
+  it.each([
+    ["expected_readiness_conflict", 409, "expected_readiness_conflict"],
+    ["head_conflict", 409, "head_conflict"],
+    ["forbidden", 403, "forbidden"],
+    ["not_found", 404, "not_found"],
+    ["collaboration_unavailable", 503, "collaboration_unavailable"],
+    // The wire token for temporary persistence unavailability is the shared
+    // "unavailable"; the client keeps its workflow-scoped internal reason.
+    ["unavailable", 503, "workflow_unavailable"],
+    ["workflow_unavailable", 503, "workflow_unavailable"],
+    ["legacy_approval_unsupported", 409, "legacy_approval_unsupported"],
+  ] as const)("preserves the stable %s workflow error and authoritative recovery state", async (reason, status, expectedReason) => {
+    const workflow = {
+      collaboration: { generation: 2, headSeq: 17 },
+      documentId: "doc_1",
+      readiness: "needs_review",
+      revision: 9,
+    } as const;
+    const client = createDocumentSessionClient(vi.fn().mockResolvedValue(jsonResponse({
+      reason,
+      workflow,
+    }, status)));
+
+    const result = client.updateWorkflow("doc_1", {
+      expectedReadiness: "ready",
+      nextReadiness: "approved",
+      observedHeadSeq: 16,
+    });
+    await expect(result).rejects.toBeInstanceOf(DocumentWorkflowRequestError);
+    await expect(result).rejects.toMatchObject({ reason: expectedReason, status, workflow });
+  });
+
+  it("parses a workflow Project Profile violation without coercing unknown values", async () => {
+    const client = createDocumentSessionClient(vi.fn().mockResolvedValue(jsonResponse({
+      reason: "invalid_project_profile",
+      violation: {
+        current: "draft",
+        next: "ready",
+        reason: "invalid_readiness_transition",
+      },
+    }, 400)));
+
+    await expect(client.updateWorkflow("doc_1", {
+      expectedReadiness: "draft",
+      nextReadiness: "ready",
+    })).rejects.toMatchObject({
+      name: "DocumentWorkflowRequestError",
+      reason: "invalid_project_profile",
+      status: 400,
+      violation: {
+        current: "draft",
+        next: "ready",
+        reason: "invalid_readiness_transition",
+      },
+    });
+  });
+
+  it("bounds workflow requests and aborts the transport when the client deadline expires", async () => {
+    vi.useFakeTimers();
+    let observedSignal: AbortSignal | undefined;
+    const request = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+      observedSignal = init?.signal ?? undefined;
+      return new Promise<Response>((_resolve, reject) => {
+        observedSignal?.addEventListener("abort", () => reject(observedSignal?.reason), { once: true });
+      });
+    });
+    const client = createDocumentSessionClient(request);
+
+    const result = expect(client.readWorkflow("doc_1", { timeoutMs: 50 })).rejects.toMatchObject({
+      name: "DocumentWorkflowRequestError",
+      reason: "timeout",
+      status: 0,
+    });
+    await vi.advanceTimersByTimeAsync(50);
+
+    expect(observedSignal?.aborted).toBe(true);
+    await result;
+  });
+
+  it("settles immediately on caller abort even when an injected transport ignores its signal", async () => {
+    vi.useFakeTimers();
+    const caller = new AbortController();
+    let transportSignal: AbortSignal | undefined;
+    const client = createDocumentSessionClient(vi.fn((_input, init) => {
+      transportSignal = init?.signal ?? undefined;
+      return new Promise<Response>(() => undefined);
+    }));
+    const result = expect(client.readWorkflow("doc_1", {
+      signal: caller.signal,
+      timeoutMs: 10_000,
+    })).rejects.toMatchObject({
+      name: "DocumentWorkflowRequestError",
+      reason: "aborted",
+      status: 0,
+    });
+
+    caller.abort();
+
+    expect(transportSignal?.aborted).toBe(true);
+    await result;
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("keeps the workflow deadline active while the response body is being consumed", async () => {
+    vi.useFakeTimers();
+    const response = jsonResponse({ workflow: {} });
+    vi.spyOn(response, "json").mockImplementation(() => new Promise<never>(() => undefined));
+    const client = createDocumentSessionClient(vi.fn().mockResolvedValue(response));
+    const result = expect(client.readWorkflow("doc_1", { timeoutMs: 50 })).rejects.toMatchObject({
+      name: "DocumentWorkflowRequestError",
+      reason: "timeout",
+      status: 0,
+    });
+
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(50);
+
+    await result;
   });
 
   it("preserves both local and server drafts as an explicit save conflict", async () => {
@@ -220,6 +461,323 @@ describe("document session client", () => {
       document: { revision: 5 },
       proposals: [{ status: "pending" }],
     });
+    expect(JSON.parse(String(request.mock.calls[0]?.[1]?.body)).document).not.toHaveProperty("readiness");
+    expect(JSON.parse(String(request.mock.calls[1]?.[1]?.body)).document).not.toHaveProperty("readiness");
+  });
+
+  it("sends only semantic collaborative proposal commands and validates the returned head", async () => {
+    const proposal = {
+      appliedMode: "replace",
+      command: null,
+      defaultApplyMode: "replace",
+      documentId: "doc_1",
+      explanation: "Clearer",
+      id: "proposal_1",
+      occurrenceIndex: null,
+      replacementText: "new",
+      source: "review",
+      status: "accepted",
+      targetFrom: null,
+      targetText: "old",
+      targetTo: null,
+    };
+    const request = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({
+        change,
+        collaboration: { generation: 2, headSeq: 8 },
+        document: serverDocument,
+        proposal,
+        replayed: false,
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        change: { ...change, id: "bulk-single" },
+        collaboration: { generation: 3, headSeq: 1 },
+        document: serverDocument,
+        proposals: [proposal],
+        replayed: true,
+      }));
+    const client = createDocumentSessionClient(request);
+
+    await expect(client.applyCollaborativeProposal("proposal_1", {
+      commandId: "command-1",
+      mode: "replace",
+      observedHeadSeq: 7,
+    }, {
+      expectedDocumentId: "doc_1",
+      expectedGeneration: 2,
+    })).resolves.toMatchObject({ collaboration: { headSeq: 8 }, replayed: false });
+    await expect(client.applyCollaborativeProposalBatch({
+      commandId: "command-2",
+      items: [{ mode: "replace", proposalId: "proposal_1" }],
+      observedHeadSeq: 8,
+    }, {
+      expectedDocumentId: "doc_1",
+      expectedGeneration: 2,
+    })).resolves.toMatchObject({ collaboration: { generation: 3, headSeq: 1 }, replayed: true });
+    expect(JSON.parse(String(request.mock.calls[0]?.[1]?.body))).toEqual({
+      commandId: "command-1",
+      mode: "replace",
+      observedHeadSeq: 7,
+      proposalId: "proposal_1",
+    });
+    expect(JSON.parse(String(request.mock.calls[1]?.[1]?.body))).toEqual({
+      commandId: "command-2",
+      items: [{ mode: "replace", proposalId: "proposal_1" }],
+      observedHeadSeq: 8,
+    });
+  });
+
+  it.each([
+    ["cross-document result", { document: { ...serverDocument, id: "doc_other" } }],
+    ["wrong change kind", { change: { ...change, kind: "batch" } }],
+    ["wrong proposal id", { proposal: { id: "proposal_other" } }],
+    ["wrong applied mode", { proposal: { appliedMode: "insert_below" } }],
+    ["invented readiness", { document: { ...serverDocument, readiness: "invented" } }],
+    ["revision mismatch", { change: { ...change, afterRevision: 3 } }],
+    ["generation skips more than one storage epoch", { collaboration: { generation: 4, headSeq: 8 } }],
+    ["head regression", { collaboration: { generation: 2, headSeq: 6 } }],
+    ["missing proposal document", { proposal: { documentId: undefined } }],
+    ["cross-document proposal", { proposal: { documentId: "doc_other" } }],
+  ])("rejects a malformed collaborative single response: %s", async (_label, override) => {
+    const proposal = {
+      appliedMode: "replace",
+      command: null,
+      defaultApplyMode: "replace",
+      documentId: "doc_1",
+      explanation: "Clearer",
+      id: "proposal_1",
+      occurrenceIndex: null,
+      replacementText: "new",
+      source: "review",
+      status: "accepted",
+      targetFrom: null,
+      targetText: "old",
+      targetTo: null,
+    };
+    const response = {
+      change,
+      collaboration: { generation: 2, headSeq: 8 },
+      document: serverDocument,
+      proposal,
+      replayed: false,
+      ...override,
+    };
+    if ("proposal" in override) response.proposal = { ...proposal, ...override.proposal };
+    const client = createDocumentSessionClient(vi.fn().mockResolvedValue(jsonResponse(response)));
+
+    await expect(client.applyCollaborativeProposal("proposal_1", {
+      commandId: "command-1",
+      mode: "replace",
+      observedHeadSeq: 7,
+    }, {
+      expectedDocumentId: "doc_1",
+      expectedGeneration: 2,
+    })).rejects.toMatchObject({
+      name: "DocumentCollaborativeProposalRequestError",
+      reason: "malformed_response",
+    });
+  });
+
+  it("rejects reordered or partially accepted collaborative batch responses", async () => {
+    const proposal = (id: string, appliedMode: "replace" | "insert_below", status = "accepted") => ({
+      appliedMode,
+      command: null,
+      defaultApplyMode: appliedMode,
+      documentId: "doc_1",
+      explanation: "Clearer",
+      id,
+      occurrenceIndex: null,
+      replacementText: "new",
+      source: "review",
+      status,
+      targetFrom: null,
+      targetText: "old",
+      targetTo: null,
+    });
+    const request = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({
+        change: { ...change, kind: "batch", batchId: "batch_1" },
+        collaboration: { generation: 2, headSeq: 8 },
+        document: serverDocument,
+        proposals: [proposal("proposal_2", "insert_below"), proposal("proposal_1", "replace")],
+        replayed: false,
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        change: { ...change, kind: "batch", batchId: "batch_2" },
+        collaboration: { generation: 2, headSeq: 8 },
+        document: serverDocument,
+        proposals: [proposal("proposal_1", "replace", "pending"), proposal("proposal_2", "insert_below")],
+        replayed: false,
+      }));
+    const client = createDocumentSessionClient(request);
+    const payload = {
+      commandId: "command-batch",
+      items: [
+        { mode: "replace" as const, proposalId: "proposal_1" },
+        { mode: "insert_below" as const, proposalId: "proposal_2" },
+      ],
+      observedHeadSeq: 7,
+    };
+    const options = { expectedDocumentId: "doc_1", expectedGeneration: 2 };
+
+    await expect(client.applyCollaborativeProposalBatch(payload, options)).rejects.toMatchObject({
+      reason: "malformed_response",
+    });
+    await expect(client.applyCollaborativeProposalBatch(payload, options)).rejects.toMatchObject({
+      reason: "malformed_response",
+    });
+  });
+
+  it.each([
+    ["one item with batch kind", [{ mode: "replace" as const, proposalId: "proposal_1" }],
+      { ...change, kind: "batch" as const, batchId: "batch_1" }],
+    ["one item with a batch id", [{ mode: "replace" as const, proposalId: "proposal_1" }],
+      { ...change, batchId: "batch_1" }],
+    ["multiple items with single kind", [
+      { mode: "replace" as const, proposalId: "proposal_1" },
+      { mode: "insert_below" as const, proposalId: "proposal_2" },
+    ], { ...change }],
+    ["multiple items without a batch id", [
+      { mode: "replace" as const, proposalId: "proposal_1" },
+      { mode: "insert_below" as const, proposalId: "proposal_2" },
+    ], { ...change, kind: "batch" as const }],
+  ])("rejects collaborative bulk response contract mismatch: %s", async (_label, items, returnedChange) => {
+    const proposals = items.map((item) => ({
+      appliedMode: item.mode,
+      command: null,
+      defaultApplyMode: item.mode,
+      documentId: "doc_1",
+      explanation: "Clearer",
+      id: item.proposalId,
+      occurrenceIndex: null,
+      replacementText: "new",
+      source: "review",
+      status: "accepted",
+      targetFrom: null,
+      targetText: "old",
+      targetTo: null,
+    }));
+    const client = createDocumentSessionClient(vi.fn().mockResolvedValue(jsonResponse({
+      change: returnedChange,
+      collaboration: { generation: 2, headSeq: 8 },
+      document: serverDocument,
+      proposals,
+      replayed: false,
+    })));
+
+    await expect(client.applyCollaborativeProposalBatch({
+      commandId: "command-contract",
+      items,
+      observedHeadSeq: 7,
+    }, {
+      expectedDocumentId: "doc_1",
+      expectedGeneration: 2,
+    })).rejects.toMatchObject({ reason: "malformed_response" });
+  });
+
+  it.each([
+    [409, "proposal_target_conflict"],
+    [409, "proposal_overlap_conflict"],
+    [409, "proposal_status_conflict"],
+    [409, "idempotency_conflict"],
+    [503, "unavailable"],
+  ])("strictly parses collaborative server reason %s/%s", async (status, reason) => {
+    const client = createDocumentSessionClient(vi.fn().mockResolvedValue(jsonResponse({
+      error: "Collaborative proposal failed",
+      reason,
+    }, status)));
+
+    await expect(client.applyCollaborativeProposal("proposal_1", {
+      commandId: "command-1",
+      mode: "replace",
+      observedHeadSeq: 7,
+    }, {
+      expectedDocumentId: "doc_1",
+      expectedGeneration: 2,
+    })).rejects.toMatchObject({ reason, status });
+  });
+
+  it("passes a cancellable signal to collaborative fetch and bounds an unresponsive request", async () => {
+    vi.useFakeTimers();
+    const request = vi.fn((_input: RequestInfo | URL, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+      }));
+    const client = createDocumentSessionClient(request);
+
+    const result = client.applyCollaborativeProposal("proposal_1", {
+      commandId: "command-timeout",
+      mode: "replace",
+      observedHeadSeq: 7,
+    }, {
+      expectedDocumentId: "doc_1",
+      expectedGeneration: 2,
+      timeoutMs: 25,
+    });
+    expect(request).toHaveBeenCalledWith("/api/proposals/proposal_1/apply", expect.objectContaining({
+      signal: expect.any(AbortSignal),
+    }));
+
+    const rejection = expect(result).rejects.toMatchObject({ reason: "timeout", status: 0 });
+    await vi.advanceTimersByTimeAsync(26);
+    await rejection;
+    expect((request.mock.calls[0]?.[1] as RequestInit).signal?.aborted).toBe(true);
+    vi.useRealTimers();
+  });
+
+  it("maps caller cancellation separately from unknown network completion", async () => {
+    const controller = new AbortController();
+    const request = vi.fn((_input: RequestInfo | URL, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+      }));
+    const client = createDocumentSessionClient(request);
+    const result = client.applyCollaborativeProposal("proposal_1", {
+      commandId: "command-abort",
+      mode: "replace",
+      observedHeadSeq: 7,
+    }, {
+      expectedDocumentId: "doc_1",
+      expectedGeneration: 2,
+      signal: controller.signal,
+    });
+
+    controller.abort();
+
+    await expect(result).rejects.toMatchObject({ reason: "aborted", status: 0 });
+  });
+
+  it("fails closed when a collaborative Proposal response omits its durable position", async () => {
+    const request = vi.fn().mockResolvedValue(jsonResponse({
+      change,
+      document: serverDocument,
+      proposal: {
+        appliedMode: "replace",
+        command: null,
+        defaultApplyMode: "replace",
+        documentId: "doc_1",
+        explanation: "Clearer",
+        id: "proposal_1",
+        occurrenceIndex: null,
+        replacementText: "new",
+        source: "review",
+        status: "accepted",
+        targetFrom: null,
+        targetText: "old",
+        targetTo: null,
+      },
+      replayed: false,
+    }));
+    const client = createDocumentSessionClient(request);
+
+    await expect(client.applyCollaborativeProposal("proposal_1", {
+      commandId: "command-1",
+      mode: "replace",
+      observedHeadSeq: 7,
+    }, {
+      expectedDocumentId: "doc_1",
+      expectedGeneration: 2,
+    })).rejects.toBeInstanceOf(DocumentSessionRequestError);
   });
 
   it.each([
@@ -259,6 +817,139 @@ describe("document session client", () => {
     });
   });
 
+  it("accepts discriminated legacy and collaborative history items", async () => {
+    const legacyItem = {
+      ...change,
+      mode: "legacy",
+      proposals: [{
+        id: "proposal_1",
+        targetText: "old",
+        replacementText: "new",
+        appliedMode: "replace",
+        ordinal: 0,
+      }],
+    };
+    const collaborationBase: Partial<typeof change> = { ...change };
+    delete collaborationBase.afterRevision;
+    const collaborationItem = {
+      ...collaborationBase,
+      canUndo: true,
+      id: "change_2",
+      mode: "collaboration",
+      proposals: [],
+      resultingHeadSeq: 9,
+    };
+    const client = createDocumentSessionClient(vi.fn().mockResolvedValue(jsonResponse({
+      changes: [collaborationItem, legacyItem],
+      nextCursor: null,
+    })));
+
+    await expect(client.listChanges("doc_1")).resolves.toEqual({
+      changes: [collaborationItem, legacyItem],
+      nextCursor: null,
+    });
+  });
+
+  it("rejects a collaborative history item without its undo capability fields", async () => {
+    const malformedItem = {
+      ...change,
+      mode: "collaboration",
+      proposals: [],
+    };
+    const client = createDocumentSessionClient(vi.fn().mockResolvedValue(jsonResponse({
+      changes: [malformedItem],
+      nextCursor: null,
+    })));
+
+    await expect(client.listChanges("doc_1")).rejects.toMatchObject({
+      name: "DocumentSessionRequestError",
+    });
+  });
+
+  it("sends only the semantic collaborative undo command and validates the undone change", async () => {
+    const pendingProposal = {
+      appliedMode: null,
+      command: null,
+      defaultApplyMode: "replace",
+      documentId: "doc_1",
+      explanation: "Clearer",
+      id: "proposal_1",
+      occurrenceIndex: null,
+      replacementText: "new",
+      source: "review",
+      status: "pending",
+      targetFrom: null,
+      targetText: "old",
+      targetTo: null,
+    };
+    const request = vi.fn().mockResolvedValue(jsonResponse({
+      change: { ...change, undoneAt: "2026-01-02T00:00:00.000Z" },
+      collaboration: { generation: 2, headSeq: 9 },
+      document: serverDocument,
+      proposals: [pendingProposal],
+      replayed: false,
+    }));
+    const client = createDocumentSessionClient(request);
+
+    await expect(client.undoCollaborativeChange("change_1", {
+      commandId: "undo-command-1",
+      observedHeadSeq: 8,
+    }, {
+      expectedDocumentId: "doc_1",
+      expectedGeneration: 2,
+    })).resolves.toMatchObject({
+      change: { id: "change_1", undoneAt: "2026-01-02T00:00:00.000Z" },
+      collaboration: { generation: 2, headSeq: 9 },
+      proposals: [{ id: "proposal_1", status: "pending" }],
+      replayed: false,
+    });
+    expect(request).toHaveBeenCalledWith(
+      "/api/document-changes/change_1/undo",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(JSON.parse(String(request.mock.calls[0]?.[1]?.body))).toEqual({
+      commandId: "undo-command-1",
+      observedHeadSeq: 8,
+    });
+  });
+
+  it("maps bounded collaborative undo failures onto stable typed reasons", async () => {
+    const client = createDocumentSessionClient(vi.fn().mockResolvedValue(jsonResponse({
+      error: "Document change undo conflict",
+      reason: "undo_conflict",
+    }, 409)));
+
+    await expect(client.undoCollaborativeChange("change_1", {
+      commandId: "undo-command-2",
+      observedHeadSeq: 8,
+    }, {
+      expectedDocumentId: "doc_1",
+      expectedGeneration: 2,
+    })).rejects.toMatchObject({
+      name: "DocumentCollaborativeProposalRequestError",
+      reason: "undo_conflict",
+      status: 409,
+    });
+  });
+
+  it("rejects a collaborative undo response whose change was not actually undone", async () => {
+    const client = createDocumentSessionClient(vi.fn().mockResolvedValue(jsonResponse({
+      change,
+      collaboration: { generation: 2, headSeq: 9 },
+      document: serverDocument,
+      proposals: [],
+      replayed: false,
+    })));
+
+    await expect(client.undoCollaborativeChange("change_1", {
+      commandId: "undo-command-3",
+      observedHeadSeq: 8,
+    }, {
+      expectedDocumentId: "doc_1",
+      expectedGeneration: 2,
+    })).rejects.toMatchObject({ reason: "malformed_response" });
+  });
+
   it("loads paginated durable history and creates a full draft", async () => {
     const historyChange = {
       ...change,
@@ -294,7 +985,11 @@ describe("document session client", () => {
     expect(request).toHaveBeenNthCalledWith(2, "/api/documents", expect.objectContaining({
       method: "POST",
       headers: expect.objectContaining({ "Idempotency-Key": "recovery-key-123456" }),
-      body: JSON.stringify(draft),
+      body: JSON.stringify({
+        title: draft.title,
+        contentJson: draft.contentJson,
+        metadataJson: draft.metadataJson,
+      }),
     }));
   });
 });

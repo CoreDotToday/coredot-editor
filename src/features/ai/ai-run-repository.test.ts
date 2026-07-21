@@ -111,8 +111,70 @@ async function createIsolatedAiRunDb() {
       FOREIGN KEY (workspace_id, document_id) REFERENCES documents(workspace_id, id) ON DELETE CASCADE,
       FOREIGN KEY (workspace_id, ai_run_id, document_id)
         REFERENCES ai_runs(workspace_id, id, document_id) ON DELETE CASCADE,
+      UNIQUE(workspace_id, id, document_id),
       UNIQUE(workspace_id, ai_run_id, result_ordinal),
       CONSTRAINT "no_bad_targets" CHECK(target_text <> 'bad')
+    )
+  `);
+  await db.run(sql`
+    CREATE TABLE collaboration_documents (
+      workspace_id text NOT NULL,
+      document_id text NOT NULL,
+      generation integer NOT NULL,
+      is_current integer DEFAULT true NOT NULL,
+      schema_version integer NOT NULL,
+      schema_fingerprint text NOT NULL,
+      checkpoint_blob blob NOT NULL,
+      checkpoint_checksum text NOT NULL,
+      head_seq integer DEFAULT 0 NOT NULL,
+      checkpoint_seq integer DEFAULT 0 NOT NULL,
+      projected_seq integer DEFAULT 0 NOT NULL,
+      last_checkpoint_at integer NOT NULL,
+      created_at integer NOT NULL,
+      updated_at integer NOT NULL,
+      PRIMARY KEY(workspace_id, document_id, generation),
+      FOREIGN KEY(workspace_id, document_id) REFERENCES documents(workspace_id, id) ON DELETE CASCADE
+    )
+  `);
+  await db.run(sql`
+    CREATE TABLE collaboration_ai_run_snapshots (
+      workspace_id text NOT NULL,
+      ai_run_id text NOT NULL,
+      document_id text NOT NULL,
+      generation integer NOT NULL,
+      head_seq integer NOT NULL,
+      state_vector blob NOT NULL,
+      schema_fingerprint text NOT NULL,
+      content_hash text NOT NULL,
+      created_at integer NOT NULL,
+      PRIMARY KEY(workspace_id, ai_run_id),
+      FOREIGN KEY(workspace_id, document_id, generation)
+        REFERENCES collaboration_documents(workspace_id, document_id, generation) ON DELETE CASCADE,
+      FOREIGN KEY(workspace_id, ai_run_id, document_id)
+        REFERENCES ai_runs(workspace_id, id, document_id) ON DELETE CASCADE
+    )
+  `);
+  await db.run(sql`
+    CREATE TABLE collaboration_proposal_anchors (
+      workspace_id text NOT NULL,
+      proposal_id text NOT NULL,
+      document_id text NOT NULL,
+      generation integer NOT NULL,
+      schema_fingerprint text NOT NULL,
+      base_head_seq integer NOT NULL,
+      base_state_vector blob NOT NULL,
+      start_relative blob NOT NULL,
+      start_assoc integer NOT NULL,
+      end_relative blob NOT NULL,
+      end_assoc integer NOT NULL,
+      target_hash text NOT NULL,
+      target_preview text NOT NULL,
+      created_at integer NOT NULL,
+      PRIMARY KEY(workspace_id, proposal_id),
+      FOREIGN KEY(workspace_id, document_id, generation)
+        REFERENCES collaboration_documents(workspace_id, document_id, generation) ON DELETE CASCADE,
+      FOREIGN KEY(workspace_id, proposal_id, document_id)
+        REFERENCES ai_proposals(workspace_id, id, document_id) ON DELETE CASCADE
     )
   `);
   await db.run(sql`
@@ -195,7 +257,211 @@ async function createIsolatedAiRunDb() {
   return db;
 }
 
+async function seedCollaborationDocument(
+  db: Awaited<ReturnType<typeof createIsolatedAiRunDb>>,
+) {
+  const now = new Date("2026-01-01T00:00:00.000Z");
+  await db.insert(schema.collaborationDocuments).values({
+    checkpointBlob: Buffer.from([1]),
+    checkpointChecksum: "c".repeat(64),
+    checkpointSeq: 0,
+    createdAt: now,
+    documentId: "doc_1",
+    generation: 1,
+    headSeq: 4,
+    isCurrent: true,
+    lastCheckpointAt: now,
+    projectedSeq: 4,
+    schemaFingerprint: "a".repeat(64),
+    schemaVersion: 1,
+    updatedAt: now,
+    workspaceId: workspaceA.workspaceId,
+  });
+}
+
 describe("AI run repository", () => {
+  it("atomically fixes a collaborative run snapshot and proposal anchors", async () => {
+    const db = await createIsolatedAiRunDb();
+    await seedCollaborationDocument(db);
+    const repository = createAiRunRepository(db);
+    const collaborationSnapshot = {
+      contentHash: "b".repeat(64),
+      documentId: "doc_1",
+      generation: 1,
+      headSeq: 4,
+      schemaFingerprint: "a".repeat(64),
+      stateVector: new Uint8Array([0]),
+    };
+    const input = {
+      collaborationSnapshot,
+      commandType: "document_review" as const,
+      documentId: "doc_1",
+      idempotencyKey: "collaboration-run",
+      inputSummaryJson: {},
+      model: "stub-editor",
+      operationFingerprint: "collaboration-fingerprint",
+      promptTemplateId: "tpl_1",
+      provider: "stub",
+    };
+    const claim = await repository.claimAiRun(workspaceA, input);
+    if (claim.kind !== "claimed" || !claim.run.executionToken) throw new Error("Expected claim");
+    const anchor = {
+      baseHeadSeq: 4,
+      baseStateVector: new Uint8Array([0]),
+      endAssoc: 1 as const,
+      endRelative: new Uint8Array([2]),
+      generation: 1,
+      schemaFingerprint: "a".repeat(64),
+      startAssoc: -1 as const,
+      startRelative: new Uint8Array([1]),
+      targetHash: "d".repeat(64),
+      targetPreview: "target",
+    };
+
+    const finalized = await repository.completeAiRunWithProposals(
+      workspaceA,
+      claim.run.id,
+      claim.run.executionToken,
+      "review",
+      [{
+        anchor,
+        documentId: "doc_1",
+        explanation: "Reason",
+        replacementText: "replacement",
+        targetText: "target",
+      }],
+    );
+    const stored = await repository.getAiRunByIdempotencyKey(workspaceA, input.idempotencyKey);
+    const changedSnapshot = await repository.claimAiRun(workspaceA, {
+      ...input,
+      collaborationSnapshot: { ...collaborationSnapshot, headSeq: 5 },
+    });
+
+    expect(finalized?.proposals).toHaveLength(1);
+    expect(stored).toMatchObject({
+      collaborationSnapshot: { contentHash: collaborationSnapshot.contentHash, headSeq: 4 },
+      proposalAnchors: [{ proposalId: finalized!.proposals[0]!.id, targetPreview: "target" }],
+      run: { status: "completed" },
+    });
+    expect(changedSnapshot).toEqual({ kind: "conflict" });
+    await expect(db.select().from(schema.collaborationAiRunSnapshots)).resolves.toHaveLength(1);
+    await expect(db.select().from(schema.collaborationProposalAnchors)).resolves.toHaveLength(1);
+  });
+
+  it("fails closed when snapshot and anchor presence do not match", async () => {
+    const db = await createIsolatedAiRunDb();
+    await seedCollaborationDocument(db);
+    const repository = createAiRunRepository(db);
+    const snapshotInput = {
+      collaborationSnapshot: {
+        contentHash: "b".repeat(64),
+        documentId: "doc_1",
+        generation: 1,
+        headSeq: 4,
+        schemaFingerprint: "a".repeat(64),
+        stateVector: new Uint8Array([0]),
+      },
+      commandType: "document_review" as const,
+      documentId: "doc_1",
+      idempotencyKey: "missing-anchor",
+      inputSummaryJson: {},
+      model: "stub-editor",
+      operationFingerprint: "fingerprint",
+      promptTemplateId: "tpl_1",
+      provider: "stub",
+    };
+    const claim = await repository.claimAiRun(workspaceA, snapshotInput);
+    if (claim.kind !== "claimed" || !claim.run.executionToken) throw new Error("Expected claim");
+
+    await expect(repository.completeAiRunWithProposals(
+      workspaceA,
+      claim.run.id,
+      claim.run.executionToken,
+      "review",
+      [{ documentId: "doc_1", explanation: "x", replacementText: "y", targetText: "x" }],
+    )).rejects.toThrow("anchor");
+    expect((await repository.getAiRunByIdempotencyKey(workspaceA, snapshotInput.idempotencyKey))?.run.status)
+      .toBe("pending");
+
+    const legacy = await repository.createAiRun(workspaceB, {
+      commandType: "document_review",
+      documentId: "doc_b",
+      inputSummaryJson: {},
+      model: "stub",
+      promptTemplateId: "tpl_b",
+      provider: "stub",
+    });
+    await expect(repository.completeAiRunWithProposals(
+      workspaceB,
+      legacy.id,
+      legacy.executionToken!,
+      "review",
+      [{
+        anchor: {
+          baseHeadSeq: 4,
+          baseStateVector: new Uint8Array([0]),
+          endAssoc: 1,
+          endRelative: new Uint8Array([2]),
+          generation: 1,
+          schemaFingerprint: "a".repeat(64),
+          startAssoc: -1,
+          startRelative: new Uint8Array([1]),
+          targetHash: "d".repeat(64),
+          targetPreview: "x",
+        },
+        documentId: "doc_b",
+        explanation: "x",
+        replacementText: "y",
+        targetText: "x",
+      }],
+    )).rejects.toThrow("anchor");
+  });
+
+  it("fences in-progress and failed retries to their fixed collaborative snapshot", async () => {
+    const db = await createIsolatedAiRunDb();
+    await seedCollaborationDocument(db);
+    const repository = createAiRunRepository(db);
+    const input = {
+      collaborationSnapshot: {
+        contentHash: "b".repeat(64),
+        documentId: "doc_1",
+        generation: 1,
+        headSeq: 4,
+        schemaFingerprint: "a".repeat(64),
+        stateVector: new Uint8Array([0]),
+      },
+      commandType: "selection_rewrite" as const,
+      documentId: "doc_1",
+      idempotencyKey: "snapshot-retry-fence",
+      inputSummaryJson: {},
+      model: "stub",
+      operationFingerprint: "same-incoming-barrier",
+      promptTemplateId: "tpl_1",
+      provider: "stub",
+    };
+    const claimed = await repository.claimAiRun(workspaceA, input);
+    if (claimed.kind !== "claimed" || !claimed.run.executionToken) throw new Error("Expected claim");
+
+    await expect(repository.claimAiRun(workspaceA, input)).resolves.toMatchObject({
+      kind: "in_progress",
+      run: { id: claimed.run.id },
+    });
+    await expect(repository.claimAiRun(workspaceA, {
+      ...input,
+      collaborationSnapshot: { ...input.collaborationSnapshot, contentHash: "e".repeat(64) },
+    })).resolves.toEqual({ kind: "conflict" });
+
+    await repository.failAiRun(workspaceA, claimed.run.id, claimed.run.executionToken, "retry");
+    await expect(repository.claimAiRun(workspaceA, {
+      ...input,
+      collaborationSnapshot: { ...input.collaborationSnapshot, stateVector: new Uint8Array([1]) },
+    })).resolves.toEqual({ kind: "conflict" });
+    await expect(repository.claimAiRun(workspaceA, input)).resolves.toMatchObject({
+      kind: "claimed",
+      run: { id: claimed.run.id, status: "pending" },
+    });
+  });
+
   it("returns stable bounded AI run summaries without input or output payloads", async () => {
     const db = await createIsolatedAiRunDb();
     const repository = createAiRunRepository(db);
@@ -363,6 +629,66 @@ describe("AI run repository", () => {
     expect(mismatch).toEqual({ kind: "conflict" });
     await expect(repository.listAiRunsForDocument(workspaceA, "doc_1")).resolves.toHaveLength(1);
     await expect(repository.listAiRunsForDocument(workspaceB, "doc_b")).resolves.toHaveLength(1);
+  });
+
+  it("rejects a new legacy claim after collaboration is initialized", async () => {
+    const db = await createIsolatedAiRunDb();
+    const repository = createAiRunRepository(db);
+    await seedCollaborationDocument(db);
+
+    await expect(repository.claimAiRun(workspaceA, {
+      commandType: "document_review",
+      documentId: "doc_1",
+      idempotencyKey: "legacy-after-initialize",
+      inputSummaryJson: {},
+      model: "stub",
+      operationFingerprint: "legacy-after-initialize",
+      promptTemplateId: "tpl_1",
+      provider: "stub",
+    })).rejects.toMatchObject({ name: "AiRunCollaborationFenceError" });
+    await expect(db.select().from(schema.aiRuns)).resolves.toEqual([]);
+  });
+
+  it("rolls back an anchorless legacy finalization when collaboration initializes after claim", async () => {
+    const db = await createIsolatedAiRunDb();
+    const repository = createAiRunRepository(db);
+    const input = {
+      commandType: "document_review" as const,
+      documentId: "doc_1",
+      idempotencyKey: "legacy-initialize-race",
+      inputSummaryJson: {},
+      model: "stub",
+      operationFingerprint: "legacy-initialize-race",
+      promptTemplateId: "tpl_1",
+      provider: "stub",
+    };
+    const claimed = await repository.claimAiRun(workspaceA, input);
+    if (claimed.kind !== "claimed" || !claimed.run.executionToken) throw new Error("Expected legacy claim");
+    await seedCollaborationDocument(db);
+
+    await expect(repository.completeAiRunWithProposals(
+      workspaceA,
+      claimed.run.id,
+      claimed.run.executionToken,
+      "stale review",
+      [{
+        documentId: "doc_1",
+        explanation: "Must not persist",
+        replacementText: "replacement",
+        targetText: "Text",
+      }],
+    )).rejects.toMatchObject({ name: "AiRunCollaborationFenceError" });
+    await expect(db.select().from(schema.aiProposals)).resolves.toEqual([]);
+    await expect(repository.getAiRunByIdempotencyKey(workspaceA, input.idempotencyKey)).resolves.toMatchObject({
+      run: { outputText: "", status: "pending" },
+    });
+    await expect(repository.failAiRun(
+      workspaceA,
+      claimed.run.id,
+      claimed.run.executionToken,
+      "Collaboration state changed",
+    )).resolves.toMatchObject({ executionToken: null, status: "failed" });
+    await expect(db.select().from(schema.aiProposals)).resolves.toEqual([]);
   });
 
   it("allows exactly one concurrent retrier to atomically reclaim a failed key", async () => {

@@ -8,6 +8,7 @@ import { listProposalSummariesPage } from "@/features/proposals/proposal-reposit
 import { listActivePromptTemplates } from "@/features/templates/template-repository";
 import { getProtectedPageContext } from "@/features/auth/route-context";
 import { resolveActiveProjectProfile } from "@/features/projects/active-project-profile";
+import { resolveCollaborationClientConfiguration } from "@/features/collaboration/client-configuration";
 
 type DocumentPageProps = {
   params: Promise<{ id: string }>;
@@ -24,7 +25,14 @@ export default async function DocumentPage({ params }: DocumentPageProps) {
   }
 
   const conversationStorageMode = resolveConversationStorageMode(process.env.CONVERSATION_STORAGE);
-  const [templates, aiRunPage, proposalPage, referenceDocuments, conversationResult] = await Promise.all([
+  const [
+    templates,
+    aiRunPage,
+    proposalPage,
+    referenceDocuments,
+    conversationResult,
+    collaboration,
+  ] = await Promise.all([
     listActivePromptTemplates(context),
     listAiRunSummariesPage(context, document.id, { limit: 20 }),
     listProposalSummariesPage(context, document.id, { limit: 20 }),
@@ -35,6 +43,7 @@ export default async function DocumentPage({ params }: DocumentPageProps) {
           reason: "unavailable" as const,
         }))
       : Promise.resolve(null),
+    resolveCollaborationClientConfiguration(context, document.id),
   ]);
   const defaultTemplateId = projectProfile.defaultTemplateIds
     .map((builtinKey) => templates.find((template) => template.builtinKey === builtinKey)?.id)
@@ -49,6 +58,7 @@ export default async function DocumentPage({ params }: DocumentPageProps) {
         status: run.status,
       }))}
       aiRunsNextCursor={aiRunPage.nextCursor}
+      collaboration={collaboration}
       document={{
         id: document.id,
         title: document.title,

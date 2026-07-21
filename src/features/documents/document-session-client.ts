@@ -4,6 +4,7 @@ import type {
   DocumentReadiness,
   TiptapJson,
 } from "@/db/schema";
+import { z } from "zod";
 import type { ProposalApplyMode } from "@/features/proposals/proposal-transaction";
 import type { ProjectProfileViolation } from "@/features/projects/project-profile";
 
@@ -13,6 +14,55 @@ export type DocumentSessionDraft = {
   metadataJson: DocumentMetadata;
   readiness: DocumentReadiness;
 };
+
+export type DocumentSessionSaveDraft = Omit<DocumentSessionDraft, "readiness">;
+
+export type DocumentWorkflowState = Readonly<{
+  collaboration: Readonly<{
+    generation: number;
+    headSeq: number;
+  }> | null;
+  documentId: string;
+  readiness: DocumentReadiness;
+  revision: number;
+}>;
+
+export type DocumentWorkflowCommand =
+  | {
+      expectedReadiness: DocumentReadiness;
+      nextReadiness: Exclude<DocumentReadiness, "approved">;
+    }
+  | {
+      expectedReadiness: "ready";
+      nextReadiness: "approved";
+      observedHeadSeq: number;
+    };
+
+export type DocumentWorkflowResult = Readonly<{
+  workflow: DocumentWorkflowState;
+}>;
+
+export type DocumentWorkflowErrorReason =
+  | "aborted"
+  | "collaboration_unavailable"
+  | "expected_readiness_conflict"
+  | "forbidden"
+  | "head_conflict"
+  | "invalid_project_profile"
+  | "legacy_approval_unsupported"
+  | "malformed_response"
+  | "network_error"
+  | "not_found"
+  | "timeout"
+  | "unknown"
+  | "workflow_unavailable";
+
+export type DocumentWorkflowRequestOptions = Readonly<{
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}>;
+
+export const DOCUMENT_WORKFLOW_CLIENT_TIMEOUT_MS = 15_000;
 
 export type DocumentSessionDocument = DocumentSessionDraft & {
   id: string;
@@ -51,15 +101,31 @@ export type DocumentSessionChangeResponse = {
   proposals: DocumentSessionProposal[];
 };
 
-export type DocumentSessionHistoryChange = DocumentSessionChange & {
-  proposals: Array<{
-    id: string;
-    targetText: string;
-    replacementText: string;
-    appliedMode: ProposalApplyMode;
-    ordinal: number;
-  }>;
+export type DocumentSessionCollaborativeChangeResponse = DocumentSessionChangeResponse & {
+  collaboration: { generation: number; headSeq: number };
+  replayed: boolean;
 };
+
+export type DocumentSessionHistoryProposal = {
+  id: string;
+  targetText: string;
+  replacementText: string;
+  appliedMode: ProposalApplyMode;
+  ordinal: number;
+};
+
+/**
+ * Legacy history items undo by document revision; collaborative items undo by
+ * durable command with a server-owned `canUndo`. Items without a `mode` come
+ * from pre-collaboration servers and are treated as legacy.
+ */
+export type DocumentSessionHistoryChange =
+  & Omit<DocumentSessionChange, "afterRevision">
+  & { proposals: DocumentSessionHistoryProposal[] }
+  & (
+    | { afterRevision: number; mode?: "legacy" }
+    | { afterRevision?: number; canUndo: boolean; mode: "collaboration"; resultingHeadSeq: number }
+  );
 
 export type DocumentSaveResult =
   | { kind: "saved"; document: DocumentSessionDocument }
@@ -73,15 +139,57 @@ export type DocumentSaveResult =
 
 export type ProposalApplyPayload = {
   appliedMode: ProposalApplyMode;
-  document: DocumentSessionDraft & { id: string };
+  document: DocumentSessionSaveDraft & { id: string };
   expectedRevision: number;
 };
 
 export type ProposalBatchApplyPayload = {
-  document: DocumentSessionDraft & { id: string };
+  document: DocumentSessionSaveDraft & { id: string };
   expectedRevision: number;
   proposals: Array<{ appliedMode: ProposalApplyMode; id: string }>;
 };
+
+export type CollaborativeProposalApplyPayload = {
+  commandId: string;
+  mode: ProposalApplyMode;
+  observedHeadSeq: number;
+};
+
+export type CollaborativeProposalBatchApplyPayload = {
+  commandId: string;
+  items: Array<{ mode: ProposalApplyMode; proposalId: string }>;
+  observedHeadSeq: number;
+};
+
+export type CollaborativeProposalRequestOptions = Readonly<{
+  expectedDocumentId: string;
+  expectedGeneration: number;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}>;
+
+export type CollaborativeProposalErrorReason =
+  | "aborted"
+  | "idempotency_conflict"
+  | "invalid_request"
+  | "malformed_response"
+  | "network_error"
+  | "not_found"
+  | "proposal_overlap_conflict"
+  | "proposal_status_conflict"
+  | "proposal_target_conflict"
+  | "timeout"
+  | "unavailable"
+  | "unknown";
+
+export type CollaborativeUndoErrorReason = CollaborativeProposalErrorReason | "undo_conflict";
+
+export type CollaborativeUndoPayload = {
+  commandId: string;
+  observedHeadSeq: number;
+};
+
+export const COLLABORATIVE_PROPOSAL_CLIENT_TIMEOUT_MS = 15_000;
 
 type RequestFunction = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
@@ -116,6 +224,135 @@ export class DocumentSessionInvalidProfileError extends DocumentSessionRequestEr
     this.name = "DocumentSessionInvalidProfileError";
   }
 }
+
+export class DocumentCollaborativeProposalRequestError extends DocumentSessionRequestError {
+  constructor(
+    status: number,
+    body: Record<string, unknown>,
+    readonly reason: CollaborativeUndoErrorReason,
+  ) {
+    super(status, body);
+    this.name = "DocumentCollaborativeProposalRequestError";
+  }
+}
+
+export class DocumentWorkflowRequestError extends DocumentSessionRequestError {
+  constructor(
+    status: number,
+    body: Record<string, unknown>,
+    readonly reason: DocumentWorkflowErrorReason,
+    readonly workflow: DocumentWorkflowState | null = null,
+    readonly violation: ProjectProfileViolation | null = null,
+  ) {
+    super(status, body);
+    this.name = "DocumentWorkflowRequestError";
+  }
+}
+
+class DocumentWorkflowTimeoutError extends Error {
+  constructor() {
+    super("Document workflow request timed out");
+    this.name = "DocumentWorkflowTimeoutError";
+  }
+}
+
+const documentReadinessSchema = z.enum(["draft", "needs_review", "ready", "approved"]);
+const proposalApplyModeSchema = z.enum(["replace", "insert_below"]);
+const tiptapJsonSchema = z.object({
+  content: z.array(z.unknown()).optional(),
+  type: z.literal("doc"),
+}).strict();
+const documentMetadataValueSchema = z.union([
+  z.boolean(),
+  z.number(),
+  z.string(),
+  z.array(z.string()),
+  z.null(),
+]);
+const collaborativeDocumentSchema = z.object({
+  contentJson: tiptapJsonSchema,
+  createdAt: z.string().optional(),
+  id: z.string().min(1),
+  metadataJson: z.record(z.string(), documentMetadataValueSchema),
+  plainText: z.string().optional(),
+  readiness: documentReadinessSchema,
+  revision: z.number().int().nonnegative(),
+  status: z.enum(["draft", "archived"]).optional(),
+  title: z.string(),
+  updatedAt: z.string().optional(),
+  workspaceId: z.string().optional(),
+}).strict();
+const collaborativeChangeSchema = z.object({
+  afterRevision: z.number().int().nonnegative(),
+  batchId: z.string().nullable(),
+  createdAt: z.string(),
+  documentId: z.string().min(1),
+  id: z.string().min(1),
+  kind: z.enum(["single", "batch"]),
+  undoneAt: z.string().nullable(),
+}).strict();
+const collaborativeProposalSchema = z.object({
+  aiRunId: z.string().optional(),
+  appliedMode: proposalApplyModeSchema.nullable(),
+  command: z.string().nullable(),
+  createdAt: z.string().optional(),
+  defaultApplyMode: proposalApplyModeSchema,
+  documentId: z.string().min(1),
+  explanation: z.string(),
+  id: z.string().min(1),
+  occurrenceIndex: z.number().int().nullable(),
+  replacementText: z.string(),
+  resultOrdinal: z.number().int().nonnegative().nullable().optional(),
+  source: z.enum(["review", "selection"]),
+  status: z.enum(["pending", "accepted", "rejected"]),
+  targetFrom: z.number().int().nullable(),
+  targetText: z.string(),
+  targetTo: z.number().int().nullable(),
+  updatedAt: z.string().optional(),
+  workspaceId: z.string().optional(),
+}).strict();
+const collaborationPositionSchema = z.object({
+  generation: z.number().int().positive(),
+  headSeq: z.number().int().nonnegative(),
+}).strict();
+const collaborativeSingleResponseSchema = z.object({
+  change: collaborativeChangeSchema,
+  collaboration: collaborationPositionSchema,
+  document: collaborativeDocumentSchema,
+  proposal: collaborativeProposalSchema,
+  replayed: z.boolean(),
+}).strict();
+const collaborativeBatchResponseSchema = z.object({
+  change: collaborativeChangeSchema,
+  collaboration: collaborationPositionSchema,
+  document: collaborativeDocumentSchema,
+  proposals: z.array(collaborativeProposalSchema),
+  replayed: z.boolean(),
+}).strict();
+const collaborativeProposalServerReasonSchema = z.enum([
+  "idempotency_conflict",
+  "invalid_request",
+  "not_found",
+  "proposal_overlap_conflict",
+  "proposal_status_conflict",
+  "proposal_target_conflict",
+  "unavailable",
+]);
+const collaborativeProposalErrorBodySchema = z.object({
+  error: z.string(),
+  reason: collaborativeProposalServerReasonSchema,
+}).strict();
+const collaborativeUndoServerReasonSchema = z.enum([
+  "idempotency_conflict",
+  "invalid_request",
+  "not_found",
+  "unavailable",
+  "undo_conflict",
+]);
+const collaborativeUndoErrorBodySchema = z.object({
+  error: z.string(),
+  reason: collaborativeUndoServerReasonSchema,
+}).strict();
 
 export function createDocumentSessionClient(request: RequestFunction = fetch) {
   async function readBody(response: Response): Promise<Record<string, unknown>> {
@@ -162,6 +399,153 @@ export function createDocumentSessionClient(request: RequestFunction = fetch) {
     };
   }
 
+  async function requestCollaborativeChange(
+    url: string,
+    payload: unknown,
+    proposalShape: "single" | "plural",
+    expectedProposals: ReadonlyArray<{ mode: ProposalApplyMode; proposalId: string }>,
+    observedHeadSeq: number,
+    options: CollaborativeProposalRequestOptions,
+  ): Promise<DocumentSessionCollaborativeChangeResponse> {
+    let exchange: { body: Record<string, unknown>; response: Response };
+    try {
+      exchange = await requestWithWorkflowDeadline(request, url, {
+        body: JSON.stringify(payload),
+        headers: { "Content-Type": "application/json" },
+        method: "POST",
+        signal: options.signal,
+      }, async (response) => ({ body: await readBody(response), response }),
+      options.timeoutMs ?? COLLABORATIVE_PROPOSAL_CLIENT_TIMEOUT_MS);
+    } catch (error) {
+      if (error instanceof DocumentWorkflowTimeoutError) {
+        throw new DocumentCollaborativeProposalRequestError(0, {}, "timeout");
+      }
+      if (options.signal?.aborted) {
+        throw new DocumentCollaborativeProposalRequestError(0, {}, "aborted");
+      }
+      throw new DocumentCollaborativeProposalRequestError(0, {}, "network_error");
+    }
+
+    const { body, response } = exchange;
+    if (!response.ok) {
+      const parsedError = collaborativeProposalErrorBodySchema.safeParse(body);
+      throw new DocumentCollaborativeProposalRequestError(
+        response.status,
+        body,
+        parsedError.success ? parsedError.data.reason : "unknown",
+      );
+    }
+
+    const parsed = proposalShape === "single"
+      ? collaborativeSingleResponseSchema.safeParse(body)
+      : collaborativeBatchResponseSchema.safeParse(body);
+    if (!parsed.success) {
+      throw new DocumentCollaborativeProposalRequestError(response.status, body, "malformed_response");
+    }
+    const parsedBody = parsed.data;
+    const proposals = "proposal" in parsedBody ? [parsedBody.proposal] : parsedBody.proposals;
+    const expectedKind = expectedProposals.length === 1 ? "single" : "batch";
+    const expectedBatchIdentity = expectedKind === "batch"
+      ? parsedBody.change.batchId !== null
+      : parsedBody.change.batchId === null;
+    const collaborationPositionIsValid = parsedBody.collaboration.generation === options.expectedGeneration
+      ? parsedBody.collaboration.headSeq >= observedHeadSeq
+      : parsedBody.collaboration.generation === options.expectedGeneration + 1;
+    if (
+      parsedBody.document.id !== options.expectedDocumentId
+      || parsedBody.change.documentId !== options.expectedDocumentId
+      || parsedBody.change.kind !== expectedKind
+      || !expectedBatchIdentity
+      || parsedBody.change.afterRevision !== parsedBody.document.revision
+      || !collaborationPositionIsValid
+      || proposals.length !== expectedProposals.length
+      || proposals.some((proposal, index) => {
+        const expected = expectedProposals[index];
+        return !expected
+          || proposal.id !== expected.proposalId
+          || proposal.status !== "accepted"
+          || proposal.appliedMode !== expected.mode
+          || proposal.documentId !== options.expectedDocumentId;
+      })
+    ) {
+      throw new DocumentCollaborativeProposalRequestError(response.status, body, "malformed_response");
+    }
+
+    return {
+      change: parsedBody.change,
+      collaboration: parsedBody.collaboration,
+      document: parsedBody.document,
+      proposals,
+      replayed: parsedBody.replayed,
+    };
+  }
+
+  async function requestCollaborativeUndo(
+    changeId: string,
+    payload: CollaborativeUndoPayload,
+    options: CollaborativeProposalRequestOptions,
+  ): Promise<DocumentSessionCollaborativeChangeResponse> {
+    const url = `/api/document-changes/${encodeURIComponent(changeId)}/undo`;
+    let exchange: { body: Record<string, unknown>; response: Response };
+    try {
+      exchange = await requestWithWorkflowDeadline(request, url, {
+        body: JSON.stringify(payload),
+        headers: { "Content-Type": "application/json" },
+        method: "POST",
+        signal: options.signal,
+      }, async (response) => ({ body: await readBody(response), response }),
+      options.timeoutMs ?? COLLABORATIVE_PROPOSAL_CLIENT_TIMEOUT_MS);
+    } catch (error) {
+      if (error instanceof DocumentWorkflowTimeoutError) {
+        throw new DocumentCollaborativeProposalRequestError(0, {}, "timeout");
+      }
+      if (options.signal?.aborted) {
+        throw new DocumentCollaborativeProposalRequestError(0, {}, "aborted");
+      }
+      throw new DocumentCollaborativeProposalRequestError(0, {}, "network_error");
+    }
+
+    const { body, response } = exchange;
+    if (!response.ok) {
+      const parsedError = collaborativeUndoErrorBodySchema.safeParse(body);
+      throw new DocumentCollaborativeProposalRequestError(
+        response.status,
+        body,
+        parsedError.success ? parsedError.data.reason : "unknown",
+      );
+    }
+
+    const parsed = collaborativeBatchResponseSchema.safeParse(body);
+    if (!parsed.success) {
+      throw new DocumentCollaborativeProposalRequestError(response.status, body, "malformed_response");
+    }
+    const parsedBody = parsed.data;
+    const collaborationPositionIsValid = parsedBody.collaboration.generation === options.expectedGeneration
+      ? parsedBody.collaboration.headSeq >= payload.observedHeadSeq
+      : parsedBody.collaboration.generation === options.expectedGeneration + 1;
+    if (
+      parsedBody.document.id !== options.expectedDocumentId
+      || parsedBody.change.documentId !== options.expectedDocumentId
+      || parsedBody.change.id !== changeId
+      || parsedBody.change.undoneAt === null
+      || !collaborationPositionIsValid
+      || parsedBody.proposals.some((proposal) =>
+        proposal.status !== "pending"
+        || proposal.appliedMode !== null
+        || proposal.documentId !== options.expectedDocumentId)
+    ) {
+      throw new DocumentCollaborativeProposalRequestError(response.status, body, "malformed_response");
+    }
+
+    return {
+      change: parsedBody.change,
+      collaboration: parsedBody.collaboration,
+      document: parsedBody.document,
+      proposals: parsedBody.proposals,
+      replayed: parsedBody.replayed,
+    };
+  }
+
   return {
     async save(
       documentId: string,
@@ -174,7 +558,12 @@ export function createDocumentSessionClient(request: RequestFunction = fetch) {
           request,
           `/api/documents/${encodeURIComponent(documentId)}`,
           "PUT",
-          { ...localDraft, expectedRevision },
+          {
+            contentJson: localDraft.contentJson,
+            expectedRevision,
+            metadataJson: localDraft.metadataJson,
+            title: localDraft.title,
+          },
         );
       } catch {
         return { kind: "failed", status: null };
@@ -200,13 +589,46 @@ export function createDocumentSessionClient(request: RequestFunction = fetch) {
     applyProposal(proposalId: string, payload: ProposalApplyPayload) {
       return requestChange(
         `/api/proposals/${encodeURIComponent(proposalId)}/apply`,
-        payload,
+        { ...payload, document: legacyWriterDocument(payload.document) },
         "single",
       );
     },
 
     applyProposalBatch(payload: ProposalBatchApplyPayload) {
-      return requestChange("/api/proposals/bulk-apply", payload, "plural");
+      return requestChange(
+        "/api/proposals/bulk-apply",
+        { ...payload, document: legacyWriterDocument(payload.document) },
+        "plural",
+      );
+    },
+
+    applyCollaborativeProposal(
+      proposalId: string,
+      payload: CollaborativeProposalApplyPayload,
+      options: CollaborativeProposalRequestOptions,
+    ) {
+      return requestCollaborativeChange(
+        `/api/proposals/${encodeURIComponent(proposalId)}/apply`,
+        { ...payload, proposalId },
+        "single",
+        [{ mode: payload.mode, proposalId }],
+        payload.observedHeadSeq,
+        options,
+      );
+    },
+
+    applyCollaborativeProposalBatch(
+      payload: CollaborativeProposalBatchApplyPayload,
+      options: CollaborativeProposalRequestOptions,
+    ) {
+      return requestCollaborativeChange(
+        "/api/proposals/bulk-apply",
+        payload,
+        "plural",
+        payload.items,
+        payload.observedHeadSeq,
+        options,
+      );
     },
 
     undoChange(changeId: string, expectedRevision: number) {
@@ -215,6 +637,14 @@ export function createDocumentSessionClient(request: RequestFunction = fetch) {
         { expectedRevision },
         "plural",
       );
+    },
+
+    undoCollaborativeChange(
+      changeId: string,
+      payload: CollaborativeUndoPayload,
+      options: CollaborativeProposalRequestOptions,
+    ) {
+      return requestCollaborativeUndo(changeId, payload, options);
     },
 
     async listChanges(
@@ -241,7 +671,7 @@ export function createDocumentSessionClient(request: RequestFunction = fetch) {
     },
 
     async createFromDraft(
-      draft: DocumentSessionDraft,
+      draft: DocumentSessionSaveDraft,
       creationKey: string,
     ): Promise<{ document: DocumentSessionDocument; replayed: boolean }> {
       const response = await request("/api/documents", {
@@ -250,7 +680,7 @@ export function createDocumentSessionClient(request: RequestFunction = fetch) {
           "Content-Type": "application/json",
           "Idempotency-Key": creationKey,
         },
-        body: JSON.stringify(draft),
+        body: JSON.stringify(legacyWriterDraft(draft)),
       });
       const body = await readBody(response);
       if (
@@ -262,7 +692,133 @@ export function createDocumentSessionClient(request: RequestFunction = fetch) {
       }
       return { document: body.document, replayed: body.replayed };
     },
+
+    async readWorkflow(
+      documentId: string,
+      options: DocumentWorkflowRequestOptions = {},
+    ): Promise<DocumentWorkflowResult> {
+      return requestWorkflow(documentId, "GET", undefined, options);
+    },
+
+    async updateWorkflow(
+      documentId: string,
+      command: DocumentWorkflowCommand,
+      options: DocumentWorkflowRequestOptions = {},
+    ): Promise<DocumentWorkflowResult> {
+      return requestWorkflow(documentId, "POST", command, options);
+    },
   };
+
+  async function requestWorkflow(
+    documentId: string,
+    method: "GET" | "POST",
+    payload: DocumentWorkflowCommand | undefined,
+    options: DocumentWorkflowRequestOptions,
+  ): Promise<DocumentWorkflowResult> {
+    const url = `/api/documents/${encodeURIComponent(documentId)}/workflow`;
+    let exchange: { body: Record<string, unknown>; response: Response };
+    try {
+      exchange = await requestWithWorkflowDeadline(request, url, {
+        ...(payload === undefined ? {} : {
+          body: JSON.stringify(payload),
+          headers: { "Content-Type": "application/json" },
+        }),
+        method,
+        signal: options.signal,
+      }, async (response) => ({ body: await readBody(response), response }),
+      options.timeoutMs ?? DOCUMENT_WORKFLOW_CLIENT_TIMEOUT_MS);
+    } catch (error) {
+      if (error instanceof DocumentWorkflowTimeoutError) {
+        throw new DocumentWorkflowRequestError(0, {}, "timeout");
+      }
+      if (options.signal?.aborted) {
+        throw new DocumentWorkflowRequestError(0, {}, "aborted");
+      }
+      throw new DocumentWorkflowRequestError(0, {}, "network_error");
+    }
+
+    const { body, response } = exchange;
+    const workflow = isDocumentWorkflowState(body.workflow, documentId)
+      ? body.workflow
+      : null;
+    if (response.ok) {
+      if (!workflow) {
+        throw new DocumentWorkflowRequestError(response.status, body, "malformed_response");
+      }
+      return { workflow };
+    }
+
+    const reason = parseWorkflowErrorReason(body.reason);
+    const violation = reason === "invalid_project_profile"
+      ? parseProjectProfileViolation(body.violation)
+      : null;
+    throw new DocumentWorkflowRequestError(response.status, body, reason, workflow, violation);
+  }
+}
+
+function legacyWriterDraft(draft: DocumentSessionSaveDraft): DocumentSessionSaveDraft {
+  return {
+    title: draft.title,
+    contentJson: draft.contentJson,
+    metadataJson: draft.metadataJson,
+  };
+}
+
+function legacyWriterDocument(
+  document: DocumentSessionSaveDraft & { id: string },
+): DocumentSessionSaveDraft & { id: string } {
+  return { id: document.id, ...legacyWriterDraft(document) };
+}
+
+async function requestWithWorkflowDeadline<T>(
+  request: RequestFunction,
+  input: RequestInfo | URL,
+  init: RequestInit,
+  consumeResponse: (response: Response) => Promise<T>,
+  timeoutMs: number,
+): Promise<T> {
+  const controller = new AbortController();
+  const callerSignal = init.signal;
+  let rejectCallerAbort!: (reason: unknown) => void;
+  const callerAbort = new Promise<never>((_resolve, reject) => {
+    rejectCallerAbort = reject;
+  });
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  let didTimeout = false;
+  const handleCallerAbort = () => {
+    const reason = callerSignal?.reason ?? new DOMException("The operation was aborted", "AbortError");
+    controller.abort(reason);
+    rejectCallerAbort(reason);
+  };
+  callerSignal?.addEventListener("abort", handleCallerAbort, { once: true });
+  if (callerSignal?.aborted) handleCallerAbort();
+
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timeoutId = setTimeout(() => {
+      didTimeout = true;
+      const error = new DocumentWorkflowTimeoutError();
+      controller.abort(error);
+      reject(error);
+    }, Math.max(0, timeoutMs));
+  });
+
+  try {
+    const requestAndConsume = (async () => {
+      const response = await request(input, { ...init, signal: controller.signal });
+      return consumeResponse(response);
+    })();
+    return await Promise.race([
+      requestAndConsume,
+      timeout,
+      callerAbort,
+    ]);
+  } catch (error) {
+    if (didTimeout) throw new DocumentWorkflowTimeoutError();
+    throw error;
+  } finally {
+    if (timeoutId !== undefined) clearTimeout(timeoutId);
+    callerSignal?.removeEventListener("abort", handleCallerAbort);
+  }
 }
 
 async function requestJson(
@@ -290,14 +846,62 @@ function isDocumentSessionDocument(value: unknown): value is DocumentSessionDocu
     Number(value.revision) >= 0;
 }
 
+function isDocumentWorkflowState(
+  value: unknown,
+  expectedDocumentId: string,
+): value is DocumentWorkflowState {
+  if (!isRecord(value)) return false;
+  if (
+    value.documentId !== expectedDocumentId ||
+    !isDocumentReadiness(value.readiness) ||
+    !isNonNegativeSafeInteger(value.revision)
+  ) {
+    return false;
+  }
+  if (value.collaboration === null) return true;
+  return isRecord(value.collaboration) &&
+    isPositiveSafeInteger(value.collaboration.generation) &&
+    isNonNegativeSafeInteger(value.collaboration.headSeq);
+}
+
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isPositiveSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
+function parseWorkflowErrorReason(value: unknown): DocumentWorkflowErrorReason {
+  // The wire token for temporary collaboration persistence unavailability is
+  // the shared "unavailable" (same as the proposal/undo command routes); it
+  // maps onto the client's workflow-scoped reason vocabulary.
+  if (value === "unavailable") return "workflow_unavailable";
+  return value === "collaboration_unavailable" ||
+    value === "expected_readiness_conflict" ||
+    value === "forbidden" ||
+    value === "head_conflict" ||
+    value === "invalid_project_profile" ||
+    value === "legacy_approval_unsupported" ||
+    value === "not_found" ||
+    value === "workflow_unavailable"
+    ? value
+    : "unknown";
+}
+
 function isDocumentSessionChange(value: unknown): value is DocumentSessionChange {
+  return isDocumentSessionChangeBase(value) &&
+    isNonNegativeSafeInteger((value as Record<string, unknown>).afterRevision);
+}
+
+function isDocumentSessionChangeBase(
+  value: unknown,
+): value is Omit<DocumentSessionChange, "afterRevision"> {
   if (!isRecord(value)) return false;
   return typeof value.id === "string" &&
     typeof value.documentId === "string" &&
     (value.kind === "single" || value.kind === "batch") &&
     (value.batchId === null || typeof value.batchId === "string") &&
-    Number.isSafeInteger(value.afterRevision) &&
-    Number(value.afterRevision) >= 0 &&
     typeof value.createdAt === "string" &&
     (value.undoneAt === null || typeof value.undoneAt === "string");
 }
@@ -321,7 +925,22 @@ function isDocumentSessionProposal(value: unknown): value is DocumentSessionProp
 function isDocumentSessionHistoryChange(value: unknown): value is DocumentSessionHistoryChange {
   if (!isRecord(value)) return false;
   const proposals = value.proposals;
-  if (!Array.isArray(proposals) || !isDocumentSessionChange(value)) return false;
+  if (!Array.isArray(proposals) || !isDocumentSessionChangeBase(value)) return false;
+  const record = value as Record<string, unknown>;
+  if (record.mode === "collaboration") {
+    if (
+      typeof record.canUndo !== "boolean" ||
+      !isNonNegativeSafeInteger(record.resultingHeadSeq) ||
+      (record.afterRevision !== undefined && !isNonNegativeSafeInteger(record.afterRevision))
+    ) {
+      return false;
+    }
+  } else if (
+    (record.mode !== undefined && record.mode !== "legacy") ||
+    !isNonNegativeSafeInteger(record.afterRevision)
+  ) {
+    return false;
+  }
   return proposals.every((proposal) =>
     isRecord(proposal) &&
     typeof proposal.id === "string" &&

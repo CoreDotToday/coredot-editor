@@ -105,6 +105,53 @@ describe("request context", () => {
     });
   });
 
+  it("reads a valid signed test identity header through the injected request-header seam", async () => {
+    const { createSignedTestIdentityHeader, TEST_IDENTITY_HEADER } = await import("./test-request-context");
+    const secret = "test-identity-secret-that-is-long-enough-123456";
+    const now = new Date();
+    const header = createSignedTestIdentityHeader({
+      expiresAt: new Date(now.getTime() + 30_000),
+      principalId: "test:principal:alice",
+      workspaceId: "test:workspace:shared",
+    }, secret);
+    const resolve = createRequestContextResolver({
+      env: {
+        AUTH_MODE: "test",
+        NODE_ENV: "test",
+        TEST_IDENTITY_SIGNING_SECRET: secret,
+      },
+      environment: "test",
+      readTestRequestHeaders: async () => new Headers({ [TEST_IDENTITY_HEADER]: header }),
+    });
+
+    await expect(resolve()).resolves.toMatchObject({
+      principalId: "test:principal:alice",
+      workspaceId: "test:workspace:shared",
+    });
+  });
+
+  it("cannot bypass the effective production environment with a signed test header", async () => {
+    const { createSignedTestIdentityHeader, TEST_IDENTITY_HEADER } = await import("./test-request-context");
+    const secret = "test-identity-secret-that-is-long-enough-123456";
+    const header = createSignedTestIdentityHeader({
+      expiresAt: new Date(Date.now() + 30_000),
+      principalId: "test:principal:alice",
+      workspaceId: "test:workspace:shared",
+    }, secret);
+    const resolve = createRequestContextResolver({
+      env: {
+        AUTH_MODE: "test",
+        NODE_ENV: "development",
+        TEST_IDENTITY_SIGNING_SECRET: secret,
+      },
+      environment: "production",
+      mode: "test",
+      readTestRequestHeaders: async () => new Headers({ [TEST_IDENTITY_HEADER]: header }),
+    });
+
+    await expect(resolve()).rejects.toThrow("Test authentication is disabled in production");
+  });
+
   it("fails closed in production when Clerk credentials are absent", async () => {
     const resolve = createRequestContextResolver({
       env: { NODE_ENV: "production" },

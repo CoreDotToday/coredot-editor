@@ -1,9 +1,11 @@
-import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, lt, notExists, or, sql } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { db } from "@/db/client";
 import { withSerializedDocumentWrite } from "@/db/document-write-queue";
 import {
   aiProposals,
+  collaborationDocumentChanges,
+  collaborationDocuments,
   documentChangeProposals,
   documentChanges,
   documents,
@@ -45,11 +47,10 @@ type DraftValidationLimit =
   | "documentNodes"
   | "malformed"
   | "metadata"
-  | "readiness"
   | "snapshotBytes"
   | "title";
 
-export type DocumentChangeDraft = DocumentChangeSnapshot;
+export type DocumentChangeDraft = Omit<DocumentChangeSnapshot, "readiness">;
 export type ProposalChangeInput = { mode: ProposalApplyMode; proposalId: string };
 export type ApplyProposalInput = {
   documentId: string;
@@ -76,7 +77,18 @@ export type DocumentChangeIdentity = Pick<
   DocumentChangeRecord,
   "afterRevision" | "batchId" | "createdAt" | "documentId" | "id" | "kind" | "undoneAt"
 >;
-export type DocumentChangeHistoryItem = DocumentChangeIdentity & { proposals: DocumentChangeHistoryProposal[] };
+/**
+ * Legacy items expose `afterRevision` for snapshot undo preconditions;
+ * collaborative items expose the durable `resultingHeadSeq` and a server-owned
+ * `canUndo` because collaboration mode never undoes by document revision.
+ */
+export type DocumentChangeHistoryItem =
+  & Omit<DocumentChangeIdentity, "afterRevision">
+  & { proposals: DocumentChangeHistoryProposal[] }
+  & (
+    | { afterRevision: number; mode: "legacy" }
+    | { canUndo: boolean; mode: "collaboration"; resultingHeadSeq: number }
+  );
 export type ListDocumentChangesInput = { cursor?: string; documentId: string; limit?: number };
 export type DocumentChangeHistoryPage = {
   changes: DocumentChangeHistoryItem[];
@@ -99,6 +111,7 @@ export type DocumentChangeResult =
       violation?: ProjectProfileViolation;
       reason:
         | "invalid_batch"
+        | "collaboration_initialized"
         | "invalid_draft"
         | "invalid_profile"
         | "invalid_revision"
@@ -160,6 +173,15 @@ export function createDocumentChangeService(
             ))
             .limit(1);
           if (!document) return { ok: false, reason: "not_found" } as const;
+          const [collaboration] = await transaction
+            .select({ generation: collaborationDocuments.generation })
+            .from(collaborationDocuments)
+            .where(and(
+              eq(collaborationDocuments.workspaceId, context.workspaceId),
+              eq(collaborationDocuments.documentId, input.documentId),
+            ))
+            .limit(1);
+          if (collaboration) return { ok: false, reason: "collaboration_initialized" } as const;
 
           const proposalIds = input.proposals.map(({ proposalId }) => proposalId);
           const foundProposals = await transaction
@@ -185,7 +207,7 @@ export function createDocumentChangeService(
 
           const projectState = validateProjectDocumentState(projectProfile, {
             metadataJson: input.draft.metadataJson,
-            readiness: input.draft.readiness,
+            readiness: document.readiness,
           }, {
             metadataJson: document.metadataJson,
             readiness: document.readiness,
@@ -193,11 +215,15 @@ export function createDocumentChangeService(
           if (!projectState.ok) {
             return { ok: false, reason: "invalid_profile", violation: projectState.violation } as const;
           }
-          const validatedDraft = {
-            ...input.draft,
+          const validatedDraft: DocumentChangeSnapshot = {
+            title: input.draft.title,
+            contentJson: input.draft.contentJson,
             metadataJson: projectState.value.metadataJson,
-            readiness: projectState.value.readiness,
+            readiness: document.readiness,
           };
+          if (documentChangeSnapshotExceedsLimit(validatedDraft)) {
+            return { limit: "snapshotBytes", ok: false, reason: "invalid_draft" } as const;
+          }
 
           const ordered = getProposalApplicationOrder(
             requested.map((item) => ({ ...item.proposal, changeItem: item })),
@@ -230,7 +256,6 @@ export function createDocumentChangeService(
               contentJson: nextContentJson,
               metadataJson: validatedDraft.metadataJson,
               plainText: extractPlainTextFromTiptap(nextContentJson),
-              readiness: validatedDraft.readiness,
               revision: input.expectedRevision + 1,
               updatedAt: now,
             })
@@ -239,6 +264,13 @@ export function createDocumentChangeService(
               eq(documents.id, input.documentId),
               eq(documents.status, "draft"),
               eq(documents.revision, input.expectedRevision),
+              notExists(transaction
+                .select({ generation: collaborationDocuments.generation })
+                .from(collaborationDocuments)
+                .where(and(
+                  eq(collaborationDocuments.workspaceId, context.workspaceId),
+                  eq(collaborationDocuments.documentId, input.documentId),
+                ))),
             ))
             .returning();
           if (!updatedDocument) throw new DocumentChangeCasRollback(input.documentId);
@@ -364,6 +396,20 @@ export function createDocumentChangeService(
       if (pageRows.length === 0) return { changes: [], nextCursor: null };
 
       const changeIds = pageRows.map(({ id }) => id);
+      const collaborationRows = await retrySqliteContention(async () => database
+        .select({
+          changeId: collaborationDocumentChanges.changeId,
+          resultingHeadSeq: collaborationDocumentChanges.resultingHeadSeq,
+        })
+        .from(collaborationDocumentChanges)
+        .where(and(
+          eq(collaborationDocumentChanges.workspaceId, context.workspaceId),
+          eq(collaborationDocumentChanges.documentId, input.documentId),
+          inArray(collaborationDocumentChanges.changeId, changeIds),
+        )));
+      const resultingHeadSeqByChangeId = new Map(
+        collaborationRows.map(({ changeId, resultingHeadSeq }) => [changeId, resultingHeadSeq]),
+      );
       const links = await retrySqliteContention(async () => database
         .select()
         .from(documentChangeProposals)
@@ -395,27 +441,37 @@ export function createDocumentChangeService(
       }
 
       return {
-        changes: pageRows.map((change) => ({
-          id: change.id,
-          documentId: change.documentId,
-          kind: change.kind,
-          batchId: change.batchId,
-          afterRevision: change.afterRevision,
-          createdAt: change.createdAt,
-          undoneAt: change.undoneAt,
-          proposals: (linksByChangeId.get(change.id) ?? []).flatMap((link) => {
-            const proposal = proposalById.get(link.proposalId);
-            return proposal
-              ? [{
-                  id: proposal.id,
-                  targetText: proposal.targetText.slice(0, HISTORY_TARGET_PREVIEW_CODE_UNITS),
-                  replacementText: proposal.replacementText.slice(0, HISTORY_REPLACEMENT_PREVIEW_CODE_UNITS),
-                  appliedMode: link.appliedMode,
-                  ordinal: link.ordinal,
-                }]
-              : [];
-          }),
-        })),
+        changes: pageRows.map((change): DocumentChangeHistoryItem => {
+          const base = {
+            id: change.id,
+            documentId: change.documentId,
+            kind: change.kind,
+            batchId: change.batchId,
+            createdAt: change.createdAt,
+            undoneAt: change.undoneAt,
+            proposals: (linksByChangeId.get(change.id) ?? []).flatMap((link) => {
+              const proposal = proposalById.get(link.proposalId);
+              return proposal
+                ? [{
+                    id: proposal.id,
+                    targetText: proposal.targetText.slice(0, HISTORY_TARGET_PREVIEW_CODE_UNITS),
+                    replacementText: proposal.replacementText.slice(0, HISTORY_REPLACEMENT_PREVIEW_CODE_UNITS),
+                    appliedMode: link.appliedMode,
+                    ordinal: link.ordinal,
+                  }]
+                : [];
+            }),
+          };
+          const resultingHeadSeq = resultingHeadSeqByChangeId.get(change.id);
+          return resultingHeadSeq === undefined
+            ? { ...base, afterRevision: change.afterRevision, mode: "legacy" }
+            : {
+                ...base,
+                canUndo: change.undoneAt === null,
+                mode: "collaboration",
+                resultingHeadSeq,
+              };
+        }),
         nextCursor: hasNextPage ? pageRows.at(-1)?.id ?? null : null,
       };
     },
@@ -459,6 +515,15 @@ export function createDocumentChangeService(
               ))
               .limit(1);
             if (!document) return { ok: false, reason: "not_found" } as const;
+            const [collaboration] = await transaction
+              .select({ generation: collaborationDocuments.generation })
+              .from(collaborationDocuments)
+              .where(and(
+                eq(collaborationDocuments.workspaceId, context.workspaceId),
+                eq(collaborationDocuments.documentId, change.documentId),
+              ))
+              .limit(1);
+            if (collaboration) return { ok: false, reason: "collaboration_initialized" } as const;
             if (document.revision !== input.expectedRevision || input.expectedRevision !== change.afterRevision) {
               return { document, ok: false, reason: "revision_conflict" } as const;
             }
@@ -491,12 +556,12 @@ export function createDocumentChangeService(
             ) {
               return { ok: false, reason: "status_conflict" } as const;
             }
-            if (!validateDocumentChangeDraft(change.beforeSnapshotJson).ok) {
+            if (!validateStoredDocumentChangeSnapshot(change.beforeSnapshotJson).ok) {
               return { ok: false, reason: "status_conflict" } as const;
             }
             const projectState = validateProjectDocumentState(projectProfile, {
               metadataJson: change.beforeSnapshotJson.metadataJson,
-              readiness: change.beforeSnapshotJson.readiness,
+              readiness: document.readiness,
             }, {
               metadataJson: document.metadataJson,
               readiness: document.readiness,
@@ -513,7 +578,6 @@ export function createDocumentChangeService(
                 contentJson: change.beforeSnapshotJson.contentJson,
                 metadataJson: projectState.value.metadataJson,
                 plainText: extractPlainTextFromTiptap(change.beforeSnapshotJson.contentJson),
-                readiness: projectState.value.readiness,
                 revision: input.expectedRevision + 1,
                 updatedAt: now,
               })
@@ -522,6 +586,13 @@ export function createDocumentChangeService(
                 eq(documents.id, change.documentId),
                 eq(documents.status, "draft"),
                 eq(documents.revision, input.expectedRevision),
+                notExists(transaction
+                  .select({ generation: collaborationDocuments.generation })
+                  .from(collaborationDocuments)
+                  .where(and(
+                    eq(collaborationDocuments.workspaceId, context.workspaceId),
+                    eq(collaborationDocuments.documentId, change.documentId),
+                  ))),
               ))
               .returning();
             if (!restoredDocument) throw new DocumentChangeCasRollback(change.documentId);
@@ -577,6 +648,15 @@ async function latestRevisionConflict(
   context: Pick<RequestContext, "workspaceId">,
   documentId: string,
 ): Promise<DocumentChangeResult> {
+  const [collaboration] = await retrySqliteContention(async () => database
+    .select({ generation: collaborationDocuments.generation })
+    .from(collaborationDocuments)
+    .where(and(
+      eq(collaborationDocuments.workspaceId, context.workspaceId),
+      eq(collaborationDocuments.documentId, documentId),
+    ))
+    .limit(1));
+  if (collaboration) return { ok: false, reason: "collaboration_initialized" };
   const [document] = await retrySqliteContention(async () => database
     .select()
     .from(documents)
@@ -597,9 +677,6 @@ function validateDocumentChangeDraft(
   if (typeof draft.title !== "string" || draft.title.trim().length === 0 || draft.title.length > 500) {
     return { limit: "title", ok: false };
   }
-  if (!documentReadinessValues.includes(draft.readiness as DocumentReadiness)) {
-    return { limit: "readiness", ok: false };
-  }
   if (!isDocumentMetadata(draft.metadataJson)) return { limit: "metadata", ok: false };
   const tiptapValidation = validateTiptapResource(draft.contentJson);
   if (!tiptapValidation.ok) return { limit: tiptapValidation.limit, ok: false };
@@ -611,6 +688,23 @@ function validateDocumentChangeDraft(
     return { limit: "malformed", ok: false };
   }
   return { ok: true };
+}
+
+function validateStoredDocumentChangeSnapshot(
+  snapshot: DocumentChangeSnapshot,
+): { ok: true } | { limit: DraftValidationLimit; ok: false } {
+  if (!documentReadinessValues.includes(snapshot.readiness as DocumentReadiness)) {
+    return { limit: "malformed", ok: false };
+  }
+  return validateDocumentChangeDraft(snapshot);
+}
+
+function documentChangeSnapshotExceedsLimit(snapshot: DocumentChangeSnapshot) {
+  try {
+    return new TextEncoder().encode(JSON.stringify(snapshot)).byteLength > DOCUMENT_REQUEST_BODY_BYTES;
+  } catch {
+    return true;
+  }
 }
 
 function isDocumentMetadata(value: unknown): value is DocumentMetadata {

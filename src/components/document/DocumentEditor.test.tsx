@@ -1,9 +1,18 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { Extension } from "@tiptap/core";
+import Collaboration from "@tiptap/extension-collaboration";
 import { Editor } from "@tiptap/react";
+import { Awareness } from "y-protocols/awareness";
+import * as Y from "yjs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { TiptapJson } from "@/db/schema";
 import { createDocumentSchemaExtensions } from "@/features/documents/tiptap-extensions";
+import { createCollaborationDocumentCodec } from "@/features/collaboration/document-codec";
+import { prepareBaseExtensionsForCollaboration } from "@/features/collaboration/client/collaboration-editor-extensions";
+import { createYjsFieldStore } from "@/features/collaboration/client/yjs-field-store";
+import { getProjectProfile } from "@/features/projects/default-project-profiles";
+import { editorMessages } from "@/features/i18n/editor-language";
 import {
   getBlockActionRangeAtPosition,
   getListItemBlockActionRangeByPath,
@@ -68,6 +77,287 @@ describe("DocumentEditor", () => {
     );
 
     expect(handleChange).not.toHaveBeenCalled();
+  });
+
+  it("renders collaboration body only from Yjs and never resynchronizes it when projected props change", async () => {
+    const user = userEvent.setup();
+    const codec = createCollaborationDocumentCodec(getProjectProfile("default"));
+    const sharedDocument = codec.bootstrap({
+      contentJson: {
+        type: "doc",
+        content: [{ type: "paragraph", content: [{ type: "text", text: "Canonical Yjs body" }] }],
+      },
+      metadataJson: {},
+      plainText: "Canonical Yjs body",
+      title: "Canonical title",
+    });
+    const provider = { awareness: new Awareness(sharedDocument) };
+    const fields = createYjsFieldStore({
+      document: sharedDocument,
+      projectProfile: getProjectProfile("default"),
+      writable: () => true,
+    });
+    const session = { document: sharedDocument, fields, provider, writable: true };
+    const update = vi.fn();
+    const mountDynamicSchemaExtension = vi.fn();
+    sharedDocument.on("update", update);
+
+    const runPluginCommand = vi.fn();
+    const { rerender, unmount } = render(
+      <DocumentEditor
+        mode={{ kind: "collaboration", session }}
+        pluginContributions={{
+          tiptapExtensions: [Extension.create({
+            name: "dynamicSchemaExtension",
+            onCreate: mountDynamicSchemaExtension,
+          })],
+          toolbarItems: [{ id: "structural-plugin", label: "Structural plugin", run: runPluginCommand }],
+        }}
+      />,
+    );
+
+    expect(await screen.findByText("Canonical Yjs body")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "실행 취소" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "다시 실행" })).toBeDisabled();
+    expect(screen.getByRole("combobox", { name: "텍스트 스타일" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "글머리 기호" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "번호 목록" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "인용문" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "굵게" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Structural plugin" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Structural plugin" }));
+    expect(runPluginCommand).not.toHaveBeenCalled();
+    expect(mountDynamicSchemaExtension).not.toHaveBeenCalled();
+    update.mockClear();
+    rerender(<DocumentEditor mode={{ kind: "collaboration", session }} />);
+
+    expect(screen.getByRole("textbox", { name: "문서 제목" })).toHaveValue("Canonical title");
+    expect(update).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByRole("textbox", { name: "문서 제목" }), {
+      target: { value: "Collaborative title" },
+    });
+    expect(sharedDocument.getText("title").toString()).toBe("Collaborative title");
+    act(() => {
+      sharedDocument.transact(() => {
+        const title = sharedDocument.getText("title");
+        title.delete(0, title.length);
+        title.insert(0, "Remote title");
+      }, "remote-title-test");
+    });
+    expect(screen.getByRole("textbox", { name: "문서 제목" })).toHaveValue("Remote title");
+    const titleInput = screen.getByRole("textbox", { name: "문서 제목" });
+    await user.clear(titleInput);
+    expect(titleInput).toHaveValue("");
+    expect(sharedDocument.getText("title").toString()).toBe("Remote title");
+    expect(titleInput).toBeRequired();
+    expect(titleInput).toHaveAttribute("aria-invalid", "true");
+    expect(titleInput).toHaveAccessibleDescription(
+      "제목은 필수입니다. 빈 제목은 저장되지 않았습니다.",
+    );
+    act(() => {
+      const remoteTitle = sharedDocument.getText("title");
+      sharedDocument.transact(() => {
+        remoteTitle.delete(0, remoteTitle.length);
+        remoteTitle.insert(0, "Remote override");
+      }, "remote-title-while-local-empty");
+    });
+    expect(titleInput).toHaveValue("Remote override");
+    act(() => {
+      const remoteTitle = sharedDocument.getText("title");
+      sharedDocument.transact(() => {
+        remoteTitle.delete(0, remoteTitle.length);
+        remoteTitle.insert(0, "Remote title");
+      }, "remote-title-return-to-draft-base");
+    });
+    expect(titleInput).toHaveValue("Remote title");
+    act(() => {
+      const remoteTitle = sharedDocument.getText("title");
+      sharedDocument.transact(() => {
+        remoteTitle.delete(0, remoteTitle.length);
+        remoteTitle.insert(0, "Remote override");
+      }, "remote-title-after-draft-reset");
+    });
+    expect(titleInput).toHaveValue("Remote override");
+    await user.clear(titleInput);
+    fireEvent.blur(titleInput);
+    expect(titleInput).toHaveValue("Remote override");
+    await user.clear(titleInput);
+    await user.type(titleInput, "Replacement title");
+    expect(titleInput).toHaveValue("Replacement title");
+    expect(sharedDocument.getText("title").toString()).toBe("Replacement title");
+    expect(screen.getByRole("combobox", { name: /AI.*명령/ })).toBeDisabled();
+    expect(screen.getByText("Canonical Yjs body")).toBeInTheDocument();
+    expect(update).toHaveBeenCalled();
+
+    unmount();
+    fields.destroy();
+    sharedDocument.destroy();
+  });
+
+  it("restores the canonical title immediately when write permission is downgraded during a blank draft", async () => {
+    const user = userEvent.setup();
+    const sharedDocument = createCollaborationDocumentCodec(getProjectProfile("default")).bootstrap({
+      contentJson: { type: "doc", content: [{ type: "paragraph" }] },
+      metadataJson: {},
+      plainText: "",
+      title: "Canonical title",
+    });
+    const provider = { awareness: new Awareness(sharedDocument) };
+    const fields = createYjsFieldStore({
+      document: sharedDocument,
+      projectProfile: getProjectProfile("default"),
+      writable: () => true,
+    });
+    const writableSession = { document: sharedDocument, fields, provider, writable: true };
+    const { rerender } = render(
+      <DocumentEditor
+        language="en"
+        messages={editorMessages.en.editor}
+        mode={{ kind: "collaboration", session: writableSession }}
+      />,
+    );
+    const titleInput = screen.getByRole("textbox", { name: "Document title" });
+
+    await user.clear(titleInput);
+    expect(titleInput).toHaveValue("");
+    expect(titleInput).toHaveAttribute("aria-invalid", "true");
+    expect(titleInput).toHaveAccessibleDescription(
+      "A title is required. The blank title was not saved.",
+    );
+
+    rerender(
+      <DocumentEditor
+        language="en"
+        messages={editorMessages.en.editor}
+        mode={{
+          kind: "collaboration",
+          session: { ...writableSession, writable: false },
+        }}
+      />,
+    );
+
+    expect(titleInput).toHaveValue("Canonical title");
+    expect(titleInput).toHaveAttribute("readonly");
+    expect(titleInput).not.toHaveAttribute("aria-invalid", "true");
+
+    rerender(
+      <DocumentEditor
+        language="en"
+        messages={editorMessages.en.editor}
+        mode={{ kind: "collaboration", session: writableSession }}
+      />,
+    );
+    expect(titleInput).toHaveValue("Canonical title");
+    expect(titleInput).not.toHaveAttribute("readonly");
+
+    provider.awareness.destroy();
+    fields.destroy();
+    sharedDocument.destroy();
+  });
+
+  it("refreshes find results and counts after a remote collaborative transaction", async () => {
+    const user = userEvent.setup();
+    const sharedDocument = createCollaborationDocumentCodec(getProjectProfile("default")).bootstrap({
+      contentJson: {
+        type: "doc",
+        content: [{ type: "paragraph", content: [{ type: "text", text: "Alpha" }] }],
+      },
+      metadataJson: {},
+      plainText: "Alpha",
+      title: "Derived UI",
+    });
+    const remoteDocument = new Y.Doc();
+    Y.applyUpdate(remoteDocument, Y.encodeStateAsUpdate(sharedDocument));
+    const sharedStateVector = Y.encodeStateVector(sharedDocument);
+    const remoteEditor = new Editor({
+      extensions: [
+        ...prepareBaseExtensionsForCollaboration(createDocumentSchemaExtensions()),
+        Collaboration.configure({ document: remoteDocument, field: "body" }),
+      ],
+    });
+    editors.push(remoteEditor);
+    const provider = { awareness: new Awareness(sharedDocument) };
+    const fields = createYjsFieldStore({
+      document: sharedDocument,
+      projectProfile: getProjectProfile("default"),
+      writable: () => true,
+    });
+
+    render(
+      <DocumentEditor
+        isFindOpen
+        mode={{
+          kind: "collaboration",
+          session: { document: sharedDocument, fields, provider, writable: true },
+        }}
+      />,
+    );
+    await user.type(screen.getByRole("searchbox", { name: "문서에서 찾기" }), "Remote");
+    expect(screen.getByText("일치 없음")).toBeInTheDocument();
+    expect(screen.getByText("1 단어")).toBeInTheDocument();
+    expect(screen.getByText("5 글자")).toBeInTheDocument();
+
+    remoteEditor.commands.insertContentAt(1, "Remote ");
+    await act(async () => {
+      Y.applyUpdate(
+        sharedDocument,
+        Y.encodeStateAsUpdate(remoteDocument, sharedStateVector),
+        "remote-derived-ui-test",
+      );
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("1/1")).toBeInTheDocument();
+      expect(screen.getByText("2 단어")).toBeInTheDocument();
+      expect(screen.getByText("12 글자")).toBeInTheDocument();
+    });
+
+    provider.awareness.destroy();
+    fields.destroy();
+    sharedDocument.destroy();
+    remoteDocument.destroy();
+  });
+
+  it("does not expose a mutable plugin context while collaboration permission is read-only", async () => {
+    const sharedDocument = createCollaborationDocumentCodec(getProjectProfile("default")).bootstrap({
+      contentJson: {
+        type: "doc",
+        content: [{ type: "paragraph", content: [{ type: "text", text: "/" }] }],
+      },
+      metadataJson: {},
+      plainText: "/",
+      title: "Read-only projection",
+    });
+    const provider = { awareness: new Awareness(sharedDocument) };
+    const fields = createYjsFieldStore({
+      document: sharedDocument,
+      projectProfile: getProjectProfile("default"),
+      writable: () => false,
+    });
+    const runPluginAction = vi.fn();
+
+    render(
+      <DocumentEditor
+        mode={{
+          kind: "collaboration",
+          session: { document: sharedDocument, fields, provider, writable: false },
+        }}
+        pluginContributions={{
+          toolbarItems: [{ id: "write-bypass", label: "Plugin write", run: runPluginAction }],
+        }}
+      />,
+    );
+
+    expect(await screen.findByRole("button", { name: "Plugin write" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Plugin write" }));
+    expect(runPluginAction).not.toHaveBeenCalled();
+    const editorBody = screen.getByRole("textbox", { name: "문서 본문" });
+    fireEvent.focus(editorBody);
+    fireEvent.keyDown(editorBody, { key: "Enter" });
+    expect(screen.queryByRole("listbox", { name: "슬래시 명령" })).not.toBeInTheDocument();
+    expect(screen.getByText("/")).toBeInTheDocument();
+    fields.destroy();
+    sharedDocument.destroy();
   });
 
   it("renders the editor body in a centered writing column", async () => {

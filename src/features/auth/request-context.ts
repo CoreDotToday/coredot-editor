@@ -1,4 +1,7 @@
-import { createTestRequestContext } from "./test-request-context";
+import {
+  createTestRequestContext,
+  TestIdentityOverrideError,
+} from "./test-request-context";
 import { assertProductionAuthConfigured } from "./production-auth-config.mjs";
 
 export type WorkspaceRole = "admin" | "member" | "owner";
@@ -29,6 +32,7 @@ export class AuthenticationRequiredError extends Error {
 type AuthMode = RequestContext["authMode"];
 type RuntimeEnvironment = "development" | "production" | "test";
 type ReadClerkIdentity = () => Promise<ClerkIdentity>;
+type ReadTestRequestHeaders = () => Promise<Pick<Headers, "get">>;
 
 type RequestContextResolverOptions = {
   clerkPublishableKey?: string;
@@ -37,6 +41,7 @@ type RequestContextResolverOptions = {
   environment?: RuntimeEnvironment;
   mode?: AuthMode;
   readClerkIdentity?: ReadClerkIdentity;
+  readTestRequestHeaders?: ReadTestRequestHeaders;
 };
 
 function normalizeWorkspaceRole(orgRole: string | null | undefined): WorkspaceRole {
@@ -92,7 +97,21 @@ export function createRequestContextResolver(
     assertProductionAuthConfigured(authEnvironment);
 
     if (mode === "test") {
-      return createTestRequestContext(env);
+      const hasTestIdentitySecret = Boolean(authEnvironment.TEST_IDENTITY_SIGNING_SECRET?.trim());
+      const requestHeaders = hasTestIdentitySecret
+        ? await (
+            options.readTestRequestHeaders
+            ?? (async () => (await import("next/headers")).headers())
+          )()
+        : undefined;
+      try {
+        return createTestRequestContext(authEnvironment, { headers: requestHeaders });
+      } catch (error) {
+        if (error instanceof TestIdentityOverrideError) {
+          throw new AuthenticationRequiredError("Test identity override is invalid");
+        }
+        throw error;
+      }
     }
 
     const readIdentity =

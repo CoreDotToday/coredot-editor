@@ -107,6 +107,36 @@ describe("DocumentFindBar", () => {
     expect(screen.getByRole("button", { name: "모두 교체" })).toBeDisabled();
   });
 
+  it("keeps search available but disables replacement controls when read-only", () => {
+    render(
+      <DocumentFindBar
+        activeIndex={0}
+        caseSensitive={false}
+        error={null}
+        matchCount={2}
+        messages={messages}
+        onCaseSensitiveChange={vi.fn()}
+        onClose={vi.fn()}
+        onNext={vi.fn()}
+        onPrevious={vi.fn()}
+        onQueryChange={vi.fn()}
+        onRegexChange={vi.fn()}
+        onReplaceAll={vi.fn()}
+        onReplaceCurrent={vi.fn()}
+        onReplaceTextChange={vi.fn()}
+        query="revenue"
+        readOnly
+        regex={false}
+        replaceText=""
+      />,
+    );
+
+    expect(screen.getByRole("searchbox")).toBeEnabled();
+    expect(screen.getByRole("textbox")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "현재 교체" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "모두 교체" })).toBeDisabled();
+  });
+
   it("toggles options and submits replace actions", () => {
     const onCaseSensitiveChange = vi.fn();
     const onRegexChange = vi.fn();

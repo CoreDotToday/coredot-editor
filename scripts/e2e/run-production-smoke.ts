@@ -18,7 +18,7 @@ const clerkTestCredentials = {
   CLERK_SECRET_KEY: "sk_test_production_smoke",
   NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: "pk_test_Y2xlcmsuZXhhbXBsZS5jb20k",
 } as const;
-const inheritedToolEnvironmentNames = [
+export const inheritedToolEnvironmentNames = [
   "CI",
   "COMSPEC",
   "GITHUB_ACTIONS",
@@ -47,7 +47,7 @@ type ProductionSmokeEnvironmentOptions = {
   port: number;
 };
 
-type ServerExit = {
+export type ServerExit = {
   code: number | null;
   error: boolean;
   signal: NodeJS.Signals | null;
@@ -142,7 +142,7 @@ export async function withPhaseTimeout<T>(
   }
 }
 
-function waitForChild(child: ChildProcess): Promise<ServerExit> {
+export function waitForChild(child: ChildProcess): Promise<ServerExit> {
   if (child.exitCode !== null || child.signalCode !== null) {
     return Promise.resolve({
       code: child.exitCode,
@@ -193,7 +193,7 @@ function signalProcessTree(child: ChildProcess, signal: NodeJS.Signals) {
   }
 }
 
-async function stopProcessTree(child: ChildProcess) {
+export async function stopProcessTree(child: ChildProcess) {
   const parentAlreadyExited = child.exitCode !== null || child.signalCode !== null;
   const signaled = signalProcessTree(child, "SIGTERM");
   if (parentAlreadyExited) {
@@ -232,7 +232,7 @@ export async function runCleanupSteps(
   if (failed) throw new Error("Production smoke cleanup failed");
 }
 
-async function runCommand(
+export async function runCommand(
   args: string[],
   environment: NodeJS.ProcessEnv,
   timeoutMs: number,
@@ -256,7 +256,7 @@ async function runCommand(
   }
 }
 
-async function reserveAvailablePort() {
+export async function reserveAvailablePort() {
   return new Promise<number>((resolve, reject) => {
     const server = createServer();
     server.once("error", reject);
@@ -285,7 +285,7 @@ async function canBindPort(port: number) {
   });
 }
 
-async function waitForPortRelease(port: number) {
+export async function waitForPortRelease(port: number) {
   const deadline = Date.now() + commandTimeouts.cleanup;
   while (Date.now() < deadline) {
     if (await canBindPort(port)) return;

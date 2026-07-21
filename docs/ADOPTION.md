@@ -91,17 +91,18 @@ See [ARCHITECTURE.md](ARCHITECTURE.md#sqlite-today-postgres-later).
 
 The starter already uses Clerk request context, personal/organization Workspaces, and Workspace-scoped repositories. Keep Clerk when it fits the product, or replace only the identity adapter while preserving repository-level Workspace predicates, owner/admin/member authorization, and cross-Workspace not-found behavior. Do not rely on client-side filtering for access control, and keep production from enabling the deterministic test adapter.
 
-## Add Collaboration Later
+## Enable Collaboration Deliberately
 
-The editor stores Tiptap JSON as the canonical body. This is enough for a single-user MVP.
+Real-time collaboration ships in this repository behind `COLLABORATION_MODE`. Disabled mode keeps the single-user revision-aware editor and requires no extra infrastructure. Self-hosted mode adds the Node 22 Hocuspocus sidecar, the capability key rings, and the WSS endpoint described in [Configuration](configuration.md#collaboration-capability-keys) and [Deployment](DEPLOYMENT.md#real-time-collaboration-sidecar).
 
-For collaboration, introduce a sync layer deliberately:
+Adopt it with the migration semantics in mind:
 
-- Yjs for real-time shared editing
-- Separate update logs or snapshots for audit/history
-- Background persistence from collaborative state to `documents.contentJson`
+- A document is converted from its SQL snapshot to Yjs exactly once, when its first collaboration capability is issued. Concurrent bootstrap attempts return the already-created generation.
+- After initialization, the Yjs log and checkpoints are canonical for body, title, and metadata; `documents.contentJson` becomes a fenced projection and every legacy body/title/metadata writer fails closed - even when the sidecar is down.
+- Pending legacy numeric-position AI Proposals are rejected at cutover; collaborative Proposals use relative anchors instead.
+- Downgrade is not automatic. Moving an initialized document back to legacy autosave requires an explicit, audited export-and-reset operation that is not part of this release, so enable self-hosted mode only when you intend to keep it.
 
-Keep AI review routes operating on explicit document snapshots so AI runs remain reproducible.
+AI review routes keep operating on explicit durable snapshots (the collaboration barrier), so AI runs remain reproducible in both modes.
 
 ## Spellbook-Style Expansion Path
 

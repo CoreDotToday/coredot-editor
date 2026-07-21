@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { createProtectedOptionsHandler, createProtectedRouteHandler } from "@/features/auth/route-context";
+import {
+  loadExactCollaborationMaterialization,
+  toExactCollaborationHttpFailure,
+} from "@/features/collaboration/exact-document-materialization";
 import { documentInterchange } from "@/features/documents/document-interchange";
 import { getDocumentById } from "@/features/documents/document-repository";
 import { enforceRequestBudget } from "@/features/security/request-budget";
@@ -52,9 +56,27 @@ const postHandler = createProtectedRouteHandler(async (context, request: Request
     return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
   }
 
-  const preview = await documentInterchange.previewExport(result.data.contentJson);
+  let exactMaterialization: Awaited<ReturnType<typeof loadExactCollaborationMaterialization>>;
+  try {
+    exactMaterialization = await loadExactCollaborationMaterialization(context, id);
+  } catch (error) {
+    const failure = toExactCollaborationHttpFailure(error);
+    if (failure) {
+      return NextResponse.json({ code: failure.code, error: failure.error }, { status: failure.status });
+    }
+    throw error;
+  }
+  const contentJson = exactMaterialization.kind === "collaboration"
+    ? exactMaterialization.materialization.contentJson
+    : result.data.contentJson;
+  const preview = await documentInterchange.previewExport(contentJson);
   if (!preview.ok) return documentResourceLimitResponse();
-  return NextResponse.json({ fidelity: preview.fidelity });
+  return NextResponse.json({
+    ...(exactMaterialization.kind === "collaboration"
+      ? { collaboration: exactMaterialization.diagnostics }
+      : {}),
+    fidelity: preview.fidelity,
+  });
 }, { beforeWorkspaceBootstrap: (context) => enforceRequestBudget(context, "documents.export-preview") });
 
 export async function POST(request: Request, params: Params) {

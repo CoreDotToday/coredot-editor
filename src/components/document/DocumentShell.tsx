@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import {
   ChevronsLeft,
   Code2,
@@ -16,6 +17,8 @@ import {
 } from "lucide-react";
 import { nanoid } from "nanoid";
 import { z } from "zod";
+import type { HocuspocusProvider } from "@hocuspocus/provider";
+import type { Awareness } from "y-protocols/awareness";
 import {
   useCallback,
   useEffect,
@@ -65,14 +68,25 @@ import { resolveDocumentShortcut } from "@/features/commands/document-command-ma
 import { buildDocumentOutline, type DocumentOutlineItem } from "@/features/documents/document-outline";
 import {
   createDocumentSessionClient,
+  DocumentCollaborativeProposalRequestError,
   DocumentSessionConflictError,
   DocumentSessionInvalidProfileError,
   DocumentSessionRequestError,
+  DocumentWorkflowRequestError,
   type DocumentSessionChange,
   type DocumentSessionHistoryChange,
   type DocumentSessionProposal,
+  type DocumentWorkflowErrorReason,
+  type DocumentWorkflowState,
+  type CollaborativeProposalApplyPayload,
+  type CollaborativeProposalBatchApplyPayload,
+  type CollaborativeUndoPayload,
 } from "@/features/documents/document-session-client";
 import { extractPlainTextFromTiptap } from "@/features/documents/tiptap-text";
+import {
+  createDocumentWorkflowNotificationBus,
+  type DocumentWorkflowNotificationBus,
+} from "@/features/documents/workflow-notification";
 import {
   EDITOR_LANGUAGE_STORAGE_KEY,
   editorLanguageOptions,
@@ -105,10 +119,26 @@ import { DocumentMetadataPanel } from "./DocumentMetadataPanel";
 import { DocumentOutlinePanel } from "./DocumentOutlinePanel";
 import { DocumentSourceView } from "./DocumentSourceView";
 import { DocumentInterchangeDialog } from "./DocumentInterchangeDialog";
+import { CollaborationParticipants } from "./CollaborationParticipants";
+import { CollaborationStatus } from "./CollaborationStatus";
 import { buildDocumentCommandRegistry } from "./commands/document-command-registry";
 import type { DocumentCommandAction } from "./commands/document-command-types";
 import type { SelectionAiResultPreview } from "./SelectionAiResultPopover";
 import { getProjectProfile } from "@/features/projects/default-project-profiles";
+import type { CollaborationClientConfiguration } from "@/features/collaboration/client-configuration";
+import type { CollaborationSession } from "@/features/collaboration/client/hocuspocus-provider-adapter";
+import type { CollaborationSessionSnapshot } from "@/features/collaboration/client/session-store";
+import { useCollaborationSession } from "@/features/collaboration/client/use-collaboration-session";
+import {
+  createBrowserCollaborationNavigationEnvironment,
+  createCollaborationNavigationController,
+  type CollaborationNavigationController,
+} from "@/features/collaboration/client/navigation-controller";
+import { hasPendingCollaborationUpdates } from "@/features/collaboration/client/durability-state";
+import {
+  createYjsFieldStore,
+  type YjsFieldStore,
+} from "@/features/collaboration/client/yjs-field-store";
 import {
   PROJECT_METADATA_LIMITS,
   type ProjectProfile,
@@ -135,10 +165,13 @@ type ShellProposal = Pick<
   | "appliedMode"
   | "status"
 > & { isTruncated?: boolean };
+const EMPTY_SHELL_PROPOSALS: ShellProposal[] = [];
+const EMPTY_REFERENCE_DOCUMENTS: AiDocumentReferenceCandidate[] = [];
 export type SaveState = "saved" | "dirty" | "saving" | "failed";
 export type EditorSurface = "editor" | "source";
 
 type DocumentShellProps = {
+  collaboration?: CollaborationClientConfiguration;
   conversationStorageMode?: ConversationStorageMode;
   conversationWorkspaceId?: string;
   defaultTemplateId?: string;
@@ -158,6 +191,19 @@ type DocumentShellProps = {
   plugins?: EditorPlugin[];
 };
 
+type CollaborationRuntime = {
+  currentPrincipalId: string;
+  fields: YjsFieldStore | null;
+  session: CollaborationSession | null;
+  snapshot: CollaborationSessionSnapshot;
+};
+
+export { hasPendingCollaborationUpdates };
+
+type DocumentShellContentProps = DocumentShellProps & {
+  collaborationRuntime: CollaborationRuntime | null;
+};
+
 type DraftState = {
   title: string;
   contentJson: TiptapJson;
@@ -166,6 +212,7 @@ type DraftState = {
 };
 
 type PendingDocxExport = {
+  collaborationDiagnostics?: CollaborationExportDiagnostics;
   contentJson: TiptapJson;
   fidelity: FidelityReport;
   title: string;
@@ -202,6 +249,28 @@ type AiSnapshot = {
 };
 
 type DocumentAsyncScope = { documentId: string; generation: number };
+type CollaborationPosition = { generation: number; headSeq: number };
+type CollaborationBarrier = { generation: number; stateVector: string };
+type CollaborationExportDiagnostics = CollaborationPosition & {
+  contentHash: string;
+  schemaFingerprint: string;
+};
+type CachedCollaborationCommand =
+  | {
+      expectedGeneration: number;
+      kind: "batch";
+      payload: CollaborativeProposalBatchApplyPayload;
+    }
+  | {
+      expectedGeneration: number;
+      kind: "single";
+      payload: CollaborativeProposalApplyPayload;
+    }
+  | {
+      expectedGeneration: number;
+      kind: "undo";
+      payload: CollaborativeUndoPayload;
+    };
 
 type ReviewResponse = {
   review?: {
@@ -220,8 +289,11 @@ type RewriteResponse = {
 
 const MAX_CONCURRENT_SELECTION_COMMANDS = 5;
 const AUTOSAVE_DEBOUNCE_MS = 1000;
+const COLLABORATION_ACTION_TIMEOUT_MS = 15_000;
+export const DOCUMENT_WORKFLOW_RECOVERY_INTERVAL_MS = 30_000;
 const COMPACT_WORKSPACE_MEDIA_QUERY = "(max-width: 1279px)";
 const COMPACT_SIDEBAR_MEDIA_QUERY = "(max-width: 1023px)";
+const subscribeToNothing = () => () => undefined;
 
 function resolveServerRevision(
   currentRevision: number,
@@ -243,6 +315,18 @@ type ProposalStatusPatchPayload = {
   status: ShellProposal["status"];
 };
 
+type WorkflowFeedback =
+  | "approval_durability_pending"
+  | "legacy_approval_unsupported"
+  | "saved"
+  | DocumentWorkflowErrorReason;
+
+type WorkflowReadRequest = {
+  controller: AbortController;
+  documentId: string;
+  promise: Promise<DocumentWorkflowState | null>;
+};
+
 class ProposalStatusConflictError extends Error {
   proposal: AiReviewProposal;
 
@@ -250,6 +334,154 @@ class ProposalStatusConflictError extends Error {
     super("Proposal status conflict");
     this.name = "ProposalStatusConflictError";
     this.proposal = proposal;
+  }
+}
+
+class CollaborationActionError extends Error {
+  constructor() {
+    super("Collaboration action could not be fenced");
+    this.name = "CollaborationActionError";
+  }
+}
+
+class CollaborationExportChangedError extends Error {
+  constructor() {
+    super("Collaborative document changed after export preview");
+    this.name = "CollaborationExportChangedError";
+  }
+}
+
+class CollaborationExportStateUnavailableError extends Error {}
+class CollaborationExportStateConflictError extends Error {}
+class CollaborationExportFidelityChangedError extends Error {}
+
+const collaborationExportDiagnosticsSchema = z.object({
+  contentHash: z.string().regex(/^[a-f0-9]{64}$/u),
+  generation: z.number().int().positive(),
+  headSeq: z.number().int().nonnegative(),
+  schemaFingerprint: z.string().regex(/^[a-f0-9]{64}$/u),
+}).strict();
+const fidelityFeatureSchema = z.string().min(1).max(128);
+const fidelityReportSchema = z.object({
+  items: z.array(z.object({
+    feature: fidelityFeatureSchema,
+    message: z.string().optional(),
+    outcome: z.enum(["approximated", "preserved", "removed"]),
+  }).strict()),
+  requiresAcknowledgement: z.boolean(),
+}).strict();
+const exportPreviewResponseSchema = z.object({
+  collaboration: collaborationExportDiagnosticsSchema.optional(),
+  fidelity: fidelityReportSchema,
+}).strict();
+const exactExportStateErrorSchema = z.object({
+  code: z.enum(["collaboration_state_conflict", "collaboration_state_unavailable"]),
+  error: z.string(),
+}).strict();
+const exportFidelityErrorSchema = z.object({
+  code: z.literal("fidelity_acknowledgement_required"),
+  collaboration: collaborationExportDiagnosticsSchema.optional(),
+  error: z.string(),
+  fidelity: fidelityReportSchema,
+}).strict();
+
+function encodeBase64Url(bytes: Uint8Array) {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return window.btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/u, "");
+}
+
+function matchesCollaborationExportDiagnostics(
+  expected: CollaborationExportDiagnostics,
+  actual: CollaborationExportDiagnostics | null,
+) {
+  return actual !== null
+    && actual.generation === expected.generation
+    && actual.headSeq === expected.headSeq
+    && actual.schemaFingerprint === expected.schemaFingerprint
+    && actual.contentHash === expected.contentHash;
+}
+
+function readCollaborationExportHeaders(headers: Headers): CollaborationExportDiagnostics | null {
+  const parsed = collaborationExportDiagnosticsSchema.safeParse({
+    contentHash: headers.get("X-CoreDot-Collaboration-Content-Hash"),
+    generation: Number(headers.get("X-CoreDot-Collaboration-Generation")),
+    headSeq: Number(headers.get("X-CoreDot-Collaboration-Head-Seq")),
+    schemaFingerprint: headers.get("X-CoreDot-Collaboration-Schema-Fingerprint"),
+  });
+  return parsed.success ? parsed.data : null;
+}
+
+function isCollaborationExportDiagnostics(value: unknown): value is CollaborationExportDiagnostics {
+  return collaborationExportDiagnosticsSchema.safeParse(value).success;
+}
+
+async function classifyCollaborationExportFailure(response: Response) {
+  const body = await response.json().catch(() => null);
+  const stateFailure = exactExportStateErrorSchema.safeParse(body);
+  if (stateFailure.success) {
+    if (stateFailure.data.code === "collaboration_state_unavailable") {
+      throw new CollaborationExportStateUnavailableError();
+    }
+    throw new CollaborationExportStateConflictError();
+  }
+  if (exportFidelityErrorSchema.safeParse(body).success) {
+    throw new CollaborationExportFidelityChangedError();
+  }
+}
+
+function shouldRetainCollaborationCommand(error: unknown) {
+  // These outcomes may arrive after the server committed the command. Preserve the
+  // exact semantic payload only here; success and authoritative conflicts clear it.
+  return error instanceof DocumentCollaborativeProposalRequestError && (
+    error.reason === "aborted"
+    || error.reason === "malformed_response"
+    || error.reason === "network_error"
+    || error.reason === "timeout"
+    || error.reason === "unavailable"
+    || error.reason === "unknown"
+  );
+}
+
+function getDocxExportErrorMessage(
+  error: unknown,
+  messages: (typeof editorMessages)[EditorLanguage]["errors"],
+) {
+  if (error instanceof CollaborationActionError) return messages.collaborationSyncFailed;
+  if (error instanceof CollaborationExportChangedError) return messages.collaborationExportChanged;
+  if (error instanceof CollaborationExportStateUnavailableError) return messages.collaborationExportUnavailable;
+  if (error instanceof CollaborationExportStateConflictError) return messages.collaborationExportConflict;
+  if (error instanceof CollaborationExportFidelityChangedError) return messages.collaborationExportFidelityChanged;
+  return messages.exportDocxFailed;
+}
+
+function getCollaborationProposalErrorMessage(
+  error: unknown,
+  messages: (typeof editorMessages)[EditorLanguage]["errors"],
+) {
+  if (!(error instanceof DocumentCollaborativeProposalRequestError)) {
+    return messages.updateProposalFailed;
+  }
+  switch (error.reason) {
+    case "proposal_target_conflict":
+      return messages.collaborationProposalTarget;
+    case "proposal_overlap_conflict":
+      return messages.collaborationProposalOverlap;
+    case "proposal_status_conflict":
+    case "not_found":
+      return messages.collaborationProposalStatus;
+    case "idempotency_conflict":
+      return messages.collaborationProposalIdempotency;
+    case "unavailable":
+      return messages.collaborationProposalUnavailable;
+    case "aborted":
+    case "malformed_response":
+    case "network_error":
+    case "timeout":
+    case "unknown":
+      return messages.collaborationProposalReconcile;
+    default:
+      return messages.updateProposalFailed;
   }
 }
 
@@ -299,17 +531,24 @@ const documentSessionClient = createDocumentSessionClient((input, init) => fetch
 function createHistoryChange(
   change: DocumentSessionChange,
   proposals: DocumentSessionProposal[],
+  collaboration?: { generation: number; headSeq: number },
 ): DocumentSessionHistoryChange {
-  return {
-    ...change,
-    proposals: proposals.map((proposal, ordinal) => ({
-      id: proposal.id,
-      targetText: proposal.targetText,
-      replacementText: proposal.replacementText,
-      appliedMode: proposal.appliedMode ?? proposal.defaultApplyMode ?? "replace",
-      ordinal,
-    })),
-  };
+  const historyProposals = proposals.map((proposal, ordinal) => ({
+    id: proposal.id,
+    targetText: proposal.targetText,
+    replacementText: proposal.replacementText,
+    appliedMode: proposal.appliedMode ?? proposal.defaultApplyMode ?? "replace",
+    ordinal,
+  }));
+  return collaboration
+    ? {
+        ...change,
+        canUndo: change.undoneAt === null,
+        mode: "collaboration",
+        proposals: historyProposals,
+        resultingHeadSeq: collaboration.headSeq,
+      }
+    : { ...change, mode: "legacy", proposals: historyProposals };
 }
 
 function mergeDocumentChanges(
@@ -364,45 +603,94 @@ function getCompactSidebarLayoutSnapshot() {
     window.matchMedia(COMPACT_SIDEBAR_MEDIA_QUERY).matches;
 }
 
-export function DocumentShell({
-  aiRuns,
-  aiRunsNextCursor = null,
-  conversationStorageMode = "local",
-  conversationWorkspaceId = "local-workspace",
-  defaultTemplateId,
-  document,
-  initialConversationLoadFailed = false,
-  initialConversationNextCursor = null,
-  initialConversations,
-  pluginContributions,
-  plugins,
-  proposals = [],
-  proposalsNextCursor = null,
-  projectProfile = getProjectProfile("default"),
-  referenceDocuments = [],
-  templates,
-}: DocumentShellProps) {
+export function DocumentShell(props: DocumentShellProps) {
+  if (props.collaboration?.kind === "collaboration") {
+    return (
+      <CollaborativeDocumentShellContent
+        key={props.document.id}
+        {...props}
+        collaboration={props.collaboration}
+      />
+    );
+  }
+  return <DocumentShellContent key={props.document.id} {...props} collaborationRuntime={null} />;
+}
+
+function CollaborativeDocumentShellContent(
+  props: DocumentShellProps & {
+    collaboration: Extract<CollaborationClientConfiguration, { kind: "collaboration" }>;
+  },
+) {
+  const projectProfile = props.projectProfile ?? getProjectProfile("default");
+  const { session, snapshot } = useCollaborationSession({
+    ...props.collaboration,
+    projectProfile,
+  });
+  const [fieldResource, setFieldResource] = useState<{
+    fields: YjsFieldStore;
+    session: CollaborationSession;
+  } | null>(null);
+  const fieldsReady = Boolean(
+    session
+    && snapshot.hasCompletedInitialSync
+    && snapshot.status !== "fatal",
+  );
+
+  useEffect(() => {
+    if (!session || !fieldsReady) return;
+    let active = true;
+    let nextFields: YjsFieldStore | null = null;
+    void Promise.resolve().then(() => {
+      if (!active) return;
+      try {
+        nextFields = createYjsFieldStore({
+          document: session.document,
+          onInvalid: () => failCollaborationSession(session),
+          projectProfile,
+          writable: () => session.store.getSnapshot().writable,
+        });
+      } catch {
+        failCollaborationSession(session);
+        return;
+      }
+      if (!active) {
+        nextFields.destroy();
+        nextFields = null;
+        return;
+      }
+      setFieldResource({ fields: nextFields, session });
+    });
+    return () => {
+      active = false;
+      nextFields?.destroy();
+      nextFields = null;
+    };
+  }, [fieldsReady, projectProfile, session]);
+
   return (
     <DocumentShellContent
-      key={document.id}
-      aiRuns={aiRuns}
-      aiRunsNextCursor={aiRunsNextCursor}
-      conversationStorageMode={conversationStorageMode}
-      conversationWorkspaceId={conversationWorkspaceId}
-      defaultTemplateId={defaultTemplateId}
-      document={document}
-      initialConversationLoadFailed={initialConversationLoadFailed}
-      initialConversationNextCursor={initialConversationNextCursor}
-      initialConversations={initialConversations}
-      pluginContributions={pluginContributions}
-      plugins={plugins}
-      proposals={proposals}
-      proposalsNextCursor={proposalsNextCursor}
-      projectProfile={projectProfile}
-      referenceDocuments={referenceDocuments}
-      templates={templates}
+      {...props}
+      collaborationRuntime={{
+        currentPrincipalId: props.collaboration.currentPrincipalId,
+        fields: fieldsReady && fieldResource?.session === session ? fieldResource.fields : null,
+        session,
+        snapshot,
+      }}
     />
   );
+}
+
+function failCollaborationSession(session: CollaborationSession) {
+  try {
+    session.store.markFatal();
+  } catch {
+    // A broken store must not prevent transport teardown.
+  }
+  try {
+    session.destroy();
+  } catch {
+    // Teardown is best effort; the UI still fails closed via the store.
+  }
 }
 
 function DocumentShellContent({
@@ -417,12 +705,16 @@ function DocumentShellContent({
   initialConversations,
   pluginContributions,
   plugins,
-  proposals = [],
+  proposals = EMPTY_SHELL_PROPOSALS,
   proposalsNextCursor = null,
   projectProfile = getProjectProfile("default"),
-  referenceDocuments = [],
+  referenceDocuments = EMPTY_REFERENCE_DOCUMENTS,
   templates,
-}: DocumentShellProps) {
+  collaborationRuntime,
+}: DocumentShellContentProps) {
+  const router = useRouter();
+  const replaceRoute = router.replace;
+  const isCollaborationMode = collaborationRuntime !== null;
   const initialTemplate = getInitialTemplate(templates, defaultTemplateId);
   const initialTemplateVariables = useMemo(
     () => mergeMissingTemplateVariableDefaults(initialTemplate, {}),
@@ -449,6 +741,22 @@ function DocumentShellContent({
     [document.metadataJson, document.readiness, incomingDocument],
   );
   const [draft, setDraft] = useState<DraftState>(initialDraft);
+  const activeCollaborationFields = collaborationRuntime?.session
+    && collaborationRuntime.fields
+    && collaborationRuntime.snapshot.hasCompletedInitialSync
+    && collaborationRuntime.snapshot.status !== "fatal"
+    ? collaborationRuntime.fields
+    : null;
+  const collaborationTitle = useSyncExternalStore(
+    activeCollaborationFields?.subscribeTitle ?? subscribeToNothing,
+    activeCollaborationFields?.getTitleSnapshot ?? (() => initialDraft.title),
+    activeCollaborationFields?.getTitleSnapshot ?? (() => initialDraft.title),
+  );
+  const collaborationMetadata = useSyncExternalStore(
+    activeCollaborationFields?.subscribeMetadata ?? subscribeToNothing,
+    activeCollaborationFields?.getMetadataSnapshot ?? (() => initialDraft.metadataJson),
+    activeCollaborationFields?.getMetadataSnapshot ?? (() => initialDraft.metadataJson),
+  );
   const draftRef = useRef<DraftState>(initialDraft);
   const draftVersionRef = useRef(0);
   const persistedDraftVersionRef = useRef(0);
@@ -461,6 +769,25 @@ function DocumentShellContent({
   const serverContentSignatureRef = useRef(createProposalContentSignature(incomingDocument.contentJson));
   const serverRevisionRef = useRef(incomingDocument.revision);
   const [serverRevision, setServerRevision] = useState(incomingDocument.revision);
+  const initialWorkflowState = useMemo<DocumentWorkflowState | null>(() => isCollaborationMode
+    ? null
+    : Object.freeze({
+        collaboration: null,
+        documentId: document.id,
+        readiness: document.readiness ?? "draft",
+        revision: document.revision,
+      }), [document.id, document.readiness, document.revision, isCollaborationMode]);
+  const [workflowState, setWorkflowState] = useState<DocumentWorkflowState | null>(initialWorkflowState);
+  const workflowStateRef = useRef<DocumentWorkflowState | null>(initialWorkflowState);
+  const collaborationPositionRef = useRef<CollaborationPosition | null>(null);
+  const collaborationFlushControllersRef = useRef(new Set<AbortController>());
+  const collaborationCommandPendingRef = useRef(false);
+  const collaborationCommandRetryRef = useRef(new Map<string, CachedCollaborationCommand>());
+  const workflowReadRequestRef = useRef<WorkflowReadRequest | null>(null);
+  const workflowMutationControllerRef = useRef<AbortController | null>(null);
+  const workflowNotificationBusRef = useRef<DocumentWorkflowNotificationBus | null>(null);
+  const [workflowFeedback, setWorkflowFeedback] = useState<WorkflowFeedback | null>(null);
+  const [isWorkflowMutating, setIsWorkflowMutating] = useState(false);
   const [saveState, setSaveState] = useState<SaveState>("saved");
   const [projectProfileViolation, setProjectProfileViolation] = useState<ProjectProfileViolation | null>(null);
   const [saveConflict, setSaveConflict] = useState<{
@@ -470,6 +797,9 @@ function DocumentShellContent({
   const [saveConflictNotice, setSaveConflictNotice] = useState("");
   const [isSavingConflictCopy, setIsSavingConflictCopy] = useState(false);
   const [language, setLanguage] = useState<EditorLanguage>(() => readStoredEditorLanguage());
+  const collaborationNavigationRef = useRef<CollaborationNavigationController | null>(null);
+  const collaborationSnapshotRef = useRef(collaborationRuntime?.snapshot ?? null);
+  const collaborationNavigationMessageRef = useRef("");
   const [selectionCommand, setSelectionCommand] = useState<SelectionCommandPayload | null>(null);
   const [selectionAiResult, setSelectionAiResult] = useState<SelectionAiResultPreview | null>(null);
   const [selectionApplicationNotice, setSelectionApplicationNotice] = useState("");
@@ -510,6 +840,8 @@ function DocumentShellContent({
   const [isLoadingProposals, setIsLoadingProposals] = useState(false);
   const [reviewSummary, setReviewSummary] = useState<AiReviewSummary | null>(null);
   const [isReviewing, setIsReviewing] = useState(false);
+  const [collaborationCommandPendingDocumentId, setCollaborationCommandPendingDocumentId] = useState<string | null>(null);
+  const isCollaborationCommandPending = collaborationCommandPendingDocumentId === document.id;
   const [reviewError, setReviewError] = useState("");
   const [templateVariables, setTemplateVariables] = useState<Record<string, string>>(initialTemplateVariables);
   const [templateVariableErrors, setTemplateVariableErrors] = useState<Record<string, string>>({});
@@ -529,8 +861,67 @@ function DocumentShellContent({
   const isActiveDocumentAsyncScope = useCallback((scope: DocumentAsyncScope) =>
     scope.documentId === documentAsyncScopeRef.current.documentId &&
     scope.generation === documentAsyncScopeRef.current.generation, []);
+  const flushCollaborationBarrier = useCallback(async (
+    signal: AbortSignal,
+    requestScope: DocumentAsyncScope,
+  ): Promise<CollaborationBarrier> => {
+    const session = collaborationRuntime?.session;
+    if (!session) throw new CollaborationActionError();
+    try {
+      const durableState = await session.flushPendingUpdates({
+        signal,
+        timeoutMs: COLLABORATION_ACTION_TIMEOUT_MS,
+      });
+      if (!isActiveDocumentAsyncScope(requestScope)) throw new CollaborationActionError();
+      const position = collaborationPositionRef.current;
+      if (position && durableState.generation < position.generation) {
+        throw new CollaborationActionError();
+      }
+      return {
+        generation: durableState.generation,
+        stateVector: encodeBase64Url(durableState.stateVector),
+      };
+    } catch {
+      throw new CollaborationActionError();
+    }
+  }, [collaborationRuntime?.session, isActiveDocumentAsyncScope]);
+  const runWithCollaborationFlushController = useCallback(async <Result,>(
+    operation: (signal: AbortSignal) => Promise<Result>,
+  ) => {
+    const controller = new AbortController();
+    collaborationFlushControllersRef.current.add(controller);
+    try {
+      return await operation(controller.signal);
+    } finally {
+      collaborationFlushControllersRef.current.delete(controller);
+    }
+  }, []);
+  const acceptCollaborationPosition = useCallback((
+    nextPosition: CollaborationPosition,
+    requestScope: DocumentAsyncScope,
+    expectedPosition: CollaborationPosition,
+  ) => {
+    if (!isActiveDocumentAsyncScope(requestScope)) return false;
+    const isExpectedGeneration = nextPosition.generation === expectedPosition.generation
+      && nextPosition.headSeq >= expectedPosition.headSeq;
+    const isSingleStorageRotation = nextPosition.generation === expectedPosition.generation + 1;
+    if (!isExpectedGeneration && !isSingleStorageRotation) {
+      return false;
+    }
+    const currentPosition = collaborationPositionRef.current;
+    if (
+      currentPosition === null
+      || nextPosition.generation > currentPosition.generation
+      || (nextPosition.generation === currentPosition.generation
+        && nextPosition.headSeq > currentPosition.headSeq)
+    ) {
+      collaborationPositionRef.current = nextPosition;
+    }
+    return true;
+  }, [isActiveDocumentAsyncScope]);
 
   useLayoutEffect(() => {
+    const flushControllers = collaborationFlushControllersRef.current;
     if (documentAsyncScopeRef.current.documentId !== document.id) {
       documentAsyncScopeRef.current = {
         documentId: document.id,
@@ -539,6 +930,10 @@ function DocumentShellContent({
       saveRequestGenerationRef.current += 1;
     }
     return () => {
+      for (const controller of flushControllers) controller.abort();
+      flushControllers.clear();
+      collaborationPositionRef.current = null;
+      collaborationCommandPendingRef.current = false;
       documentAsyncScopeRef.current = {
         ...documentAsyncScopeRef.current,
         generation: documentAsyncScopeRef.current.generation + 1,
@@ -546,6 +941,20 @@ function DocumentShellContent({
       saveRequestGenerationRef.current += 1;
     };
   }, [document.id]);
+
+  useEffect(() => {
+    const nextPosition = workflowState?.collaboration ?? null;
+    if (!isCollaborationMode || !nextPosition) return;
+    const currentPosition = collaborationPositionRef.current;
+    if (
+      currentPosition === null
+      || nextPosition.generation > currentPosition.generation
+      || (currentPosition.generation === nextPosition.generation
+        && nextPosition.headSeq >= currentPosition.headSeq)
+    ) {
+      collaborationPositionRef.current = nextPosition;
+    }
+  }, [isCollaborationMode, workflowState]);
 
   useEffect(() => subscribeCompactSidebarLayout(() => {
     if (!getCompactSidebarLayoutSnapshot()) setIsSidebarOpen(false);
@@ -600,12 +1009,141 @@ function DocumentShellContent({
   const selectionCommandLabel = selectionCommand ? getSelectionCommandLabel(selectionCommand.command, language) : "";
   const isRewritingSelection = runningSelectionCommands.length > 0;
   const isSelectionCommandLimitReached = runningSelectionCommands.length >= MAX_CONCURRENT_SELECTION_COMMANDS;
-  const isInternalNavigationBlocked = saveState !== "saved";
+  const isInternalNavigationBlocked = !isCollaborationMode && saveState !== "saved";
+
+  useLayoutEffect(() => {
+    collaborationSnapshotRef.current = collaborationRuntime?.snapshot ?? null;
+  }, [collaborationRuntime?.snapshot]);
+
+  useEffect(() => {
+    collaborationNavigationMessageRef.current = language === "ko"
+      ? "아직 서버와 동기화되지 않은 공동 편집 변경 사항이 있습니다. 이동을 계속하시겠습니까?"
+      : "Some shared edits have not finished syncing. Continue navigating?";
+  }, [language]);
+
+  useEffect(() => {
+    const initialSnapshot = collaborationSnapshotRef.current;
+    if (!isCollaborationMode || !initialSnapshot) {
+      collaborationNavigationRef.current = null;
+      return;
+    }
+    const controller = collaborationNavigationRef.current
+      ?? createCollaborationNavigationController({
+        environment: createBrowserCollaborationNavigationEnvironment(),
+        getMessage: () => collaborationNavigationMessageRef.current,
+        getSnapshot: () => collaborationSnapshotRef.current ?? initialSnapshot,
+        onHandoff: () => {
+          intentionalNavigationRef.current = true;
+        },
+        onRestoreProtectedRoute: (href) => {
+          const protectedUrl = new URL(href, window.location.href);
+          if (protectedUrl.origin !== window.location.origin) return;
+          replaceRoute(`${protectedUrl.pathname}${protectedUrl.search}${protectedUrl.hash}`);
+        },
+      });
+    if (!collaborationNavigationRef.current) {
+      collaborationNavigationRef.current = controller;
+    }
+    const uninstall = controller.install();
+    return uninstall;
+  }, [document.id, isCollaborationMode, replaceRoute]);
   const adoptServerRevision = useCallback((returnedRevision: number, mode: "advance" | "reset" = "advance") => {
     const nextRevision = resolveServerRevision(serverRevisionRef.current, returnedRevision, mode);
     serverRevisionRef.current = nextRevision;
     setServerRevision(nextRevision);
   }, []);
+  const adoptWorkflowState = useCallback((nextWorkflow: DocumentWorkflowState) => {
+    if (nextWorkflow.documentId !== documentAsyncScopeRef.current.documentId) return;
+    workflowStateRef.current = nextWorkflow;
+    setWorkflowState(nextWorkflow);
+    setDraft((currentDraft) => {
+      if (currentDraft.readiness === nextWorkflow.readiness) return currentDraft;
+      const nextDraft = { ...currentDraft, readiness: nextWorkflow.readiness };
+      draftRef.current = nextDraft;
+      return nextDraft;
+    });
+  }, []);
+  const refreshWorkflow = useCallback((): Promise<DocumentWorkflowState | null> => {
+    const currentRequest = workflowReadRequestRef.current;
+    if (currentRequest?.documentId === document.id) return currentRequest.promise;
+    if (workflowMutationControllerRef.current) return Promise.resolve(null);
+
+    const requestScope = documentAsyncScopeRef.current;
+    const controller = new AbortController();
+    const promise = (async () => {
+      try {
+        const result = await documentSessionClient.readWorkflow(document.id, { signal: controller.signal });
+        if (!isActiveDocumentAsyncScope(requestScope)) return null;
+        adoptWorkflowState(result.workflow);
+        setWorkflowFeedback(null);
+        return result.workflow;
+      } catch (error) {
+        if (!isActiveDocumentAsyncScope(requestScope) || controller.signal.aborted) return null;
+        setWorkflowFeedback(error instanceof DocumentWorkflowRequestError ? error.reason : "network_error");
+        return null;
+      } finally {
+        const activeRequest = workflowReadRequestRef.current;
+        if (activeRequest?.controller === controller) workflowReadRequestRef.current = null;
+      }
+    })();
+    workflowReadRequestRef.current = { controller, documentId: document.id, promise };
+    return promise;
+  }, [adoptWorkflowState, document.id, isActiveDocumentAsyncScope]);
+
+  useEffect(() => {
+    const recoverWorkflow = () => {
+      void refreshWorkflow();
+    };
+    if (isCollaborationMode) recoverWorkflow();
+    const notificationBus = createDocumentWorkflowNotificationBus({
+      onDocumentChanged: (changedDocumentId) => {
+        if (changedDocumentId === document.id) recoverWorkflow();
+      },
+    });
+    workflowNotificationBusRef.current = notificationBus;
+    window.addEventListener("focus", recoverWorkflow);
+    window.addEventListener("online", recoverWorkflow);
+    const intervalId = window.setInterval(recoverWorkflow, DOCUMENT_WORKFLOW_RECOVERY_INTERVAL_MS);
+
+    return () => {
+      window.removeEventListener("focus", recoverWorkflow);
+      window.removeEventListener("online", recoverWorkflow);
+      window.clearInterval(intervalId);
+      notificationBus.destroy();
+      if (workflowNotificationBusRef.current === notificationBus) {
+        workflowNotificationBusRef.current = null;
+      }
+      workflowReadRequestRef.current?.controller.abort();
+      workflowReadRequestRef.current = null;
+      workflowMutationControllerRef.current?.abort();
+      workflowMutationControllerRef.current = null;
+    };
+  }, [document.id, isCollaborationMode, refreshWorkflow]);
+
+  useEffect(() => {
+    const session = collaborationRuntime?.session;
+    if (!session) return;
+    return session.subscribeWorkflowChanged(() => {
+      void refreshWorkflow();
+    });
+  }, [collaborationRuntime?.session, refreshWorkflow]);
+
+  useEffect(() => {
+    if (
+      !collaborationRuntime?.session ||
+      !collaborationRuntime.snapshot.hasCompletedInitialSync ||
+      !collaborationRuntime.snapshot.transportSynced
+    ) {
+      return;
+    }
+    void refreshWorkflow();
+  }, [
+    collaborationRuntime?.session,
+    collaborationRuntime?.snapshot.hasCompletedInitialSync,
+    collaborationRuntime?.snapshot.status,
+    collaborationRuntime?.snapshot.transportSynced,
+    refreshWorkflow,
+  ]);
   const enterRevisionConflictRecovery = useCallback((serverDocument: DocumentSnapshot) => {
     saveRequestGenerationRef.current += 1;
     intentionalNavigationRef.current = false;
@@ -785,7 +1323,7 @@ function DocumentShellContent({
     setProjectProfileViolation(null);
     setSaveState("dirty");
   }, []);
-  const handleMetadataChange = useCallback((change: { metadataJson?: DocumentMetadata; readiness?: DocumentReadiness }) => {
+  const handleLegacyMetadataChange = useCallback((change: { metadataJson?: DocumentMetadata; readiness?: DocumentReadiness }) => {
     draftVersionRef.current += 1;
     setDraft((currentDraft) => {
       const updatedDraft = { ...currentDraft, ...change };
@@ -799,6 +1337,157 @@ function DocumentShellContent({
     setProjectProfileViolation(null);
     setSaveState("dirty");
   }, []);
+  const handleMetadataFieldChange = useCallback((key: string, value: DocumentMetadata[string] | undefined) => {
+    if (activeCollaborationFields) {
+      try {
+        activeCollaborationFields.setMetadataField(key, value);
+      } catch {
+        // The field store reports only bounded validation categories. The
+        // controlled input remains on the last canonical snapshot.
+      }
+      return;
+    }
+    if (isCollaborationMode) return;
+    const nextMetadata = { ...draftRef.current.metadataJson };
+    if (value === undefined) delete nextMetadata[key];
+    else nextMetadata[key] = Array.isArray(value) ? [...value] : value;
+    handleLegacyMetadataChange({ metadataJson: nextMetadata });
+  }, [activeCollaborationFields, handleLegacyMetadataChange, isCollaborationMode]);
+  const handleReadinessChange = useCallback(async (next: DocumentReadiness) => {
+    const initialWorkflow = workflowStateRef.current;
+    if (
+      !initialWorkflow ||
+      isWorkflowMutating ||
+      workflowMutationControllerRef.current ||
+      (!isCollaborationMode && (saveState !== "saved" || saveConflict !== null)) ||
+      next === initialWorkflow.readiness
+    ) return;
+    if (
+      isCollaborationMode && (
+        !collaborationRuntime?.snapshot.hasCompletedInitialSync ||
+        collaborationRuntime.snapshot.permission !== "write" ||
+        collaborationRuntime.snapshot.status === "fatal"
+      )
+    ) {
+      return;
+    }
+
+    const requestScope = documentAsyncScopeRef.current;
+    const controller = new AbortController();
+    const pendingRead = workflowReadRequestRef.current?.promise;
+    workflowMutationControllerRef.current = controller;
+    setIsWorkflowMutating(true);
+    setWorkflowFeedback(null);
+
+    const readAuthoritativeWorkflow = async () => {
+      const result = await documentSessionClient.readWorkflow(document.id, { signal: controller.signal });
+      if (!isActiveDocumentAsyncScope(requestScope)) return null;
+      adoptWorkflowState(result.workflow);
+      return result.workflow;
+    };
+
+    try {
+      if (pendingRead) await pendingRead;
+      if (!isActiveDocumentAsyncScope(requestScope) || controller.signal.aborted) return;
+      let expectedWorkflow = workflowStateRef.current;
+      if (!expectedWorkflow) return;
+
+      let command: Parameters<typeof documentSessionClient.updateWorkflow>[1];
+      if (next === "approved") {
+        expectedWorkflow = await readAuthoritativeWorkflow();
+        if (!expectedWorkflow) return;
+        if (expectedWorkflow.readiness !== "ready") {
+          setWorkflowFeedback("expected_readiness_conflict");
+          return;
+        }
+        if (!expectedWorkflow.collaboration) {
+          setWorkflowFeedback("legacy_approval_unsupported");
+          return;
+        }
+        const liveSnapshot = collaborationSnapshotRef.current;
+        if (
+          !liveSnapshot ||
+          liveSnapshot.status !== "synced" ||
+          !liveSnapshot.transportSynced ||
+          hasPendingCollaborationUpdates(liveSnapshot)
+        ) {
+          setWorkflowFeedback("approval_durability_pending");
+          return;
+        }
+        command = {
+          expectedReadiness: "ready",
+          nextReadiness: "approved",
+          observedHeadSeq: expectedWorkflow.collaboration.headSeq,
+        };
+      } else {
+        command = {
+          expectedReadiness: expectedWorkflow.readiness,
+          nextReadiness: next,
+        };
+      }
+
+      const result = await documentSessionClient.updateWorkflow(document.id, command, {
+        signal: controller.signal,
+      });
+      if (!isActiveDocumentAsyncScope(requestScope)) return;
+      adoptWorkflowState(result.workflow);
+      if (
+        !isCollaborationMode &&
+        expectedWorkflow.revision === serverRevisionRef.current &&
+        result.workflow.revision === expectedWorkflow.revision + 1
+      ) {
+        // Workflow and legacy body saves share one document revision. Only
+        // advance the body CAS when this command is provably the sole
+        // intervening revision; otherwise retain the stale revision so the
+        // next body save conflicts instead of overwriting an external edit.
+        adoptServerRevision(result.workflow.revision);
+      }
+      setWorkflowFeedback("saved");
+      try {
+        workflowNotificationBusRef.current?.publish(document.id);
+      } catch {
+        // The HTTP command already committed. Notification transports are
+        // hints only; explicit re-read and recovery polling remain active.
+      }
+      try {
+        await readAuthoritativeWorkflow();
+      } catch {
+        if (!controller.signal.aborted && isActiveDocumentAsyncScope(requestScope)) {
+          setWorkflowFeedback("workflow_unavailable");
+        }
+      }
+    } catch (error) {
+      if (!isActiveDocumentAsyncScope(requestScope) || controller.signal.aborted) return;
+      if (error instanceof DocumentWorkflowRequestError) {
+        if (error.workflow) adoptWorkflowState(error.workflow);
+        if (error.violation) setProjectProfileViolation(error.violation);
+        setWorkflowFeedback(error.reason);
+      } else {
+        setWorkflowFeedback("network_error");
+      }
+      try {
+        await readAuthoritativeWorkflow();
+      } catch {
+        // Preserve the stable command error while a later focus/online/poll
+        // recovery retries the authoritative workflow read.
+      }
+    } finally {
+      if (workflowMutationControllerRef.current === controller) {
+        workflowMutationControllerRef.current = null;
+      }
+      if (isActiveDocumentAsyncScope(requestScope)) setIsWorkflowMutating(false);
+    }
+  }, [
+    adoptServerRevision,
+    adoptWorkflowState,
+    collaborationRuntime,
+    document.id,
+    isActiveDocumentAsyncScope,
+    isCollaborationMode,
+    isWorkflowMutating,
+    saveConflict,
+    saveState,
+  ]);
 
   const handleLanguageChange = useCallback((nextLanguage: string) => {
     if (!isEditorLanguage(nextLanguage)) {
@@ -810,9 +1499,10 @@ function DocumentShellContent({
   }, []);
 
   const createNewDocument = useCallback(async () => {
-    if (isInternalNavigationBlocked) {
-      return;
-    }
+    const navigationPermit = isCollaborationMode
+      ? collaborationNavigationRef.current?.requestTransition()
+      : undefined;
+    if ((isCollaborationMode && !navigationPermit) || isInternalNavigationBlocked) return;
 
     setIsCreatingDocument(true);
 
@@ -831,20 +1521,48 @@ function DocumentShellContent({
 
       const body = (await response.json()) as { document?: { id?: string } };
       if (body.document?.id) {
-        window.location.assign(`/documents/${body.document.id}`);
+        const destination = `/documents/${encodeURIComponent(body.document.id)}`;
+        if (navigationPermit) {
+          navigationPermit.continue(() => router.push(destination));
+        } else {
+          window.location.assign(destination);
+        }
       }
     } catch {
       setReviewError(messages.errors.createDocumentFailed);
     } finally {
       setIsCreatingDocument(false);
     }
-  }, [isInternalNavigationBlocked, messages.errors.createDocumentFailed, messages.shell.untitledDocument]);
+  }, [
+    isCollaborationMode,
+    isInternalNavigationBlocked,
+    messages.errors.createDocumentFailed,
+    messages.shell.untitledDocument,
+    router,
+  ]);
 
   const handleInternalNavigationClick = useCallback((event: MouseEvent<HTMLAnchorElement>) => {
     if (isInternalNavigationBlocked) {
       event.preventDefault();
+      return;
     }
-  }, [isInternalNavigationBlocked]);
+    if (!isCollaborationMode) return;
+    if (
+      event.button !== 0
+      || event.altKey
+      || event.ctrlKey
+      || event.metaKey
+      || event.shiftKey
+      || event.currentTarget.target === "_blank"
+    ) {
+      return;
+    }
+    const destination = event.currentTarget.getAttribute("href");
+    if (!destination || !destination.startsWith("/") || destination.startsWith("//")) return;
+    event.preventDefault();
+    const permit = collaborationNavigationRef.current?.requestTransition();
+    permit?.continue(() => router.push(destination));
+  }, [isCollaborationMode, isInternalNavigationBlocked, router]);
 
   const handleSelectionCommand = useCallback(async (
     command: string,
@@ -936,7 +1654,19 @@ function DocumentShellContent({
       title: getSelectionCommandLabel(command, language),
     });
 
+    let collaborationFlushFailed = false;
     try {
+      let collaborationBarrier: CollaborationBarrier | undefined;
+      if (isCollaborationMode) {
+        try {
+          collaborationBarrier = await runWithCollaborationFlushController((signal) =>
+            flushCollaborationBarrier(signal, requestScope));
+        } catch {
+          collaborationFlushFailed = true;
+          throw new CollaborationActionError();
+        }
+      }
+      if (!isActiveDocumentAsyncScope(requestScope)) return;
       const requestBody = JSON.stringify({
           documentId: document.id,
           templateId: selectedTemplate.id,
@@ -952,7 +1682,9 @@ function DocumentShellContent({
           selectedText,
           occurrenceIndex: context?.occurrenceIndex,
           selectionRange: context?.selectionRange,
-          documentText: extractPlainTextFromTiptap(draft.contentJson),
+          ...(collaborationBarrier
+            ? { collaborationBarrier }
+            : { documentText: extractPlainTextFromTiptap(draft.contentJson) }),
           beforeContext: "",
           afterContext: "",
         });
@@ -1020,7 +1752,9 @@ function DocumentShellContent({
       if (!isActiveDocumentAsyncScope(requestScope)) return;
       await conversations.failConversation(conversationAttempt);
       if (!isActiveDocumentAsyncScope(requestScope)) return;
-      setReviewError(messages.errors.selectionRewriteFailed);
+      setReviewError(collaborationFlushFailed
+        ? messages.errors.collaborationSyncFailed
+        : messages.errors.selectionRewriteFailed);
     } finally {
       if (isActiveDocumentAsyncScope(requestScope)) {
         updateRunningSelectionCommands((currentCommands) =>
@@ -1035,14 +1769,22 @@ function DocumentShellContent({
     language,
     messages,
     conversations,
+    flushCollaborationBarrier,
     isActiveDocumentAsyncScope,
+    isCollaborationMode,
+    runWithCollaborationFlushController,
     selectedTemplate,
     templateVariables,
     updateRunningSelectionCommands,
   ]);
 
   const saveDraft = useCallback(async () => {
-    if (saveConflict) return;
+    if (
+      isCollaborationMode
+      || saveConflict
+      || isWorkflowMutating
+      || workflowMutationControllerRef.current
+    ) return;
     const requestScope = documentAsyncScopeRef.current;
     const requestGeneration = saveRequestGenerationRef.current + 1;
     saveRequestGenerationRef.current = requestGeneration;
@@ -1082,10 +1824,19 @@ function DocumentShellContent({
     }
     if (requestGeneration !== saveRequestGenerationRef.current) return;
     setSaveState(draftVersionRef.current === savingVersion ? "failed" : "dirty");
-  }, [adoptServerRevision, document.id, draft, enterRevisionConflictRecovery, isActiveDocumentAsyncScope, saveConflict]);
+  }, [
+    adoptServerRevision,
+    document.id,
+    draft,
+    enterRevisionConflictRecovery,
+    isActiveDocumentAsyncScope,
+    isCollaborationMode,
+    isWorkflowMutating,
+    saveConflict,
+  ]);
 
   useEffect(() => {
-    if (saveState !== "dirty" || saveConflict) {
+    if (isCollaborationMode || saveState !== "dirty" || saveConflict) {
       return;
     }
 
@@ -1094,7 +1845,7 @@ function DocumentShellContent({
     }, AUTOSAVE_DEBOUNCE_MS);
 
     return () => window.clearTimeout(timeoutId);
-  }, [saveConflict, saveDraft, saveState]);
+  }, [isCollaborationMode, saveConflict, saveDraft, saveState]);
 
   const loadServerConflictVersion = useCallback(() => {
     if (!saveConflict) return;
@@ -1201,9 +1952,10 @@ function DocumentShellContent({
   ]);
 
   useEffect(() => {
-    if (saveState !== "dirty" && saveState !== "failed" && saveState !== "saving") {
-      return;
-    }
+    const hasPendingLegacyChanges = saveState === "dirty"
+      || saveState === "failed"
+      || saveState === "saving";
+    if (isCollaborationMode || !hasPendingLegacyChanges) return;
 
     const handleBeforeUnload = (event: BeforeUnloadEvent) => {
       if (intentionalNavigationRef.current) return;
@@ -1213,13 +1965,18 @@ function DocumentShellContent({
 
     window.addEventListener("beforeunload", handleBeforeUnload);
     return () => window.removeEventListener("beforeunload", handleBeforeUnload);
-  }, [saveState]);
+  }, [isCollaborationMode, saveState]);
 
   const downloadDocxSnapshot = useCallback(async (
-    snapshot: Pick<PendingDocxExport, "contentJson" | "title">,
+    snapshot: Pick<PendingDocxExport, "collaborationDiagnostics" | "contentJson" | "title">,
     acknowledgedLoss: boolean,
     signal: AbortSignal,
+    requestScope: DocumentAsyncScope,
   ) => {
+    if (isCollaborationMode) {
+      await flushCollaborationBarrier(signal, requestScope);
+    }
+    if (!isActiveDocumentAsyncScope(requestScope)) throw new CollaborationActionError();
     const blob = await fetchDocumentInterchange(`/api/documents/${encodeURIComponent(document.id)}/export`, {
       method: "POST",
       signal,
@@ -1232,7 +1989,17 @@ function DocumentShellContent({
         contentJson: snapshot.contentJson,
       }),
     }, async (response) => {
-      if (!response.ok) throw new Error("Failed to export DOCX");
+      if (!response.ok) {
+        if (snapshot.collaborationDiagnostics) await classifyCollaborationExportFailure(response);
+        throw new Error("Failed to export DOCX");
+      }
+      if (snapshot.collaborationDiagnostics) {
+        const actualDiagnostics = readCollaborationExportHeaders(response.headers);
+        if (!actualDiagnostics) throw new Error("Collaboration export diagnostics missing");
+        if (!matchesCollaborationExportDiagnostics(snapshot.collaborationDiagnostics, actualDiagnostics)) {
+          throw new CollaborationExportChangedError();
+        }
+      }
       return response.blob();
     });
     if (signal.aborted) throw signal.reason;
@@ -1242,18 +2009,26 @@ function DocumentShellContent({
     link.download = `${sanitizeDownloadFileName(snapshot.title)}.docx`;
     link.click();
     URL.revokeObjectURL(url);
-  }, [document.id]);
+  }, [document.id, flushCollaborationBarrier, isActiveDocumentAsyncScope, isCollaborationMode]);
 
   const exportDocxDraft = useCallback(async () => {
     if (isExportingDocx || pendingDocxExport) return;
     docxExportRequestRef.current?.abort();
     const requestController = new AbortController();
     docxExportRequestRef.current = requestController;
-    const snapshot = { contentJson: draft.contentJson, title: draft.title };
+    const requestScope = documentAsyncScopeRef.current;
+    const snapshot = {
+      contentJson: draft.contentJson,
+      title: isCollaborationMode ? collaborationTitle : draft.title,
+    };
     setIsExportingDocx(true);
     setDocxExportError("");
 
     try {
+      if (isCollaborationMode) {
+        await flushCollaborationBarrier(requestController.signal, requestScope);
+      }
+      if (!isActiveDocumentAsyncScope(requestScope)) return;
       const body = await fetchDocumentInterchange(`/api/documents/${encodeURIComponent(document.id)}/export/preview`, {
         method: "POST",
         signal: requestController.signal,
@@ -1264,21 +2039,33 @@ function DocumentShellContent({
           contentJson: snapshot.contentJson,
         }),
       }, async (response) => {
-        if (!response.ok) throw new Error("Failed to preview DOCX export");
-        return response.json() as Promise<{ fidelity?: FidelityReport }>;
+        if (!response.ok) {
+          if (isCollaborationMode) await classifyCollaborationExportFailure(response);
+          throw new Error("Failed to preview DOCX export");
+        }
+        const parsed = exportPreviewResponseSchema.safeParse(await response.json().catch(() => null));
+        if (!parsed.success) throw new Error("Malformed DOCX export preview");
+        return parsed.data;
       });
-      if (!body.fidelity || !Array.isArray(body.fidelity.items)) {
-        throw new Error("DOCX export fidelity missing");
+      if (!isActiveDocumentAsyncScope(requestScope)) return;
+      if (isCollaborationMode && !isCollaborationExportDiagnostics(body.collaboration)) {
+        throw new Error("Collaboration export diagnostics missing");
       }
+      const exportSnapshot = {
+        ...snapshot,
+        ...(isCollaborationExportDiagnostics(body.collaboration)
+          ? { collaborationDiagnostics: body.collaboration }
+          : {}),
+      };
 
       if (body.fidelity.requiresAcknowledgement) {
-        setPendingDocxExport({ ...snapshot, fidelity: body.fidelity });
+        setPendingDocxExport({ ...exportSnapshot, fidelity: body.fidelity });
       } else {
-        await downloadDocxSnapshot(snapshot, false, requestController.signal);
+        await downloadDocxSnapshot(exportSnapshot, false, requestController.signal, requestScope);
       }
-    } catch {
+    } catch (error) {
       if (docxExportRequestRef.current === requestController && !requestController.signal.aborted) {
-        setDocxExportError(messages.errors.exportDocxFailed);
+        setDocxExportError(getDocxExportErrorMessage(error, messages.errors));
       }
     } finally {
       if (docxExportRequestRef.current === requestController) {
@@ -1288,11 +2075,15 @@ function DocumentShellContent({
     }
   }, [
     document.id,
+    collaborationTitle,
     downloadDocxSnapshot,
     draft.contentJson,
     draft.title,
+    isCollaborationMode,
+    isActiveDocumentAsyncScope,
     isExportingDocx,
-    messages.errors.exportDocxFailed,
+    flushCollaborationBarrier,
+    messages.errors,
     pendingDocxExport,
   ]);
 
@@ -1303,13 +2094,15 @@ function DocumentShellContent({
     docxExportRequestRef.current = requestController;
     setIsExportingDocx(true);
     setDocxExportError("");
+    const requestScope = documentAsyncScopeRef.current;
     try {
-      await downloadDocxSnapshot(pendingDocxExport, true, requestController.signal);
+      await downloadDocxSnapshot(pendingDocxExport, true, requestController.signal, requestScope);
+      if (!isActiveDocumentAsyncScope(requestScope)) return;
       setPendingDocxExport(null);
-    } catch {
+    } catch (error) {
       if (docxExportRequestRef.current === requestController && !requestController.signal.aborted) {
         setPendingDocxExport(null);
-        setDocxExportError(messages.errors.exportDocxFailed);
+        setDocxExportError(getDocxExportErrorMessage(error, messages.errors));
       }
     } finally {
       if (docxExportRequestRef.current === requestController) {
@@ -1317,7 +2110,13 @@ function DocumentShellContent({
         setIsExportingDocx(false);
       }
     }
-  }, [downloadDocxSnapshot, isExportingDocx, messages.errors.exportDocxFailed, pendingDocxExport]);
+  }, [
+    downloadDocxSnapshot,
+    isActiveDocumentAsyncScope,
+    isExportingDocx,
+    messages.errors,
+    pendingDocxExport,
+  ]);
 
   const selectTemplate = useCallback((templateId: string) => {
     const nextTemplate = templates.find((template) => template.id === templateId) ?? null;
@@ -1361,13 +2160,27 @@ function DocumentShellContent({
     setReviewSummary(null);
     setTemplateVariableErrors({});
 
+    let collaborationFlushFailed = false;
     try {
+      let collaborationBarrier: CollaborationBarrier | undefined;
+      if (isCollaborationMode) {
+        try {
+          collaborationBarrier = await runWithCollaborationFlushController((signal) =>
+            flushCollaborationBarrier(signal, requestScope));
+        } catch {
+          collaborationFlushFailed = true;
+          throw new CollaborationActionError();
+        }
+      }
+      if (!isActiveDocumentAsyncScope(requestScope)) return;
       const requestBody = JSON.stringify({
           documentId: document.id,
           templateId: selectedTemplate.id,
           command: "Review document",
           variables: variablesForReview,
-          documentText: extractPlainTextFromTiptap(draft.contentJson),
+          ...(collaborationBarrier
+            ? { collaborationBarrier }
+            : { documentText: extractPlainTextFromTiptap(draft.contentJson) }),
         });
       const result = await postAiOperation<ReviewResponse>(
         aiIdempotencyKeyCacheRef.current,
@@ -1392,11 +2205,25 @@ function DocumentShellContent({
         setReviewRuns((currentRuns) => [body.run!, ...currentRuns]);
       }
     } catch {
-      if (isActiveDocumentAsyncScope(requestScope)) setReviewError(messages.errors.reviewFailed);
+      if (isActiveDocumentAsyncScope(requestScope)) {
+        setReviewError(collaborationFlushFailed
+          ? messages.errors.collaborationSyncFailed
+          : messages.errors.reviewFailed);
+      }
     } finally {
       if (isActiveDocumentAsyncScope(requestScope)) setIsReviewing(false);
     }
-  }, [document.id, draft.contentJson, isActiveDocumentAsyncScope, messages, selectedTemplate, templateVariables]);
+  }, [
+    document.id,
+    draft.contentJson,
+    flushCollaborationBarrier,
+    isActiveDocumentAsyncScope,
+    isCollaborationMode,
+    messages,
+    runWithCollaborationFlushController,
+    selectedTemplate,
+    templateVariables,
+  ]);
 
   const updateProposalStatus = useCallback(async (
     proposalId: string,
@@ -1420,6 +2247,90 @@ function DocumentShellContent({
         if (isActiveDocumentAsyncScope(requestScope)) setReviewError(messages.errors.updateProposalFailed);
         return;
       }
+    }
+
+    if (isCollaborationMode && status === "accepted") {
+      if (collaborationCommandPendingRef.current) return;
+      const observedPosition = collaborationPositionRef.current
+        ?? workflowStateRef.current?.collaboration
+        ?? null;
+      if (!observedPosition) {
+        setReviewError(messages.errors.collaborationSyncFailed);
+        return;
+      }
+      const commandKey = `${document.id}:single:${proposalId}:${applyMode}`;
+      const cachedCommand = collaborationCommandRetryRef.current.get(commandKey);
+      const command: Extract<CachedCollaborationCommand, { kind: "single" }> = cachedCommand?.kind === "single"
+        ? cachedCommand
+        : {
+            expectedGeneration: observedPosition.generation,
+            kind: "single",
+            payload: {
+              commandId: crypto.randomUUID(),
+              mode: applyMode,
+              observedHeadSeq: observedPosition.headSeq,
+            },
+          };
+      collaborationCommandRetryRef.current.set(commandKey, command);
+      collaborationPositionRef.current = observedPosition;
+      collaborationCommandPendingRef.current = true;
+      setCollaborationCommandPendingDocumentId(document.id);
+      setReviewError("");
+      let commandWasSubmitted = false;
+      try {
+        const response = await runWithCollaborationFlushController(async (signal) => {
+          const durableBarrier = await flushCollaborationBarrier(signal, requestScope);
+          if (durableBarrier.generation < command.expectedGeneration) {
+            throw new CollaborationActionError();
+          }
+          if (!isActiveDocumentAsyncScope(requestScope)) throw new CollaborationActionError();
+          commandWasSubmitted = true;
+          return documentSessionClient.applyCollaborativeProposal(proposalId, command.payload, {
+            expectedDocumentId: document.id,
+            expectedGeneration: command.expectedGeneration,
+            signal,
+          });
+        });
+        const expectedPosition = {
+          generation: command.expectedGeneration,
+          headSeq: command.payload.observedHeadSeq,
+        };
+        if (!acceptCollaborationPosition(response.collaboration, requestScope, expectedPosition)) {
+          throw new CollaborationActionError();
+        }
+        const updatedProposal = response.proposals[0];
+        if (!updatedProposal) throw new CollaborationActionError();
+        setReviewProposals((currentProposals) => currentProposals.map((proposal) =>
+          proposal.id === proposalId ? updatedProposal : proposal));
+        setDocumentChanges((currentChanges) => [
+          createHistoryChange(response.change, response.proposals, response.collaboration),
+          ...currentChanges.filter((change) => change.id !== response.change.id),
+        ]);
+        adoptServerRevision(response.document.revision);
+        if (proposalId in selectionProposalContexts) {
+          setSelectionApplicationNotice(messages.selectionResult.collaborationAppliedNotice);
+        }
+        setUndoChangeError("");
+        if (selectionAiResult?.proposalId === proposalId) setSelectionAiResult(null);
+        if (activeProposalId === proposalId) setActiveProposalId(null);
+        collaborationCommandRetryRef.current.delete(commandKey);
+      } catch (error) {
+        if (!commandWasSubmitted || !shouldRetainCollaborationCommand(error)) {
+          collaborationCommandRetryRef.current.delete(commandKey);
+        }
+        if (isActiveDocumentAsyncScope(requestScope)) {
+          setSelectionApplicationNotice("");
+          setReviewError(commandWasSubmitted
+            ? getCollaborationProposalErrorMessage(error, messages.errors)
+            : messages.errors.collaborationSyncFailed);
+        }
+      } finally {
+        if (isActiveDocumentAsyncScope(requestScope)) {
+          collaborationCommandPendingRef.current = false;
+          setCollaborationCommandPendingDocumentId(null);
+        }
+      }
+      return;
     }
 
     const startingDraftVersion = draftVersionRef.current;
@@ -1543,15 +2454,20 @@ function DocumentShellContent({
       setReviewError(messages.errors.updateProposalFailed);
     }
   }, [
+    acceptCollaborationPosition,
     adoptServerRevision,
     document.id,
     draft,
+    flushCollaborationBarrier,
     isActiveDocumentAsyncScope,
+    isCollaborationMode,
     messages.errors,
     messages.selectionResult.appliedNotice,
+    messages.selectionResult.collaborationAppliedNotice,
     reviewProposals,
     recoverProjectProfileViolation,
     recoverSessionRevisionConflict,
+    runWithCollaborationFlushController,
     selectionAiResult,
     selectionProposalContexts,
     activeProposalId,
@@ -1603,6 +2519,89 @@ function DocumentShellContent({
         if (isActiveDocumentAsyncScope(requestScope)) setReviewError(messages.errors.updateProposalFailed);
         return;
       }
+    }
+
+    if (isCollaborationMode && status === "accepted") {
+      if (collaborationCommandPendingRef.current) return;
+      const observedPosition = collaborationPositionRef.current
+        ?? workflowStateRef.current?.collaboration
+        ?? null;
+      if (!observedPosition) {
+        setReviewError(messages.errors.collaborationSyncFailed);
+        return;
+      }
+      const proposalsToApply = getProposalApplicationOrder(pendingProposals, selectionProposalContexts);
+      const commandItems = proposalsToApply.map((proposal) => ({
+        mode: proposal.appliedMode ?? proposal.defaultApplyMode ?? "replace" as const,
+        proposalId: proposal.id,
+      }));
+      const commandKey = `${document.id}:batch:${JSON.stringify(commandItems)}`;
+      const cachedCommand = collaborationCommandRetryRef.current.get(commandKey);
+      const command: Extract<CachedCollaborationCommand, { kind: "batch" }> = cachedCommand?.kind === "batch"
+        ? cachedCommand
+        : {
+            expectedGeneration: observedPosition.generation,
+            kind: "batch",
+            payload: {
+              commandId: crypto.randomUUID(),
+              items: commandItems,
+              observedHeadSeq: observedPosition.headSeq,
+            },
+          };
+      collaborationCommandRetryRef.current.set(commandKey, command);
+      collaborationPositionRef.current = observedPosition;
+      collaborationCommandPendingRef.current = true;
+      setCollaborationCommandPendingDocumentId(document.id);
+      setReviewError("");
+      let commandWasSubmitted = false;
+      try {
+        const response = await runWithCollaborationFlushController(async (signal) => {
+          const durableBarrier = await flushCollaborationBarrier(signal, requestScope);
+          if (durableBarrier.generation < command.expectedGeneration) {
+            throw new CollaborationActionError();
+          }
+          if (!isActiveDocumentAsyncScope(requestScope)) throw new CollaborationActionError();
+          commandWasSubmitted = true;
+          return documentSessionClient.applyCollaborativeProposalBatch(command.payload, {
+            expectedDocumentId: document.id,
+            expectedGeneration: command.expectedGeneration,
+            signal,
+          });
+        });
+        const expectedPosition = {
+          generation: command.expectedGeneration,
+          headSeq: command.payload.observedHeadSeq,
+        };
+        if (!acceptCollaborationPosition(response.collaboration, requestScope, expectedPosition)) {
+          throw new CollaborationActionError();
+        }
+        const updatedProposalById = new Map(response.proposals.map((proposal) => [proposal.id, proposal]));
+        setReviewProposals((currentProposals) => currentProposals.map((proposal) =>
+          updatedProposalById.get(proposal.id) ?? proposal));
+        setDocumentChanges((currentChanges) => [
+          createHistoryChange(response.change, response.proposals, response.collaboration),
+          ...currentChanges.filter((change) => change.id !== response.change.id),
+        ]);
+        adoptServerRevision(response.document.revision);
+        setUndoChangeError("");
+        setActiveProposalId(null);
+        collaborationCommandRetryRef.current.delete(commandKey);
+      } catch (error) {
+        if (!commandWasSubmitted || !shouldRetainCollaborationCommand(error)) {
+          collaborationCommandRetryRef.current.delete(commandKey);
+        }
+        if (isActiveDocumentAsyncScope(requestScope)) {
+          setReviewError(commandWasSubmitted
+            ? getCollaborationProposalErrorMessage(error, messages.errors)
+            : messages.errors.collaborationSyncFailed);
+        }
+      } finally {
+        if (isActiveDocumentAsyncScope(requestScope)) {
+          collaborationCommandPendingRef.current = false;
+          setCollaborationCommandPendingDocumentId(null);
+        }
+      }
+      return;
     }
 
     const buildAcceptedDraftState = (baseDraft: DraftState, proposalsToAccept: AiReviewProposal[]) => {
@@ -1751,15 +2750,18 @@ function DocumentShellContent({
       setActiveProposalId(null);
     }
   }, [
+    acceptCollaborationPosition,
     adoptServerRevision,
     document.id,
     draft,
+    flushCollaborationBarrier,
     isActiveDocumentAsyncScope,
-    messages.errors.staleSelection,
-    messages.errors.updateProposalFailed,
+    isCollaborationMode,
+    messages.errors,
     recoverProjectProfileViolation,
     recoverSessionRevisionConflict,
     reviewProposals,
+    runWithCollaborationFlushController,
     proposalCursor,
     selectionProposalContexts,
   ]);
@@ -1849,8 +2851,98 @@ function DocumentShellContent({
 
   const undoAppliedChange = useCallback(async (changeId: string) => {
     const change = documentChanges.find((item) => item.id === changeId);
+    if (isCollaborationMode) {
+      if (
+        !change ||
+        change.mode !== "collaboration" ||
+        !change.canUndo ||
+        change.undoneAt !== null
+      ) {
+        setUndoChangeError(messages.aiWorkspace.undoConflict);
+        return;
+      }
+      if (collaborationCommandPendingRef.current) return;
+      const observedPosition = collaborationPositionRef.current
+        ?? workflowStateRef.current?.collaboration
+        ?? null;
+      if (!observedPosition) {
+        setUndoChangeError(messages.aiWorkspace.undoConflict);
+        return;
+      }
+      const requestScope = documentAsyncScopeRef.current;
+      const commandKey = `${document.id}:undo:${changeId}`;
+      const cachedCommand = collaborationCommandRetryRef.current.get(commandKey);
+      const command: Extract<CachedCollaborationCommand, { kind: "undo" }> = cachedCommand?.kind === "undo"
+        ? cachedCommand
+        : {
+            expectedGeneration: observedPosition.generation,
+            kind: "undo",
+            payload: {
+              commandId: crypto.randomUUID(),
+              observedHeadSeq: observedPosition.headSeq,
+            },
+          };
+      collaborationCommandRetryRef.current.set(commandKey, command);
+      collaborationPositionRef.current = observedPosition;
+      collaborationCommandPendingRef.current = true;
+      setCollaborationCommandPendingDocumentId(document.id);
+      setProjectProfileViolation(null);
+      setUndoChangeError("");
+      let commandWasSubmitted = false;
+      try {
+        const response = await runWithCollaborationFlushController(async (signal) => {
+          const durableBarrier = await flushCollaborationBarrier(signal, requestScope);
+          if (durableBarrier.generation < command.expectedGeneration) {
+            throw new CollaborationActionError();
+          }
+          if (!isActiveDocumentAsyncScope(requestScope)) throw new CollaborationActionError();
+          commandWasSubmitted = true;
+          return documentSessionClient.undoCollaborativeChange(changeId, command.payload, {
+            expectedDocumentId: document.id,
+            expectedGeneration: command.expectedGeneration,
+            signal,
+          });
+        });
+        const expectedPosition = {
+          generation: command.expectedGeneration,
+          headSeq: command.payload.observedHeadSeq,
+        };
+        if (!acceptCollaborationPosition(response.collaboration, requestScope, expectedPosition)) {
+          throw new CollaborationActionError();
+        }
+        const updatedProposalById = new Map(response.proposals.map((proposal) => [proposal.id, proposal]));
+        setReviewProposals((currentProposals) => {
+          const currentProposalIds = new Set(currentProposals.map((proposal) => proposal.id));
+          return [
+            ...currentProposals.map((proposal) => updatedProposalById.get(proposal.id) ?? proposal),
+            ...response.proposals.filter((proposal) => !currentProposalIds.has(proposal.id)),
+          ];
+        });
+        setDocumentChanges((currentChanges) => currentChanges.map((item) =>
+          item.id === changeId
+            ? createHistoryChange(response.change, response.proposals, response.collaboration)
+            : item));
+        adoptServerRevision(response.document.revision);
+        setUndoChangeError("");
+        collaborationCommandRetryRef.current.delete(commandKey);
+      } catch (error) {
+        if (!commandWasSubmitted || !shouldRetainCollaborationCommand(error)) {
+          collaborationCommandRetryRef.current.delete(commandKey);
+        }
+        if (isActiveDocumentAsyncScope(requestScope)) {
+          setUndoChangeError(messages.aiWorkspace.undoConflict);
+        }
+      } finally {
+        if (isActiveDocumentAsyncScope(requestScope)) {
+          collaborationCommandPendingRef.current = false;
+          setCollaborationCommandPendingDocumentId(null);
+        }
+      }
+      return;
+    }
     if (
       !change ||
+      change.mode === "collaboration" ||
       change.undoneAt !== null ||
       saveState !== "saved" ||
       change.afterRevision !== serverRevisionRef.current
@@ -1907,12 +2999,17 @@ function DocumentShellContent({
       }
     }
   }, [
+    acceptCollaborationPosition,
     adoptServerRevision,
+    document.id,
     documentChanges,
+    flushCollaborationBarrier,
     isActiveDocumentAsyncScope,
+    isCollaborationMode,
     messages.aiWorkspace.undoConflict,
     recoverProjectProfileViolation,
     recoverSessionRevisionConflict,
+    runWithCollaborationFlushController,
     saveState,
   ]);
 
@@ -1929,6 +3026,52 @@ function DocumentShellContent({
   }, [conversations]);
 
   const selectedTemplateName = selectedTemplate?.name ?? "";
+  const workflowReadiness = workflowState?.readiness ?? draft.readiness;
+  const collaborationApprovalIsDurable = Boolean(
+    collaborationRuntime?.snapshot.status === "synced" &&
+    collaborationRuntime.snapshot.transportSynced &&
+    !hasPendingCollaborationUpdates(collaborationRuntime.snapshot),
+  );
+  const workflowControlEnabled = Boolean(
+    workflowState &&
+    !isWorkflowMutating &&
+    (isCollaborationMode || (saveState === "saved" && saveConflict === null)) &&
+    (
+      !isCollaborationMode ||
+      (
+        collaborationRuntime?.snapshot.hasCompletedInitialSync &&
+        collaborationRuntime.snapshot.permission === "write" &&
+        collaborationRuntime.snapshot.status !== "fatal"
+      )
+    ),
+  );
+  const workflowDescription = workflowState?.collaboration === null
+    ? messages.metadataPanel.readinessApprovalLegacyUnsupported
+    : workflowReadiness === "ready" && isCollaborationMode && !collaborationApprovalIsDurable
+      ? messages.metadataPanel.readinessApprovalDurability
+      : messages.metadataPanel.readinessServerAuthority;
+  const workflowFeedbackMessage = isWorkflowMutating
+    ? messages.metadataPanel.readinessSaving
+    : workflowFeedback === "saved"
+      ? messages.metadataPanel.readinessSaved
+      : workflowFeedback === "approval_durability_pending"
+        ? messages.metadataPanel.readinessApprovalDurability
+        : workflowFeedback === "legacy_approval_unsupported"
+          ? messages.metadataPanel.readinessApprovalLegacyUnsupported
+          : workflowFeedback === "expected_readiness_conflict" || workflowFeedback === "head_conflict"
+            ? messages.metadataPanel.readinessConflict
+            : workflowFeedback === "forbidden"
+              ? messages.metadataPanel.readinessForbidden
+              : workflowFeedback === "invalid_project_profile"
+                ? messages.metadataPanel.readinessInvalidProfile
+                : workflowFeedback
+                  ? messages.metadataPanel.readinessUnavailable
+                  : !workflowState && isCollaborationMode
+                    ? messages.metadataPanel.readinessChecking
+                    : "";
+  const workflowFeedbackKind = workflowFeedback && (
+    workflowFeedback !== "saved" && workflowFeedback !== "approval_durability_pending"
+  ) ? "error" as const : "status" as const;
   const inlineSuggestions = useMemo(
     () =>
       reviewProposals
@@ -1951,15 +3094,17 @@ function DocumentShellContent({
       documentChanges.map((change): AiWorkspaceChangeItem => ({
         appliedAt: new Date(change.createdAt),
         appliedMode: change.proposals[0]?.appliedMode ?? "replace",
-        canUndo:
-          change.undoneAt === null &&
-          saveState === "saved" &&
-          change.afterRevision === serverRevision,
+        canUndo: change.mode === "collaboration"
+          ? isCollaborationMode && change.canUndo && change.undoneAt === null
+          : !isCollaborationMode &&
+            change.undoneAt === null &&
+            saveState === "saved" &&
+            change.afterRevision === serverRevision,
         id: change.id,
         replacementText: change.proposals.map((proposal) => proposal.replacementText).join(" · "),
         targetText: change.proposals.map((proposal) => proposal.targetText).join(" · "),
       })),
-    [documentChanges, saveState, serverRevision],
+    [documentChanges, isCollaborationMode, saveState, serverRevision],
   );
   const documentOutline = useMemo(
     () => buildDocumentOutline(draft.title || messages.shell.untitledDocument, draft.contentJson),
@@ -1985,7 +3130,7 @@ function DocumentShellContent({
       document: {
         id: document.id,
         metadata: draft.metadataJson,
-        readiness: draft.readiness,
+        readiness: workflowReadiness,
         text: extractPlainTextFromTiptap(contentJsonForSnapshot),
         title: titleForSnapshot || messages.shell.untitledDocument,
       },
@@ -2011,7 +3156,7 @@ function DocumentShellContent({
     document.id,
     draft.contentJson,
     draft.metadataJson,
-    draft.readiness,
+    workflowReadiness,
     draft.title,
     initialTemplate,
     messages.shell.untitledDocument,
@@ -2032,6 +3177,7 @@ function DocumentShellContent({
     setIsSidebarOpen(false);
   }, []);
   const executeDocumentCommand = useCallback((commandId: DocumentCommandAction["id"]) => {
+    if (isCollaborationMode && isLegacyBodyCommand(commandId)) return;
     switch (commandId) {
       case "open-workspace":
         setWorkspaceOpen(true);
@@ -2055,7 +3201,7 @@ function DocumentShellContent({
       case "export-docx":
         void exportDocxDraft();
     }
-  }, [exportDocxDraft, openFind, runDocumentReview, saveDraft, setWorkspaceOpen]);
+  }, [exportDocxDraft, isCollaborationMode, openFind, runDocumentReview, saveDraft, setWorkspaceOpen]);
   const commandPaletteActions = useMemo(
     () => buildDocumentCommandRegistry({
       editorSurface,
@@ -2065,12 +3211,16 @@ function DocumentShellContent({
       saveState,
     }).map((definition): DocumentCommandAction => ({
       ...definition,
+      enabled: isCollaborationMode && isLegacyBodyCommand(definition.id)
+        ? false
+        : definition.enabled,
       execute: () => executeDocumentCommand(definition.id),
     })),
     [
       editorSurface,
       executeDocumentCommand,
       isExportingDocx,
+      isCollaborationMode,
       messages.commandPalette,
       saveConflict,
       saveState,
@@ -2133,6 +3283,7 @@ function DocumentShellContent({
         </Link>
         <button
           className="flex h-9 w-full items-center gap-2 rounded-md px-2.5 text-left text-zinc-700 hover:bg-zinc-100"
+          disabled={isCollaborationCommandPending}
           onClick={() => {
             setWorkspaceOpen(true);
             setIsSidebarOpen(false);
@@ -2145,20 +3296,36 @@ function DocumentShellContent({
       </nav>
 
       <div className="min-h-0 flex-1 overflow-y-auto">
-        <DocumentOutlinePanel
-          activeItemId={activeOutlineItemId}
-          messages={messages.outline}
-          onSelectItem={selectOutlineItem}
-          outline={documentOutline}
-        />
+        {!isCollaborationMode ? (
+          <DocumentOutlinePanel
+            activeItemId={activeOutlineItemId}
+            messages={messages.outline}
+            onSelectItem={selectOutlineItem}
+            outline={documentOutline}
+          />
+        ) : null}
 
         <DocumentMetadataPanel
+          isReadinessOptionDisabled={(next) => next === "approved" && (
+            workflowState?.collaboration === null ||
+            !isCollaborationMode ||
+            !collaborationApprovalIsDurable
+          )}
           language={language}
-          metadata={draft.metadataJson}
+          metadata={activeCollaborationFields ? collaborationMetadata : draft.metadataJson}
+          metadataDisabled={isCollaborationMode && (
+            !activeCollaborationFields || !collaborationRuntime?.snapshot.writable
+          )}
+          metadataDraftIdentity={activeCollaborationFields ?? projectProfile}
           messages={messages.metadataPanel}
-          onChange={handleMetadataChange}
+          onMetadataFieldChange={handleMetadataFieldChange}
+          onReadinessChange={handleReadinessChange}
           profile={projectProfile}
-          readiness={draft.readiness}
+          readiness={workflowReadiness}
+          readinessDescription={workflowDescription}
+          readinessDisabled={!workflowControlEnabled}
+          readinessFeedback={workflowFeedbackMessage}
+          readinessFeedbackKind={workflowFeedbackKind}
         />
 
         <PromptTemplatePanel
@@ -2185,7 +3352,12 @@ function DocumentShellContent({
     </>
   );
   const renderWorkspacePanel = (layout: "drawer" | "side", onClose?: () => void) => (
-    <AiWorkspacePanel
+    <div
+      aria-busy={isCollaborationCommandPending}
+      className="contents"
+      inert={isCollaborationCommandPending}
+    >
+      <AiWorkspacePanel
       activeProposalId={activeProposalId}
       changeItems={changeItems}
       changeLoadErrorMessage={documentChangesError}
@@ -2237,9 +3409,9 @@ function DocumentShellContent({
       reviewSummary={reviewSummary}
       selectedTemplateName={selectedTemplateName}
       undoErrorMessage={undoChangeError}
-    >
-      <AiContextInspector messages={messages.aiContext} snapshot={aiContextSnapshot} />
-      <section className="px-5 py-5">
+      >
+        <AiContextInspector messages={messages.aiContext} snapshot={aiContextSnapshot} />
+        <section className="px-5 py-5">
         <h3 className="text-xs font-medium uppercase tracking-normal text-zinc-500">
           {messages.selectionCommand.title}
         </h3>
@@ -2276,9 +3448,28 @@ function DocumentShellContent({
             {selectionApplicationNotice}
           </p>
         ) : null}
-      </section>
-    </AiWorkspacePanel>
+        </section>
+      </AiWorkspacePanel>
+    </div>
   );
+  const collaborationProvider = collaborationRuntime?.session?.provider ?? null;
+  const collaborationEditorSession = useMemo(() => (
+    collaborationRuntime?.snapshot.hasCompletedInitialSync
+    && collaborationRuntime.session
+    && activeCollaborationFields
+    && hasCollaborationAwareness(collaborationProvider)
+      ? {
+          document: collaborationRuntime.session.document,
+          fields: activeCollaborationFields,
+          provider: collaborationProvider,
+          writable: collaborationRuntime.snapshot.writable,
+        }
+      : null
+  ), [
+    collaborationProvider,
+    collaborationRuntime,
+    activeCollaborationFields,
+  ]);
 
   return (
     <main className="flex h-dvh min-h-0 w-full min-w-0 overflow-hidden bg-white text-zinc-950">
@@ -2301,8 +3492,8 @@ function DocumentShellContent({
       ) : null}
 
       <section aria-label={messages.editor.workspaceLabel} className="flex min-w-0 flex-1 flex-col bg-white">
-        <header className="flex min-h-14 shrink-0 flex-col gap-2 border-b border-zinc-200 bg-white px-3 py-2 sm:h-14 sm:flex-row sm:items-center sm:justify-between sm:px-4 sm:py-0">
-          <div className="flex min-w-0 items-center gap-3">
+        <header className="flex min-h-14 min-w-0 shrink-0 flex-col gap-2 border-b border-zinc-200 bg-white px-3 py-2 sm:px-4 xl:flex-row xl:items-center xl:justify-between xl:py-0">
+          <div className="flex w-full min-w-0 flex-wrap items-center gap-x-3 gap-y-2 xl:flex-nowrap">
             <button
               aria-label={messages.shell.openSidebar}
               className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-zinc-600 hover:bg-zinc-100 hover:text-zinc-950 lg:hidden"
@@ -2311,23 +3502,44 @@ function DocumentShellContent({
             >
               <PanelLeftOpen aria-hidden="true" className="size-4" />
             </button>
-            <p className="max-w-[34rem] truncate text-sm font-medium text-zinc-800">
-              {draft.title || messages.shell.untitledDocument}
+            <p className="min-w-0 max-w-[34rem] flex-[1_1_8rem] truncate text-sm font-medium text-zinc-800">
+              {(activeCollaborationFields ? collaborationTitle : draft.title) || messages.shell.untitledDocument}
             </p>
-            <div
-              aria-label={messages.header.saveStatus}
-              aria-live="polite"
-              className="shrink-0 text-xs font-medium text-zinc-500"
-              role="status"
-            >
-              {messages.saveState[saveState]}
-            </div>
+            {isCollaborationMode ? (
+              <CollaborationStatus
+                className="flex-[1_1_12rem] font-medium xl:flex-initial"
+                language={language}
+                snapshot={collaborationRuntime.snapshot}
+              />
+            ) : (
+              <div
+                aria-label={messages.header.saveStatus}
+                aria-live="polite"
+                className="shrink-0 text-xs font-medium text-zinc-500"
+                role="status"
+              >
+                {messages.saveState[saveState]}
+              </div>
+            )}
+            {isCollaborationMode ? (
+              <CollaborationParticipants
+                awareness={collaborationProvider?.awareness ?? null}
+                className="ml-auto shrink-0"
+                currentPrincipalId={collaborationRuntime.currentPrincipalId}
+                language={language}
+              />
+            ) : null}
           </div>
-          <div className="flex w-full min-w-0 items-center gap-2 overflow-x-auto pb-1 sm:w-auto sm:overflow-visible sm:pb-0">
+          <div className="flex w-full min-w-0 items-center gap-2 overflow-x-auto pb-1 xl:w-auto xl:shrink-0 xl:overflow-visible xl:pb-0">
             <button
               aria-label={editorSurface === "source" ? messages.header.editorView : messages.header.sourceView}
-              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-zinc-200 bg-white px-2.5 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50"
-              onClick={() => setEditorSurface((currentSurface) => (currentSurface === "source" ? "editor" : "source"))}
+              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-zinc-200 bg-white px-2.5 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-400"
+              disabled={isCollaborationMode}
+              onClick={() => {
+                if (!isCollaborationMode) {
+                  setEditorSurface((currentSurface) => (currentSurface === "source" ? "editor" : "source"));
+                }
+              }}
               type="button"
             >
               <Code2 aria-hidden="true" className="size-4" />
@@ -2338,7 +3550,7 @@ function DocumentShellContent({
             <button
               aria-label={isExportingDocx ? messages.header.exportingDocx : messages.header.exportDocx}
               className="inline-flex h-8 items-center gap-1.5 rounded-md border border-zinc-200 bg-white px-2.5 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-400"
-              disabled={isExportingDocx}
+              disabled={isCollaborationCommandPending || isExportingDocx}
               onClick={exportDocxDraft}
               ref={exportTriggerRef}
               type="button"
@@ -2377,6 +3589,7 @@ function DocumentShellContent({
                   ? "border-zinc-950 bg-zinc-950 text-white hover:bg-zinc-800"
                   : "border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50",
               ].join(" ")}
+              disabled={isCollaborationCommandPending}
               onClick={() => setWorkspaceOpen((currentValue) => !currentValue)}
               type="button"
             >
@@ -2389,7 +3602,13 @@ function DocumentShellContent({
             </button>
             <button
               className="inline-flex h-8 shrink-0 items-center justify-center rounded-md bg-zinc-950 px-3 text-sm font-medium text-white transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-300"
-              disabled={saveConflict !== null || saveState === "saved" || saveState === "saving"}
+              disabled={
+                isCollaborationMode
+                || isWorkflowMutating
+                || saveConflict !== null
+                || saveState === "saved"
+                || saveState === "saving"
+              }
               onClick={saveDraft}
               type="button"
             >
@@ -2444,7 +3663,7 @@ function DocumentShellContent({
           </section>
         ) : null}
 
-        {saveConflict ? (
+        {!isCollaborationMode && saveConflict ? (
           <section
             className="shrink-0 border-b border-amber-200 bg-amber-50 px-4 py-3 text-amber-950"
             role="alert"
@@ -2505,6 +3724,7 @@ function DocumentShellContent({
               ].join(" ")}
               onClick={() => setEditorSurface("source")}
               role="tab"
+              disabled={isCollaborationMode}
               type="button"
             >
               {messages.sourceView.sourceTab}
@@ -2512,33 +3732,68 @@ function DocumentShellContent({
           </div>
         </div>
 
-        {editorSurface === "editor" ? (
-          <DocumentEditor
-            key={document.id}
-            contentJson={draft.contentJson}
-            isFindOpen={isFindOpen}
-            isSelectionCommandLimitReached={isSelectionCommandLimitReached}
-            isSelectionCommandRunning={isRewritingSelection}
-            inlineSuggestions={inlineSuggestions}
-            language={language}
-            messages={messages.editor}
-            onChange={handleDraftChange}
-            onFindOpenChange={setIsFindOpen}
-            referenceCandidates={referenceDocuments}
-            resolvedPluginContributions={resolvedPluginContributions}
-            onApplySelectionAiResult={(proposalId, applyMode) =>
-              updateProposalStatusLocally(proposalId, "accepted", applyMode)
-            }
-            onDismissSelectionAiResult={() => setSelectionAiResult(null)}
-            onRetrySelectionAiResult={retrySelectionAiResult}
-            onSelectionCommand={handleSelectionCommand}
-            outlineFocusRequest={outlineFocusRequest}
-            runningSelectionCommand={selectionCommand?.command}
-            runningSelectionCommandLimit={MAX_CONCURRENT_SELECTION_COMMANDS}
-            runningSelectionCommands={runningSelectionCommands}
-            selectionAiResult={selectionAiResult}
-            title={draft.title}
-          />
+        {editorSurface === "editor" || isCollaborationMode ? (
+          collaborationEditorSession ? (
+            <DocumentEditor
+              key={`${document.id}:collaboration`}
+              isFindOpen={isFindOpen}
+              isSelectionCommandLimitReached={isSelectionCommandLimitReached}
+              isSelectionCommandRunning={isRewritingSelection}
+              inlineSuggestions={inlineSuggestions}
+              language={language}
+              messages={messages.editor}
+              mode={{
+                kind: "collaboration",
+                session: collaborationEditorSession,
+              }}
+              onApplySelectionAiResult={(proposalId, applyMode) =>
+                updateProposalStatusLocally(proposalId, "accepted", applyMode)
+              }
+              onDismissSelectionAiResult={() => setSelectionAiResult(null)}
+              onFindOpenChange={setIsFindOpen}
+              onRetrySelectionAiResult={retrySelectionAiResult}
+              onSelectionCommand={handleSelectionCommand}
+              outlineFocusRequest={outlineFocusRequest}
+              referenceCandidates={referenceDocuments}
+              resolvedPluginContributions={resolvedPluginContributions}
+              runningSelectionCommand={selectionCommand?.command}
+              runningSelectionCommandLimit={MAX_CONCURRENT_SELECTION_COMMANDS}
+              runningSelectionCommands={runningSelectionCommands}
+              selectionAiResult={selectionAiResult}
+            />
+          ) : isCollaborationMode ? (
+            <CollaborationReadOnlyProjection
+              plainText={document.plainText}
+              title={draft.title}
+            />
+          ) : (
+            <DocumentEditor
+              key={document.id}
+              contentJson={draft.contentJson}
+              isFindOpen={isFindOpen}
+              isSelectionCommandLimitReached={isSelectionCommandLimitReached}
+              isSelectionCommandRunning={isRewritingSelection}
+              inlineSuggestions={inlineSuggestions}
+              language={language}
+              messages={messages.editor}
+              onChange={handleDraftChange}
+              onFindOpenChange={setIsFindOpen}
+              referenceCandidates={referenceDocuments}
+              resolvedPluginContributions={resolvedPluginContributions}
+              onApplySelectionAiResult={(proposalId, applyMode) =>
+                updateProposalStatusLocally(proposalId, "accepted", applyMode)
+              }
+              onDismissSelectionAiResult={() => setSelectionAiResult(null)}
+              onRetrySelectionAiResult={retrySelectionAiResult}
+              onSelectionCommand={handleSelectionCommand}
+              outlineFocusRequest={outlineFocusRequest}
+              runningSelectionCommand={selectionCommand?.command}
+              runningSelectionCommandLimit={MAX_CONCURRENT_SELECTION_COMMANDS}
+              runningSelectionCommands={runningSelectionCommands}
+              selectionAiResult={selectionAiResult}
+              title={draft.title}
+            />
+          )
         ) : (
           <DocumentSourceView contentJson={draft.contentJson} messages={messages.sourceView} title={draft.title} />
         )}
@@ -2744,6 +3999,38 @@ function mergeMissingTemplateVariableDefaults(template: ShellTemplate | null, va
   );
 }
 
+function CollaborationReadOnlyProjection({
+  plainText,
+  title,
+}: {
+  plainText: string;
+  title: string;
+}) {
+  return (
+    <article
+      aria-label="Collaboration read-only projection"
+      className="min-h-0 flex-1 overflow-y-auto bg-white px-4 py-8 sm:px-16 lg:px-20"
+    >
+      <div className="mx-auto w-full max-w-[54rem]">
+        <h1 className="text-3xl font-semibold text-zinc-950">{title}</h1>
+        <p className="mt-8 whitespace-pre-wrap text-base leading-7 text-zinc-800">
+          {plainText}
+        </p>
+      </div>
+    </article>
+  );
+}
+
+function hasCollaborationAwareness(
+  provider: HocuspocusProvider | null,
+): provider is HocuspocusProvider & { awareness: Awareness } {
+  return provider?.awareness !== null && provider?.awareness !== undefined;
+}
+
+function isLegacyBodyCommand(commandId: DocumentCommandAction["id"]) {
+  return commandId === "show-source" || commandId === "save-document";
+}
+
 function getInitialTemplate(templates: readonly ShellTemplate[], defaultTemplateId?: string) {
   return templates.find((template) => template.id === defaultTemplateId) ?? templates[0] ?? null;
 }
@@ -2818,6 +4105,7 @@ const proposalSchema = z.object({
   appliedMode: z.enum(["replace", "insert_below"]).nullable(),
   command: z.string().nullable(),
   defaultApplyMode: z.enum(["replace", "insert_below"]),
+  documentId: z.string().min(1),
   explanation: z.string(),
   id: z.string().min(1),
   occurrenceIndex: z.number().int().nullable(),

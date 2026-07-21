@@ -1,16 +1,69 @@
 import { createClient, type Client } from "@libsql/client";
+import { drizzle } from "drizzle-orm/libsql";
+import { migrate } from "drizzle-orm/libsql/migrator";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import { claimLocalWorkspace } from "./claim-local-workspace";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { claimLocalWorkspace, createClaimDatabaseClient } from "./claim-local-workspace";
 
 const tempDirs: string[] = [];
 const clients: Client[] = [];
+const FULL_WORKSPACE_TABLES = [
+  "prompt_templates",
+  "documents",
+  "request_budget_buckets",
+  "collaboration_authorization_epochs",
+  "ai_runs",
+  "document_changes",
+  "collaboration_documents",
+  "ai_proposals",
+  "ai_workspace_conversations",
+  "collaboration_actions",
+  "document_approvals",
+  "collaboration_ai_run_snapshots",
+  "document_change_proposals",
+  "ai_workspace_messages",
+  "collaboration_updates",
+  "collaboration_command_delivery_jobs",
+  "collaboration_noop_receipts",
+  "collaboration_room_closure_jobs",
+  "collaboration_workflow_notification_jobs",
+  "collaboration_proposal_anchors",
+  "collaboration_document_changes",
+  "app_settings",
+] as const;
+const FULL_SUMMARY_KEYS = [
+  "aiProposals",
+  "aiRuns",
+  "aiWorkspaceConversations",
+  "aiWorkspaceMessages",
+  "appSettings",
+  "collaborationActions",
+  "collaborationAiRunSnapshots",
+  "collaborationAuthorizationEpochs",
+  "collaborationCommandDeliveryJobs",
+  "collaborationDocumentChanges",
+  "collaborationDocuments",
+  "collaborationProposalAnchors",
+  "collaborationUpdates",
+  "collaborationNoopReceipts",
+  "collaborationRoomClosureJobs",
+  "collaborationWorkflowNotificationJobs",
+  "documentApprovals",
+  "documentChangeProposals",
+  "documentChanges",
+  "documents",
+  "promptTemplates",
+  "requestBudgetBuckets",
+] as const;
+const HASH_A = "a".repeat(64);
+const HASH_B = "b".repeat(64);
 
 afterEach(async () => {
   clients.splice(0).forEach((client) => client.close());
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  vi.unstubAllEnvs();
 });
 
 async function createClaimDatabase() {
@@ -109,7 +162,331 @@ async function createMigratedClaimDatabase() {
   return client;
 }
 
+async function createFullClaimDatabase() {
+  const dir = await mkdtemp(join(tmpdir(), "coredot-claim-full-test-"));
+  tempDirs.push(dir);
+  const client = createClient({ url: `file:${join(dir, "full.db")}` });
+  clients.push(client);
+  await migrate(drizzle(client), { migrationsFolder: resolve(process.cwd(), "drizzle") });
+  await client.execute("PRAGMA foreign_keys=ON");
+  await client.executeMultiple(`
+    INSERT INTO documents (
+      id, workspace_id, creation_key, title, content_json, plain_text, status, readiness,
+      metadata_json, revision, created_at, updated_at
+    ) VALUES ('full_doc', 'local', 'full-creation-key', 'Full', '{"type":"doc"}', 'Full',
+      'draft', 'ready', '{}', 1, 1000, 1000);
+    INSERT INTO prompt_templates (
+      id, workspace_id, builtin_key, name, description, category, system_prompt,
+      variable_schema_json, is_default, is_active, created_at, updated_at
+    ) VALUES ('full_tpl', 'local', 'full-builtin', 'Full', 'Full', 'review', 'Review.',
+      '{"fields":[],"required":[]}', 1, 1, 1000, 1000);
+    INSERT INTO request_budget_buckets (
+      workspace_id, principal_id, policy_id, window_start, request_count, expires_at
+    ) VALUES ('local', 'full_principal', 'ai', 1000, 1, 9000);
+    INSERT INTO ai_runs (
+      id, workspace_id, document_id, prompt_template_id, command_type, provider, model,
+      idempotency_key, operation_fingerprint, input_summary_json, output_text, status,
+      was_applied, created_at, updated_at
+    ) VALUES ('full_run', 'local', 'full_doc', 'full_tpl', 'document_review', 'stub', 'stub',
+      'full-run-key', 'full-run-fingerprint', '{}', '', 'completed', 1, 2000, 2000);
+    INSERT INTO ai_proposals (
+      id, workspace_id, ai_run_id, document_id, target_text, replacement_text, explanation,
+      source, default_apply_mode, result_ordinal, status, created_at, updated_at
+    ) VALUES ('full_proposal', 'local', 'full_run', 'full_doc', 'old', 'new', 'why',
+      'review', 'replace', 0, 'accepted', 3000, 3000);
+    INSERT INTO document_changes (
+      id, workspace_id, document_id, principal_id, request_id, kind, before_snapshot_json,
+      after_revision, created_at
+    ) VALUES ('full_change', 'local', 'full_doc', 'full_principal', 'full_request', 'single',
+      '{"title":"Before","contentJson":{"type":"doc"},"metadataJson":{},"readiness":"ready"}',
+      1, 4000);
+    INSERT INTO document_change_proposals (
+      workspace_id, change_id, document_id, proposal_id, applied_mode, ordinal
+    ) VALUES ('local', 'full_change', 'full_doc', 'full_proposal', 'replace', 0);
+    INSERT INTO ai_workspace_conversations (
+      id, workspace_id, document_id, created_by_principal_id, creation_key,
+      creation_fingerprint, title, command, status, version, message_count,
+      latest_ai_run_id, latest_proposal_id, created_at, updated_at
+    ) VALUES ('full_conversation', 'local', 'full_doc', 'full_principal', 'full-conversation-key',
+      'full-conversation-fingerprint', 'Conversation', 'Review', 'idle', 1, 1,
+      'full_run', 'full_proposal', 5000, 5000);
+    INSERT INTO ai_workspace_messages (
+      id, workspace_id, conversation_id, document_id, mutation_key, mutation_fingerprint,
+      ordinal, role, content, ai_run_id, proposal_id, created_at
+    ) VALUES ('full_message', 'local', 'full_conversation', 'full_doc', 'full-message-key',
+      'full-message-fingerprint', 0, 'assistant', 'Answer', 'full_run', 'full_proposal', 5000);
+    INSERT INTO collaboration_documents (
+      workspace_id, document_id, generation, is_current, schema_version, schema_fingerprint,
+      checkpoint_blob, checkpoint_checksum, head_seq, checkpoint_seq, projected_seq,
+      last_checkpoint_at, created_at, updated_at
+    ) VALUES ('local', 'full_doc', 1, 1, 1, '${HASH_A}', X'0102', '${HASH_B}', 1, 0, 0,
+      6000, 6000, 6000);
+    INSERT INTO collaboration_actions (
+      id, workspace_id, document_id, generation, command_id, command_fingerprint, action_type, principal_id,
+      request_id, base_head_seq, applied_head_seq, proposal_id, document_change_id,
+      status, failure_category, created_at, updated_at
+    ) VALUES ('full_action', 'local', 'full_doc', 1, 'full-command', '${HASH_B}', 'proposal_apply',
+      'full_principal', 'full_request', 0, 1, 'full_proposal', 'full_change',
+      'applied', NULL, 6000, 6000);
+    INSERT INTO collaboration_updates (
+      workspace_id, document_id, generation, seq, update_blob, checksum, idempotency_key,
+      origin_kind, principal_id, request_id, session_id, semantic_action_id, diagnostic_json, created_at
+    ) VALUES ('local', 'full_doc', 1, 1, X'0304', '${HASH_A}', 'full-update-key',
+      'proposal_command', 'full_principal', 'full_request', 'full_session', 'full_action', '{}', 6000);
+    INSERT INTO collaboration_command_delivery_jobs (
+      workspace_id, action_id, command_id, command_fingerprint, document_id, generation,
+      seq, checksum, status, attempts, next_attempt_at, failure_category, created_at, updated_at
+    ) VALUES ('local', 'full_action', 'full-command', '${HASH_B}', 'full_doc', 1,
+      1, '${HASH_A}', 'exhausted', 5, NULL, 'delivery_failed', 6000, 6000);
+    INSERT INTO collaboration_noop_receipts (
+      workspace_id, document_id, idempotency_key, generation, head_seq, checksum,
+      origin_kind, principal_id, request_id, session_id, semantic_action_id, created_at
+    ) VALUES ('local', 'full_doc', 'full-noop-key', 1, 1, '${HASH_B}', 'proposal_command',
+      'full_principal', 'full_request', 'full_session', 'full_action', 6000);
+    INSERT INTO collaboration_room_closure_jobs (
+      workspace_id, document_id, generation, reason, status, attempts,
+      next_attempt_at, failure_category, created_at, updated_at
+    ) VALUES (
+      'local', 'full_doc', 1, 'archived', 'exhausted', 5,
+      NULL, 'delivery_failed', 6000, 6000
+    );
+    INSERT INTO collaboration_workflow_notification_jobs (
+      workspace_id, document_id, generation, workflow_revision, status, attempts,
+      next_attempt_at, failure_category, created_at, updated_at
+    ) VALUES (
+      'local', 'full_doc', 1, 1, 'exhausted', 5,
+      NULL, 'delivery_failed', 6000, 6000
+    );
+    INSERT INTO collaboration_authorization_epochs (
+      workspace_id, principal_id, epoch, updated_at
+    ) VALUES ('local', 'full_principal', 1, 6000);
+    INSERT INTO document_approvals (
+      id, workspace_id, document_id, generation, approved_head_seq, approved_state_vector,
+      approved_content_hash, principal_id, request_id, approved_at,
+      invalidated_seq, invalidated_principal_id, invalidated_at
+    ) VALUES ('full_approval', 'local', 'full_doc', 1, 1, X'0506', '${HASH_A}',
+      'full_principal', 'full_request', 6000, NULL, NULL, NULL);
+    INSERT INTO collaboration_proposal_anchors (
+      workspace_id, proposal_id, document_id, generation, schema_fingerprint, base_head_seq,
+      base_state_vector, start_relative, start_assoc, end_relative, end_assoc,
+      target_hash, target_preview, created_at
+    ) VALUES ('local', 'full_proposal', 'full_doc', 1, '${HASH_A}', 1, X'0708', X'0910',
+      -1, X'1112', 1, '${HASH_B}', 'preview', 6000);
+    INSERT INTO collaboration_document_changes (
+      workspace_id, change_id, document_id, generation, action_id, forward_seq, inverse_update,
+      affected_start_relative, affected_end_relative, postcondition_fingerprint,
+      base_head_seq, resulting_head_seq
+    ) VALUES ('local', 'full_change', 'full_doc', 1, 'full_action', 1, X'1314', X'1516',
+      X'1718', '${HASH_A}', 0, 1);
+    INSERT INTO collaboration_ai_run_snapshots (
+      workspace_id, ai_run_id, document_id, generation, head_seq, state_vector,
+      schema_fingerprint, content_hash, created_at
+    ) VALUES ('local', 'full_run', 'full_doc', 1, 1, X'1920', '${HASH_A}', '${HASH_B}', 6000);
+    INSERT INTO app_settings (
+      id, workspace_id, ai_provider, ai_model, created_at, updated_at
+    ) VALUES ('full_settings', 'local', 'stub', 'stub', 1000, 1000);
+  `);
+  return client;
+}
+
 describe("claimLocalWorkspace", () => {
+  it("passes hosted libSQL credentials, including the auth token, to the client factory", () => {
+    const authToken = "test-token-not-a-secret";
+    vi.stubEnv("DATABASE_URL", "libsql://workspace.example.test");
+    vi.stubEnv("DATABASE_AUTH_TOKEN", authToken);
+    const close = vi.fn();
+    const inputs: unknown[] = [];
+
+    const client = createClaimDatabaseClient(((input: unknown) => {
+      inputs.push(input);
+      return { close } as unknown as Client;
+    }) as typeof createClient);
+
+    expect(inputs).toEqual([{
+      authToken,
+      url: "libsql://workspace.example.test",
+    }]);
+    expect(close).not.toHaveBeenCalled();
+    client.close();
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("closes the transaction and surfaces both failures when rollback rejects", async () => {
+    const operationError = new Error("private operation detail");
+    const rollbackError = new Error("private rollback detail");
+    const close = vi.fn();
+    const transaction = {
+      close,
+      commit: vi.fn(),
+      execute: vi.fn().mockRejectedValue(operationError),
+      rollback: vi.fn().mockRejectedValue(rollbackError),
+    };
+    const client = {
+      transaction: vi.fn().mockResolvedValue(transaction),
+    } as unknown as Pick<Client, "transaction">;
+
+    const error = await claimLocalWorkspace(client, "workspace-acme").catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(AggregateError);
+    expect(error).toMatchObject({
+      errors: [operationError, rollbackError],
+      message: "Workspace claim failed and rollback could not be completed",
+    });
+    expect(transaction.rollback).toHaveBeenCalledOnce();
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("moves the complete current Workspace graph atomically", async () => {
+    const client = await createFullClaimDatabase();
+
+    const summary = await claimLocalWorkspace(client, "workspace-full");
+
+    expect(summary).toEqual({
+      ...Object.fromEntries(FULL_SUMMARY_KEYS.map((key) => [key, 1])),
+      targetWorkspaceId: "workspace-full",
+    });
+    for (const table of FULL_WORKSPACE_TABLES) {
+      expect((await client.execute(`SELECT DISTINCT workspace_id FROM ${table}`)).rows, table).toEqual([
+        expect.objectContaining({ workspace_id: "workspace-full" }),
+      ]);
+    }
+    expect((await client.execute("PRAGMA foreign_key_check")).rows).toEqual([]);
+  });
+
+  it("preflights an authorization epoch collision and rolls back the entire graph", async () => {
+    const client = await createFullClaimDatabase();
+    await client.execute(`
+      INSERT INTO collaboration_authorization_epochs (
+        workspace_id, principal_id, epoch, updated_at
+      ) VALUES ('workspace-full', 'full_principal', 2, 7000)
+    `);
+
+    await expect(claimLocalWorkspace(client, "workspace-full")).rejects.toThrow(/authorization epoch.*conflict/i);
+
+    for (const table of FULL_WORKSPACE_TABLES) {
+      expect((await client.execute({
+        sql: `SELECT count(*) AS count FROM ${table} WHERE workspace_id = 'local'`,
+        args: [],
+      })).rows[0]?.count, table).toBe(1);
+    }
+    expect((await client.execute("PRAGMA foreign_key_check")).rows).toEqual([]);
+  });
+
+  it("refuses a partial collaboration schema instead of moving only the visible subset", async () => {
+    const client = await createClaimDatabase();
+    await client.executeMultiple(`
+      CREATE TABLE collaboration_documents (
+        workspace_id text NOT NULL,
+        document_id text NOT NULL,
+        PRIMARY KEY (workspace_id, document_id)
+      );
+      INSERT INTO collaboration_documents VALUES ('local', 'doc_local');
+    `);
+
+    await expect(claimLocalWorkspace(client, "workspace-acme")).rejects.toThrow(/complete.*collaboration.*schema/i);
+
+    expect((await client.execute("SELECT workspace_id FROM documents WHERE id = 'doc_local'")).rows[0]?.workspace_id)
+      .toBe("local");
+    expect((await client.execute("SELECT workspace_id FROM collaboration_documents")).rows[0]?.workspace_id)
+      .toBe("local");
+  });
+
+  it.each([
+    {
+      label: "document creation key",
+      prepare: (client: Client) => client.execute(`
+        INSERT INTO documents (
+          id, workspace_id, creation_key, title, content_json, plain_text, status, readiness,
+          metadata_json, revision, created_at, updated_at
+        ) VALUES ('target-doc', 'workspace-full', 'full-creation-key', 'Target', '{"type":"doc"}', '',
+          'draft', 'draft', '{}', 0, 1, 1)
+      `),
+    },
+    {
+      label: "AI idempotency key",
+      prepare: async (client: Client) => {
+        await client.execute(`
+          INSERT INTO documents (
+            id, workspace_id, title, content_json, plain_text, status, readiness,
+            metadata_json, revision, created_at, updated_at
+          ) VALUES ('target-ai-doc', 'workspace-full', 'Target', '{"type":"doc"}', '',
+            'draft', 'draft', '{}', 0, 1, 1)
+        `);
+        await client.execute(`
+          INSERT INTO ai_runs (
+            id, workspace_id, document_id, command_type, provider, model, idempotency_key,
+            operation_fingerprint, input_summary_json, output_text, status, was_applied, created_at, updated_at
+          ) VALUES ('target-run', 'workspace-full', 'target-ai-doc', 'document_review', 'stub', 'stub',
+            'full-run-key', 'target-fingerprint', '{}', '', 'completed', 0, 1, 1)
+        `);
+      },
+    },
+    {
+      label: "conversation creation key",
+      prepare: async (client: Client) => {
+        await client.execute(`
+          INSERT INTO documents (
+            id, workspace_id, title, content_json, plain_text, status, readiness,
+            metadata_json, revision, created_at, updated_at
+          ) VALUES ('target-conversation-doc', 'workspace-full', 'Target', '{"type":"doc"}', '',
+            'draft', 'draft', '{}', 0, 1, 1)
+        `);
+        await client.execute(`
+          INSERT INTO ai_workspace_conversations (
+            id, workspace_id, document_id, created_by_principal_id, creation_key,
+            creation_fingerprint, title, command, status, version, message_count,
+            created_at, updated_at
+          ) VALUES ('target-conversation', 'workspace-full', 'target-conversation-doc', 'target-principal',
+            'full-conversation-key', 'target-fingerprint', 'Target', 'Review', 'idle', 1, 1, 1, 1)
+        `);
+      },
+    },
+    {
+      label: "request budget",
+      prepare: (client: Client) => client.execute(`
+        INSERT INTO request_budget_buckets (
+          workspace_id, principal_id, policy_id, window_start, request_count, expires_at
+        ) VALUES ('workspace-full', 'full_principal', 'ai', 1000, 2, 9000)
+      `),
+    },
+    {
+      label: "collaboration action command",
+      prepare: async (client: Client) => {
+        await client.execute(`
+          INSERT INTO documents (
+            id, workspace_id, title, content_json, plain_text, status, readiness,
+            metadata_json, revision, created_at, updated_at
+          ) VALUES ('target-action-doc', 'workspace-full', 'Target', '{"type":"doc"}', '',
+            'draft', 'draft', '{}', 0, 1, 1)
+        `);
+        await client.execute(`
+          INSERT INTO collaboration_documents (
+            workspace_id, document_id, generation, is_current, schema_version, schema_fingerprint,
+            checkpoint_blob, checkpoint_checksum, head_seq, checkpoint_seq, projected_seq,
+            last_checkpoint_at, created_at, updated_at
+          ) VALUES ('workspace-full', 'target-action-doc', 1, 1, 1, '${HASH_A}', X'0102',
+            '${HASH_B}', 0, 0, 0, 1, 1, 1)
+        `);
+        await client.execute(`
+          INSERT INTO collaboration_actions (
+            id, workspace_id, document_id, generation, command_id, command_fingerprint, action_type, principal_id,
+            request_id, base_head_seq, applied_head_seq, status, failure_category, created_at, updated_at
+          ) VALUES ('target-action', 'workspace-full', 'target-action-doc', 1, 'full-command', '${HASH_A}', 'repair',
+            'target-principal', 'target-request', 0, NULL, 'pending', NULL, 1, 1)
+        `);
+      },
+    },
+  ])("preflights $label conflicts without moving local rows", async ({ label, prepare }) => {
+    const client = await createFullClaimDatabase();
+    await prepare(client);
+
+    await expect(claimLocalWorkspace(client, "workspace-full")).rejects.toThrow(new RegExp(`${label}.*conflict`, "i"));
+
+    expect((await client.execute("SELECT workspace_id FROM documents WHERE id = 'full_doc'")).rows[0]?.workspace_id)
+      .toBe("local");
+    expect((await client.execute("PRAGMA foreign_key_check")).rows).toEqual([]);
+  });
+
   it("claims all five row types after applying the exact 0000-0006 migration chain", async () => {
     const client = await createMigratedClaimDatabase();
 
@@ -154,6 +531,7 @@ describe("claimLocalWorkspace", () => {
     const summary = await claimLocalWorkspace(client, " workspace-acme ");
 
     expect(summary).toEqual({
+      ...Object.fromEntries(FULL_SUMMARY_KEYS.map((key) => [key, 0])),
       aiProposals: 1,
       aiRuns: 1,
       appSettings: 1,

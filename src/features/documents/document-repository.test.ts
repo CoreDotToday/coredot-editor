@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import * as schema from "@/db/schema";
 import { getProjectProfile } from "@/features/projects/default-project-profiles";
 import { defineProjectProfile } from "@/features/projects/project-profile";
+import { createDocumentArchiveService } from "./document-archive-service";
 import { createDocumentRepository } from "./document-repository";
 
 const tempDirs: string[] = [];
@@ -47,11 +48,48 @@ async function createIsolatedDocumentDb() {
     CREATE UNIQUE INDEX documents_workspace_creation_key_unique
     ON documents (workspace_id, creation_key)
   `);
+  await db.run(sql`
+    CREATE TABLE collaboration_documents (
+      workspace_id text NOT NULL,
+      document_id text NOT NULL,
+      generation integer NOT NULL,
+      is_current integer DEFAULT 1 NOT NULL,
+      PRIMARY KEY (workspace_id, document_id, generation)
+    )
+  `);
+  await db.run(sql`
+    CREATE TABLE collaboration_room_closure_jobs (
+      workspace_id text NOT NULL,
+      document_id text NOT NULL,
+      generation integer NOT NULL,
+      reason text NOT NULL,
+      status text DEFAULT 'pending' NOT NULL,
+      attempts integer DEFAULT 0 NOT NULL,
+      next_attempt_at integer,
+      failure_category text,
+      created_at integer NOT NULL,
+      updated_at integer NOT NULL,
+      PRIMARY KEY (workspace_id, document_id, generation, reason)
+    )
+  `);
 
   return db;
 }
 
+function createArchiveDocument(database: Awaited<ReturnType<typeof createIsolatedDocumentDb>>) {
+  return createDocumentArchiveService({ database }).archive;
+}
+
 describe("document repository", () => {
+  it("does not expose an archive writer outside the durable archive service", async () => {
+    const db = await createIsolatedDocumentDb();
+    const repository = createDocumentRepository(db);
+    const repositoryModule = await import("./document-repository");
+
+    expect(repository).not.toHaveProperty("archiveDocument");
+    expect(repositoryModule).not.toHaveProperty("archiveDocument");
+  });
+
   it("returns bounded stable summary pages without full document content", async () => {
     const db = await createIsolatedDocumentDb();
     const repository = createDocumentRepository(db);
@@ -114,15 +152,13 @@ describe("document repository", () => {
     const repository = createDocumentRepository(db, { projectProfile: profile });
     await repository.createDocumentFromDraft(workspaceA, {
       title: "Matching",
-      contentJson: { type: "doc", content: [{ type: "paragraph" }] },
+      contentJson: { type: "doc" as const, content: [{ type: "paragraph" }] },
       metadataJson: { billable: false, owner: "123", score: 1.5, stage: "open", tags: ["risk", "msa"] },
-      readiness: "draft",
     });
     await repository.createDocumentFromDraft(workspaceA, {
       title: "Other",
       contentJson: { type: "doc", content: [{ type: "paragraph" }] },
       metadataJson: { billable: true, score: 2, stage: "closed", tags: ["brisk"] },
-      readiness: "draft",
     });
 
     await expect(repository.listDocumentSummaries(workspaceA, { metadataKey: "billable", metadataValue: "false" }))
@@ -156,13 +192,11 @@ describe("document repository", () => {
       title: "Valid metadata",
       contentJson: { type: "doc", content: [{ type: "paragraph" }] },
       metadataJson: { owner: "Legal" },
-      readiness: "draft",
     });
     const corrupt = await repository.createDocumentFromDraft(workspaceA, {
       title: "Corrupt metadata",
       contentJson: { type: "doc", content: [{ type: "paragraph" }] },
       metadataJson: { owner: "Legal" },
-      readiness: "draft",
     });
     await db.run(sql`update documents set metadata_json = '{' where id = ${corrupt.id}`);
 
@@ -248,7 +282,7 @@ describe("document repository", () => {
     expect(documents.some((item) => item.id === document.id)).toBe(true);
   });
 
-  it("allows an incomplete required-field draft and blocks readiness until it is completed", async () => {
+  it("allows incomplete draft metadata while enforcing field constraints without changing readiness", async () => {
     const db = await createIsolatedDocumentDb();
     const profile = defineProjectProfile({
       defaultTemplateIds: [],
@@ -265,61 +299,29 @@ describe("document repository", () => {
     const repository = createDocumentRepository(db, { projectProfile: profile });
 
     const document = await repository.createDocumentDraft(workspaceA, "Incomplete draft");
-    const blocked = await repository.saveDocumentDraft(workspaceA, document.id, {
-      title: document.title,
-      contentJson: document.contentJson,
-      expectedRevision: 0,
-      readiness: "needs_review",
-    });
     const saved = await repository.saveDocumentDraft(workspaceA, document.id, {
       title: document.title,
       contentJson: document.contentJson,
       expectedRevision: 0,
       metadataJson: { owner: "Legal" },
-      readiness: "needs_review",
     });
 
-    expect(blocked).toEqual({
-      status: "invalid_profile",
-      violation: { fieldId: "owner", ok: false, reason: "required" },
-    });
-    expect(saved).toMatchObject({ status: "success", document: { metadataJson: { owner: "Legal" }, readiness: "needs_review" } });
-    if (saved.status !== "success") throw new Error("Expected required metadata transition to succeed");
-    const returnedToDraft = await repository.saveDocumentDraft(workspaceA, document.id, {
+    expect(saved).toMatchObject({ status: "success", document: { metadataJson: { owner: "Legal" }, readiness: "draft" } });
+    if (saved.status !== "success") throw new Error("Expected draft metadata save to succeed");
+    const incompleteDraftSave = await repository.saveDocumentDraft(workspaceA, document.id, {
       title: document.title,
       contentJson: document.contentJson,
       expectedRevision: 1,
       metadataJson: {},
-      readiness: "draft",
-    });
-    expect(returnedToDraft).toMatchObject({
-      status: "success",
-      document: { metadataJson: {}, readiness: "draft", revision: 2 },
-    });
-    const incompleteDraftSave = await repository.saveDocumentDraft(workspaceA, document.id, {
-      title: "Still incomplete",
-      contentJson: document.contentJson,
-      expectedRevision: 2,
     });
     expect(incompleteDraftSave).toMatchObject({
       status: "success",
-      document: { metadataJson: {}, readiness: "draft", revision: 3 },
-    });
-    const blockedAgain = await repository.saveDocumentDraft(workspaceA, document.id, {
-      title: "Cannot leave draft",
-      contentJson: document.contentJson,
-      expectedRevision: 3,
-      readiness: "needs_review",
-    });
-    expect(blockedAgain).toEqual({
-      status: "invalid_profile",
-      violation: { fieldId: "owner", ok: false, reason: "required" },
+      document: { metadataJson: {}, readiness: "draft", revision: 2 },
     });
     await expect(repository.createDocumentFromDraft(workspaceA, {
       title: "Oversized",
       contentJson: { type: "doc", content: [{ type: "paragraph" }] },
       metadataJson: { owner: "x".repeat(11) },
-      readiness: "draft",
     })).rejects.toMatchObject({
       name: "ProjectProfileViolationError",
       violation: { fieldId: "owner", ok: false, reason: "invalid_length" },
@@ -351,28 +353,42 @@ describe("document repository", () => {
     expect(document.revision).toBe(0);
   });
 
-  it("creates a complete draft atomically with metadata and readiness", async () => {
+  it("creates a complete draft atomically with metadata and server-owned initial readiness", async () => {
     const db = await createIsolatedDocumentDb();
     const { createDocumentFromDraft } = createDocumentRepository(db);
 
     const document = await createDocumentFromDraft(workspaceA, {
       title: "Recovered local draft",
       contentJson: {
-        type: "doc",
+        type: "doc" as const,
         content: [{ type: "paragraph", content: [{ type: "text", text: "Unsaved local work" }] }],
       },
       metadataJson: { owner: "Legal", tags: ["recovered"] },
-      readiness: "needs_review",
     });
 
     expect(document).toMatchObject({
       title: "Recovered local draft",
       plainText: "Unsaved local work",
       metadataJson: { owner: "Legal", tags: ["recovered"] },
-      readiness: "needs_review",
+      readiness: "draft",
       revision: 0,
       status: "draft",
     });
+  });
+
+  it("forces direct full-draft creation to the Project Profile initial readiness", async () => {
+    const db = await createIsolatedDocumentDb();
+    const { createDocumentFromDraft } = createDocumentRepository(db);
+
+    const untrustedDraft = {
+      title: "Untrusted recovery payload",
+      contentJson: { type: "doc" as const, content: [{ type: "paragraph" }] },
+      metadataJson: {},
+      readiness: "approved" as const,
+    };
+    const document = await createDocumentFromDraft(workspaceA, untrustedDraft);
+
+    expect(document.readiness).toBe("draft");
   });
 
   it("replays an idempotent recovery create without mutating its original payload", async () => {
@@ -385,7 +401,6 @@ describe("document repository", () => {
         content: [{ type: "paragraph", content: [{ type: "text", text: "Original local work" }] }],
       },
       metadataJson: { owner: "Legal" },
-      readiness: "needs_review" as const,
     };
 
     const created = await createDocumentFromDraftIdempotently(workspaceA, firstDraft, "recovery-key-123456");
@@ -412,7 +427,6 @@ describe("document repository", () => {
       title: "Recovery copy",
       contentJson: { type: "doc" as const, content: [{ type: "paragraph" }] },
       metadataJson: {},
-      readiness: "draft" as const,
     };
 
     const workspaceACopy = await createDocumentFromDraftIdempotently(
@@ -438,7 +452,6 @@ describe("document repository", () => {
       title: "Concurrent recovery copy",
       contentJson: { type: "doc" as const, content: [{ type: "paragraph" }] },
       metadataJson: {},
-      readiness: "draft" as const,
     };
 
     const results = await Promise.all([
@@ -453,12 +466,12 @@ describe("document repository", () => {
 
   it("releases an archived recovery copy key so a retry creates a new active copy", async () => {
     const db = await createIsolatedDocumentDb();
-    const { archiveDocument, createDocumentFromDraftIdempotently } = createDocumentRepository(db);
+    const { createDocumentFromDraftIdempotently } = createDocumentRepository(db);
+    const archiveDocument = createArchiveDocument(db);
     const draft = {
       title: "Recovery copy",
       contentJson: { type: "doc" as const, content: [{ type: "paragraph" }] },
       metadataJson: {},
-      readiness: "draft" as const,
     };
 
     const first = await createDocumentFromDraftIdempotently(
@@ -480,32 +493,37 @@ describe("document repository", () => {
 
   it("archives an existing document and removes it from draft listings", async () => {
     const db = await createIsolatedDocumentDb();
-    const { archiveDocument, createDocumentDraft, getDocumentById, listDocuments } = createDocumentRepository(db);
+    const { createDocumentDraft, getDocumentById, listDocuments } = createDocumentRepository(db);
+    const archiveDocument = createArchiveDocument(db);
     const document = await createDocumentDraft(workspaceA, "Market Entry Memo");
 
-    const archivedDocument = await archiveDocument(workspaceA, document.id);
+    const archiveResult = await archiveDocument(workspaceA, document.id);
     const savedDocument = await getDocumentById(workspaceA, document.id);
     const documents = await listDocuments(workspaceA);
 
-    expect(archivedDocument?.id).toBe(document.id);
-    expect(archivedDocument?.status).toBe("archived");
+    expect(archiveResult).toEqual({ roomClosure: "not_required", status: "archived" });
     expect(savedDocument).toBeNull();
     expect(documents.some((item) => item.id === document.id)).toBe(false);
   });
 
-  it("returns null when archiving a missing or already archived document", async () => {
+  it("uses durable archive semantics for a missing or already archived document", async () => {
     const db = await createIsolatedDocumentDb();
-    const { archiveDocument, createDocumentDraft } = createDocumentRepository(db);
+    const { createDocumentDraft } = createDocumentRepository(db);
+    const archiveDocument = createArchiveDocument(db);
     const document = await createDocumentDraft(workspaceA, "Market Entry Memo");
     await archiveDocument(workspaceA, document.id);
 
-    await expect(archiveDocument(workspaceA, "missing-document")).resolves.toBeNull();
-    await expect(archiveDocument(workspaceA, document.id)).resolves.toBeNull();
+    await expect(archiveDocument(workspaceA, "missing-document")).resolves.toEqual({ status: "not_found" });
+    await expect(archiveDocument(workspaceA, document.id)).resolves.toEqual({
+      roomClosure: "not_required",
+      status: "already_archived",
+    });
   });
 
   it("returns not_found when saving an archived document", async () => {
     const db = await createIsolatedDocumentDb();
-    const { archiveDocument, createDocumentDraft, saveDocumentDraft } = createDocumentRepository(db);
+    const { createDocumentDraft, saveDocumentDraft } = createDocumentRepository(db);
+    const archiveDocument = createArchiveDocument(db);
     const document = await createDocumentDraft(workspaceA, "Market Entry Memo");
     await archiveDocument(workspaceA, document.id);
 
@@ -527,7 +545,6 @@ describe("document repository", () => {
       title: "Updated Memo",
       contentJson: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "Updated" }] }] },
       metadataJson: { owner: "Legal", tags: ["risk"] },
-      readiness: "needs_review",
       expectedRevision: 0,
     });
 
@@ -536,7 +553,7 @@ describe("document repository", () => {
       document: {
         metadataJson: { owner: "Legal", tags: ["risk"] },
         plainText: "Updated",
-        readiness: "needs_review",
+        readiness: "draft",
         revision: 1,
       },
     });
@@ -553,6 +570,57 @@ describe("document repository", () => {
     });
   });
 
+  it("preserves server readiness when a direct legacy save attempts to smuggle approval", async () => {
+    const db = await createIsolatedDocumentDb();
+    const repository = createDocumentRepository(db);
+    const document = await repository.createDocumentDraft(workspaceA, "Server workflow");
+
+    const untrustedSave = {
+      title: "Body-only update",
+      contentJson: {
+        type: "doc" as const,
+        content: [{ type: "paragraph", content: [{ type: "text", text: "Body-only update" }] }],
+      },
+      expectedRevision: 0,
+      readiness: "approved" as const,
+    };
+    const saved = await repository.saveDocumentDraft(workspaceA, document.id, untrustedSave);
+
+    expect(saved).toMatchObject({
+      status: "success",
+      document: { readiness: "draft", revision: 1 },
+    });
+  });
+
+  it("fences legacy full-draft writes after collaboration has initialized", async () => {
+    const db = await createIsolatedDocumentDb();
+    const repository = createDocumentRepository(db);
+    const document = await repository.createDocumentDraft(workspaceA, "Canonical collaboration draft");
+    await db.run(sql`
+      INSERT INTO collaboration_documents (workspace_id, document_id, generation, is_current)
+      VALUES (${workspaceA.workspaceId}, ${document.id}, 1, 0)
+    `);
+
+    const result = await repository.saveDocumentDraft(workspaceA, document.id, {
+      contentJson: {
+        content: [{ content: [{ text: "Legacy overwrite", type: "text" }], type: "paragraph" }],
+        type: "doc",
+      },
+      expectedRevision: 0,
+      metadataJson: { owner: "Legacy writer" },
+      title: "Legacy overwrite",
+    });
+
+    expect(result).toEqual({ status: "collaboration_initialized" });
+    await expect(repository.getDocumentById(workspaceA, document.id)).resolves.toMatchObject({
+      contentJson: document.contentJson,
+      metadataJson: document.metadataJson,
+      readiness: document.readiness,
+      revision: 0,
+      title: "Canonical collaboration draft",
+    });
+  });
+
   it("enforces Project Profile metadata on direct repository creation", async () => {
     const db = await createIsolatedDocumentDb();
     const { createDocumentFromDraft } = createDocumentRepository(db, {
@@ -563,18 +631,21 @@ describe("document repository", () => {
       title: "Contract",
       contentJson: { type: "doc", content: [{ type: "paragraph" }] },
       metadataJson: { researchQuestion: "Out of profile" },
-      readiness: "draft",
     })).rejects.toMatchObject({
       name: "ProjectProfileViolationError",
       violation: { fieldId: "researchQuestion", reason: "unknown_field" },
     });
   });
 
-  it("preserves unknown legacy metadata while enforcing legal readiness transitions", async () => {
+  it("preserves unknown legacy metadata and server readiness across direct saves", async () => {
     const db = await createIsolatedDocumentDb();
     const defaultRepository = createDocumentRepository(db);
     const document = await defaultRepository.createDocumentDraft(workspaceA, "Legacy contract");
-    await db.run(sql`UPDATE documents SET metadata_json = '{"legacyWorkflow":"keep-me"}' WHERE id = ${document.id}`);
+    await db.run(sql`
+      UPDATE documents
+      SET metadata_json = '{"legacyWorkflow":"keep-me"}', readiness = 'needs_review'
+      WHERE id = ${document.id}
+    `);
     const legalRepository = createDocumentRepository(db, {
       projectProfile: getProjectProfile("legal-review"),
     });
@@ -583,7 +654,6 @@ describe("document repository", () => {
       title: "Reviewed contract",
       contentJson: { type: "doc", content: [{ type: "paragraph" }] },
       metadataJson: { counterparty: "Core Dot" },
-      readiness: "needs_review",
       expectedRevision: 0,
     });
     expect(saved).toMatchObject({
@@ -595,24 +665,21 @@ describe("document repository", () => {
       },
     });
 
-    const rejected = await legalRepository.saveDocumentDraft(workspaceA, document.id, {
+    const untrustedSave = {
       title: "Illegally approved contract",
-      contentJson: { type: "doc", content: [{ type: "paragraph" }] },
-      readiness: "approved",
+      contentJson: { type: "doc" as const, content: [{ type: "paragraph" }] },
+      readiness: "approved" as const,
       expectedRevision: 1,
-    });
-    expect(rejected).toEqual({
-      status: "invalid_profile",
-      violation: {
-        current: "needs_review",
-        next: "approved",
-        reason: "invalid_readiness_transition",
-      },
+    };
+    const secondSave = await legalRepository.saveDocumentDraft(workspaceA, document.id, untrustedSave);
+    expect(secondSave).toMatchObject({
+      status: "success",
+      document: { readiness: "needs_review", revision: 2 },
     });
     await expect(legalRepository.getDocumentById(workspaceA, document.id)).resolves.toMatchObject({
       readiness: "needs_review",
-      revision: 1,
-      title: "Reviewed contract",
+      revision: 2,
+      title: "Illegally approved contract",
     });
   });
 
@@ -641,7 +708,8 @@ describe("document repository", () => {
 
   it("lists reference candidates while excluding the current and archived documents", async () => {
     const db = await createIsolatedDocumentDb();
-    const { archiveDocument, createDocumentFromContent, listDocumentReferenceCandidates } = createDocumentRepository(db);
+    const { createDocumentFromContent, listDocumentReferenceCandidates } = createDocumentRepository(db);
+    const archiveDocument = createArchiveDocument(db);
     const current = await createDocumentFromContent(workspaceA, "Current Plan", {
       type: "doc",
       content: [{ type: "paragraph", content: [{ type: "text", text: "Current body" }] }],
@@ -680,6 +748,7 @@ describe("document repository", () => {
   it("does not reveal or mutate documents across workspaces", async () => {
     const db = await createIsolatedDocumentDb();
     const repository = createDocumentRepository(db);
+    const archiveDocument = createArchiveDocument(db);
     const document = await repository.createDocumentDraft(workspaceA, "Workspace A memo");
 
     await expect(repository.getDocumentById(workspaceB, document.id)).resolves.toBeNull();
@@ -692,7 +761,7 @@ describe("document repository", () => {
         expectedRevision: 0,
       }),
     ).resolves.toEqual({ status: "not_found" });
-    await expect(repository.archiveDocument(workspaceB, document.id)).resolves.toBeNull();
+    await expect(archiveDocument(workspaceB, document.id)).resolves.toEqual({ status: "not_found" });
 
     await expect(repository.getDocumentById(workspaceA, document.id)).resolves.toMatchObject({
       status: "draft",

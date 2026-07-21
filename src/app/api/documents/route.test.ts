@@ -22,7 +22,20 @@ describe("POST /api/documents", () => {
     delete process.env.PROJECT_PROFILE_ID;
   });
 
-  it("rejects metadata and initial readiness outside the active Project Profile", async () => {
+  it("rejects client-owned readiness during document creation", async () => {
+    const response = await POST(new Request("http://localhost/api/documents", {
+      method: "POST",
+      body: JSON.stringify({ title: "Smuggled approval", readiness: "approved" }),
+    }));
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({ error: "Invalid request body" });
+    expect(createDocumentDraft).not.toHaveBeenCalled();
+    expect(createDocumentFromDraft).not.toHaveBeenCalled();
+    expect(createDocumentFromDraftIdempotently).not.toHaveBeenCalled();
+  });
+
+  it("rejects creation metadata outside the active Project Profile", async () => {
     process.env.PROJECT_PROFILE_ID = "legal-review";
     const response = await POST(new Request("http://localhost/api/documents", {
       method: "POST",
@@ -30,7 +43,6 @@ describe("POST /api/documents", () => {
         title: "Contract",
         contentJson: { type: "doc", content: [] },
         metadataJson: { researchQuestion: "Not a legal field" },
-        readiness: "approved",
       }),
     }));
 
@@ -81,13 +93,13 @@ describe("POST /api/documents", () => {
         content: [{ type: "paragraph", content: [{ type: "text", text: "Local work" }] }],
       },
       metadataJson: { owner: "Legal" },
-      readiness: "needs_review" as const,
     };
     vi.mocked(createDocumentFromDraft).mockResolvedValueOnce({
       id: "doc_recovered",
       workspaceId: "vitest-workspace",
       creationKey: null,
       ...draft,
+      readiness: "draft" as const,
       plainText: "Local work",
       status: "draft",
       revision: 0,
@@ -108,7 +120,7 @@ describe("POST /api/documents", () => {
     expect(createDocumentDraft).not.toHaveBeenCalled();
   });
 
-  it("preserves metadata and readiness when contentJson is omitted", async () => {
+  it("preserves metadata and uses initial readiness when contentJson is omitted", async () => {
     const emptyContent = { type: "doc" as const, content: [{ type: "paragraph" }] };
     vi.mocked(createDocumentFromDraft).mockResolvedValueOnce({
       id: "doc_profiled",
@@ -118,7 +130,7 @@ describe("POST /api/documents", () => {
       contentJson: emptyContent,
       metadataJson: { owner: "Legal" },
       plainText: "",
-      readiness: "needs_review",
+      readiness: "draft",
       status: "draft",
       revision: 0,
       createdAt: new Date("2026-01-01T00:00:00.000Z"),
@@ -130,7 +142,6 @@ describe("POST /api/documents", () => {
       body: JSON.stringify({
         title: "Profiled draft",
         metadataJson: { owner: "Legal" },
-        readiness: "needs_review",
       }),
     }));
 
@@ -141,7 +152,6 @@ describe("POST /api/documents", () => {
         title: "Profiled draft",
         contentJson: emptyContent,
         metadataJson: { owner: "Legal" },
-        readiness: "needs_review",
       },
     );
     expect(createDocumentDraft).not.toHaveBeenCalled();
@@ -184,13 +194,13 @@ describe("POST /api/documents", () => {
       title: "Recovered local draft",
       contentJson: { type: "doc" as const, content: [{ type: "paragraph" }] },
       metadataJson: {},
-      readiness: "draft" as const,
     };
     vi.mocked(createDocumentFromDraftIdempotently).mockResolvedValueOnce({
       document: {
         id: "doc_recovered",
         workspaceId: "vitest-workspace",
         ...draft,
+        readiness: "draft" as const,
         creationKey: "recovery-key-123456",
         plainText: "",
         status: "draft",

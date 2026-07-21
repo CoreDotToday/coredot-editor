@@ -121,9 +121,15 @@ Composite Workspace foreign keys and unique indexes keep related document, AI, P
 
 SQLite/libSQL keeps local setup and early deployments small. Move to Postgres when concurrency, reporting, database-native row-level security, or operating requirements demand it. Replace the Drizzle table/client implementation behind repository interfaces, preserve Workspace predicates and serialized document-change transactions, regenerate migrations, and rerun repository/concurrency tests against the target database.
 
+## Real-Time Collaboration
+
+`COLLABORATION_MODE=self-hosted` adds an optional second process: a Hocuspocus v4 sidecar (Node.js 22) that terminates collaboration WebSockets, verifies short-lived signed capabilities issued by the Next.js Web process, sequences and validates every Yjs update, and appends it durably before peers can observe it. Yjs binary state becomes canonical for the collaborative body, title, and metadata; the `documents` row remains canonical for readiness, approval, archive status, and Workspace ownership, and keeps a fenced materialized projection for lists and search. Server-originated mutations (AI Proposal apply, selective undo, workflow notifications) go through one collaborative document gateway; readiness and approval stay server-authoritative over HTTP. Disabled mode changes nothing, and once a document initializes collaboration its legacy body/title/metadata writers fail closed.
+
+The complete design - deep modules, durable update protocol, capability authentication, awareness privacy, resource limits, operations, and test strategy - lives in [Real-Time Collaboration](realtime-collaboration.md).
+
 ## Test And Release Gate
 
-Repository tests use temporary databases, route tests exercise auth/error contracts, component tests use Testing Library, and Playwright uses an isolated E2E database. Production smoke builds and starts the artifact against a temporary migrated database and verifies health, readiness, redirects, and protected-route behavior.
+Repository tests use temporary databases, route tests exercise auth/error contracts, component tests use Testing Library, and Playwright uses an isolated E2E database. Production smoke builds and starts the artifact against a temporary migrated database and verifies health, readiness, redirects, and protected-route behavior. Collaboration adds focused gates: `pnpm test:collaboration` (unit/contract), `pnpm collaboration:websocket-tests` (real multi-client WebSocket convergence, token refresh, revocation, tampering, and restart recovery against the built sidecar), `pnpm docker:collaboration:verify` (containerized sidecar with migrations before readiness), `pnpm e2e:collaboration` (two-principal browser scenarios), and `pnpm collaboration:production-smoke` (both production artifacts on one migrated database).
 
 Production builds intentionally require Clerk-mode configuration. Use the verification-only test-format environment documented in [Configuration](configuration.md#production-verification), then run:
 
@@ -144,5 +150,5 @@ The dependency audit blocks the configured moderate-or-higher threshold; it is n
 - Customize domain fields and workflow through Project Profiles rather than one-off UI branches.
 - Register build-time UI contributions through `createAppEditorPlugins()` and change document nodes through the shared app schema Profile.
 - Extend prompt templates while keeping variable and structured Proposal contracts.
-- Add real-time collaboration only with an explicit synchronization model that interoperates with revision/document-change semantics.
+- Extend real-time collaboration behind the session, codec, gateway, and persistence seams described in [Real-Time Collaboration](realtime-collaboration.md); a Y-Sweet or horizontally scaled backend is a new adapter set, not a configuration switch.
 - Extend DOCX fidelity with corpus tests and explicit report classifications.

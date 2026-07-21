@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { archiveDocument, getDocumentById, saveDocumentDraft } from "@/features/documents/document-repository";
-import { documentReadinessValues } from "@/features/documents/document-metadata";
+import { archiveDocumentWithRoomClosure } from "@/features/documents/document-archive-command";
+import { DocumentArchiveServiceError } from "@/features/documents/document-archive-service";
+import { getDocumentById, saveDocumentDraft } from "@/features/documents/document-repository";
 import { toPublicDocument } from "@/features/documents/document-public";
 import { createProtectedOptionsHandler, createProtectedRouteHandler } from "@/features/auth/route-context";
 import {
@@ -21,9 +22,8 @@ const updateDocumentSchema = z.object({
   metadataJson: z
     .record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.array(z.string()), z.null()]))
     .optional(),
-  readiness: z.enum(documentReadinessValues).optional(),
   expectedRevision: z.number().int().nonnegative(),
-});
+}).strict();
 
 type Params = {
   params: Promise<{ id: string }>;
@@ -71,6 +71,12 @@ const putHandler = createProtectedRouteHandler(async (context, request: Request,
       { status: 409 },
     );
   }
+  if (saveResult.status === "collaboration_initialized") {
+    return NextResponse.json({
+      error: "Document collaboration is already initialized",
+      reason: "collaboration_initialized",
+    }, { status: 409 });
+  }
   if (saveResult.status === "invalid_profile") {
     return NextResponse.json({
       error: "Document violates active Project Profile",
@@ -83,11 +89,31 @@ const putHandler = createProtectedRouteHandler(async (context, request: Request,
 
 const deleteHandler = createProtectedRouteHandler(async (context, _request: Request, { params }: Params) => {
   const { id } = await params;
-  const document = await archiveDocument(context, id);
-  if (!document) {
+  let result: Awaited<ReturnType<typeof archiveDocumentWithRoomClosure>>;
+  try {
+    result = await archiveDocumentWithRoomClosure(context, id);
+  } catch (error) {
+    if (error instanceof DocumentArchiveServiceError && error.category === "invalid_input") {
+      return NextResponse.json({
+        error: "Invalid archive request",
+        reason: "invalid_input",
+      }, { status: 400 });
+    }
+    if (error instanceof DocumentArchiveServiceError && error.category === "unavailable") {
+      return NextResponse.json({
+        error: "Document archive service is unavailable",
+        reason: "archive_unavailable",
+      }, {
+        headers: { "Retry-After": "1" },
+        status: 503,
+      });
+    }
+    throw error;
+  }
+  if (result.status === "not_found") {
     return NextResponse.json({ error: "Document not found" }, { status: 404 });
   }
-  return NextResponse.json({ ok: true });
+  return NextResponse.json({ ok: true, roomClosure: result.roomClosure });
 });
 
 export async function GET(request: Request, params: Params) {

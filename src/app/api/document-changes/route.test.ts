@@ -26,6 +26,7 @@ describe("GET /api/document-changes", () => {
         batchId: null,
         afterRevision: 1,
         createdAt: new Date("2026-01-01T00:00:00.000Z"),
+        mode: "legacy",
         undoneAt: null,
         proposals: [{
           id: "proposal_1",

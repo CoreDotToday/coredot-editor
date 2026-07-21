@@ -1,8 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  COLLABORATION_TELEMETRY_METRICS,
   emitAiExecutionTelemetry,
+  emitCollaborationCommandConflict,
+  emitCollaborationTelemetry,
   type AiExecutionTelemetryEvent,
+  type CollaborationTelemetryEvent,
 } from "./telemetry";
 
 describe("structured telemetry", () => {
@@ -158,5 +162,255 @@ describe("structured telemetry", () => {
       status: 500,
       type: "ai_execution",
     })).not.toThrow();
+  });
+});
+
+describe("collaboration telemetry", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("covers every required collaboration counter and histogram", () => {
+    expect(Object.keys(COLLABORATION_TELEMETRY_METRICS).toSorted()).toEqual([
+      "auth_rejected",
+      "checkpoint_duration_ms",
+      "command_conflict",
+      "connection_closed",
+      "connection_opened",
+      "drain_duration_ms",
+      "durable_append_latency_ms",
+      "head_projection_lag",
+      "recovery_duration_ms",
+      "room_reload",
+      "update_bytes",
+    ]);
+  });
+
+  it("emits only the allowlisted metric shape and drops content-bearing caller extras", () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const event = {
+      awareness: { user: { displayName: "name-secret" } },
+      category: "authorization_revoked",
+      content: "document-content-secret",
+      displayName: "participant-name-secret",
+      documentId: "document-id-secret",
+      email: "user@secret.example",
+      metadataJson: { audience: "metadata-value-secret" },
+      metric: "auth_rejected",
+      principalId: "principal-secret",
+      prompt: "prompt-body-secret",
+      room: "room-name-secret",
+      title: "document-title-secret",
+      token: "capability-token-secret",
+      type: "collaboration_metric",
+      update: new Uint8Array([1, 2, 3]),
+      value: 1,
+      workspaceId: "workspace-secret",
+    } as CollaborationTelemetryEvent;
+
+    emitCollaborationTelemetry(event);
+
+    expect(info).toHaveBeenCalledTimes(1);
+    const output = info.mock.calls[0]![0];
+    expect(typeof output).toBe("string");
+    const record = JSON.parse(output as string);
+    expect(record).toEqual({
+      category: "authorization_revoked",
+      kind: "counter",
+      metric: "auth_rejected",
+      type: "collaboration_metric",
+      unit: "count",
+      value: 1,
+    });
+    for (const forbiddenValue of [
+      "document-content-secret",
+      "document-title-secret",
+      "metadata-value-secret",
+      "participant-name-secret",
+      "name-secret",
+      "user@secret.example",
+      "capability-token-secret",
+      "prompt-body-secret",
+      "principal-secret",
+      "workspace-secret",
+      "document-id-secret",
+      "room-name-secret",
+    ]) {
+      expect(output).not.toContain(forbiddenValue);
+    }
+  });
+
+  it("normalizes unknown categories instead of echoing caller strings", () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+
+    emitCollaborationTelemetry({
+      category: "Bearer raw-token-secret",
+      metric: "command_conflict",
+      type: "collaboration_metric",
+      value: 1,
+    });
+
+    const output = info.mock.calls[0]![0] as string;
+    expect(JSON.parse(output)).toEqual({
+      category: "unknown",
+      kind: "counter",
+      metric: "command_conflict",
+      type: "collaboration_metric",
+      unit: "count",
+      value: 1,
+    });
+    expect(output).not.toContain("raw-token-secret");
+  });
+
+  it("emits histogram units and sanitizes non-finite or negative values", () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+
+    emitCollaborationTelemetry({
+      metric: "update_bytes",
+      type: "collaboration_metric",
+      value: 4096,
+    });
+    emitCollaborationTelemetry({
+      metric: "durable_append_latency_ms",
+      type: "collaboration_metric",
+      value: Number.NaN,
+    });
+    emitCollaborationTelemetry({
+      metric: "head_projection_lag",
+      type: "collaboration_metric",
+      value: -7,
+    });
+    emitCollaborationTelemetry({
+      metric: "drain_duration_ms",
+      type: "collaboration_metric",
+      value: 1250.5,
+    });
+
+    const records = info.mock.calls.map((call) => JSON.parse(call[0] as string));
+    expect(records).toEqual([
+      {
+        kind: "histogram",
+        metric: "update_bytes",
+        type: "collaboration_metric",
+        unit: "bytes",
+        value: 4096,
+      },
+      {
+        kind: "histogram",
+        metric: "durable_append_latency_ms",
+        type: "collaboration_metric",
+        unit: "ms",
+        value: 0,
+      },
+      {
+        kind: "gauge",
+        metric: "head_projection_lag",
+        type: "collaboration_metric",
+        unit: "sequences",
+        value: 0,
+      },
+      {
+        kind: "histogram",
+        metric: "drain_duration_ms",
+        type: "collaboration_metric",
+        unit: "ms",
+        value: 1250.5,
+      },
+    ]);
+  });
+
+  it("defaults counters to one increment and ignores categories on category-free metrics", () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+
+    emitCollaborationTelemetry({
+      category: "should-not-appear-secret",
+      metric: "room_reload",
+      type: "collaboration_metric",
+    } as CollaborationTelemetryEvent);
+
+    const output = info.mock.calls[0]![0] as string;
+    expect(JSON.parse(output)).toEqual({
+      kind: "counter",
+      metric: "room_reload",
+      type: "collaboration_metric",
+      unit: "count",
+      value: 1,
+    });
+    expect(output).not.toContain("should-not-appear-secret");
+  });
+
+  it("drops metrics outside the registry rather than guessing a shape", () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+
+    emitCollaborationTelemetry({
+      metric: "document_text",
+      type: "collaboration_metric",
+      value: 1,
+    } as unknown as CollaborationTelemetryEvent);
+
+    expect(info).not.toHaveBeenCalled();
+  });
+
+  it("never changes sidecar behavior when the collaboration telemetry sink throws", () => {
+    vi.spyOn(console, "info").mockImplementation(() => {
+      throw new Error("telemetry sink failed");
+    });
+
+    expect(() => emitCollaborationTelemetry({
+      metric: "connection_opened",
+      type: "collaboration_metric",
+      value: 1,
+    })).not.toThrow();
+  });
+
+  it("emits a command_conflict only for bounded conflict outcomes and returns the result unchanged", () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+
+    const conflict = { ok: false as const, reason: "proposal_target_conflict" as const };
+    expect(emitCollaborationCommandConflict(conflict)).toBe(conflict);
+    const undoConflict = { ok: false as const, reason: "undo_conflict" as const };
+    expect(emitCollaborationCommandConflict(undoConflict)).toBe(undoConflict);
+    const statusConflict = { ok: false as const, reason: "proposal_status_conflict" as const };
+    expect(emitCollaborationCommandConflict(statusConflict)).toBe(statusConflict);
+
+    expect(info.mock.calls.map((call) => JSON.parse(call[0] as string))).toEqual([
+      {
+        category: "proposal_target_conflict",
+        kind: "counter",
+        metric: "command_conflict",
+        type: "collaboration_metric",
+        unit: "count",
+        value: 1,
+      },
+      {
+        category: "undo_conflict",
+        kind: "counter",
+        metric: "command_conflict",
+        type: "collaboration_metric",
+        unit: "count",
+        value: 1,
+      },
+      {
+        category: "proposal_status_conflict",
+        kind: "counter",
+        metric: "command_conflict",
+        type: "collaboration_metric",
+        unit: "count",
+        value: 1,
+      },
+    ]);
+  });
+
+  it("stays silent for successful or non-conflict command outcomes", () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+
+    const success = { ok: true as const, result: { content: "document-content-secret" } };
+    expect(emitCollaborationCommandConflict(success)).toBe(success);
+    const unavailable = { ok: false as const, reason: "unavailable" as const };
+    expect(emitCollaborationCommandConflict(unavailable)).toBe(unavailable);
+    const invalid = { ok: false as const, reason: "invalid_request" as const };
+    expect(emitCollaborationCommandConflict(invalid)).toBe(invalid);
+
+    expect(info).not.toHaveBeenCalled();
   });
 });

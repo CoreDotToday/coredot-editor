@@ -399,8 +399,9 @@ describe("moveDocumentBlock", () => {
       "utf8",
     );
 
-    expect(editorSource).toContain("moveDocumentBlock(currentContent");
-    expect(editorSource).toContain("focusMovedBlock(editor, result.destination)");
+    expect(editorSource).toContain("applyScopedBlockMove(editor");
+    expect(editorSource).toContain("focusMovedBlock(editor, destination)");
+    expect(editorSource).not.toContain("moveDocumentBlock(currentContent");
     expect(editorSource).not.toMatch(/move(?:ListItem|TopLevelBlock).*InTiptapJson/);
     expect(editorSource).not.toContain("getMovedListItemPath");
     expect(editorSource).not.toContain("function toDocumentBlockLocation");

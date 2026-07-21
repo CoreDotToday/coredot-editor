@@ -19,6 +19,15 @@ export type ProjectMetadataField = {
   type: ProjectMetadataFieldType;
 };
 
+export type ProjectMetadataContractField = Pick<
+  ProjectMetadataField,
+  "id" | "itemMaxLength" | "maxItems" | "maxLength" | "options" | "required" | "type"
+>;
+
+export type ProjectMetadataContract = {
+  metadataFields: readonly ProjectMetadataContractField[];
+};
+
 export type ProjectReadinessState = {
   id: DocumentReadiness;
   labels: Record<ProjectLocale, string>;
@@ -188,7 +197,7 @@ export function validateProjectDocumentState(
 }
 
 export function validateProjectMetadata(
-  profile: ProjectProfile,
+  profile: ProjectMetadataContract,
   input: DocumentMetadata,
   previous: DocumentMetadata = {},
   options: { enforceRequired?: boolean } = {},
@@ -225,7 +234,7 @@ export function validateProjectMetadata(
 }
 
 function normalizeFieldValue(
-  field: ProjectMetadataField,
+  field: ProjectMetadataContractField,
   candidate: DocumentMetadataValue,
 ): { ok: true; value: DocumentMetadataValue | undefined } | { ok: false; reason: "invalid_length" | "invalid_option" | "invalid_type" } {
   if (candidate === null || candidate === "") return { ok: true, value: undefined };
@@ -263,7 +272,7 @@ function normalizeFieldValue(
   return { ok: true, value: normalized };
 }
 
-export function getProjectMetadataFieldLimits(field: ProjectMetadataField): {
+export function getProjectMetadataFieldLimits(field: ProjectMetadataContractField): {
   itemMaxLength?: number;
   maxItems?: number;
   maxLength?: number;

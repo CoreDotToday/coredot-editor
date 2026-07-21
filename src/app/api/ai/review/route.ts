@@ -10,6 +10,7 @@ import {
 } from "@/features/ai/ai-run-repository";
 import {
   createAiProviderForCommand,
+  createAiCollaborativeProposalAnchor,
   prepareAiCommandRequest,
   type PreparedAiCommandContext,
 } from "@/features/ai/ai-command-service";
@@ -125,6 +126,16 @@ const postHandler = createProtectedRouteHandler(async (context, request: Request
         : providerResult;
     },
     runInput: (prepared: PreparedAiCommandContext) => ({
+      ...(prepared.collaborationSnapshot ? {
+        collaborationSnapshot: {
+          contentHash: prepared.collaborationSnapshot.contentHash,
+          documentId: prepared.document.id,
+          generation: prepared.collaborationSnapshot.generation,
+          headSeq: prepared.collaborationSnapshot.headSeq,
+          schemaFingerprint: prepared.collaborationSnapshot.schemaFingerprint,
+          stateVector: prepared.collaborationSnapshot.stateVector,
+        },
+      } : {}),
       commandType: "document_review" as const,
       documentId: prepared.document.id,
       inputSummaryJson: {
@@ -163,25 +174,46 @@ function aiExecutionResponse<T>(execution: AiExecutionResult<T>) {
 }
 
 function prepareReviewFinalization(review: ReviewResult, prepared: PreparedAiCommandContext) {
-  const validFindings = review.findings
-    .map((finding) => ({
-      finding,
-      occurrenceIndex: getUniqueOccurrenceIndex(prepared.reviewedText, finding.targetText),
-    }))
-    .filter(({ finding, occurrenceIndex }) =>
-      occurrenceIndex !== null &&
-      applyProposalToText(prepared.reviewedText, finding.targetText, finding.replacementText).ok,
-    );
   return {
     outputText: JSON.stringify(review),
-    proposals: validFindings.map(({ finding, occurrenceIndex }) => ({
-      documentId: prepared.document.id,
-      occurrenceIndex,
-      targetText: finding.targetText,
-      replacementText: finding.replacementText,
-      explanation: formatFindingExplanation(finding),
-    })),
+    proposals: review.findings.flatMap((finding) => {
+      const occurrenceIndex = getUniqueOccurrenceIndex(prepared.reviewedText, finding.targetText);
+      if (
+        occurrenceIndex === null
+        || !applyProposalToText(prepared.reviewedText, finding.targetText, finding.replacementText).ok
+      ) {
+        return [];
+      }
+      const anchor = prepared.collaborationSnapshot
+        ? createSkippableCollaborativeAnchor(prepared.collaborationSnapshot, finding.targetText)
+        : undefined;
+      if (prepared.collaborationSnapshot && !anchor) return [];
+      return [{
+        ...(anchor ? { anchor } : {}),
+        documentId: prepared.document.id,
+        occurrenceIndex,
+        targetText: finding.targetText,
+        replacementText: finding.replacementText,
+        explanation: formatFindingExplanation(finding),
+      }];
+    }),
   };
+}
+
+/**
+ * A finding can be unique in the trimmed reviewed text yet unresolvable in the
+ * exact projection (whitespace/blank-line divergence). Dropping it keeps the
+ * provider result durable instead of failing the whole run after spend.
+ */
+function createSkippableCollaborativeAnchor(
+  snapshot: NonNullable<PreparedAiCommandContext["collaborationSnapshot"]>,
+  targetText: string,
+) {
+  try {
+    return createAiCollaborativeProposalAnchor(snapshot, { targetText });
+  } catch {
+    return undefined;
+  }
 }
 
 function mapDurableReviewResult(durable: DurableAiOperation) {

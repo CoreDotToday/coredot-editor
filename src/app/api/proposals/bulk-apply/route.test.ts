@@ -1,11 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AiProposalRecord, DocumentChangeRecord, DocumentRecord } from "@/db/schema";
 import { applyProposalBatch } from "@/features/documents/document-change-service";
+import { applyCollaborativeProposalCommand } from "@/features/collaboration/proposal-command-service";
 import { RESOURCE_LIMITS } from "@/features/security/resource-policy";
 import { TEST_REQUEST_CONTEXT } from "@/test/auth-context";
 import { POST } from "./route";
 
 vi.mock("@/features/documents/document-change-service", () => ({ applyProposalBatch: vi.fn() }));
+vi.mock("@/features/collaboration/proposal-command-service", () => ({
+  applyCollaborativeProposalCommand: vi.fn(),
+}));
 
 const createdAt = new Date("2026-01-01T00:00:00.000Z");
 const dirtyDocument = {
@@ -13,7 +17,6 @@ const dirtyDocument = {
   title: "Dirty draft",
   contentJson: { type: "doc" as const, content: [{ type: "paragraph", content: [{ type: "text", text: "alpha beta" }] }] },
   metadataJson: {},
-  readiness: "draft" as const,
 };
 
 function proposal(id: string): AiProposalRecord {
@@ -48,7 +51,7 @@ function successResult() {
       requestId: TEST_REQUEST_CONTEXT.requestId,
       kind: "batch" as const,
       batchId: "batch_1",
-      beforeSnapshotJson: dirtyDocument,
+      beforeSnapshotJson: { ...dirtyDocument, readiness: "draft" },
       afterRevision: 1,
       createdAt,
       undoneAt: null,
@@ -58,6 +61,7 @@ function successResult() {
       workspaceId: "vitest-workspace",
       creationKey: null,
       plainText: "ALPHA BETA",
+      readiness: "draft" as const,
       status: "draft" as const,
       revision: 1,
       createdAt,
@@ -86,6 +90,64 @@ function request(body: unknown) {
 describe("POST /api/proposals/bulk-apply", () => {
   beforeEach(() => vi.clearAllMocks());
 
+  it("accepts an ordered semantic collaborative batch without a client draft", async () => {
+    vi.mocked(applyCollaborativeProposalCommand).mockResolvedValueOnce({
+      ...successResult(),
+      collaboration: { generation: 1, headSeq: 3 },
+      replayed: false,
+    });
+    const response = await POST(request({
+      commandId: "command-batch",
+      items: [
+        { mode: "replace", proposalId: "proposal_1" },
+        { mode: "insert_below", proposalId: "proposal_2" },
+      ],
+      observedHeadSeq: 2,
+    }));
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      collaboration: { generation: 1, headSeq: 3 },
+      proposals: [{ id: "proposal_1" }, { id: "proposal_2" }],
+    });
+    expect(applyCollaborativeProposalCommand).toHaveBeenCalledWith(TEST_REQUEST_CONTEXT, {
+      commandId: "command-batch",
+      items: [
+        { mode: "replace", proposalId: "proposal_1" },
+        { mode: "insert_below", proposalId: "proposal_2" },
+      ],
+      observedHeadSeq: 2,
+    });
+    expect(applyProposalBatch).not.toHaveBeenCalled();
+  });
+
+  it("maps an atomic collaborative overlap conflict", async () => {
+    vi.mocked(applyCollaborativeProposalCommand).mockResolvedValueOnce({
+      ok: false,
+      reason: "proposal_overlap_conflict",
+    });
+    const response = await POST(request({
+      commandId: "command-overlap",
+      items: [
+        { mode: "replace", proposalId: "proposal_1" },
+        { mode: "replace", proposalId: "proposal_2" },
+      ],
+      observedHeadSeq: 2,
+    }));
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({ reason: "proposal_overlap_conflict" });
+  });
+
+  it("rejects readiness smuggling before bulk proposal service access", async () => {
+    const base = payload();
+    const smuggled = { ...base, document: { ...base.document, readiness: "approved" } };
+
+    const response = await POST(request(smuggled));
+
+    expect(response.status).toBe(400);
+    expect(applyProposalBatch).not.toHaveBeenCalled();
+  });
+
   it("applies a bounded proposal batch in one service call", async () => {
     vi.mocked(applyProposalBatch).mockResolvedValueOnce(successResult());
 
@@ -103,7 +165,6 @@ describe("POST /api/proposals/bulk-apply", () => {
         title: "Dirty draft",
         contentJson: dirtyDocument.contentJson,
         metadataJson: {},
-        readiness: "draft",
       },
       expectedRevision: 0,
       proposals: [
@@ -139,5 +200,20 @@ describe("POST /api/proposals/bulk-apply", () => {
 
     expect(response.status).toBe(409);
     expect(await response.json()).toMatchObject({ reason: "target_not_found" });
+  });
+
+  it("returns the stable collaboration fence conflict", async () => {
+    vi.mocked(applyProposalBatch).mockResolvedValueOnce({
+      ok: false,
+      reason: "collaboration_initialized",
+    });
+
+    const response = await POST(request(payload()));
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: "Document collaboration is already initialized",
+      reason: "collaboration_initialized",
+    });
   });
 });

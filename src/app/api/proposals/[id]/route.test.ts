@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getProposalById, updateProposalStatus } from "@/features/proposals/proposal-repository";
 import { setProtectedRequestContextDependenciesForTests } from "@/features/auth/route-context";
+import { ProposalStatusUpdateConflictError } from "@/features/proposals/proposal-status-errors";
 import { TEST_REQUEST_CONTEXT } from "@/test/auth-context";
 import { GET, PATCH } from "./route";
 
@@ -124,6 +125,23 @@ describe("PATCH /api/proposals/[id]", () => {
 
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ proposal: { id: "proposal_1", status: "pending" } });
+  });
+
+  it("returns a stable 409 reason when collaboration initialization invalidated an anchorless reset", async () => {
+    vi.mocked(updateProposalStatus).mockRejectedValueOnce(new ProposalStatusUpdateConflictError());
+    vi.mocked(getProposalById).mockResolvedValueOnce(createProposalRecord({ status: "rejected" }));
+
+    const response = await PATCH(
+      createJsonRequest({ status: "pending", expectedStatus: "rejected" }),
+      createContext(),
+    );
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      error: "Collaboration proposal anchor is required",
+      proposal: { id: "proposal_1", status: "rejected" },
+      reason: "collaboration_anchor_required",
+    });
   });
 
   it("returns 409 when the proposal status changed from the caller expectation", async () => {

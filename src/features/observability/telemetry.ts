@@ -42,6 +42,157 @@ export function normalizeAiExecutionErrorClass(errorClass: string | undefined) {
   return SAFE_AI_EXECUTION_ERROR_CLASSES.has(errorClass) ? errorClass : "unknown_failure";
 }
 
+type CollaborationMetricUnit = "bytes" | "count" | "ms" | "sequences";
+type CollaborationMetricKind = "counter" | "gauge" | "histogram";
+
+type CollaborationMetricDefinition = {
+  categories?: ReadonlySet<string>;
+  kind: CollaborationMetricKind;
+  unit: CollaborationMetricUnit;
+};
+
+const COLLABORATION_CLOSE_CATEGORIES = new Set([
+  "archived",
+  "authorization_expired",
+  "authorization_revoked",
+  "capability_invalid",
+  "invalid_message",
+  "resource_limit",
+  "revoked",
+  "room_rotated",
+  "schema_changed",
+  "server_draining",
+  "storage_unavailable",
+  "update_rejected",
+]);
+
+const COLLABORATION_CONFLICT_CATEGORIES = new Set([
+  "idempotency_conflict",
+  "proposal_overlap_conflict",
+  "proposal_status_conflict",
+  "proposal_target_conflict",
+  "sequence_conflict",
+  "undo_conflict",
+]);
+
+/**
+ * The complete registry of collaboration metrics. Every emitted record uses
+ * one of these names; anything else is dropped so telemetry can never invent
+ * a metric out of caller-provided (potentially content-bearing) strings.
+ */
+export const COLLABORATION_TELEMETRY_METRICS: Readonly<
+  Record<string, CollaborationMetricDefinition>
+> = Object.freeze({
+  auth_rejected: {
+    categories: COLLABORATION_CLOSE_CATEGORIES,
+    kind: "counter",
+    unit: "count",
+  },
+  checkpoint_duration_ms: { kind: "histogram", unit: "ms" },
+  command_conflict: {
+    categories: COLLABORATION_CONFLICT_CATEGORIES,
+    kind: "counter",
+    unit: "count",
+  },
+  connection_closed: {
+    categories: COLLABORATION_CLOSE_CATEGORIES,
+    kind: "counter",
+    unit: "count",
+  },
+  connection_opened: { kind: "counter", unit: "count" },
+  drain_duration_ms: { kind: "histogram", unit: "ms" },
+  durable_append_latency_ms: { kind: "histogram", unit: "ms" },
+  head_projection_lag: { kind: "gauge", unit: "sequences" },
+  recovery_duration_ms: { kind: "histogram", unit: "ms" },
+  room_reload: { kind: "counter", unit: "count" },
+  update_bytes: { kind: "histogram", unit: "bytes" },
+} satisfies Record<string, CollaborationMetricDefinition>);
+
+export type CollaborationTelemetryMetric = keyof typeof COLLABORATION_TELEMETRY_METRICS;
+
+export type CollaborationTelemetryEvent = {
+  /** Bounded label; normalized against the metric's allowlist, never echoed raw. */
+  category?: string;
+  metric: CollaborationTelemetryMetric;
+  type: "collaboration_metric";
+  /** Counter increment or measured value. Counters default to one increment. */
+  value?: number;
+};
+
+export type CollaborationTelemetryRecord = {
+  category?: string;
+  kind: CollaborationMetricKind;
+  metric: CollaborationTelemetryMetric;
+  type: "collaboration_metric";
+  unit: CollaborationMetricUnit;
+  value: number;
+};
+
+/**
+ * Emits one privacy-safe collaboration counter/histogram/gauge sample.
+ *
+ * The record is rebuilt from an allowlist: caller extras are dropped, category
+ * strings outside the metric's bounded set become "unknown", and values are
+ * clamped to finite non-negative numbers. Document content, titles, metadata
+ * values, names, email addresses, tokens, prompts, and Yjs bytes can therefore
+ * never reach the sink.
+ */
+export function emitCollaborationTelemetry(event: CollaborationTelemetryEvent) {
+  try {
+    const definition = Object.hasOwn(COLLABORATION_TELEMETRY_METRICS, event.metric)
+      ? COLLABORATION_TELEMETRY_METRICS[event.metric]
+      : undefined;
+    if (!definition) return;
+    const fallbackValue = definition.kind === "counter" ? 1 : 0;
+    const value = typeof event.value === "number" && Number.isFinite(event.value)
+      ? Math.max(0, event.value)
+      : fallbackValue;
+    const record: CollaborationTelemetryRecord = {
+      kind: definition.kind,
+      metric: event.metric,
+      type: "collaboration_metric",
+      unit: definition.unit,
+      value,
+    };
+    if (definition.categories && typeof event.category === "string") {
+      record.category = definition.categories.has(event.category)
+        ? event.category
+        : "unknown";
+    }
+    console.info(JSON.stringify(record));
+  } catch {
+    // Telemetry is best-effort and must never affect the operation it describes.
+  }
+}
+
+/**
+ * Emits one `command_conflict` sample when a collaborative command outcome
+ * carries a bounded conflict reason, then returns the outcome unchanged so it
+ * can wrap a service return expression. Success and non-conflict failures
+ * (unavailable, invalid_request, not_found) emit nothing.
+ */
+export function emitCollaborationCommandConflict<T>(result: T): T {
+  try {
+    if (
+      result
+      && typeof result === "object"
+      && (result as { ok?: unknown }).ok === false
+    ) {
+      const reason = (result as { reason?: unknown }).reason;
+      if (typeof reason === "string" && COLLABORATION_CONFLICT_CATEGORIES.has(reason)) {
+        emitCollaborationTelemetry({
+          category: reason,
+          metric: "command_conflict",
+          type: "collaboration_metric",
+        });
+      }
+    }
+  } catch {
+    // Telemetry is best-effort and must never affect the operation it describes.
+  }
+  return result;
+}
+
 export function emitAiExecutionTelemetry(event: AiExecutionTelemetryEvent) {
   try {
     const status = Number.isInteger(event.status) && event.status >= 100 && event.status <= 599

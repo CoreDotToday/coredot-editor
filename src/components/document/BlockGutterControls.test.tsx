@@ -193,6 +193,43 @@ describe("BlockGutterControls", () => {
     expect(handleBlockAction).toHaveBeenCalledWith("moveDown");
   });
 
+  it("removes identity-breaking transforms and extension bypasses when structural transforms are disabled", async () => {
+    const user = userEvent.setup();
+    const handleDragStart = vi.fn();
+
+    render(
+      <BlockGutterControls
+        isListItem
+        isVisible
+        left={0}
+        onBlockDragStart={handleDragStart}
+        pluginActions={[{ id: "plugin.move", label: "Plugin move", run: vi.fn() }]}
+        pluginContext={{
+          block: { from: 1, kind: "listItem", to: 3, topLevelIndex: 0 },
+          editor: {} as never,
+          language: "ko",
+          messages: {} as never,
+        }}
+        structuralTransformsEnabled={false}
+        top={0}
+      />,
+    );
+
+    const menuButton = screen.getByRole("button", { name: "블록 메뉴 열기" });
+    fireEvent.pointerDown(menuButton, { button: 0, clientX: 100, clientY: 100, pointerId: 1 });
+    expect(handleDragStart).not.toHaveBeenCalled();
+
+    await user.click(menuButton);
+    const menu = screen.getByRole("menu", { name: "블록 작업" });
+    expect(within(menu).queryByRole("menuitem", { name: "블록 위로 이동" })).not.toBeInTheDocument();
+    expect(within(menu).queryByRole("menuitem", { name: "블록 아래로 이동" })).not.toBeInTheDocument();
+    expect(within(menu).queryByRole("menuitem", { name: "들여쓰기" })).not.toBeInTheDocument();
+    expect(within(menu).queryByRole("menuitem", { name: "내어쓰기" })).not.toBeInTheDocument();
+    expect(within(menu).queryByRole("menuitem", { name: "텍스트로 전환" })).not.toBeInTheDocument();
+    expect(within(menu).queryByRole("menuitem", { name: "Plugin move" })).not.toBeInTheDocument();
+    expect(within(menu).getByRole("menuitem", { name: "블록 삭제" })).toBeInTheDocument();
+  });
+
   it("shows list level actions only for list item targets", async () => {
     const user = userEvent.setup();
     const handleBlockAction = vi.fn();

@@ -1,9 +1,36 @@
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { StrictMode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { DocumentShell } from "./DocumentShell";
+import { Awareness } from "y-protocols/awareness";
+import * as Y from "yjs";
+import {
+  DOCUMENT_WORKFLOW_RECOVERY_INTERVAL_MS,
+  DocumentShell,
+  hasPendingCollaborationUpdates,
+} from "./DocumentShell";
 import { SelectionAiMenu } from "./SelectionAiMenu";
 import { DOCUMENT_INTERCHANGE_CLIENT_TIMEOUT_MS } from "@/features/documents/document-interchange-fetch";
+import { COLLABORATIVE_PROPOSAL_CLIENT_TIMEOUT_MS } from "@/features/documents/document-session-client";
+import { useCollaborationSession } from "@/features/collaboration/client/use-collaboration-session";
+import type { CollaborationSession } from "@/features/collaboration/client/hocuspocus-provider-adapter";
+import { createCollaborationSessionStore } from "@/features/collaboration/client/session-store";
+import type { CollaborationSessionSnapshot } from "@/features/collaboration/client/session-store";
+import { createDocumentWorkflowNotificationBus } from "@/features/documents/workflow-notification";
+
+const { routerPush, routerReplace } = vi.hoisted(() => ({
+  routerPush: vi.fn(),
+  routerReplace: vi.fn(),
+}));
+const collaborationTestDocuments: Array<{ awareness: Awareness; document: Y.Doc }> = [];
+
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: routerPush, replace: routerReplace }),
+}));
+
+vi.mock("@/features/collaboration/client/use-collaboration-session", () => ({
+  useCollaborationSession: vi.fn(),
+}));
 
 vi.mock("./DocumentEditor", () => ({
   DocumentEditor: ({
@@ -20,18 +47,28 @@ vi.mock("./DocumentEditor", () => ({
     runningSelectionCommands = [],
     resolvedPluginContributions,
     selectionAiResult,
+    mode,
     language = "ko",
     messages = { titleLabel: "문서 제목" },
     title,
   }: {
-    contentJson: { type: "doc"; content?: unknown[] };
+    contentJson?: { type: "doc"; content?: unknown[] };
     inlineSuggestions?: Array<{ active?: boolean; id: string; targetText: string }>;
     isFindOpen?: boolean;
     isSelectionCommandLimitReached?: boolean;
     isSelectionCommandRunning?: boolean;
     language?: "en" | "ko";
     messages?: { titleLabel: string };
-    onChange: (draft: { title: string; contentJson: { type: "doc"; content?: unknown[] } }) => void;
+    mode?: {
+      kind: "collaboration";
+      session: {
+        document?: unknown;
+        fields?: { getTitleSnapshot(): string; setTitle(value: string): void };
+        writable: boolean;
+      };
+      title?: string;
+    };
+    onChange?: (draft: { title: string; contentJson: { type: "doc"; content?: unknown[] } }) => void;
     onApplySelectionAiResult?: (proposalId: string, applyMode: "replace" | "insert_below") => void;
     onDismissSelectionAiResult?: () => void;
     onSelectionCommand?: (
@@ -57,15 +94,25 @@ vi.mock("./DocumentEditor", () => ({
       replacementText: string;
       targetText: string;
     } | null;
-    title: string;
-  }) => (
-    <div>
+    title?: string;
+  }) => {
+    const resolvedContentJson = contentJson ?? { type: "doc" as const };
+    const resolvedTitle = mode?.session.fields?.getTitleSnapshot() ?? mode?.title ?? title ?? "";
+
+    return <div>
       <input
         aria-label={messages.titleLabel}
-        onChange={(event) => onChange({ title: event.currentTarget.value, contentJson })}
-        value={title}
+        onChange={(event) => {
+          if (mode?.session.fields) mode.session.fields.setTitle(event.currentTarget.value);
+          else onChange?.({ title: event.currentTarget.value, contentJson: resolvedContentJson });
+        }}
+        readOnly={mode?.kind === "collaboration" && !mode.session.writable}
+        value={resolvedTitle}
       />
-      <div data-testid="mock-document-body">{readMockTiptapText(contentJson)}</div>
+      <output data-testid="mock-editor-mode">{mode?.kind ?? "legacy"}</output>
+      <output data-testid="mock-editor-document-bound">{String(Boolean(mode?.session.document))}</output>
+      <output data-testid="mock-editor-writable">{String(mode?.session.writable ?? true)}</output>
+      <div data-testid="mock-document-body">{readMockTiptapText(resolvedContentJson)}</div>
       {isFindOpen ? <div role="search" aria-label="mock find bar">Find bar open</div> : null}
       <output data-testid="mock-inline-suggestions">{JSON.stringify(inlineSuggestions)}</output>
       {resolvedPluginContributions ? (
@@ -140,8 +187,8 @@ vi.mock("./DocumentEditor", () => ({
       </button>
       <button
         onClick={() =>
-          onChange({
-            title,
+          onChange?.({
+            title: resolvedTitle,
             contentJson: {
               type: "doc",
               content: [{ type: "paragraph", content: [{ type: "text", text: "fresh edited body" }] }],
@@ -185,7 +232,7 @@ vi.mock("./DocumentEditor", () => ({
         </div>
       ) : null}
     </div>
-  ),
+  },
 }));
 
 function getMockApplyModeLabel(applyMode: "replace" | "insert_below", language: "en" | "ko") {
@@ -223,6 +270,13 @@ function readMockTiptapText(node: unknown): string {
 }
 
 afterEach(() => {
+  cleanup();
+  for (const resource of collaborationTestDocuments.splice(0)) {
+    resource.awareness.destroy();
+    resource.document.destroy();
+  }
+  routerPush.mockReset();
+  routerReplace.mockReset();
   vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -255,6 +309,95 @@ function createDocumentWithContent(id: string, title: string, paragraphText: str
     revision: 0,
   };
 }
+
+function createCollaborationConfiguration() {
+  return {
+    currentPrincipalId: "principal-current",
+    documentId: "doc_1",
+    kind: "collaboration" as const,
+    room: "organization:org_1:document:doc_1",
+    schemaFingerprint: "schema-v1",
+    websocketUrl: "wss://collaboration.example.test",
+  };
+}
+
+function createCollaborationSnapshot(
+  overrides: Partial<CollaborationSessionSnapshot> = {},
+): CollaborationSessionSnapshot {
+  return {
+    hasCompletedInitialSync: false,
+    pendingDurableAcknowledgementChecksums: [],
+    pendingLocalChecksums: [],
+    pendingLocalUpdateCount: 0,
+    permission: null,
+    status: "connecting",
+    transportSynced: false,
+    writable: false,
+    ...overrides,
+  };
+}
+
+function createMockCollaborationSession(
+  title = "Collaborative title",
+  metadata: Record<string, string | string[] | boolean | number | null> = {},
+) {
+  const document = new Y.Doc();
+  document.getText("title").insert(0, title);
+  for (const [key, value] of Object.entries(metadata)) {
+    document.getMap("metadata").set(key, Array.isArray(value) ? [...value] : value);
+  }
+  const awareness = new Awareness(document);
+  const provider = { awareness };
+  const store = createCollaborationSessionStore();
+  store.markAuthenticated("read-write");
+  store.markTransportSynced();
+  let providerDestroyed = false;
+  const workflowChangedListeners = new Set<() => void>();
+  const destroy = vi.fn(() => {
+    providerDestroyed = true;
+  });
+  collaborationTestDocuments.push({ awareness, document });
+  return {
+    connect: vi.fn(),
+    destroy,
+    document,
+    flushPendingUpdates: vi.fn(async () => ({
+      generation: 1,
+      stateVector: new Uint8Array([0]),
+    })),
+    get provider() {
+      return providerDestroyed ? null : provider;
+    },
+    refreshCapability: vi.fn(),
+    room: "organization:org_1:document:doc_1",
+    store,
+    subscribeWorkflowChanged: vi.fn((listener: () => void) => {
+      workflowChangedListeners.add(listener);
+      return () => workflowChangedListeners.delete(listener);
+    }),
+    emitWorkflowChanged() {
+      for (const listener of workflowChangedListeners) listener();
+    },
+  } as unknown as CollaborationSession & { document: Y.Doc; emitWorkflowChanged(): void };
+}
+
+it.each([
+  { pendingLocalUpdateCount: 1 },
+  { pendingLocalChecksums: ["a".repeat(64)] },
+  { pendingDurableAcknowledgementChecksums: ["b".repeat(64)] },
+])("treats every collaboration durability queue as pending: %o", (pending) => {
+  expect(hasPendingCollaborationUpdates(createCollaborationSnapshot(pending))).toBe(true);
+});
+
+it("treats a fully acknowledged collaboration snapshot as navigation-safe", () => {
+  expect(hasPendingCollaborationUpdates(createCollaborationSnapshot({
+    hasCompletedInitialSync: true,
+    permission: "write",
+    status: "synced",
+    transportSynced: true,
+    writable: true,
+  }))).toBe(false);
+});
 
 function createListDocument(items: string[]) {
   return {
@@ -355,6 +498,7 @@ function createProposal(
 ) {
   return {
     id,
+    documentId: "doc_1",
     targetText,
     replacementText: "revenue grew 8%",
     explanation: "Unclear metric: Specificity helps review.",
@@ -440,6 +584,43 @@ function createDeferredResponse() {
   return { promise, reject, resolve };
 }
 
+function jsonResponse(body: unknown, status = 200) {
+  return new Response(JSON.stringify(body), {
+    headers: { "Content-Type": "application/json" },
+    status,
+  });
+}
+
+function collaborationWorkflowResponse(documentId = "doc_1", generation = 2, headSeq = 7) {
+  return jsonResponse({
+    workflow: {
+      collaboration: { generation, headSeq },
+      documentId,
+      readiness: "draft",
+      revision: 0,
+    },
+  });
+}
+
+function collaborationDiagnostics(generation = 2, headSeq = 7, contentHash = "c".repeat(64)) {
+  return {
+    contentHash,
+    generation,
+    headSeq,
+    schemaFingerprint: "d".repeat(64),
+  };
+}
+
+function collaborationDiagnosticHeaders(diagnostics: ReturnType<typeof collaborationDiagnostics>) {
+  return {
+    "Content-Type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "X-CoreDot-Collaboration-Content-Hash": diagnostics.contentHash,
+    "X-CoreDot-Collaboration-Generation": String(diagnostics.generation),
+    "X-CoreDot-Collaboration-Head-Seq": String(diagnostics.headSeq),
+    "X-CoreDot-Collaboration-Schema-Fingerprint": diagnostics.schemaFingerprint,
+  };
+}
+
 function expectProposalApplyFetch(
   fetchMock: { mock: { calls: Array<[unknown, RequestInit?]> } },
   proposalId: string,
@@ -451,17 +632,18 @@ function expectProposalApplyFetch(
   expect(call).toBeDefined();
   const [, init] = call!;
   expect(init).toEqual(expect.objectContaining({ method: "POST" }));
-  expect(JSON.parse(String(init?.body))).toMatchObject({
+  const body = JSON.parse(String(init?.body));
+  expect(body).toMatchObject({
     appliedMode,
     document: {
       id: "doc_1",
       title: expect.any(String),
       contentJson: expect.objectContaining({ type: "doc" }),
       metadataJson: expect.any(Object),
-      readiness: expect.any(String),
     },
     expectedRevision: expect.any(Number),
   });
+  expect(body.document).not.toHaveProperty("readiness");
 }
 
 function expectLastProposalApplyFetch(
@@ -475,20 +657,2833 @@ function expectLastProposalApplyFetch(
   const [input, init] = call!;
   expect(input).toBe(`/api/proposals/${proposalId}/apply`);
   expect(init).toEqual(expect.objectContaining({ method: "POST" }));
-  expect(JSON.parse(String(init?.body))).toMatchObject({
+  const body = JSON.parse(String(init?.body));
+  expect(body).toMatchObject({
     appliedMode,
     document: {
       id: "doc_1",
       title: expect.any(String),
       contentJson: expect.objectContaining({ type: "doc" }),
       metadataJson: expect.any(Object),
-      readiness: expect.any(String),
     },
     expectedRevision: expect.any(Number),
   });
+  expect(body.document).not.toHaveProperty("readiness");
 }
 
 describe("DocumentShell", () => {
+  it("explains through the readiness control that legacy documents cannot be approved", () => {
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={{ ...createDocument("doc_1", "Legacy approval"), readiness: "ready" }}
+        templates={[]}
+      />,
+    );
+
+    const readiness = screen.getByRole("combobox", { name: "준비 상태" });
+    expect(within(readiness).getByRole("option", { name: "승인됨" })).toBeDisabled();
+    expect(readiness).toHaveAccessibleDescription(
+      "이 문서는 현재 서버 승인 워크플로를 지원하지 않습니다.",
+    );
+    expect(screen.queryByText(
+      "준비 상태와 승인은 서버에서 검증되며 공동 편집 문서에 기록되지 않습니다.",
+    )).not.toBeInTheDocument();
+  });
+
+  it("moves legacy readiness through the workflow endpoint without scheduling a document autosave", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      if (input === "/api/documents/doc_1/workflow" && init?.method === "POST") {
+        return new Response(JSON.stringify({
+          workflow: {
+            collaboration: null,
+            documentId: "doc_1",
+            readiness: "needs_review",
+            revision: 1,
+          },
+        }));
+      }
+      if (input === "/api/documents/doc_1/workflow" && init?.method === "GET") {
+        return new Response(JSON.stringify({
+          workflow: {
+            collaboration: null,
+            documentId: "doc_1",
+            readiness: "needs_review",
+            revision: 1,
+          },
+        }));
+      }
+      throw new Error(`Unexpected request: ${String(input)}`);
+    });
+    render(<DocumentShell aiRuns={[]} document={createDocument("doc_1", "Workflow")} templates={[]} />);
+
+    fireEvent.change(screen.getByRole("combobox", { name: "준비 상태" }), {
+      target: { value: "needs_review" },
+    });
+
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "준비 상태" })).toHaveValue("needs_review"));
+    expect(fetchMock).toHaveBeenCalledWith("/api/documents/doc_1/workflow", expect.objectContaining({
+      body: JSON.stringify({ expectedReadiness: "draft", nextReadiness: "needs_review" }),
+      method: "POST",
+    }));
+    expect(screen.getByText("준비 상태가 서버에서 업데이트되었습니다.")).toHaveAttribute("role", "status");
+
+    await act(async () => vi.advanceTimersByTimeAsync(1_200));
+    expect(fetchMock.mock.calls.some(([input, init]) =>
+      input === "/api/documents/doc_1" && init?.method === "PUT")).toBe(false);
+  });
+
+  it("does not race a legacy readiness command against an unsaved body revision", async () => {
+    render(<DocumentShell aiRuns={[]} document={createDocument("doc_1", "Workflow")} templates={[]} />);
+
+    const readiness = screen.getByRole("combobox", { name: "준비 상태" });
+    expect(readiness).toBeEnabled();
+
+    fireEvent.change(screen.getByRole("textbox", { name: "문서 제목" }), {
+      target: { value: "Unsaved title" },
+    });
+
+    await waitFor(() => expect(readiness).toBeDisabled());
+  });
+
+  it("holds a legacy body save while a readiness command owns the shared revision", async () => {
+    const workflowPost = createDeferredResponse();
+    vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      if (input === "/api/documents/doc_1/workflow" && init?.method === "POST") {
+        return workflowPost.promise;
+      }
+      if (input === "/api/documents/doc_1/workflow" && init?.method === "GET") {
+        return Promise.resolve(jsonResponse({
+          workflow: {
+            collaboration: null,
+            documentId: "doc_1",
+            readiness: "needs_review",
+            revision: 1,
+          },
+        }));
+      }
+      throw new Error(`Unexpected request: ${String(input)}`);
+    });
+    render(<DocumentShell aiRuns={[]} document={createDocument("doc_1", "Workflow")} templates={[]} />);
+
+    fireEvent.change(screen.getByRole("combobox", { name: "준비 상태" }), {
+      target: { value: "needs_review" },
+    });
+    await waitFor(() => expect(screen.getByText("준비 상태를 서버에서 확인하고 있습니다.")).toBeInTheDocument());
+
+    fireEvent.change(screen.getByRole("textbox", { name: "문서 제목" }), {
+      target: { value: "Edited during workflow" },
+    });
+    expect(screen.getByRole("button", { name: "저장" })).toBeDisabled();
+
+    await act(async () => {
+      workflowPost.resolve(jsonResponse({
+        workflow: {
+          collaboration: null,
+          documentId: "doc_1",
+          readiness: "needs_review",
+          revision: 1,
+        },
+      }));
+      await workflowPost.promise;
+    });
+    await waitFor(() => expect(screen.getByRole("button", { name: "저장" })).toBeEnabled());
+  });
+
+  it("keeps the stale body revision when a legacy workflow update reveals an intervening document change", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      if (input === "/api/documents/doc_1/workflow" && init?.method === "POST") {
+        return jsonResponse({
+          workflow: {
+            collaboration: null,
+            documentId: "doc_1",
+            readiness: "needs_review",
+            revision: 2,
+          },
+        });
+      }
+      if (input === "/api/documents/doc_1/workflow" && init?.method === "GET") {
+        return jsonResponse({
+          workflow: {
+            collaboration: null,
+            documentId: "doc_1",
+            readiness: "needs_review",
+            revision: 2,
+          },
+        });
+      }
+      if (input === "/api/documents/doc_1" && init?.method === "PUT") {
+        return jsonResponse({ document: { ...createDocument("doc_1", "Local edit"), revision: 3 } });
+      }
+      throw new Error(`Unexpected request: ${String(input)}`);
+    });
+    render(<DocumentShell aiRuns={[]} document={createDocument("doc_1", "Workflow")} templates={[]} />);
+
+    fireEvent.change(screen.getByRole("combobox", { name: "준비 상태" }), {
+      target: { value: "needs_review" },
+    });
+    await waitFor(() => expect(screen.getByText("준비 상태가 서버에서 업데이트되었습니다.")).toBeInTheDocument());
+
+    fireEvent.change(screen.getByRole("textbox", { name: "문서 제목" }), {
+      target: { value: "Local edit" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "저장" }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input, init]) =>
+      input === "/api/documents/doc_1" && init?.method === "PUT")).toBe(true));
+
+    const saveCall = fetchMock.mock.calls.find(([input, init]) =>
+      input === "/api/documents/doc_1" && init?.method === "PUT");
+    expect(JSON.parse(String(saveCall?.[1]?.body))).toMatchObject({ expectedRevision: 0 });
+  });
+
+  it("advances the legacy body revision for an uncontended workflow-only update", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      if (input === "/api/documents/doc_1/workflow" && init?.method === "POST") {
+        return jsonResponse({
+          workflow: {
+            collaboration: null,
+            documentId: "doc_1",
+            readiness: "needs_review",
+            revision: 1,
+          },
+        });
+      }
+      if (input === "/api/documents/doc_1/workflow" && init?.method === "GET") {
+        return jsonResponse({
+          workflow: {
+            collaboration: null,
+            documentId: "doc_1",
+            readiness: "needs_review",
+            revision: 1,
+          },
+        });
+      }
+      if (input === "/api/documents/doc_1" && init?.method === "PUT") {
+        return jsonResponse({ document: { ...createDocument("doc_1", "Local edit"), revision: 2 } });
+      }
+      throw new Error(`Unexpected request: ${String(input)}`);
+    });
+    render(<DocumentShell aiRuns={[]} document={createDocument("doc_1", "Workflow")} templates={[]} />);
+
+    fireEvent.change(screen.getByRole("combobox", { name: "준비 상태" }), {
+      target: { value: "needs_review" },
+    });
+    await waitFor(() => expect(screen.getByText("준비 상태가 서버에서 업데이트되었습니다.")).toBeInTheDocument());
+
+    fireEvent.change(screen.getByRole("textbox", { name: "문서 제목" }), {
+      target: { value: "Local edit" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "저장" }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input, init]) =>
+      input === "/api/documents/doc_1" && init?.method === "PUT")).toBe(true));
+
+    const saveCall = fetchMock.mock.calls.find(([input, init]) =>
+      input === "/api/documents/doc_1" && init?.method === "PUT");
+    expect(JSON.parse(String(saveCall?.[1]?.body))).toMatchObject({ expectedRevision: 1 });
+  });
+
+  it("enables collaborative readiness only after initial sync and an authoritative workflow read", async () => {
+    const session = createMockCollaborationSession();
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session,
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        permission: "write",
+        status: "synced",
+        transportSynced: true,
+        writable: true,
+      }),
+    });
+    const initialWorkflow = createDeferredResponse();
+    vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      if (input !== "/api/documents/doc_1/workflow" || init?.method !== "GET") {
+        throw new Error(`Unexpected request: ${String(input)}`);
+      }
+      return initialWorkflow.promise;
+    });
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocument("doc_1", "Workflow")}
+        templates={[]}
+      />,
+    );
+
+    expect(screen.getByRole("combobox", { name: "준비 상태" })).toBeDisabled();
+    expect(screen.getByText("서버 준비 상태를 확인하는 중입니다.")).toHaveAttribute("role", "status");
+
+    await act(async () => {
+      initialWorkflow.resolve(jsonResponse({
+        workflow: {
+          collaboration: { generation: 1, headSeq: 5 },
+          documentId: "doc_1",
+          readiness: "draft",
+          revision: 0,
+        },
+      }));
+      await initialWorkflow.promise;
+    });
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "준비 상태" })).toBeEnabled());
+  });
+
+  it("revalidates the durable server head immediately before collaborative approval", async () => {
+    const session = createMockCollaborationSession();
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session,
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        permission: "write",
+        status: "synced",
+        transportSynced: true,
+        writable: true,
+      }),
+    });
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    let workflowGetCount = 0;
+    fetchMock.mockImplementation(async (input, init) => {
+      if (input !== "/api/documents/doc_1/workflow") {
+        throw new Error(`Unexpected request: ${String(input)}`);
+      }
+      if (init?.method === "GET") {
+        workflowGetCount += 1;
+        const approved = workflowGetCount >= 3;
+        return jsonResponse({
+          workflow: {
+            collaboration: { generation: 2, headSeq: workflowGetCount === 1 ? 10 : 11 },
+            documentId: "doc_1",
+            readiness: approved ? "approved" : "ready",
+            revision: approved ? 2 : 1,
+          },
+        });
+      }
+      if (init?.method === "POST") {
+        return jsonResponse({
+          workflow: {
+            collaboration: { generation: 2, headSeq: 11 },
+            documentId: "doc_1",
+            readiness: "approved",
+            revision: 2,
+          },
+        });
+      }
+      throw new Error(`Unexpected method: ${String(init?.method)}`);
+    });
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={{ ...createDocument("doc_1", "Approval"), readiness: "ready", revision: 1 }}
+        templates={[]}
+      />,
+    );
+
+    const readiness = screen.getByRole("combobox", { name: "준비 상태" });
+    await waitFor(() => expect(readiness).toBeEnabled());
+    fireEvent.change(readiness, { target: { value: "approved" } });
+
+    await waitFor(() => expect(readiness).toHaveValue("approved"));
+    const calls = fetchMock.mock.calls.filter(([input]) => input === "/api/documents/doc_1/workflow");
+    expect(calls.map(([, init]) => init?.method)).toEqual(["GET", "GET", "POST", "GET"]);
+    expect(JSON.parse(String(calls[2]?.[1]?.body))).toEqual({
+      expectedReadiness: "ready",
+      nextReadiness: "approved",
+      observedHeadSeq: 11,
+    });
+    expect(session.document.getMap("metadata").has("readiness")).toBe(false);
+  });
+
+  it("disables only approval while collaborative updates still await durability", async () => {
+    const session = createMockCollaborationSession();
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session,
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        pendingDurableAcknowledgementChecksums: ["a".repeat(64)],
+        permission: "write",
+        status: "storage_delayed",
+        transportSynced: true,
+        writable: true,
+      }),
+    });
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse({
+      workflow: {
+        collaboration: { generation: 1, headSeq: 8 },
+        documentId: "doc_1",
+        readiness: "ready",
+        revision: 1,
+      },
+    }));
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={{ ...createDocument("doc_1", "Approval"), readiness: "ready", revision: 1 }}
+        templates={[]}
+      />,
+    );
+
+    const readiness = screen.getByRole("combobox", { name: "준비 상태" });
+    await waitFor(() => expect(readiness).toBeEnabled());
+    expect(within(readiness).getByRole("option", { name: "승인됨" })).toBeDisabled();
+    expect(within(readiness).getByRole("option", { name: "초안" })).toBeEnabled();
+    expect(readiness).toHaveAccessibleDescription(/서버와 동기화/);
+  });
+
+  it("deduplicates focus and reconnect recovery reads and aborts them on unmount", async () => {
+    vi.useFakeTimers();
+    const pending = createDeferredResponse();
+    let requestSignal: AbortSignal | undefined;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation((_input, init) => {
+      requestSignal = init?.signal ?? undefined;
+      return pending.promise;
+    });
+    const { unmount } = render(
+      <DocumentShell aiRuns={[]} document={createDocument("doc_1", "Recovery")} templates={[]} />,
+    );
+
+    act(() => {
+      window.dispatchEvent(new Event("focus"));
+      window.dispatchEvent(new Event("focus"));
+      window.dispatchEvent(new Event("online"));
+      vi.advanceTimersByTime(DOCUMENT_WORKFLOW_RECOVERY_INTERVAL_MS);
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    unmount();
+    expect(requestSignal?.aborted).toBe(true);
+    pending.reject(new Error("aborted"));
+    await expect(pending.promise).rejects.toThrow("aborted");
+  });
+
+  it("re-reads only the notified document and releases its notification listeners", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse({
+      workflow: {
+        collaboration: null,
+        documentId: "doc_1",
+        readiness: "needs_review",
+        revision: 1,
+      },
+    }));
+    const { unmount } = render(
+      <DocumentShell aiRuns={[]} document={createDocument("doc_1", "Notified")} templates={[]} />,
+    );
+    const publisher = createDocumentWorkflowNotificationBus({ onDocumentChanged: vi.fn() });
+
+    publisher.publish("doc_other");
+    await Promise.resolve();
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    publisher.publish("doc_1");
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    expect(screen.getByRole("combobox", { name: "준비 상태" })).toHaveValue("needs_review");
+
+    unmount();
+    fetchMock.mockClear();
+    publisher.publish("doc_1");
+    await Promise.resolve();
+    expect(fetchMock).not.toHaveBeenCalled();
+    publisher.destroy();
+  });
+
+  it("fences stale workflow reads across A to B to A document navigation", async () => {
+    const firstA = createDeferredResponse();
+    const firstB = createDeferredResponse();
+    vi.spyOn(globalThis, "fetch")
+      .mockReturnValueOnce(firstA.promise)
+      .mockReturnValueOnce(firstB.promise);
+    const { rerender } = render(
+      <DocumentShell aiRuns={[]} document={createDocument("doc_a", "A")} templates={[]} />,
+    );
+
+    act(() => window.dispatchEvent(new Event("focus")));
+    rerender(<DocumentShell aiRuns={[]} document={{ ...createDocument("doc_b", "B"), readiness: "ready" }} templates={[]} />);
+    expect(screen.getByRole("combobox", { name: "준비 상태" })).toHaveValue("ready");
+    act(() => window.dispatchEvent(new Event("focus")));
+
+    rerender(<DocumentShell aiRuns={[]} document={createDocument("doc_a", "A again")} templates={[]} />);
+    expect(screen.getByRole("combobox", { name: "준비 상태" })).toHaveValue("draft");
+
+    await act(async () => {
+      firstA.resolve(jsonResponse({
+        workflow: {
+          collaboration: null,
+          documentId: "doc_a",
+          readiness: "approved",
+          revision: 5,
+        },
+      }));
+      firstB.resolve(jsonResponse({
+        workflow: {
+          collaboration: null,
+          documentId: "doc_b",
+          readiness: "approved",
+          revision: 7,
+        },
+      }));
+      await Promise.all([firstA.promise, firstB.promise]);
+    });
+
+    expect(screen.getByRole("combobox", { name: "준비 상태" })).toHaveValue("draft");
+    expect(screen.queryByText("준비 상태가 서버에서 업데이트되었습니다.")).not.toBeInTheDocument();
+  });
+
+  it("re-reads HTTP workflow state when the active collaboration session receives a remote notification", async () => {
+    const session = createMockCollaborationSession();
+    const snapshot = createCollaborationSnapshot({
+      hasCompletedInitialSync: true,
+      permission: "write",
+      status: "synced",
+      transportSynced: true,
+      writable: true,
+    });
+    vi.mocked(useCollaborationSession).mockReturnValue({ session, snapshot });
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(jsonResponse({
+        workflow: {
+          collaboration: { generation: 1, headSeq: 1 },
+          documentId: "doc_1",
+          readiness: "draft",
+          revision: 0,
+        },
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        workflow: {
+          collaboration: { generation: 1, headSeq: 2 },
+          documentId: "doc_1",
+          readiness: "needs_review",
+          revision: 1,
+        },
+      }));
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocument("doc_1", "Remote workflow")}
+        templates={[]}
+      />,
+    );
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+
+    act(() => session.emitWorkflowChanged());
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(screen.getByRole("combobox", { name: "준비 상태" })).toHaveValue("needs_review");
+  });
+
+  it("unsubscribes old collaboration sessions after rotation and unmount", async () => {
+    const firstSession = createMockCollaborationSession();
+    const secondSession = createMockCollaborationSession();
+    const snapshot = createCollaborationSnapshot({
+      hasCompletedInitialSync: true,
+      permission: "write",
+      status: "synced",
+      transportSynced: true,
+      writable: true,
+    });
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse({
+      workflow: {
+        collaboration: { generation: 1, headSeq: 1 },
+        documentId: "doc_1",
+        readiness: "draft",
+        revision: 0,
+      },
+    }));
+    vi.mocked(useCollaborationSession).mockReturnValue({ session: firstSession, snapshot });
+    const renderShell = () => (
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocument("doc_1", "Rotation")}
+        templates={[]}
+      />
+    );
+    const { rerender, unmount } = render(renderShell());
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+
+    vi.mocked(useCollaborationSession).mockReturnValue({ session: secondSession, snapshot });
+    rerender(renderShell());
+    await waitFor(() => expect(secondSession.subscribeWorkflowChanged).toHaveBeenCalledOnce());
+    await waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(2));
+    fetchMock.mockClear();
+    act(() => firstSession.emitWorkflowChanged());
+    await Promise.resolve();
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    act(() => secondSession.emitWorkflowChanged());
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    unmount();
+    fetchMock.mockClear();
+    act(() => secondSession.emitWorkflowChanged());
+    await Promise.resolve();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("recovers workflow state after the collaboration transport resynchronizes", async () => {
+    const session = createMockCollaborationSession();
+    const reconnecting = createCollaborationSnapshot({
+      hasCompletedInitialSync: true,
+      permission: "write",
+      status: "reconnecting",
+      transportSynced: false,
+      writable: true,
+    });
+    const synced = createCollaborationSnapshot({
+      hasCompletedInitialSync: true,
+      permission: "write",
+      status: "synced",
+      transportSynced: true,
+      writable: true,
+    });
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse({
+      workflow: {
+        collaboration: { generation: 1, headSeq: 3 },
+        documentId: "doc_1",
+        readiness: "draft",
+        revision: 0,
+      },
+    }));
+    vi.mocked(useCollaborationSession).mockReturnValue({ session, snapshot: reconnecting });
+    const renderShell = () => (
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocument("doc_1", "Reconnect")}
+        templates={[]}
+      />
+    );
+    const { rerender } = render(renderShell());
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+
+    vi.mocked(useCollaborationSession).mockReturnValue({ session, snapshot: synced });
+    rerender(renderShell());
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+  });
+
+  it("fails closed to the SQL projection when the collaboration session cannot start", async () => {
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session: null,
+      snapshot: createCollaborationSnapshot({ status: "fatal" }),
+    });
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={{
+          ...createDocumentWithContent("doc_1", "Projected title", "Last durable body"),
+          metadataJson: { owner: "Projected owner" },
+        }}
+        templates={[]}
+      />,
+    );
+
+    await waitFor(() => {
+      const projection = screen.getByRole("article", { name: "Collaboration read-only projection" });
+      expect(projection).toHaveTextContent("Projected title");
+      expect(projection).toHaveTextContent("Last durable body");
+      expect(screen.getByRole("textbox", { name: "소유자" })).toHaveValue("Projected owner");
+      expect(screen.getByRole("textbox", { name: "소유자" })).toBeDisabled();
+      expect(screen.queryByTestId("mock-editor-mode")).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "저장" })).toBeDisabled();
+    });
+  });
+
+  it("keeps the SQL projection mounted until authentication and initial sync both complete", async () => {
+    const session = createMockCollaborationSession();
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session,
+      snapshot: createCollaborationSnapshot({
+        permission: "write",
+        status: "connecting",
+      }),
+    });
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocumentWithContent("doc_1", "Projected title", "Pre-sync projection")}
+        templates={[]}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("article", { name: "Collaboration read-only projection" })).toHaveTextContent(
+        "Pre-sync projection",
+      );
+      expect(screen.queryByTestId("mock-editor-mode")).not.toBeInTheDocument();
+    });
+  });
+
+  it("mounts the Yjs editor only after initial sync and disables legacy save paths", async () => {
+    const session = createMockCollaborationSession();
+    const collaboration = createCollaborationConfiguration();
+    const document = createDocumentWithContent("doc_1", "Collaborative title", "Durable projection");
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session,
+      snapshot: createCollaborationSnapshot(),
+    });
+    const { rerender } = render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={collaboration}
+        document={document}
+        templates={[]}
+      />,
+    );
+    expect(screen.getByRole("article", { name: "Collaboration read-only projection" })).toBeInTheDocument();
+
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session,
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        permission: "write",
+        status: "synced",
+        transportSynced: true,
+        writable: true,
+      }),
+    });
+    await act(async () => {
+      rerender(
+        <DocumentShell
+          aiRuns={[]}
+          collaboration={collaboration}
+          document={document}
+          templates={[]}
+        />,
+      );
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("mock-editor-mode")).toHaveTextContent("collaboration");
+      expect(screen.getByTestId("mock-editor-document-bound")).toHaveTextContent("true");
+      expect(screen.getByTestId("mock-editor-writable")).toHaveTextContent("true");
+      expect(screen.getByRole("button", { name: "저장" })).toBeDisabled();
+      expect(screen.queryByRole("button", { name: "새 문서로 저장" })).not.toBeInTheDocument();
+      expect(useCollaborationSession).toHaveBeenCalledWith(expect.objectContaining(collaboration));
+    });
+  });
+
+  it("keeps long collaboration status and participants reachable in the wrapping mobile header", async () => {
+    const session = createMockCollaborationSession("Responsive title");
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session,
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        pendingDurableAcknowledgementChecksums: ["a".repeat(64)],
+        permission: "write",
+        status: "storage_delayed",
+        transportSynced: true,
+        writable: true,
+      }),
+    });
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocumentWithContent("doc_1", "Durable title", "Durable projection")}
+        templates={[]}
+      />,
+    );
+
+    await screen.findByRole("textbox", { name: "문서 제목" });
+    const status = document.querySelector("[data-collaboration-status]");
+    if (!(status instanceof HTMLElement)) throw new Error("Collaboration status is not rendered");
+    const header = status.closest("header");
+    const identityRow = status.parentElement;
+    const participants = screen.getByRole("region", { name: "문서 공동 편집 참여자" });
+
+    expect(header).toHaveClass("min-h-14", "min-w-0", "xl:flex-row");
+    expect(header).not.toHaveClass("h-14");
+    expect(header).not.toHaveClass("sm:h-14");
+    expect(header).not.toHaveClass("xl:h-14");
+    expect(header).not.toHaveClass("sm:flex-row");
+    expect(identityRow).toHaveClass("w-full", "flex-wrap", "gap-y-2", "xl:flex-nowrap");
+    expect(identityRow).not.toHaveClass("sm:flex-nowrap");
+    expect(status).toHaveClass("flex-[1_1_12rem]", "xl:flex-initial");
+    expect(status).not.toHaveClass("sm:flex-initial");
+    expect(participants).toHaveClass("ml-auto", "shrink-0");
+  });
+
+  it("keeps legacy body writers closed while exposing exact collaborative actions", async () => {
+    const user = userEvent.setup();
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session: createMockCollaborationSession(),
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        permission: "write",
+        status: "synced",
+        transportSynced: true,
+        writable: true,
+      }),
+    });
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 204 }));
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocumentWithContent("doc_1", "Collaborative title", "Stale SQL projection")}
+        proposals={[createProposal("proposal_stale", "pending", "Stale SQL projection")]}
+        templates={[createTemplate("tpl_1", "SQL-backed review")]}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Source 보기" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "DOCX 내보내기" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "검토" })).toBeEnabled();
+    expect(screen.getByRole("tab", { name: "Source" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "AI 채팅" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: /Stale SQL projection 제안으로 교체/ })).toBeInTheDocument();
+
+    await user.keyboard("{Meta>}k{/Meta}");
+    const palette = screen.getByRole("dialog", { name: "명령 팔레트" });
+    expect(within(palette).getByRole("option", { name: /문서 검토/ })).toBeInTheDocument();
+    expect(within(palette).queryByRole("option", { name: /Source 보기/ })).not.toBeInTheDocument();
+    expect(within(palette).getByRole("option", { name: /DOCX 내보내기/ })).toBeInTheDocument();
+    expect(within(palette).getByRole("option", { name: /문서에서 찾기/ })).toBeInTheDocument();
+    expect(fetchSpy.mock.calls.filter(([input]) => !String(input).endsWith("/workflow"))).toEqual([]);
+  });
+
+  it("flushes durable collaboration state before review and rewrite barriers", async () => {
+    const user = userEvent.setup();
+    const session = createMockCollaborationSession();
+    vi.mocked(session.flushPendingUpdates).mockResolvedValue({
+      generation: 2,
+      stateVector: new Uint8Array([0, 255]),
+    });
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session,
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        permission: "write",
+        status: "synced",
+        transportSynced: true,
+        writable: true,
+      }),
+    });
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      if (input === "/api/documents/doc_1/workflow" && init?.method === "GET") {
+        return collaborationWorkflowResponse();
+      }
+      if (input === "/api/ai/review") {
+        return jsonResponse({ proposals: [], review: { findings: [], summary: "durable review" } });
+      }
+      if (input === "/api/ai/rewrite") {
+        return jsonResponse({ proposal: null });
+      }
+      throw new Error(`Unexpected request: ${String(input)}`);
+    });
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocumentWithContent("doc_1", "Collaborative title", "Stale SQL body")}
+        templates={[createTemplate("tpl_1", "Board review")]}
+      />,
+    );
+
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) =>
+      input === "/api/documents/doc_1/workflow")).toBe(true));
+    await user.click(screen.getByRole("button", { name: "문서 검토" }));
+    await screen.findByText("durable review");
+    await user.click(screen.getByRole("button", { name: "Mock translation command" }));
+    await waitFor(() => expect(session.flushPendingUpdates).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => input === "/api/ai/rewrite")).toBe(true));
+
+    const aiCalls = fetchMock.mock.calls.filter(([input]) =>
+      input === "/api/ai/review" || input === "/api/ai/rewrite");
+    expect(session.flushPendingUpdates).toHaveBeenCalledTimes(2);
+    for (const [input, init] of aiCalls) {
+      const body = JSON.parse(String(init?.body));
+      expect(body).toMatchObject({
+        collaborationBarrier: { generation: 2, stateVector: "AP8" },
+        documentId: "doc_1",
+      });
+      expect(body).not.toHaveProperty("documentText");
+      expect(vi.mocked(session.flushPendingUpdates).mock.invocationCallOrder.shift())
+        .toBeLessThan(fetchMock.mock.invocationCallOrder[fetchMock.mock.calls.findIndex(([url]) => url === input)]!);
+    }
+  });
+
+  it("fails closed without an AI request when collaboration durability flush fails", async () => {
+    const user = userEvent.setup();
+    const session = createMockCollaborationSession();
+    vi.mocked(session.flushPendingUpdates).mockRejectedValue(new Error("storage delayed"));
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session,
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        permission: "write",
+        status: "synced",
+        transportSynced: true,
+        writable: true,
+      }),
+    });
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      if (input === "/api/documents/doc_1/workflow" && init?.method === "GET") {
+        return collaborationWorkflowResponse();
+      }
+      throw new Error(`Unexpected request: ${String(input)}`);
+    });
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocumentWithContent("doc_1", "Collaborative title", "Stale SQL body")}
+        templates={[createTemplate("tpl_1", "Board review")]}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "문서 검토" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "공동 편집 변경 사항의 동기화가 아직 끝나지 않았습니다.",
+    );
+    expect(fetchMock.mock.calls.some(([input]) => input === "/api/ai/review")).toBe(false);
+  });
+
+  it("applies one collaborative proposal as a semantic command without replacing Y.Doc", async () => {
+    const user = userEvent.setup();
+    const session = createMockCollaborationSession("Live title");
+    vi.mocked(session.flushPendingUpdates).mockResolvedValue({ generation: 2, stateVector: new Uint8Array([1]) });
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session,
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        permission: "write",
+        status: "synced",
+        transportSynced: true,
+        writable: true,
+      }),
+    });
+    const proposal = createProposal("proposal_1");
+    const before = Y.encodeStateAsUpdate(session.document);
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      if (input === "/api/documents/doc_1/workflow" && init?.method === "GET") {
+        return collaborationWorkflowResponse();
+      }
+      if (input === "/api/proposals/proposal_1/apply" && init?.method === "POST") {
+        return jsonResponse({
+          ...createProposalApplyResponse(
+            proposal,
+            createDocumentWithContent("doc_1", "Malicious returned title", "Must not enter Y.Doc"),
+          ),
+          collaboration: { generation: 2, headSeq: 8 },
+          replayed: false,
+        });
+      }
+      throw new Error(`Unexpected request: ${String(input)}`);
+    });
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocumentWithContent("doc_1", "SQL title", "Stale SQL body")}
+        proposals={[proposal]}
+        templates={[createTemplate("tpl_1", "Board review")]}
+      />,
+    );
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) =>
+      input === "/api/documents/doc_1/workflow")).toBe(true));
+    await user.click(screen.getByRole("button", { name: "growth was good 제안으로 교체" }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) =>
+      input === "/api/proposals/proposal_1/apply")).toBe(true));
+
+    const applyCall = fetchMock.mock.calls.find(([input]) => input === "/api/proposals/proposal_1/apply")!;
+    const body = JSON.parse(String(applyCall[1]?.body));
+    expect(body).toEqual({
+      commandId: expect.stringMatching(/^[0-9a-f-]{36}$/u),
+      mode: "replace",
+      observedHeadSeq: 7,
+      proposalId: "proposal_1",
+    });
+    expect(session.flushPendingUpdates).toHaveBeenCalledOnce();
+    expect(Y.encodeStateAsUpdate(session.document)).toEqual(before);
+    expect(screen.getByText("수락됨")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: "변경내역" }));
+    expect(screen.getByRole("button", { name: "growth was good 변경 되돌리기" })).toBeEnabled();
+  });
+
+  it("undoes a collaborative change as a semantic command without replacing Y.Doc", async () => {
+    const user = userEvent.setup();
+    const session = createMockCollaborationSession("Live title");
+    vi.mocked(session.flushPendingUpdates).mockResolvedValue({ generation: 2, stateVector: new Uint8Array([1]) });
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session,
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        permission: "write",
+        status: "synced",
+        transportSynced: true,
+        writable: true,
+      }),
+    });
+    const proposal = createProposal("proposal_1");
+    const before = Y.encodeStateAsUpdate(session.document);
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      if (input === "/api/documents/doc_1/workflow" && init?.method === "GET") {
+        return collaborationWorkflowResponse();
+      }
+      if (input === "/api/proposals/proposal_1/apply" && init?.method === "POST") {
+        return jsonResponse({
+          ...createProposalApplyResponse(
+            proposal,
+            createDocumentWithContent("doc_1", "Ignored title", "Must not enter Y.Doc"),
+          ),
+          collaboration: { generation: 2, headSeq: 8 },
+          replayed: false,
+        });
+      }
+      if (typeof input === "string" && input.startsWith("/api/document-changes?")) {
+        return jsonResponse({ changes: [], nextCursor: null });
+      }
+      if (input === "/api/document-changes/change_1/undo" && init?.method === "POST") {
+        return jsonResponse({
+          change: {
+            id: "change_1",
+            documentId: "doc_1",
+            kind: "single",
+            batchId: null,
+            afterRevision: 1,
+            createdAt: "2026-01-01T00:00:00.000Z",
+            undoneAt: "2026-01-01T00:01:00.000Z",
+          },
+          collaboration: { generation: 2, headSeq: 9 },
+          document: createDocumentWithContent("doc_1", "Ignored undo title", "Must not enter Y.Doc either"),
+          proposals: [{
+            ...createProposal("proposal_1"),
+            documentId: "doc_1",
+            status: "pending",
+            appliedMode: null,
+          }],
+          replayed: false,
+        });
+      }
+      throw new Error(`Unexpected request: ${String(input)}`);
+    });
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocumentWithContent("doc_1", "SQL title", "Stale SQL body")}
+        proposals={[proposal]}
+        templates={[createTemplate("tpl_1", "Board review")]}
+      />,
+    );
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) =>
+      input === "/api/documents/doc_1/workflow")).toBe(true));
+    await user.click(screen.getByRole("button", { name: "growth was good 제안으로 교체" }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) =>
+      input === "/api/proposals/proposal_1/apply")).toBe(true));
+
+    await user.click(screen.getByRole("tab", { name: "변경내역" }));
+    const undoButton = await screen.findByRole("button", { name: "growth was good 변경 되돌리기" });
+    expect(undoButton).toBeEnabled();
+    await user.click(undoButton);
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) =>
+      input === "/api/document-changes/change_1/undo")).toBe(true));
+
+    const undoCall = fetchMock.mock.calls.find(([input]) => input === "/api/document-changes/change_1/undo")!;
+    expect(JSON.parse(String(undoCall[1]?.body))).toEqual({
+      commandId: expect.stringMatching(/^[0-9a-f-]{36}$/u),
+      observedHeadSeq: 8,
+    });
+    expect(session.flushPendingUpdates).toHaveBeenCalledTimes(2);
+    expect(Y.encodeStateAsUpdate(session.document)).toEqual(before);
+    await waitFor(() => expect(
+      screen.getByRole("button", { name: "growth was good 변경 되돌리기" }),
+    ).toBeDisabled());
+    await user.click(screen.getByRole("tab", { name: "검토" }));
+    expect(await screen.findByRole("button", { name: "growth was good 제안으로 교체" })).toBeInTheDocument();
+  });
+
+  it("marks the proposal workspace busy and inert only while a deferred command is pending", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    const session = createMockCollaborationSession();
+    vi.mocked(session.flushPendingUpdates).mockResolvedValue({ generation: 2, stateVector: new Uint8Array([1]) });
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session,
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        permission: "write",
+        status: "synced",
+        transportSynced: true,
+        writable: true,
+      }),
+    });
+    vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      if (input === "/api/documents/doc_1/workflow" && init?.method === "GET") {
+        return Promise.resolve(collaborationWorkflowResponse());
+      }
+      if (input === "/api/proposals/proposal_pending/apply") {
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+        });
+      }
+      throw new Error(`Unexpected request: ${String(input)}`);
+    });
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocumentWithContent("doc_1", "SQL title", "growth was good")}
+        proposals={[createProposal("proposal_pending")]}
+        templates={[createTemplate("tpl_1", "Board review")]}
+      />,
+    );
+    const applyButton = await screen.findByRole("button", { name: "growth was good 제안으로 교체" });
+    await user.click(applyButton);
+
+    await waitFor(() => expect(applyButton.closest("[aria-busy='true']")).toHaveAttribute("inert"));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(COLLABORATIVE_PROPOSAL_CLIENT_TIMEOUT_MS + 1);
+    });
+
+    await waitFor(() => expect(applyButton.closest("[aria-busy='false']")).not.toHaveAttribute("inert"));
+    expect(screen.getByRole("alert")).toHaveTextContent("같은 작업을 다시 눌러 안전하게 결과를 확인하세요.");
+  });
+
+  it("reuses the exact semantic command after an unknown collaborative result and releases pending UI", async () => {
+    const user = userEvent.setup();
+    const session = createMockCollaborationSession();
+    vi.mocked(session.flushPendingUpdates)
+      .mockResolvedValueOnce({ generation: 2, stateVector: new Uint8Array([1]) })
+      .mockResolvedValueOnce({ generation: 3, stateVector: new Uint8Array([2]) });
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session,
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        permission: "write",
+        status: "synced",
+        transportSynced: true,
+        writable: true,
+      }),
+    });
+    const proposal = createProposal("proposal_retry");
+    let applyAttempts = 0;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      if (input === "/api/documents/doc_1/workflow" && init?.method === "GET") {
+        return collaborationWorkflowResponse();
+      }
+      if (input === "/api/proposals/proposal_retry/apply") {
+        applyAttempts += 1;
+        if (applyAttempts === 1) throw new TypeError("response lost");
+        return jsonResponse({
+          ...createProposalApplyResponse(
+            proposal,
+            createDocumentWithContent("doc_1", "Ignored", "revenue grew 8%"),
+          ),
+          collaboration: { generation: 3, headSeq: 1 },
+          replayed: true,
+        });
+      }
+      throw new Error(`Unexpected request: ${String(input)}`);
+    });
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocumentWithContent("doc_1", "SQL title", "growth was good")}
+        proposals={[proposal]}
+        templates={[createTemplate("tpl_1", "Board review")]}
+      />,
+    );
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) =>
+      input === "/api/documents/doc_1/workflow")).toBe(true));
+    const applyButton = screen.getByRole("button", { name: "growth was good 제안으로 교체" });
+    await user.click(applyButton);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "작업 결과를 아직 확인하지 못했습니다. 같은 작업을 다시 눌러 안전하게 결과를 확인하세요.",
+    );
+    expect(applyButton.closest("[inert]")).toBeNull();
+    await user.click(applyButton);
+    await screen.findByText("수락됨");
+
+    const applyCalls = fetchMock.mock.calls.filter(([input]) => input === "/api/proposals/proposal_retry/apply");
+    expect(applyCalls).toHaveLength(2);
+    expect(applyCalls[0]?.[1]?.signal).toBeInstanceOf(AbortSignal);
+    expect(applyCalls[1]?.[1]?.body).toBe(applyCalls[0]?.[1]?.body);
+    expect(JSON.parse(String(applyCalls[1]?.[1]?.body))).toMatchObject({
+      commandId: expect.any(String),
+      mode: "replace",
+      observedHeadSeq: 7,
+      proposalId: "proposal_retry",
+    });
+  });
+
+  it("clears a stable command after an authoritative target conflict and explains the recovery", async () => {
+    const user = userEvent.setup();
+    const session = createMockCollaborationSession();
+    vi.mocked(session.flushPendingUpdates).mockResolvedValue({ generation: 2, stateVector: new Uint8Array([1]) });
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session,
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        permission: "write",
+        status: "synced",
+        transportSynced: true,
+        writable: true,
+      }),
+    });
+    const proposal = createProposal("proposal_conflict");
+    let applyAttempts = 0;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      if (input === "/api/documents/doc_1/workflow" && init?.method === "GET") {
+        return collaborationWorkflowResponse();
+      }
+      if (input === "/api/proposals/proposal_conflict/apply") {
+        applyAttempts += 1;
+        if (applyAttempts === 1) {
+          return jsonResponse({ error: "Proposal command conflict", reason: "proposal_target_conflict" }, 409);
+        }
+        return jsonResponse({
+          ...createProposalApplyResponse(
+            proposal,
+            createDocumentWithContent("doc_1", "Ignored", "revenue grew 8%"),
+          ),
+          collaboration: { generation: 2, headSeq: 8 },
+          replayed: false,
+        });
+      }
+      throw new Error(`Unexpected request: ${String(input)}`);
+    });
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocumentWithContent("doc_1", "SQL title", "growth was good")}
+        proposals={[proposal]}
+        templates={[createTemplate("tpl_1", "Board review")]}
+      />,
+    );
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) =>
+      input === "/api/documents/doc_1/workflow")).toBe(true));
+    const applyButton = screen.getByRole("button", { name: "growth was good 제안으로 교체" });
+    await user.click(applyButton);
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "적용할 본문이 변경되었습니다. 최신 본문에서 AI 제안을 다시 실행하세요.",
+    );
+    await user.click(applyButton);
+    await screen.findByText("수락됨");
+
+    const commandIds = fetchMock.mock.calls
+      .filter(([input]) => input === "/api/proposals/proposal_conflict/apply")
+      .map(([, init]) => JSON.parse(String(init?.body)).commandId as string);
+    expect(commandIds[1]).not.toBe(commandIds[0]);
+  });
+
+  it.each([
+    ["proposal_overlap_conflict", 409, "서로 겹치는 제안이 있습니다. 제안을 하나씩 적용하세요."],
+    ["proposal_status_conflict", 409, "다른 곳에서 제안 상태가 변경되었습니다. 제안 목록을 새로 확인하세요."],
+    ["idempotency_conflict", 409, "이 작업을 이전 시도와 안전하게 연결하지 못했습니다."],
+    ["unavailable", 503, "공동 편집 서비스에 일시적으로 연결할 수 없습니다."],
+  ])("shows actionable collaborative proposal recovery for %s", async (reason, status, message) => {
+    const user = userEvent.setup();
+    const session = createMockCollaborationSession();
+    vi.mocked(session.flushPendingUpdates).mockResolvedValue({ generation: 2, stateVector: new Uint8Array([1]) });
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session,
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        permission: "write",
+        status: "synced",
+        transportSynced: true,
+        writable: true,
+      }),
+    });
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      if (input === "/api/documents/doc_1/workflow" && init?.method === "GET") {
+        return collaborationWorkflowResponse();
+      }
+      if (input === "/api/proposals/proposal_reason/apply") {
+        return jsonResponse({ error: "Collaborative proposal failed", reason }, status);
+      }
+      throw new Error(`Unexpected request: ${String(input)}`);
+    });
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocumentWithContent("doc_1", "SQL title", "growth was good")}
+        proposals={[createProposal("proposal_reason")]}
+        templates={[createTemplate("tpl_1", "Board review")]}
+      />,
+    );
+    await waitFor(() => expect(screen.getByRole("button", { name: "growth was good 제안으로 교체" })).toBeEnabled());
+    await user.click(screen.getByRole("button", { name: "growth was good 제안으로 교체" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(message);
+  });
+
+  it("applies collaborative proposals in deterministic batch order without draft payloads", async () => {
+    const user = userEvent.setup();
+    const session = createMockCollaborationSession();
+    vi.mocked(session.flushPendingUpdates).mockResolvedValue({ generation: 2, stateVector: new Uint8Array([2]) });
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session,
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        permission: "write",
+        status: "synced",
+        transportSynced: true,
+        writable: true,
+      }),
+    });
+    const proposals = [
+      { ...createProposal("proposal_alpha", "pending", "alpha"), replacementText: "A" },
+      { ...createProposal("proposal_beta", "pending", "beta"), defaultApplyMode: "insert_below" as const },
+    ];
+    const before = Y.encodeStateAsUpdate(session.document);
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      if (input === "/api/documents/doc_1/workflow" && init?.method === "GET") {
+        return collaborationWorkflowResponse();
+      }
+      if (input === "/api/proposals/bulk-apply" && init?.method === "POST") {
+        return jsonResponse({
+          change: createChangeIdentity("change_batch", 1, "batch"),
+          collaboration: { generation: 2, headSeq: 8 },
+          document: { ...createDocumentWithContent("doc_1", "Ignored", "A beta\nrevenue grew 8%"), revision: 1 },
+          proposals: proposals.map((proposal) => ({ ...proposal, appliedMode: proposal.defaultApplyMode, status: "accepted" })),
+          replayed: false,
+        });
+      }
+      throw new Error(`Unexpected request: ${String(input)}`);
+    });
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocumentWithContent("doc_1", "SQL title", "alpha beta")}
+        proposals={proposals}
+        templates={[createTemplate("tpl_1", "Board review")]}
+      />,
+    );
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) =>
+      input === "/api/documents/doc_1/workflow")).toBe(true));
+    await user.click(screen.getByRole("button", { name: "대기 중인 모든 제안 수락" }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => input === "/api/proposals/bulk-apply")).toBe(true));
+
+    const batchCall = fetchMock.mock.calls.find(([input]) => input === "/api/proposals/bulk-apply")!;
+    const body = JSON.parse(String(batchCall[1]?.body));
+    expect(body).toEqual({
+      commandId: expect.stringMatching(/^[0-9a-f-]{36}$/u),
+      items: [
+        { mode: "replace", proposalId: "proposal_alpha" },
+        { mode: "insert_below", proposalId: "proposal_beta" },
+      ],
+      observedHeadSeq: 7,
+    });
+    expect(body).not.toHaveProperty("document");
+    expect(body).not.toHaveProperty("readiness");
+    expect(Y.encodeStateAsUpdate(session.document)).toEqual(before);
+  });
+
+  it("accepts a one-item collaborative bulk response with single change identity", async () => {
+    const user = userEvent.setup();
+    const session = createMockCollaborationSession();
+    vi.mocked(session.flushPendingUpdates).mockResolvedValue({ generation: 2, stateVector: new Uint8Array([2]) });
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session,
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        permission: "write",
+        status: "synced",
+        transportSynced: true,
+        writable: true,
+      }),
+    });
+    const proposal = createProposal("proposal_only", "pending", "only target");
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      if (input === "/api/documents/doc_1/workflow" && init?.method === "GET") {
+        return collaborationWorkflowResponse();
+      }
+      if (input === "/api/proposals/bulk-apply" && init?.method === "POST") {
+        return jsonResponse({
+          change: createChangeIdentity("change_only"),
+          collaboration: { generation: 2, headSeq: 8 },
+          document: { ...createDocumentWithContent("doc_1", "Ignored", "revenue grew 8%"), revision: 1 },
+          proposals: [{ ...proposal, appliedMode: "replace", status: "accepted" }],
+          replayed: false,
+        });
+      }
+      throw new Error(`Unexpected request: ${String(input)}`);
+    });
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocumentWithContent("doc_1", "SQL title", "only target")}
+        proposals={[proposal]}
+        templates={[createTemplate("tpl_1", "Board review")]}
+      />,
+    );
+    await user.click(await screen.findByRole("button", { name: "대기 중인 모든 제안 수락" }));
+
+    expect(await screen.findByText("수락됨")).toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "변경내역" }));
+    expect(screen.getByRole("button", { name: "only target 변경 되돌리기" })).toBeEnabled();
+  });
+
+  it("adopts a delayed committed single result while preserving a newer workflow head", async () => {
+    const user = userEvent.setup();
+    const session = createMockCollaborationSession();
+    vi.mocked(session.flushPendingUpdates).mockResolvedValue({ generation: 2, stateVector: new Uint8Array([2]) });
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session,
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        permission: "write",
+        status: "synced",
+        transportSynced: true,
+        writable: true,
+      }),
+    });
+    const firstProposal = createProposal("proposal_delayed_single", "pending", "alpha");
+    const secondProposal = createProposal("proposal_after_single", "pending", "beta");
+    const delayedApply = createDeferredResponse();
+    let workflowReads = 0;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      if (input === "/api/documents/doc_1/workflow" && init?.method === "GET") {
+        workflowReads += 1;
+        return collaborationWorkflowResponse("doc_1", 2, workflowReads === 1 ? 7 : 9);
+      }
+      if (input === "/api/proposals/proposal_delayed_single/apply") return delayedApply.promise;
+      if (input === "/api/proposals/proposal_after_single/apply") {
+        return jsonResponse({
+          ...createProposalApplyResponse(
+            secondProposal,
+            createDocumentWithContent("doc_1", "Ignored", "A B"),
+            "replace",
+            2,
+          ),
+          collaboration: { generation: 2, headSeq: 10 },
+          replayed: false,
+        });
+      }
+      throw new Error(`Unexpected request: ${String(input)}`);
+    });
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocumentWithContent("doc_1", "SQL title", "alpha beta")}
+        proposals={[firstProposal, secondProposal]}
+        templates={[createTemplate("tpl_1", "Board review")]}
+      />,
+    );
+    await waitFor(() => expect(workflowReads).toBe(1));
+    await user.click(screen.getByRole("button", { name: "alpha 제안으로 교체" }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) =>
+      input === "/api/proposals/proposal_delayed_single/apply")).toBe(true));
+    act(() => session.emitWorkflowChanged());
+    await waitFor(() => expect(workflowReads).toBe(2));
+    await act(async () => {
+      delayedApply.resolve(jsonResponse({
+        ...createProposalApplyResponse(
+          firstProposal,
+          createDocumentWithContent("doc_1", "Ignored", "A beta"),
+        ),
+        collaboration: { generation: 2, headSeq: 8 },
+        replayed: false,
+      }));
+      await delayedApply.promise;
+    });
+
+    await waitFor(() => expect(screen.queryByRole("button", { name: "alpha 제안으로 교체" })).not.toBeInTheDocument());
+    await user.click(screen.getByRole("tab", { name: "변경내역" }));
+    expect(screen.getByRole("button", { name: "alpha 변경 되돌리기" })).toBeEnabled();
+    await user.click(screen.getByRole("tab", { name: "검토" }));
+    await user.click(screen.getByRole("button", { name: "beta 제안으로 교체" }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) =>
+      input === "/api/proposals/proposal_after_single/apply")).toBe(true));
+
+    const nextCall = fetchMock.mock.calls.find(([input]) => input === "/api/proposals/proposal_after_single/apply")!;
+    expect(JSON.parse(String(nextCall[1]?.body))).toMatchObject({ observedHeadSeq: 9 });
+  });
+
+  it("adopts a delayed committed batch result while preserving a newer workflow head", async () => {
+    const user = userEvent.setup();
+    const session = createMockCollaborationSession();
+    vi.mocked(session.flushPendingUpdates).mockResolvedValue({ generation: 2, stateVector: new Uint8Array([2]) });
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session,
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        permission: "write",
+        status: "synced",
+        transportSynced: true,
+        writable: true,
+      }),
+    });
+    const batchProposals = [
+      createProposal("proposal_delayed_batch_a", "pending", "alpha"),
+      createProposal("proposal_delayed_batch_b", "pending", "beta"),
+    ];
+    const nextProposal = createProposal("proposal_after_batch", "pending", "gamma");
+    const delayedBatch = createDeferredResponse();
+    let workflowReads = 0;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      if (input === "/api/documents/doc_1/workflow" && init?.method === "GET") {
+        workflowReads += 1;
+        return collaborationWorkflowResponse("doc_1", 2, workflowReads === 1 ? 7 : 9);
+      }
+      if (input === "/api/proposals/bulk-apply") return delayedBatch.promise;
+      if (input === "/api/proposals/proposal_after_batch/apply") {
+        return jsonResponse({
+          ...createProposalApplyResponse(
+            nextProposal,
+            createDocumentWithContent("doc_1", "Ignored", "A B C"),
+            "replace",
+            2,
+          ),
+          collaboration: { generation: 2, headSeq: 10 },
+          replayed: false,
+        });
+      }
+      throw new Error(`Unexpected request: ${String(input)}`);
+    });
+    const document = createDocumentWithContent("doc_1", "SQL title", "alpha beta gamma");
+    const view = render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={document}
+        proposals={batchProposals}
+        templates={[createTemplate("tpl_1", "Board review")]}
+      />,
+    );
+    await waitFor(() => expect(workflowReads).toBe(1));
+    await user.click(screen.getByRole("button", { name: "대기 중인 모든 제안 수락" }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => input === "/api/proposals/bulk-apply")).toBe(true));
+    act(() => session.emitWorkflowChanged());
+    await waitFor(() => expect(workflowReads).toBe(2));
+    await act(async () => {
+      delayedBatch.resolve(jsonResponse({
+        change: createChangeIdentity("change_delayed_batch", 1, "batch"),
+        collaboration: { generation: 2, headSeq: 8 },
+        document: { ...createDocumentWithContent("doc_1", "Ignored", "A B gamma"), revision: 1 },
+        proposals: batchProposals.map((proposal) => ({ ...proposal, appliedMode: "replace", status: "accepted" })),
+        replayed: false,
+      }));
+      await delayedBatch.promise;
+    });
+
+    await waitFor(() => expect(screen.getAllByText("수락됨")).toHaveLength(2));
+    await user.click(screen.getByRole("tab", { name: "변경내역" }));
+    expect(screen.getByRole("button", { name: "alpha · beta 변경 되돌리기" })).toBeEnabled();
+
+    view.rerender(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={document}
+        proposals={[nextProposal]}
+        templates={[createTemplate("tpl_1", "Board review")]}
+      />,
+    );
+    await user.click(screen.getByRole("tab", { name: "검토" }));
+    await user.click(await screen.findByRole("button", { name: "gamma 제안으로 교체" }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) =>
+      input === "/api/proposals/proposal_after_batch/apply")).toBe(true));
+
+    const nextCall = fetchMock.mock.calls.find(([input]) => input === "/api/proposals/proposal_after_batch/apply")!;
+    expect(JSON.parse(String(nextCall[1]?.body))).toMatchObject({ observedHeadSeq: 9 });
+  });
+
+  it("accepts one storage generation rotation and preserves a newer rotated workflow head", async () => {
+    const user = userEvent.setup();
+    const session = createMockCollaborationSession();
+    vi.mocked(session.flushPendingUpdates)
+      .mockResolvedValueOnce({ generation: 2, stateVector: new Uint8Array([2]) })
+      .mockResolvedValueOnce({ generation: 3, stateVector: new Uint8Array([3]) });
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session,
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        permission: "write",
+        status: "synced",
+        transportSynced: true,
+        writable: true,
+      }),
+    });
+    const rotatingProposal = createProposal("proposal_rotating", "pending", "alpha");
+    const nextProposal = createProposal("proposal_after_rotation", "pending", "beta");
+    const delayedRotation = createDeferredResponse();
+    let workflowReads = 0;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      if (input === "/api/documents/doc_1/workflow" && init?.method === "GET") {
+        workflowReads += 1;
+        return workflowReads === 1
+          ? collaborationWorkflowResponse("doc_1", 2, 7)
+          : collaborationWorkflowResponse("doc_1", 3, 4);
+      }
+      if (input === "/api/proposals/proposal_rotating/apply") return delayedRotation.promise;
+      if (input === "/api/proposals/proposal_after_rotation/apply") {
+        return jsonResponse({
+          ...createProposalApplyResponse(
+            nextProposal,
+            createDocumentWithContent("doc_1", "Ignored", "A B"),
+            "replace",
+            2,
+          ),
+          collaboration: { generation: 3, headSeq: 5 },
+          replayed: false,
+        });
+      }
+      throw new Error(`Unexpected request: ${String(input)}`);
+    });
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocumentWithContent("doc_1", "SQL title", "alpha beta")}
+        proposals={[rotatingProposal, nextProposal]}
+        templates={[createTemplate("tpl_1", "Board review")]}
+      />,
+    );
+    await waitFor(() => expect(workflowReads).toBe(1));
+    await user.click(screen.getByRole("button", { name: "alpha 제안으로 교체" }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) =>
+      input === "/api/proposals/proposal_rotating/apply")).toBe(true));
+    act(() => session.emitWorkflowChanged());
+    await waitFor(() => expect(workflowReads).toBe(2));
+    await act(async () => {
+      delayedRotation.resolve(jsonResponse({
+        ...createProposalApplyResponse(
+          rotatingProposal,
+          createDocumentWithContent("doc_1", "Ignored", "A beta"),
+        ),
+        collaboration: { generation: 3, headSeq: 1 },
+        replayed: false,
+      }));
+      await delayedRotation.promise;
+    });
+
+    await waitFor(() => expect(screen.queryByRole("button", { name: "alpha 제안으로 교체" })).not.toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: "beta 제안으로 교체" }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) =>
+      input === "/api/proposals/proposal_after_rotation/apply")).toBe(true));
+
+    const nextCall = fetchMock.mock.calls.find(([input]) => input === "/api/proposals/proposal_after_rotation/apply")!;
+    expect(JSON.parse(String(nextCall[1]?.body))).toMatchObject({ observedHeadSeq: 4 });
+  });
+
+  it("adopts a workflow-only storage rotation before the next collaborative command", async () => {
+    const user = userEvent.setup();
+    const session = createMockCollaborationSession();
+    vi.mocked(session.flushPendingUpdates).mockResolvedValue({ generation: 3, stateVector: new Uint8Array([3]) });
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session,
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        permission: "write",
+        status: "synced",
+        transportSynced: true,
+        writable: true,
+      }),
+    });
+    const proposal = createProposal("proposal_after_workflow_rotation", "pending", "alpha");
+    let workflowReads = 0;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      if (input === "/api/documents/doc_1/workflow" && init?.method === "GET") {
+        workflowReads += 1;
+        return workflowReads === 1
+          ? collaborationWorkflowResponse("doc_1", 2, 7)
+          : collaborationWorkflowResponse("doc_1", 3, 4);
+      }
+      if (input === "/api/proposals/proposal_after_workflow_rotation/apply") {
+        return jsonResponse({
+          ...createProposalApplyResponse(
+            proposal,
+            createDocumentWithContent("doc_1", "Ignored", "A"),
+          ),
+          collaboration: { generation: 3, headSeq: 5 },
+          replayed: false,
+        });
+      }
+      throw new Error(`Unexpected request: ${String(input)}`);
+    });
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocumentWithContent("doc_1", "SQL title", "alpha")}
+        proposals={[proposal]}
+        templates={[createTemplate("tpl_1", "Board review")]}
+      />,
+    );
+    await waitFor(() => expect(workflowReads).toBe(1));
+    act(() => session.emitWorkflowChanged());
+    await waitFor(() => expect(workflowReads).toBe(2));
+    await user.click(screen.getByRole("button", { name: "alpha 제안으로 교체" }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) =>
+      input === "/api/proposals/proposal_after_workflow_rotation/apply")).toBe(true));
+
+    const applyCall = fetchMock.mock.calls.find(([input]) =>
+      input === "/api/proposals/proposal_after_workflow_rotation/apply")!;
+    expect(JSON.parse(String(applyCall[1]?.body))).toMatchObject({ observedHeadSeq: 4 });
+    expect(await screen.findByText("수락됨")).toBeInTheDocument();
+  });
+
+  it("retries a lost collaborative batch response with a byte-identical command payload", async () => {
+    const user = userEvent.setup();
+    const session = createMockCollaborationSession();
+    vi.mocked(session.flushPendingUpdates)
+      .mockResolvedValueOnce({ generation: 2, stateVector: new Uint8Array([2]) })
+      .mockResolvedValueOnce({ generation: 3, stateVector: new Uint8Array([3]) });
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session,
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        permission: "write",
+        status: "synced",
+        transportSynced: true,
+        writable: true,
+      }),
+    });
+    const proposals = [
+      createProposal("proposal_retry_batch_a", "pending", "alpha"),
+      createProposal("proposal_retry_batch_b", "pending", "beta"),
+    ];
+    let attempts = 0;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      if (input === "/api/documents/doc_1/workflow" && init?.method === "GET") {
+        return collaborationWorkflowResponse();
+      }
+      if (input === "/api/proposals/bulk-apply") {
+        attempts += 1;
+        if (attempts === 1) throw new TypeError("response lost");
+        return jsonResponse({
+          change: createChangeIdentity("change_retry_batch", 1, "batch"),
+          collaboration: { generation: 3, headSeq: 1 },
+          document: { ...createDocumentWithContent("doc_1", "Ignored", "A B"), revision: 1 },
+          proposals: proposals.map((proposal) => ({ ...proposal, appliedMode: "replace", status: "accepted" })),
+          replayed: true,
+        });
+      }
+      throw new Error(`Unexpected request: ${String(input)}`);
+    });
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocumentWithContent("doc_1", "SQL title", "alpha beta")}
+        proposals={proposals}
+        templates={[createTemplate("tpl_1", "Board review")]}
+      />,
+    );
+    const bulkButton = await screen.findByRole("button", { name: "대기 중인 모든 제안 수락" });
+    await user.click(bulkButton);
+    expect(await screen.findByRole("alert")).toHaveTextContent("같은 작업을 다시 눌러 안전하게 결과를 확인하세요.");
+    await user.click(bulkButton);
+    await waitFor(() => expect(screen.getAllByText("수락됨")).toHaveLength(2));
+
+    const calls = fetchMock.mock.calls.filter(([input]) => input === "/api/proposals/bulk-apply");
+    expect(calls).toHaveLength(2);
+    expect(calls[1]?.[1]?.body).toBe(calls[0]?.[1]?.body);
+    const firstPayload = JSON.parse(String(calls[0]?.[1]?.body));
+    const secondPayload = JSON.parse(String(calls[1]?.[1]?.body));
+    expect(secondPayload.commandId).toBe(firstPayload.commandId);
+    expect(secondPayload).toEqual(firstPayload);
+  });
+
+  it.each([
+    ["generation mismatch", { generation: 4, headSeq: 8 }],
+    ["head regression", { generation: 2, headSeq: 6 }],
+  ])("rejects collaborative proposal response %s", async (_label, returnedPosition) => {
+    const user = userEvent.setup();
+    const session = createMockCollaborationSession();
+    vi.mocked(session.flushPendingUpdates).mockResolvedValue({ generation: 2, stateVector: new Uint8Array([3]) });
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session,
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        permission: "write",
+        status: "synced",
+        transportSynced: true,
+        writable: true,
+      }),
+    });
+    const proposal = createProposal("proposal_fenced");
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      if (input === "/api/documents/doc_1/workflow" && init?.method === "GET") {
+        return collaborationWorkflowResponse();
+      }
+      if (input === "/api/proposals/proposal_fenced/apply" && init?.method === "POST") {
+        return jsonResponse({
+          ...createProposalApplyResponse(
+            proposal,
+            createDocumentWithContent("doc_1", "Ignored", "revenue grew 8%"),
+          ),
+          collaboration: returnedPosition,
+          replayed: false,
+        });
+      }
+      throw new Error(`Unexpected request: ${String(input)}`);
+    });
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocumentWithContent("doc_1", "SQL title", "growth was good")}
+        proposals={[proposal]}
+        templates={[createTemplate("tpl_1", "Board review")]}
+      />,
+    );
+    await waitFor(() => expect(screen.getByRole("button", { name: "growth was good 제안으로 교체" })).toBeEnabled());
+    await user.click(screen.getByRole("button", { name: "growth was good 제안으로 교체" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("작업 결과를 아직 확인하지 못했습니다.");
+    expect(screen.getByRole("button", { name: "growth was good 제안으로 교체" })).toBeInTheDocument();
+  });
+
+  it("rejects an immediate collaborative export when actual diagnostics differ from preview", async () => {
+    const user = userEvent.setup();
+    const session = createMockCollaborationSession("Exact export");
+    vi.mocked(session.flushPendingUpdates).mockResolvedValue({ generation: 2, stateVector: new Uint8Array([4]) });
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session,
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        permission: "write",
+        status: "synced",
+        transportSynced: true,
+        writable: true,
+      }),
+    });
+    const previewDiagnostics = collaborationDiagnostics();
+    const actualDiagnostics = collaborationDiagnostics(2, 8, "e".repeat(64));
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      if (input === "/api/documents/doc_1/workflow" && init?.method === "GET") {
+        return collaborationWorkflowResponse();
+      }
+      if (input === "/api/documents/doc_1/export/preview") {
+        return jsonResponse({
+          collaboration: previewDiagnostics,
+          fidelity: {
+            items: [{ feature: "paragraph", outcome: "preserved" }],
+            requiresAcknowledgement: false,
+          },
+        });
+      }
+      if (input === "/api/documents/doc_1/export") {
+        return new Response(new Uint8Array([1, 2, 3]), {
+          headers: collaborationDiagnosticHeaders(actualDiagnostics),
+        });
+      }
+      throw new Error(`Unexpected request: ${String(input)}`);
+    });
+    const download = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+    vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:must-not-download");
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocumentWithContent("doc_1", "SQL title", "Stale SQL body")}
+        templates={[]}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "DOCX 내보내기" }));
+
+    const alert = await screen.findByRole("alert", { name: "DOCX 내보내기 중단" });
+    expect(alert).toHaveTextContent("미리보기 후 공유 문서가 변경되었습니다.");
+    expect(session.flushPendingUpdates).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).includes("/export"))).toHaveLength(2);
+    expect(download).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [503, { code: "collaboration_state_unavailable", error: "temporarily unavailable" },
+      "공동 편집 문서의 최신 상태를 불러올 수 없습니다. 잠시 후 다시 시도하세요."],
+    [500, { error: "unexpected failure" }, "DOCX 내보내기에 실패했습니다. 다시 시도하세요."],
+  ])("classifies collaborative export failure %s without inventing a document change", async (status, errorBody, message) => {
+    const user = userEvent.setup();
+    const session = createMockCollaborationSession("Exact export failure");
+    vi.mocked(session.flushPendingUpdates).mockResolvedValue({ generation: 2, stateVector: new Uint8Array([4]) });
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session,
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        permission: "write",
+        status: "synced",
+        transportSynced: true,
+        writable: true,
+      }),
+    });
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      if (input === "/api/documents/doc_1/workflow" && init?.method === "GET") {
+        return collaborationWorkflowResponse();
+      }
+      if (input === "/api/documents/doc_1/export/preview") {
+        return jsonResponse({
+          collaboration: collaborationDiagnostics(),
+          fidelity: {
+            items: [{ feature: "paragraph", outcome: "preserved" }],
+            requiresAcknowledgement: false,
+          },
+        });
+      }
+      if (input === "/api/documents/doc_1/export") return jsonResponse(errorBody, status);
+      throw new Error(`Unexpected request: ${String(input)}`);
+    });
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocumentWithContent("doc_1", "SQL title", "Stale SQL body")}
+        templates={[]}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "DOCX 내보내기" }));
+
+    const alert = await screen.findByRole("alert", { name: "DOCX 내보내기 중단" });
+    expect(alert).toHaveTextContent(message);
+    expect(alert).not.toHaveTextContent("미리보기 후 공유 문서가 변경되었습니다.");
+  });
+
+  it("accepts plugin-defined fidelity feature names in collaborative export previews", async () => {
+    const user = userEvent.setup();
+    const session = createMockCollaborationSession("Plugin fidelity export");
+    vi.mocked(session.flushPendingUpdates).mockResolvedValue({ generation: 2, stateVector: new Uint8Array([4]) });
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session,
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        permission: "write",
+        status: "synced",
+        transportSynced: true,
+        writable: true,
+      }),
+    });
+    const diagnostics = collaborationDiagnostics();
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      if (input === "/api/documents/doc_1/workflow" && init?.method === "GET") {
+        return collaborationWorkflowResponse();
+      }
+      if (input === "/api/documents/doc_1/export/preview") {
+        return jsonResponse({
+          collaboration: diagnostics,
+          fidelity: {
+            items: [{ feature: "unknown:customCallout", outcome: "preserved" }],
+            requiresAcknowledgement: false,
+          },
+        });
+      }
+      if (input === "/api/documents/doc_1/export") {
+        return new Response(new Uint8Array([1, 2, 3]), {
+          headers: collaborationDiagnosticHeaders(diagnostics),
+        });
+      }
+      throw new Error(`Unexpected request: ${String(input)}`);
+    });
+    const download = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+    vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:plugin-fidelity-export");
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocumentWithContent("doc_1", "Plugin title", "Plugin body")}
+        templates={[]}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "DOCX 내보내기" }));
+
+    await waitFor(() => expect(download).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole("alert", { name: "DOCX 내보내기 중단" })).not.toBeInTheDocument();
+  });
+
+  it.each(["contentHash", "schemaFingerprint"] as const)(
+    "rejects uppercase collaborative preview %s diagnostics",
+    async (field) => {
+      const user = userEvent.setup();
+      const session = createMockCollaborationSession("Uppercase diagnostics");
+      vi.mocked(session.flushPendingUpdates).mockResolvedValue({ generation: 2, stateVector: new Uint8Array([4]) });
+      vi.mocked(useCollaborationSession).mockReturnValue({
+        session,
+        snapshot: createCollaborationSnapshot({
+          hasCompletedInitialSync: true,
+          permission: "write",
+          status: "synced",
+          transportSynced: true,
+          writable: true,
+        }),
+      });
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+        if (input === "/api/documents/doc_1/workflow" && init?.method === "GET") {
+          return collaborationWorkflowResponse();
+        }
+        if (input === "/api/documents/doc_1/export/preview") {
+          return jsonResponse({
+            collaboration: { ...collaborationDiagnostics(), [field]: "A".repeat(64) },
+            fidelity: {
+              items: [{ feature: "paragraph", outcome: "preserved" }],
+              requiresAcknowledgement: false,
+            },
+          });
+        }
+        throw new Error(`Unexpected request: ${String(input)}`);
+      });
+
+      render(
+        <DocumentShell
+          aiRuns={[]}
+          collaboration={createCollaborationConfiguration()}
+          document={createDocumentWithContent("doc_1", "SQL title", "Stale SQL body")}
+          templates={[]}
+        />,
+      );
+      await user.click(screen.getByRole("button", { name: "DOCX 내보내기" }));
+
+      expect(await screen.findByRole("alert", { name: "DOCX 내보내기 중단" }))
+        .toHaveTextContent("DOCX 내보내기에 실패했습니다. 다시 시도하세요.");
+      expect(fetchMock.mock.calls.filter(([input]) => input === "/api/documents/doc_1/export")).toHaveLength(0);
+    },
+  );
+
+  it("strictly rejects malformed collaborative preview diagnostics and fidelity enums", async () => {
+    const user = userEvent.setup();
+    const session = createMockCollaborationSession("Malformed preview");
+    vi.mocked(session.flushPendingUpdates).mockResolvedValue({ generation: 2, stateVector: new Uint8Array([4]) });
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session,
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        permission: "write",
+        status: "synced",
+        transportSynced: true,
+        writable: true,
+      }),
+    });
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      if (input === "/api/documents/doc_1/workflow" && init?.method === "GET") {
+        return collaborationWorkflowResponse();
+      }
+      if (input === "/api/documents/doc_1/export/preview") {
+        return jsonResponse({
+          collaboration: { ...collaborationDiagnostics(), contentHash: "not-a-hash" },
+          fidelity: {
+            items: [{ feature: "invented-feature", outcome: "invented-outcome" }],
+            requiresAcknowledgement: true,
+          },
+        });
+      }
+      throw new Error(`Unexpected request: ${String(input)}`);
+    });
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocumentWithContent("doc_1", "SQL title", "Stale SQL body")}
+        templates={[]}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "DOCX 내보내기" }));
+
+    expect(await screen.findByRole("alert", { name: "DOCX 내보내기 중단" }))
+      .toHaveTextContent("DOCX 내보내기에 실패했습니다. 다시 시도하세요.");
+    expect(fetchMock.mock.calls.filter(([input]) => input === "/api/documents/doc_1/export")).toHaveLength(0);
+    expect(screen.queryByRole("dialog", { name: "DOCX 형식 손실 확인" })).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["collaboration_state_conflict", "공동 편집 문서 상태가 변경되어 내보내기를 중단했습니다. 최신 상태로 다시 시도하세요."],
+    ["fidelity_acknowledgement_required", "문서 형식 변환 결과가 달라졌습니다. 최신 미리보기를 다시 확인하세요."],
+  ])("separates collaborative export %s from generic failures", async (code, message) => {
+    const user = userEvent.setup();
+    const session = createMockCollaborationSession("Classified export");
+    vi.mocked(session.flushPendingUpdates).mockResolvedValue({ generation: 2, stateVector: new Uint8Array([4]) });
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session,
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        permission: "write",
+        status: "synced",
+        transportSynced: true,
+        writable: true,
+      }),
+    });
+    let exportAttempt = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      if (input === "/api/documents/doc_1/workflow" && init?.method === "GET") {
+        return collaborationWorkflowResponse();
+      }
+      if (input === "/api/documents/doc_1/export/preview") {
+        if (code === "collaboration_state_conflict") {
+          return jsonResponse({ code, error: "unsafe snapshot" }, 409);
+        }
+        return jsonResponse({
+          collaboration: collaborationDiagnostics(),
+          fidelity: {
+            items: [{ feature: "paragraph", outcome: "preserved" }],
+            requiresAcknowledgement: false,
+          },
+        });
+      }
+      if (input === "/api/documents/doc_1/export") {
+        exportAttempt += 1;
+        return jsonResponse({
+          code,
+          collaboration: collaborationDiagnostics(2, 8, "e".repeat(64)),
+          error: "preview changed",
+          fidelity: {
+            items: [{ feature: "table", outcome: "approximated" }],
+            requiresAcknowledgement: true,
+          },
+        }, 409);
+      }
+      throw new Error(`Unexpected request: ${String(input)}`);
+    });
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocumentWithContent("doc_1", "SQL title", "Stale SQL body")}
+        templates={[]}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "DOCX 내보내기" }));
+
+    expect(await screen.findByRole("alert", { name: "DOCX 내보내기 중단" })).toHaveTextContent(message);
+    expect(exportAttempt).toBe(code === "fidelity_acknowledgement_required" ? 1 : 0);
+  });
+
+  it("does not let lossy acknowledgement authorize a newer collaborative snapshot", async () => {
+    const user = userEvent.setup();
+    const session = createMockCollaborationSession("Lossy exact export");
+    vi.mocked(session.flushPendingUpdates).mockResolvedValue({ generation: 2, stateVector: new Uint8Array([5]) });
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session,
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        permission: "write",
+        status: "synced",
+        transportSynced: true,
+        writable: true,
+      }),
+    });
+    const previewDiagnostics = collaborationDiagnostics();
+    const actualDiagnostics = collaborationDiagnostics(2, 9, "f".repeat(64));
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      if (input === "/api/documents/doc_1/workflow" && init?.method === "GET") {
+        return collaborationWorkflowResponse();
+      }
+      if (input === "/api/documents/doc_1/export/preview") {
+        return jsonResponse({
+          collaboration: previewDiagnostics,
+          fidelity: {
+            items: [{ feature: "table", outcome: "approximated" }],
+            requiresAcknowledgement: true,
+          },
+        });
+      }
+      if (input === "/api/documents/doc_1/export") {
+        return new Response(new Uint8Array([1, 2, 3]), {
+          headers: collaborationDiagnosticHeaders(actualDiagnostics),
+        });
+      }
+      throw new Error(`Unexpected request: ${String(input)}`);
+    });
+    const download = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+    vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:must-not-download-lossy");
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocumentWithContent("doc_1", "SQL title", "Stale SQL body")}
+        templates={[]}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "DOCX 내보내기" }));
+    await user.click(await screen.findByRole("button", { name: "손실을 이해하고 내보내기" }));
+
+    const alert = await screen.findByRole("alert", { name: "DOCX 내보내기 중단" });
+    expect(alert).toHaveTextContent("미리보기 후 공유 문서가 변경되었습니다.");
+    expect(session.flushPendingUpdates).toHaveBeenCalledTimes(2);
+    expect(download).not.toHaveBeenCalled();
+  });
+
+  it("ignores a late collaborative proposal result after document navigation", async () => {
+    const user = userEvent.setup();
+    const firstSession = createMockCollaborationSession("First live title");
+    const secondSession = createMockCollaborationSession("Second live title");
+    vi.mocked(firstSession.flushPendingUpdates).mockResolvedValue({ generation: 2, stateVector: new Uint8Array([6]) });
+    const snapshot = createCollaborationSnapshot({
+      hasCompletedInitialSync: true,
+      permission: "write",
+      status: "synced",
+      transportSynced: true,
+      writable: true,
+    });
+    vi.mocked(useCollaborationSession).mockReturnValue({ session: firstSession, snapshot });
+    const deferredApply = createDeferredResponse();
+    const proposal = createProposal("proposal_late");
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      if (input === "/api/documents/doc_1/workflow" && init?.method === "GET") {
+        return collaborationWorkflowResponse("doc_1", 2, 7);
+      }
+      if (input === "/api/documents/doc_2/workflow" && init?.method === "GET") {
+        return collaborationWorkflowResponse("doc_2", 4, 1);
+      }
+      if (input === "/api/proposals/proposal_late/apply") return deferredApply.promise;
+      throw new Error(`Unexpected request: ${String(input)}`);
+    });
+    const firstConfiguration = createCollaborationConfiguration();
+    const { rerender } = render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={firstConfiguration}
+        document={createDocumentWithContent("doc_1", "SQL one", "growth was good")}
+        proposals={[proposal]}
+        templates={[createTemplate("tpl_1", "Board review")]}
+      />,
+    );
+    await waitFor(() => expect(screen.getByRole("button", { name: "growth was good 제안으로 교체" })).toBeEnabled());
+    await user.click(screen.getByRole("button", { name: "growth was good 제안으로 교체" }));
+    await waitFor(() => expect(vi.mocked(globalThis.fetch).mock.calls.some(([input]) =>
+      input === "/api/proposals/proposal_late/apply")).toBe(true));
+
+    vi.mocked(useCollaborationSession).mockReturnValue({ session: secondSession, snapshot });
+    rerender(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={{
+          ...firstConfiguration,
+          documentId: "doc_2",
+          room: "organization:org_1:document:doc_2",
+        }}
+        document={createDocumentWithContent("doc_2", "SQL two", "second durable body")}
+        proposals={[]}
+        templates={[createTemplate("tpl_1", "Board review")]}
+      />,
+    );
+    await screen.findByDisplayValue("Second live title");
+    await act(async () => {
+      deferredApply.resolve(jsonResponse({
+        ...createProposalApplyResponse(
+          proposal,
+          createDocumentWithContent("doc_1", "Ignored late title", "revenue grew 8%"),
+        ),
+        collaboration: { generation: 2, headSeq: 8 },
+        replayed: false,
+      }));
+      await deferredApply.promise;
+    });
+
+    expect(screen.getByRole("textbox", { name: "문서 제목" })).toHaveValue("Second live title");
+    expect(screen.queryByText("수락됨")).not.toBeInTheDocument();
+    expect(screen.queryByText("제안 상태를 업데이트하지 못했습니다.")).not.toBeInTheDocument();
+  });
+
+  it("keeps the legacy review request contract unchanged", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse({
+      proposals: [],
+      review: { findings: [], summary: "legacy reviewed" },
+    }));
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        document={createDocumentWithContent("doc_1", "Legacy title", "legacy browser draft")}
+        templates={[createTemplate("tpl_1", "Board review")]}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "문서 검토" }));
+    await screen.findByText("legacy reviewed");
+
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    expect(body.documentText).toBe("legacy browser draft");
+    expect(body).not.toHaveProperty("collaborationBarrier");
+  });
+
+  it("keeps the collaborative editor mounted and writable while post-sync changes are pending offline", async () => {
+    const session = createMockCollaborationSession();
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session,
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        pendingLocalChecksums: ["a".repeat(64)],
+        permission: "write",
+        status: "offline_pending",
+        writable: true,
+      }),
+    });
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocumentWithContent("doc_1", "Collaborative title", "Durable projection")}
+        templates={[]}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.queryByRole("article", { name: "Collaboration read-only projection" })).not.toBeInTheDocument();
+      expect(screen.getByTestId("mock-editor-mode")).toHaveTextContent("collaboration");
+      expect(screen.getByTestId("mock-editor-writable")).toHaveTextContent("true");
+      expect(document.querySelector("[data-collaboration-status='offline_pending']"))
+        .toHaveTextContent(/오프라인.*변경 1건/);
+    });
+
+    fireEvent.change(screen.getByRole("textbox", { name: "문서 제목" }), {
+      target: { value: "Offline shared title" },
+    });
+    fireEvent.change(screen.getByRole("textbox", { name: "소유자" }), {
+      target: { value: "Offline owner" },
+    });
+    expect(session.document.getText("title").toString()).toBe("Offline shared title");
+    expect(session.document.getMap("metadata").get("owner")).toBe("Offline owner");
+  });
+
+  it("writes collaborative title and metadata to Yjs while readiness remains server-authoritative", async () => {
+    const user = userEvent.setup();
+    const session = createMockCollaborationSession("Canonical title", { owner: "Canonical owner" });
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session,
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        permission: "write",
+        status: "synced",
+        transportSynced: true,
+        writable: true,
+      }),
+    });
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={{
+          ...createDocumentWithContent("doc_1", "Stale SQL title", "Durable projection"),
+          metadataJson: { owner: "Stale SQL owner" },
+          readiness: "draft",
+        }}
+        templates={[]}
+      />,
+    );
+
+    const title = await screen.findByRole("textbox", { name: "문서 제목" });
+    expect(title).toHaveValue("Canonical title");
+    fireEvent.change(title, { target: { value: "Shared title" } });
+    expect(session.document.getText("title").toString()).toBe("Shared title");
+
+    const owner = screen.getByRole("textbox", { name: "소유자" });
+    expect(owner).toHaveValue("Canonical owner");
+    expect(owner).toBeEnabled();
+    await user.clear(owner);
+    await user.type(owner, "Finance");
+    expect(session.document.getMap("metadata").get("owner")).toBe("Finance");
+
+    const readiness = screen.getByRole("combobox", { name: "준비 상태" });
+    expect(readiness).toBeDisabled();
+    expect(readiness).toHaveAccessibleDescription(
+      "준비 상태와 승인은 서버에서 검증되며 공동 편집 문서에 기록되지 않습니다.",
+    );
+    expect(session.document.getMap("metadata").has("readiness")).toBe(false);
+  });
+
+  it("keeps the collaborative metadata read-only when the session is not writable", async () => {
+    const session = createMockCollaborationSession("Read-only title", { owner: "Legal" });
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session,
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        permission: "read",
+        status: "read_only",
+        transportSynced: true,
+        writable: false,
+      }),
+    });
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocumentWithContent("doc_1", "Stale title", "Durable projection")}
+        templates={[]}
+      />,
+    );
+
+    expect(await screen.findByRole("textbox", { name: "문서 제목" })).toHaveAttribute("readonly");
+    expect(screen.getByRole("textbox", { name: "소유자" })).toBeDisabled();
+    expect(screen.getByRole("combobox", { name: "준비 상태" })).toBeDisabled();
+  });
+
+  it("fails closed to the durable projection when a synchronized Yjs title is empty", async () => {
+    const session = createMockCollaborationSession("");
+    const markFatal = vi.spyOn(session.store, "markFatal");
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session,
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        permission: "write",
+        status: "synced",
+        transportSynced: true,
+        writable: true,
+      }),
+    });
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocumentWithContent("doc_1", "Durable title", "Durable SQL body")}
+        templates={[]}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(markFatal).toHaveBeenCalledTimes(1);
+      expect(session.destroy).toHaveBeenCalledTimes(1);
+      const projection = screen.getByRole("article", { name: "Collaboration read-only projection" });
+      expect(projection).toHaveTextContent("Durable title");
+      expect(projection).toHaveTextContent("Durable SQL body");
+      expect(screen.queryByTestId("mock-editor-mode")).not.toBeInTheDocument();
+    });
+  });
+
+  it("fences title and metadata writes immediately when session permission is downgraded", async () => {
+    const session = createMockCollaborationSession("Writable title", { owner: "Legal" });
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session,
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        permission: "write",
+        status: "synced",
+        transportSynced: true,
+        writable: true,
+      }),
+    });
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocumentWithContent("doc_1", "Stale title", "Durable projection")}
+        templates={[]}
+      />,
+    );
+
+    const title = await screen.findByRole("textbox", { name: "문서 제목" });
+    const owner = screen.getByRole("textbox", { name: "소유자" });
+    session.store.markAuthenticated("readonly");
+
+    fireEvent.change(title, { target: { value: "Must not be written" } });
+    fireEvent.change(owner, { target: { value: "Must not be written" } });
+
+    expect(session.store.getSnapshot()).toMatchObject({ permission: "read", writable: false });
+    expect(session.document.getText("title").toString()).toBe("Writable title");
+    expect(session.document.getMap("metadata").get("owner")).toBe("Legal");
+  });
+
+  it("rotates one field store and Awareness subscription with the collaboration session", async () => {
+    const firstSession = createMockCollaborationSession("First room title", { owner: "First owner" });
+    const secondSession = createMockCollaborationSession("Second room title", { owner: "Second owner" });
+    const firstDocumentOn = vi.spyOn(firstSession.document, "on");
+    const firstDocumentOff = vi.spyOn(firstSession.document, "off");
+    const secondDocumentOn = vi.spyOn(secondSession.document, "on");
+    const secondDocumentOff = vi.spyOn(secondSession.document, "off");
+    const firstAwarenessOn = vi.spyOn(firstSession.provider!.awareness, "on");
+    const firstAwarenessOff = vi.spyOn(firstSession.provider!.awareness, "off");
+    const secondAwarenessOn = vi.spyOn(secondSession.provider!.awareness, "on");
+    const secondAwarenessOff = vi.spyOn(secondSession.provider!.awareness, "off");
+    const snapshot = createCollaborationSnapshot({
+      hasCompletedInitialSync: true,
+      permission: "write",
+      status: "synced",
+      transportSynced: true,
+      writable: true,
+    });
+    vi.mocked(useCollaborationSession).mockReturnValue({ session: firstSession, snapshot });
+    const renderShell = () => (
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocumentWithContent("doc_1", "SQL title", "Durable projection")}
+        templates={[]}
+      />
+    );
+    const { rerender, unmount } = render(renderShell());
+
+    expect(await screen.findByRole("textbox", { name: "문서 제목" })).toHaveValue("First room title");
+    expect(firstDocumentOn.mock.calls.filter(([event]) => event === "afterTransaction")).toHaveLength(1);
+    expect(firstAwarenessOn.mock.calls.filter(([event]) => event === "change")).toHaveLength(1);
+
+    vi.mocked(useCollaborationSession).mockReturnValue({ session: secondSession, snapshot });
+    rerender(renderShell());
+
+    await waitFor(() => {
+      expect(screen.getByRole("textbox", { name: "문서 제목" })).toHaveValue("Second room title");
+      expect(screen.getByRole("textbox", { name: "소유자" })).toHaveValue("Second owner");
+    });
+    expect(firstDocumentOff.mock.calls.filter(([event]) => event === "afterTransaction")).toHaveLength(1);
+    expect(firstAwarenessOff.mock.calls.filter(([event]) => event === "change")).toHaveLength(1);
+    expect(secondDocumentOn.mock.calls.filter(([event]) => event === "afterTransaction")).toHaveLength(1);
+    expect(secondAwarenessOn.mock.calls.filter(([event]) => event === "change")).toHaveLength(1);
+
+    unmount();
+    expect(secondDocumentOff.mock.calls.filter(([event]) => event === "afterTransaction")).toHaveLength(1);
+    expect(secondAwarenessOff.mock.calls.filter(([event]) => event === "change")).toHaveLength(1);
+  });
+
+  it("fails closed and releases collaborative listeners when a synced field becomes invalid", async () => {
+    const session = createMockCollaborationSession("Canonical title", { owner: "Canonical owner" });
+    const markFatal = vi.spyOn(session.store, "markFatal");
+    const documentOn = vi.spyOn(session.document, "on");
+    const documentOff = vi.spyOn(session.document, "off");
+    const awareness = session.provider!.awareness;
+    const awarenessOn = vi.spyOn(awareness, "on");
+    const awarenessOff = vi.spyOn(awareness, "off");
+    const syncedSnapshot = createCollaborationSnapshot({
+      hasCompletedInitialSync: true,
+      permission: "write",
+      status: "synced",
+      transportSynced: true,
+      writable: true,
+    });
+    vi.mocked(useCollaborationSession).mockReturnValue({ session, snapshot: syncedSnapshot });
+    const renderShell = () => (
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={{
+          ...createDocumentWithContent("doc_1", "Durable SQL title", "Durable SQL body"),
+          metadataJson: { owner: "Durable SQL owner" },
+        }}
+        templates={[]}
+      />
+    );
+    const { rerender } = render(renderShell());
+
+    expect(await screen.findByRole("textbox", { name: "문서 제목" })).toHaveValue("Canonical title");
+    expect(documentOn.mock.calls.filter(([event]) => event === "afterTransaction")).toHaveLength(1);
+    expect(awarenessOn.mock.calls.filter(([event]) => event === "change")).toHaveLength(1);
+
+    act(() => {
+      session.document.getMap("metadata").set("unknown", "invalid remote state");
+    });
+
+    expect(markFatal).toHaveBeenCalledTimes(1);
+    expect(session.destroy).toHaveBeenCalledTimes(1);
+
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session,
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        status: "fatal",
+      }),
+    });
+    rerender(renderShell());
+
+    await waitFor(() => {
+      const projection = screen.getByRole("article", { name: "Collaboration read-only projection" });
+      expect(projection).toHaveTextContent("Durable SQL title");
+      expect(projection).toHaveTextContent("Durable SQL body");
+      expect(screen.queryByTestId("mock-editor-mode")).not.toBeInTheDocument();
+      expect(screen.getByRole("textbox", { name: "소유자" })).toHaveValue("Durable SQL owner");
+      expect(screen.getByRole("textbox", { name: "소유자" })).toBeDisabled();
+    });
+    expect(documentOff.mock.calls.filter(([event]) => event === "afterTransaction")).toHaveLength(
+      documentOn.mock.calls.filter(([event]) => event === "afterTransaction").length,
+    );
+    expect(awarenessOff.mock.calls.filter(([event]) => event === "change")).toHaveLength(
+      awarenessOn.mock.calls.filter(([event]) => event === "change").length,
+    );
+  });
+
+  it("warns and retains the document when pending collaboration navigation is canceled", () => {
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session: createMockCollaborationSession(),
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        pendingDurableAcknowledgementChecksums: ["a".repeat(64)],
+        permission: "write",
+        status: "storage_delayed",
+        transportSynced: true,
+        writable: true,
+      }),
+    });
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocument("doc_1", "Pending collaboration")}
+        templates={[]}
+      />,
+    );
+
+    const beforeUnload = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(beforeUnload);
+    expect(beforeUnload.defaultPrevented).toBe(true);
+    expect(fireEvent.click(screen.getByRole("link", { name: "문서" }))).toBe(false);
+    expect(routerPush).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "새로 만들기" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "새로 만들기" }));
+    expect(confirm).toHaveBeenCalledTimes(2);
+    expect(fetchSpy.mock.calls.filter(([input]) => !String(input).endsWith("/workflow"))).toEqual([]);
+  });
+
+  it("restores the protected Next route after a canceled multi-entry history traversal", async () => {
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session: createMockCollaborationSession("Protected collaboration"),
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        pendingDurableAcknowledgementChecksums: ["a".repeat(64)],
+        permission: "write",
+        status: "storage_delayed",
+        transportSynced: true,
+        writable: true,
+      }),
+    });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const replaceState = vi.spyOn(window.history, "replaceState");
+    const forward = vi.spyOn(window.history, "forward").mockImplementation(() => undefined);
+    const protectedRoute = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocumentWithContent("doc_1", "Protected collaboration", "Protected body")}
+        templates={[]}
+      />,
+    );
+    await screen.findByTestId("mock-editor-mode");
+    const baseState = replaceState.mock.calls.at(-1)?.[0];
+
+    act(() => {
+      window.dispatchEvent(new PopStateEvent("popstate", {
+        state: { route: "foreign-target" },
+      }));
+    });
+    expect(confirm).toHaveBeenCalledOnce();
+    expect(forward).toHaveBeenCalledOnce();
+    expect(routerReplace).not.toHaveBeenCalled();
+
+    act(() => {
+      window.dispatchEvent(new PopStateEvent("popstate", { state: baseState }));
+    });
+
+    expect(confirm).toHaveBeenCalledOnce();
+    expect(routerReplace).toHaveBeenCalledOnce();
+    expect(routerReplace).toHaveBeenCalledWith(protectedRoute);
+    expect(await screen.findByRole("textbox", { name: "문서 제목" })).toHaveValue("Protected collaboration");
+    expect(screen.getByTestId("mock-editor-mode")).toHaveTextContent("collaboration");
+  });
+
+  it.each([
+    ["ko", "아직 서버와 동기화되지 않은 공동 편집 변경 사항이 있습니다. 이동을 계속하시겠습니까?"],
+    ["en", "Some shared edits have not finished syncing. Continue navigating?"],
+  ] as const)("confirms pending collaboration soft navigation in %s", async (language, warning) => {
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session: createMockCollaborationSession(),
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        pendingDurableAcknowledgementChecksums: ["a".repeat(64)],
+        permission: "write",
+        status: "storage_delayed",
+        transportSynced: true,
+        writable: true,
+      }),
+    });
+    window.localStorage.setItem("coredot-editor-language", language);
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const replaceState = vi.spyOn(window.history, "replaceState");
+    vi.spyOn(window.history, "back").mockImplementation(() => undefined);
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocument("doc_1", "Pending collaboration")}
+        templates={[]}
+      />,
+    );
+    const baseState = replaceState.mock.calls.at(-1)?.[0];
+
+    expect(fireEvent.click(screen.getByRole("link", { name: language === "ko" ? "문서" : "Documents" })))
+      .toBe(false);
+    expect(confirm).toHaveBeenCalledWith(warning);
+    expect(routerPush).not.toHaveBeenCalled();
+
+    window.dispatchEvent(new PopStateEvent("popstate", { state: baseState }));
+    await waitFor(() => expect(routerPush).toHaveBeenCalledOnce());
+    expect(routerPush).toHaveBeenCalledWith("/documents");
+  });
+
+  it("confirms before creating a document and continues only after the sentinel handoff", async () => {
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session: createMockCollaborationSession(),
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        pendingLocalChecksums: ["a".repeat(64)],
+        permission: "write",
+        status: "offline_pending",
+        writable: true,
+      }),
+    });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      if (input === "/api/documents/doc_1/workflow" && init?.method === "GET") {
+        return jsonResponse({
+          workflow: {
+            collaboration: { generation: 1, headSeq: 0 },
+            documentId: "doc_1",
+            readiness: "draft",
+            revision: 0,
+          },
+        });
+      }
+      if (input === "/api/documents" && init?.method === "POST") {
+        return jsonResponse({ document: { id: "doc/new" } }, 201);
+      }
+      throw new Error(`Unexpected request: ${String(input)}`);
+    });
+    const replaceState = vi.spyOn(window.history, "replaceState");
+    vi.spyOn(window.history, "back").mockImplementation(() => undefined);
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocument("doc_1", "Pending collaboration")}
+        templates={[]}
+      />,
+    );
+    const baseState = replaceState.mock.calls.at(-1)?.[0];
+
+    fireEvent.click(screen.getByRole("button", { name: "새로 만들기" }));
+    await waitFor(() => expect(vi.mocked(globalThis.fetch).mock.calls.filter(([input]) =>
+      input === "/api/documents")).toHaveLength(1));
+    expect(routerPush).not.toHaveBeenCalled();
+
+    window.dispatchEvent(new PopStateEvent("popstate", { state: baseState }));
+    await waitFor(() => expect(routerPush).toHaveBeenCalledWith("/documents/doc%2Fnew"));
+  });
+
+  it("allows navigation once every collaboration update is durably acknowledged", () => {
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session: createMockCollaborationSession(),
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        permission: "write",
+        status: "synced",
+        transportSynced: true,
+        writable: true,
+      }),
+    });
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocument("doc_1", "Durable collaboration")}
+        templates={[]}
+      />,
+    );
+
+    const beforeUnload = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(beforeUnload);
+    expect(beforeUnload.defaultPrevented).toBe(false);
+    expect(screen.getByRole("button", { name: "새로 만들기" })).toBeEnabled();
+    expect(screen.getByRole("link", { name: "문서" })).not.toHaveAttribute("aria-disabled", "true");
+  });
+
+  it("installs one collaboration history sentinel across the StrictMode effect probe", () => {
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session: createMockCollaborationSession(),
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        permission: "write",
+        status: "synced",
+        transportSynced: true,
+        writable: true,
+      }),
+    });
+    const pushState = vi.spyOn(window.history, "pushState");
+
+    render(
+      <StrictMode>
+        <DocumentShell
+          aiRuns={[]}
+          collaboration={createCollaborationConfiguration()}
+          document={createDocument("doc_1", "Strict collaboration")}
+          templates={[]}
+        />
+      </StrictMode>,
+    );
+
+    expect(pushState).toHaveBeenCalledOnce();
+  });
+
+  it("does not schedule legacy autosave or expose conflict-copy actions in collaboration mode", async () => {
+    vi.useFakeTimers();
+    vi.mocked(useCollaborationSession).mockReturnValue({
+      session: createMockCollaborationSession(),
+      snapshot: createCollaborationSnapshot({
+        hasCompletedInitialSync: true,
+        permission: "write",
+        status: "synced",
+        transportSynced: true,
+        writable: true,
+      }),
+    });
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 204 }));
+
+    render(
+      <DocumentShell
+        aiRuns={[]}
+        collaboration={createCollaborationConfiguration()}
+        document={createDocumentWithContent("doc_1", "Collaborative title", "Durable projection")}
+        templates={[]}
+      />,
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Mock body edit" }));
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+
+    expect(fetchSpy.mock.calls.filter(([input]) => !String(input).endsWith("/workflow"))).toEqual([]);
+    expect(screen.queryByRole("button", { name: "새 문서로 저장" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "로컬 내용 복사" })).not.toBeInTheDocument();
+  });
+
   it("uses the localized generic user role instead of a personal placeholder", async () => {
     render(
       <DocumentShell
@@ -1028,10 +4023,10 @@ describe("DocumentShell", () => {
         title: "Revision two",
         contentJson: currentContent,
         metadataJson: { owner: "Current owner" },
-        readiness: "ready",
       },
       expectedRevision: 2,
     });
+    expect(proposalPayload.document).not.toHaveProperty("readiness");
 
     fireEvent.change(screen.getByRole("textbox", { name: "문서 제목" }), {
       target: { value: "Saved current snapshot" },
@@ -1043,7 +4038,6 @@ describe("DocumentShell", () => {
       contentJson: currentContent,
       expectedRevision: 2,
       metadataJson: { owner: "Current owner" },
-      readiness: "ready",
       title: "Saved current snapshot",
     });
 
@@ -1080,7 +4074,6 @@ describe("DocumentShell", () => {
       contentJson: newerRevision.contentJson,
       expectedRevision: 4,
       metadataJson: { owner: "Newer owner" },
-      readiness: "approved",
     });
   });
 
@@ -1144,16 +4137,17 @@ describe("DocumentShell", () => {
     expect(screen.getByRole("textbox", { name: "문서 제목" })).toHaveValue("Base title");
 
     await user.click(screen.getByRole("button", { name: "fresh edited body 제안으로 교체" }));
-    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toMatchObject({
+    const proposalPayload = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    expect(proposalPayload).toMatchObject({
       document: {
         id: "doc_1",
         title: "Base title",
         contentJson: createDocumentWithContent("doc_1", "Base title", "fresh edited body").contentJson,
         metadataJson: {},
-        readiness: "draft",
       },
       expectedRevision: 0,
     });
+    expect(proposalPayload.document).not.toHaveProperty("readiness");
 
     fireEvent.click(screen.getByRole("button", { name: "저장" }));
     await waitFor(() => expect(screen.getByText("저장 실패")).toBeInTheDocument());
@@ -1873,11 +4867,12 @@ describe("DocumentShell", () => {
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
     expect(fetchMock.mock.calls[1]?.[0]).toBe("/api/documents");
-    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toMatchObject({
+    const recoveryPayload = JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body));
+    expect(recoveryPayload).toMatchObject({
       title: "Local recovery copy",
       metadataJson: {},
-      readiness: "draft",
     });
+    expect(recoveryPayload).not.toHaveProperty("readiness");
     expect(screen.getByRole("alert")).toHaveTextContent("Could not save the local draft as a new document.");
   });
 

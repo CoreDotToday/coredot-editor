@@ -85,7 +85,7 @@ describe("production smoke helpers", () => {
     expect(workflow).toContain("python -m pip install -r requirements-docs.txt");
     const nodeSqliteJob = extractWorkflowJob(workflow, "node-sqlite-concurrency");
 
-    expect(nodeSqliteJob).toContain("node-version: 24");
+    expect(nodeSqliteJob).toContain("node-version: 22");
     expect(nodeSqliteJob).toContain(
       "node -e \"if (!require('node:module').isBuiltin('node:sqlite')) process.exit(1)\"",
     );
