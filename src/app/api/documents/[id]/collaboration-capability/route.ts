@@ -20,7 +20,7 @@ const optionsHandler = createProtectedOptionsHandler(["POST"]);
 const postHandler = createProtectedRouteHandler(async (context, request: Request, route: Params) => {
   const { id: rawDocumentId } = await route.params;
   const documentId = documentIdSchema.safeParse(rawDocumentId);
-  if (!documentId.success || request.body !== null || hasNonemptyBody(request)) {
+  if (!documentId.success || hasNonemptyBody(request)) {
     return NextResponse.json(
       { error: "Invalid collaboration capability request" },
       { status: 400 },
@@ -65,6 +65,12 @@ export async function OPTIONS() {
 }
 
 function hasNonemptyBody(request: Request) {
+  // Real HTTP requests reach this handler with an empty body stream rather
+  // than a null body, so emptiness is decided from the declared length first.
+  // A chunked request hides its length and is rejected outright; a body
+  // stream without any declared length is treated as nonempty.
+  if (request.headers.get("transfer-encoding") !== null) return true;
   const contentLength = request.headers.get("content-length");
-  return contentLength !== null && (!/^0+$/.test(contentLength));
+  if (contentLength !== null) return !/^0+$/.test(contentLength);
+  return request.body !== null;
 }

@@ -104,6 +104,12 @@ jobs:
       - name: Unit and component tests
         run: pnpm test
 
+      - name: Collaboration WebSocket tests
+        run: pnpm collaboration:websocket-tests
+
+      - name: Collaboration Docker verification
+        run: pnpm docker:collaboration:verify
+
       - name: E2E tests
         run: pnpm e2e
 
@@ -116,6 +122,9 @@ jobs:
 
       - name: Production artifact smoke tests
         run: pnpm e2e:production
+
+      - name: Collaboration production smoke tests
+        run: pnpm collaboration:production-smoke
 
       - name: Documentation build
         run: pnpm docs:build

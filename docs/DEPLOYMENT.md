@@ -40,6 +40,7 @@ Those fixed values are non-secret test-format configuration for local build/star
 | `COREDOT_GEMINI_MODEL` | Optional | Initial Core.Today Gemini model seed. Defaults to `gemini-2.5-flash`. |
 | `COREDOT_GEMINI_BASE_URL` | Optional | Initial Core.Today Gemini Base URL seed. Defaults to `https://api.core.today/llm/gemini/v1beta`. |
 | `COREDOT_MAX_COMPLETION_TOKENS` | Optional | Initial Core.Today output token seed. Defaults to `32768`. |
+| `COLLABORATION_MODE` | Optional | `disabled` (default) or `self-hosted`. Self-hosted mode additionally requires the collaboration variables described in [Configuration](configuration.md#environment-variables) and the sidecar deployment below. |
 
 Production startup fails before the server becomes ready if Clerk keys are missing or `AUTH_MODE=test`. Keep test-auth variables such as `TEST_PRINCIPAL_ID` and `TEST_WORKSPACE_ID` out of production. The test-format keys used by `pnpm e2e:production` are isolated smoke credentials, not deployment credentials.
 
@@ -102,6 +103,43 @@ The two public operational endpoints intentionally expose only generic state and
 - `HEAD` preserves the corresponding status with an empty body. `OPTIONS` returns `204` and `Allow: GET, HEAD, OPTIONS`.
 
 Run migrations before adding an instance to service. Configure the platform liveness probe to `/api/health` and the traffic/readiness probe to `/api/ready`. A failing readiness probe should remove the instance from traffic; it should not trigger migration or recovery automatically.
+
+## Real-Time Collaboration Sidecar
+
+Real-time collaboration is optional. `COLLABORATION_MODE=disabled` (the default) keeps the existing revision-aware editor and requires none of this section. `COLLABORATION_MODE=self-hosted` adds a second deployable process: the Hocuspocus sidecar built by `pnpm collaboration:build`. Both processes require Node.js 22.13+; the engine pin, CI, production images, and DOCX worker all target Node 22 together.
+
+Deploy the Web process and the sidecar with separate environment allowlists as described in [Configuration](configuration.md#collaboration-capability-keys): only the Web process receives the private signing key ring, and only the sidecar receives the public verification key ring. The sidecar refuses to start when private signing material is present in its environment. Key generation and rotation steps, and the 60-second maximum access-revocation delay, are documented there as well.
+
+### Sidecar health probes
+
+The sidecar exposes its own uncached probes on its HTTP listener:
+
+- `GET /live` returns `200 {"status":"live"}` while the process can serve requests.
+- `GET /ready` returns `200 {"status":"ready"}` only when configuration and verification keys are valid, the expected collaboration migrations exist, a non-destructive storage probe succeeds, and the room-closure, workflow-notification, and command-delivery reconcilers are healthy. Readiness returns `503` during drain and after migration, key, or database failures.
+
+Run database migrations before the sidecar can become ready. Point the platform liveness probe at `/live` and the traffic probe at `/ready`. `SIGTERM` starts a bounded graceful drain: readiness goes down, new upgrades are rejected, connections close with a retryable reason, pending durable work finishes, a checkpoint is written, and database handles close within `COLLABORATION_SHUTDOWN_GRACE_MS`.
+
+### WSS termination and proxy limits
+
+Browsers connect to `COLLABORATION_WEBSOCKET_URL` over WSS in production. The proxy or load balancer in front of the sidecar must:
+
+- Terminate TLS and forward WebSocket upgrades (`Upgrade`/`Connection` headers preserved).
+- Forward the exact browser `Origin` and the routed `Host`; both are checked against `COLLABORATION_ALLOWED_ORIGINS` and `COLLABORATION_ALLOWED_HOSTS`, and mismatches are rejected before authentication.
+- Disable response buffering for the WebSocket path.
+- Use trusted forwarded-IP handling only at the boundary you control.
+- Configure an idle timeout longer than the WebSocket heartbeat interval so healthy connections are not recycled.
+
+### Single-sidecar SQLite constraint
+
+This release supports exactly one sidecar instance per database. SQLite/libSQL is the starter adapter with real two-process (Web + sidecar) contention coverage, but the sidecar itself must not be scaled horizontally: there is no Redis fan-out or shared-document coordination between multiple sidecars. Scale the Web process freely; scale collaboration by moving to Postgres and a horizontal adapter when measured requirements demand it (see the [Roadmap](ROADMAP.md)).
+
+### Backup and recovery
+
+Canonical collaborative state lives in the same database as everything else: `collaboration_documents` holds checkpoints and `collaboration_updates` holds the append-only update log. Existing database backups therefore cover collaboration; no separate artifact store exists in this release. Recovery loads the latest checkpoint and replays newer updates in order. A checksum, generation, or schema mismatch fails readiness and requires explicit repair - the sidecar never silently rebuilds Yjs state from the SQL projection, because that would create a second canonical history. Restoring a backup rolls the whole document set to one consistent point in time; open tabs reconnect and reload the restored canonical state.
+
+### Docker
+
+`Dockerfile.collaboration` builds the sidecar into a Node 22 image that applies migrations to the mounted database volume before starting the server, and `docker-compose.collaboration.yml` runs it with an isolated named volume and a `/ready` healthcheck. `pnpm docker:collaboration:verify` builds the image, waits for readiness, verifies `/live` and `/ready`, stops the container with `SIGTERM`, and requires a clean exit code before tearing everything down.
 
 ## Claiming Legacy Local Data
 
@@ -245,6 +283,8 @@ CI runs lint, typecheck, unit/component tests, development E2E, build, productio
 - [ ] `pnpm test` passes.
 - [ ] `pnpm e2e` passes.
 - [ ] `pnpm e2e:production` passes.
+- [ ] `pnpm collaboration:production-smoke` passes when collaboration will be enabled.
+- [ ] `pnpm docker:collaboration:verify` passes when the sidecar ships as a container.
 - [ ] `pnpm build` passes.
 - [ ] `pnpm docs:build` passes in the documentation virtual environment.
 - [ ] `pnpm security:audit` passes.
@@ -254,6 +294,7 @@ CI runs lint, typecheck, unit/component tests, development E2E, build, productio
 - [ ] AI provider secrets are configured.
 - [ ] Migrations have run.
 - [ ] `/api/health` and `/api/ready` probes use their distinct liveness/readiness roles.
+- [ ] With collaboration enabled: separate signing/verification key allowlists, sidecar `/live` and `/ready` probes, WSS proxy upgrade/buffering/idle-timeout settings, and exactly one sidecar instance per database.
 - [ ] Interrupted-AI recovery is scheduled, bounded, and monitored without sensitive output.
 - [ ] A pre-migration backup has been verified and `PRAGMA foreign_key_check` is empty after migration.
 - [ ] Legacy `local` data has been dry-run and claimed when upgrading an existing deployment.

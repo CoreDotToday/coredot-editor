@@ -400,7 +400,7 @@ Telemetry records counts and bounded timings for:
 - Storage retries and room reloads.
 - Proposal target, overlap, and undo conflicts.
 
-Telemetry excludes document text, title, metadata values, user names, email addresses, raw tokens, Yjs payloads, prompt bodies, and provider secrets.
+Telemetry excludes document text, title, metadata values, user names, email addresses, raw tokens, Yjs payloads, prompt bodies, and provider secrets. The observability module enforces this at the emitter: collaboration metrics are rebuilt from a fixed registry of counters, histograms, and gauges, caller extras are dropped, and category labels outside each metric's bounded set become `unknown`.
 
 ## Test Strategy
 
@@ -456,7 +456,13 @@ Telemetry excludes document text, title, metadata values, user names, email addr
 
 ## Release Gates
 
-The implementation adds focused collaboration unit, contract, WebSocket, Docker, and Playwright commands and includes them in the repository release finish line. Production smoke starts both the Next.js artifact and sidecar against an isolated migrated database, verifies WSS/auth/readiness behavior, and guarantees bounded child-process cleanup.
+The implementation adds focused collaboration unit, contract, WebSocket, Docker, and Playwright commands and includes them in the repository release finish line:
+
+- `pnpm test:collaboration` runs the focused unit and contract suites.
+- `pnpm collaboration:websocket-tests` runs real multi-client WebSocket scenarios against the built sidecar and a migrated database: convergence, token refresh, revoked access, cross-Workspace room tampering, and graceful restart recovery.
+- `pnpm docker:collaboration:verify` builds `Dockerfile.collaboration`, runs migrations before readiness on an isolated volume, and requires a clean `SIGTERM` exit.
+- `pnpm e2e --grep "real-time collaboration"` (also `pnpm e2e:collaboration`) runs the two-Principal browser scenarios.
+- `pnpm collaboration:production-smoke` starts both the Next.js artifact and sidecar against an isolated migrated database, verifies WSS/auth/readiness behavior, and guarantees bounded child-process cleanup and released ports.
 
 Completion requires:
 

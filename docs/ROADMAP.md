@@ -12,7 +12,7 @@ Coredot Editor now has the production-oriented foundation needed for downstream 
 
 ## Collaboration, Audit, And Operations
 
-- Add real-time multi-user editing with a defined CRDT or equivalent synchronization model. Revision conflicts remain the current cross-client safety mechanism.
+- Real-time multi-user editing shipped as self-hosted Yjs + Hocuspocus (`COLLABORATION_MODE=self-hosted`) with one sidecar instance over SQLite/libSQL. Next steps are a Postgres-backed deployment guide and measured horizontal scaling. Y-Sweet (S3-backed, horizontally scalable) remains a future adapter that needs new provider, authentication, server-command, and operational adapters - it is not a configuration switch on the current sidecar. Revision conflicts remain the safety mechanism for non-collaborative documents.
 - Expand the existing Document Change and AI Run records into a granular audit trail for settings changes, exports, authentication events, and administrative actions.
 - Add provider policy controls per Workspace.
 - Provide a concrete Postgres migration guide, concurrency harness, and production observability runbook.

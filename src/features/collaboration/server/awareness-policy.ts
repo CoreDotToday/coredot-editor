@@ -65,22 +65,38 @@ export function createAwarenessPolicy(options: { now?: () => number } = {}) {
           throw rejected();
         }
         const entries = parseAwarenessPayload(payload);
-        if (entries.length !== 1) throw rejected();
+        if (entries.length < 1) throw rejected();
         consumeRate(totalRates, connection, now(), AWARENESS_TOTAL_RATE_LIMIT);
         const roomOwners = ownerByRoom.get(exactRoom) ?? new Map<number, AwarenessOwner>();
         const activeClient = activeClientByConnection.get(connection);
         const ignoredClientIds = new Set<number>();
+        // HocuspocusProvider flushes every client it knows on (re)connect, so
+        // one frame may combine the connection's own state with cached peer
+        // echoes. At most one entry per frame may claim a new live client.
+        let liveCandidateClientId: number | undefined;
         for (const entry of entries) {
           const owner = roomOwners.get(entry.clientId);
           if (owner && owner.connection !== connection) {
-            // HocuspocusProvider echoes remote Awareness updates back to the
-            // server. Only the exact canonical clock/state is a rate-free
-            // no-op; any attempted foreign mutation remains a rejection.
+            // A stale echo (older clock) and the exact canonical clock/state
+            // are rate-free no-ops. A newer clock cannot be told apart from a
+            // same-client reconnect racing its dead connection's cleanup, so
+            // it is dropped without being applied; ownership recovers once
+            // the dead connection is released. A mutation at the canonical
+            // clock is a definite spoof attempt and remains a rejection.
+            if (entry.clock < owner.clock) {
+              ignoredClientIds.add(entry.clientId);
+              continue;
+            }
             if (
               entry.state !== null
               && entry.clock === owner.clock
               && isDeepStrictEqual(entry.state, owner.state)
             ) {
+              ignoredClientIds.add(entry.clientId);
+              continue;
+            }
+            if (entry.clock > owner.clock) {
+              consumeRate(rates, connection, now());
               ignoredClientIds.add(entry.clientId);
               continue;
             }
@@ -93,18 +109,36 @@ export function createAwarenessPolicy(options: { now?: () => number } = {}) {
             ignoredClientIds.add(entry.clientId);
             continue;
           }
+          if (!owner && activeClient !== undefined && activeClient !== entry.clientId) {
+            // A cached foreign state whose owner already left cannot be
+            // applied under this connection's identity; drop it instead of
+            // killing a legitimate reconnect flush.
+            ignoredClientIds.add(entry.clientId);
+            continue;
+          }
           if (activeClient !== undefined && activeClient !== entry.clientId) throw rejected();
+          if (activeClient === undefined && entry.clientId !== liveCandidateClientId) {
+            if (liveCandidateClientId !== undefined) throw rejected();
+            liveCandidateClientId = entry.clientId;
+          }
           if (entry.state === null) {
-            if (
-              owner?.connection !== connection
-              || entry.clock <= (activeClockByConnection.get(connection) ?? 0)
-            ) {
-              throw rejected();
+            if (entry.clock <= (activeClockByConnection.get(connection) ?? 0)) {
+              // A duplicate or stale removal echo cannot remove newer state
+              // and must not close an otherwise healthy connection.
+              ignoredClientIds.add(entry.clientId);
+              continue;
             }
+            if (owner?.connection !== connection) throw rejected();
           } else {
             validateState(entry.state);
           }
-          consumeRate(rates, connection, now());
+          if (!tryConsumeRate(rates, connection, now())) {
+            // Awareness is ephemeral. A fast typist or a reconnect flush of
+            // queued frames may exceed the per-connection budget; drop the
+            // whole frame instead of closing the session.
+            for (const dropped of entries) ignoredClientIds.add(dropped.clientId);
+            break;
+          }
         }
         pending.set(connection, { entries, ignoredClientIds, room: exactRoom });
       } catch (error) {
@@ -260,19 +294,25 @@ function validateCursor(value: unknown) {
 function validateRelativePosition(value: unknown) {
   if (!isRecord(value)) throw rejected();
   const keys = Object.keys(value);
+  // Serialized Y.RelativePosition values carry explicit nulls for absent
+  // parts, so null is normalized to "absent" before shape checks.
+  const tname = value.tname ?? undefined;
+  const type = value.type ?? undefined;
+  const item = value.item ?? undefined;
+  const assoc = value.assoc ?? undefined;
   if (
     keys.length < 2
     || keys.some((key) => !["assoc", "item", "tname", "type"].includes(key))
-    || (value.tname === undefined) === (value.type === undefined)
-    || (value.assoc !== undefined && (
-      !Number.isSafeInteger(value.assoc) || (value.assoc as number) < -1 || (value.assoc as number) > 1
+    || (tname === undefined) === (type === undefined)
+    || (assoc !== undefined && (
+      !Number.isSafeInteger(assoc) || (assoc as number) < -1 || (assoc as number) > 1
     ))
   ) {
     throw rejected();
   }
-  if (value.tname !== undefined && value.tname !== "body") throw rejected();
-  if (value.type !== undefined) validateYjsId(value.type);
-  if (value.item !== undefined) validateYjsId(value.item);
+  if (tname !== undefined && tname !== "body") throw rejected();
+  if (type !== undefined) validateYjsId(type);
+  if (item !== undefined) validateYjsId(item);
 }
 
 function validateYjsId(value: unknown) {
@@ -314,13 +354,23 @@ function consumeRate(
   timestamp: number,
   limit: { messages: number; windowMs: number } = AWARENESS_RATE_LIMIT,
 ) {
+  if (!tryConsumeRate(rates, connection, timestamp, limit)) throw rejected();
+}
+
+function tryConsumeRate(
+  rates: WeakMap<object, { count: number; windowStartedAt: number }>,
+  connection: object,
+  timestamp: number,
+  limit: { messages: number; windowMs: number } = AWARENESS_RATE_LIMIT,
+) {
   const current = rates.get(connection);
   if (!current || timestamp - current.windowStartedAt >= limit.windowMs) {
     rates.set(connection, { count: 1, windowStartedAt: timestamp });
-    return;
+    return true;
   }
-  if (current.count >= limit.messages) throw rejected();
+  if (current.count >= limit.messages) return false;
   current.count += 1;
+  return true;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

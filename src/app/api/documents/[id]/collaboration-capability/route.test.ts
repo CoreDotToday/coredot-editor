@@ -73,6 +73,59 @@ describe("POST /api/documents/[id]/collaboration-capability", () => {
     expect(response.headers.get("Cache-Control")).toBe("no-store");
   });
 
+  it("accepts a real bodyless HTTP POST whose runtime body is an empty stream", async () => {
+    // Real HTTP servers hand the route a Request whose body is an empty
+    // stream with `content-length: 0`, unlike synthetic bodyless Requests
+    // whose body is null. The route must accept both shapes.
+    vi.mocked(issueCollaborationCapabilityForDocument).mockResolvedValueOnce({
+      expiresInSeconds: 60,
+      room: "collab:v1:vitest-workspace:document-a:g1",
+      token: "signed-token",
+    });
+    const emptyStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.close();
+      },
+    });
+    const realRequest = new Request(
+      "http://localhost/api/documents/document-a/collaboration-capability",
+      {
+        body: emptyStream,
+        duplex: "half",
+        headers: { "content-length": "0" },
+        method: "POST",
+      } as RequestInit,
+    );
+
+    const response = await POST(realRequest, {
+      params: Promise.resolve({ id: "document-a" }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      expiresInSeconds: 60,
+      room: "collab:v1:vitest-workspace:document-a:g1",
+      token: "signed-token",
+    });
+  });
+
+  it("rejects a chunked request that hides its body length", async () => {
+    const chunkedRequest = new Request(
+      "http://localhost/api/documents/document-a/collaboration-capability",
+      {
+        headers: { "transfer-encoding": "chunked" },
+        method: "POST",
+      },
+    );
+
+    const response = await POST(chunkedRequest, {
+      params: Promise.resolve({ id: "document-a" }),
+    });
+
+    expect(response.status).toBe(400);
+    expect(issueCollaborationCapabilityForDocument).not.toHaveBeenCalled();
+  });
+
   it("returns the standard protected OPTIONS response", async () => {
     const response = await OPTIONS();
 

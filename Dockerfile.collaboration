@@ -1,0 +1,59 @@
+# syntax=docker/dockerfile:1
+# Collaboration sidecar image: the same Node 22 esbuild artifact used by
+# production smoke, with database migrations applied before the server starts
+# so readiness can only succeed against a fully migrated schema.
+
+FROM node:22-alpine AS build
+WORKDIR /app
+RUN corepack enable
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile
+COPY tsconfig.json ./
+COPY src ./src
+COPY scripts/collaboration ./scripts/collaboration
+RUN pnpm collaboration:build
+
+FROM node:22-alpine AS runtime
+ENV NODE_ENV=production
+WORKDIR /app
+RUN corepack enable
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile --prod
+COPY drizzle ./drizzle
+COPY --from=build /app/src/features/collaboration/server/.generated ./server
+
+# Applies every pending migration to the mounted database volume. The sidecar
+# process is only executed after this exits successfully, and sidecar readiness
+# additionally re-verifies that the expected collaboration tables exist.
+COPY <<"EOF" /app/migrate.mjs
+import { createClient } from "@libsql/client";
+import { drizzle } from "drizzle-orm/libsql";
+import { migrate } from "drizzle-orm/libsql/migrator";
+
+const url = process.env.DATABASE_URL;
+if (!url) {
+  console.error(JSON.stringify({ phase: "migrate", status: "failed" }));
+  process.exit(1);
+}
+const client = createClient({ url });
+try {
+  await migrate(drizzle(client), { migrationsFolder: "/app/drizzle" });
+  console.log(JSON.stringify({ phase: "migrate", status: "ok" }));
+} catch {
+  console.error(JSON.stringify({ phase: "migrate", status: "failed" }));
+  process.exit(1);
+} finally {
+  client.close();
+}
+EOF
+
+RUN mkdir -p /data && chown node:node /data /app
+USER node
+VOLUME ["/data"]
+EXPOSE 1234
+
+HEALTHCHECK --interval=5s --timeout=3s --start-period=15s --retries=30 CMD \
+  node -e "fetch('http://127.0.0.1:' + (process.env.COLLABORATION_SERVER_PORT || '1234') + '/ready').then((r) => process.exit(r.status === 200 ? 0 : 1)).catch(() => process.exit(1))"
+
+# `exec` keeps the sidecar as PID 1 so SIGTERM reaches its graceful drain path.
+CMD ["sh", "-c", "node /app/migrate.mjs && exec node /app/server/server.mjs"]

@@ -42,9 +42,10 @@ _DOCX import and export report preserved, approximated, and removed features; lo
 
 | Area | Implemented baseline | Deliberate boundary |
 | --- | --- | --- |
-| Editing | Three-pane Workspace, Tiptap v3, commands, outline, find/replace, and Korean/English UI | The repository is a full application, not a packaged editor component or real-time collaboration engine |
+| Editing | Three-pane Workspace, Tiptap v3, commands, outline, find/replace, and Korean/English UI | The repository is a full application, not a packaged editor component |
+| Collaboration | Optional self-hosted real-time co-editing (`COLLABORATION_MODE=self-hosted`): Yjs + a Hocuspocus sidecar on Node 22 with durable updates, shared cursors/participants, and server-authoritative readiness/approval | One sidecar instance over SQLite/libSQL; horizontal scaling and a Y-Sweet backend remain future adapters, and initialized documents cannot silently fall back to legacy autosave |
 | AI | Deterministic `stub`, Core.Today proxy modes, and direct OpenAI; structured review creates Proposals | Live providers require server-side credentials; the stub proves the flow, not model quality |
-| Change safety | Revision-aware saves, atomic single/bulk Proposal apply, durable Document Changes, and revision-checked undo | This is optimistic revision control, not CRDT synchronization |
+| Change safety | Revision-aware saves, atomic single/bulk Proposal apply, durable Document Changes, and revision-checked undo; collaborative documents use anchored apply and selective inverse-update undo | Legacy documents use optimistic revision control, not CRDT synchronization |
 | Identity | Clerk personal/organization Workspaces with owner/admin/member roles; deterministic test identity for local use | `AUTH_MODE=test` is rejected by production build and startup validation |
 | Persistence | Drizzle repositories with SQLite/libSQL and Workspace-scoped predicates | Deployments own durable hosting, backups, restore drills, and any Postgres migration |
 | DOCX | Two-phase import/export with bounded worker conversion and explicit fidelity reports | Reports surface known loss; they do not claim full Word parity |

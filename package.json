@@ -25,8 +25,10 @@
     "build:docx-worker": "esbuild src/features/documents/docx-conversion-worker.mjs --bundle --platform=node --format=cjs --target=node22 --outfile=src/features/documents/.generated/docx-conversion-worker.cjs",
     "collaboration:build": "tsx scripts/collaboration/build-server.ts",
     "collaboration:dev": "tsx watch src/features/collaboration/server/main.ts",
+    "collaboration:production-smoke": "tsx --conditions=react-server scripts/collaboration/run-production-smoke.ts",
     "collaboration:smoke": "tsx scripts/collaboration/smoke-server.ts",
     "collaboration:verify-runtime": "tsx scripts/collaboration/verify-runtime.ts",
+    "collaboration:websocket-tests": "tsx --conditions=react-server scripts/collaboration/run-websocket-tests.ts",
     "start": "node scripts/validate-production-auth.mjs --production && next start",
     "check": "pnpm lint && pnpm typecheck && pnpm test && pnpm build",
     "lint": "eslint .",
@@ -46,15 +48,17 @@
     "docs:check-links": "tsx scripts/docs/check-links.ts",
     "docs:check-links:external": "tsx scripts/docs/check-links.ts --external",
     "docs:verify-quick-start": "tsx scripts/docs/verify-quick-start.ts",
+    "docker:collaboration:verify": "tsx scripts/collaboration/verify-docker.ts",
     "docker:rag:up": "bash scripts/rag/verify-docker-env.sh up",
     "docker:rag:down": "bash scripts/rag/verify-docker-env.sh down",
     "docker:rag:verify": "bash scripts/rag/verify-docker-env.sh verify",
     "e2e:prepare": "tsx scripts/e2e/prepare.ts",
     "e2e": "pnpm e2e:prepare && playwright test",
+    "e2e:collaboration": "pnpm e2e --grep \"real-time collaboration\"",
     "e2e:production": "tsx scripts/e2e/run-production-smoke.ts",
     "security:audit": "tsx scripts/security/audit-dependencies.ts",
     "security:verify-auth-startup": "pnpm build:docx-worker && node scripts/security/verify-production-auth-startup.mjs",
-    "release:check": "pnpm lint && pnpm typecheck && pnpm test && pnpm e2e && pnpm security:verify-auth-startup && pnpm build && pnpm collaboration:verify-runtime && pnpm collaboration:build && pnpm collaboration:smoke && pnpm security:audit"
+    "release:check": "pnpm lint && pnpm typecheck && pnpm test && pnpm e2e && pnpm security:verify-auth-startup && pnpm build && pnpm collaboration:verify-runtime && pnpm collaboration:build && pnpm collaboration:smoke && pnpm test:collaboration && pnpm collaboration:websocket-tests && pnpm docker:collaboration:verify && pnpm security:audit"
   },
   "dependencies": {
     "@ai-sdk/openai": "^3.0.85",
@@ -130,6 +134,8 @@
   "pnpm": {
     "overrides": {
       "@babel/core": "^7.29.6",
+      "brace-expansion@1": "^1.1.16",
+      "brace-expansion@>=3.0.0 <5.0.7": "^5.0.7",
       "esbuild": "^0.25.12",
       "js-yaml": "^4.2.0",
       "postcss": "^8.5.14",

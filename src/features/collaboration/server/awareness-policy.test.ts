@@ -70,7 +70,46 @@ describe("server-owned Awareness policy", () => {
       .toThrow(AwarenessPolicyError);
   });
 
-  it("rejects payloads over 4 KiB and a high-frequency sender", () => {
+  it("accepts the exact serialized Yjs relative-position shape real editors send", () => {
+    // JSON-serialized Y.RelativePosition values carry explicit nulls, e.g.
+    // {"type":null,"tname":"body","item":{...},"assoc":0} inside content and
+    // {"type":null,"tname":"body","item":null,"assoc":0} at the type end.
+    const connection = {};
+    const policy = createAwarenessPolicy({ now: () => 1_000 });
+    const realCursor = {
+      anchor: { assoc: 0, item: { client: 7, clock: 2 }, tname: "body", type: null },
+      head: { assoc: 0, item: null, tname: "body", type: null },
+    };
+
+    expect(() => policy.validateFrame(connection, awarenessPayload(7, {
+      cursor: realCursor,
+      user: { color: "", displayName: "" },
+    }))).not.toThrow();
+
+    const state = { cursor: realCursor, user: { color: "", displayName: "" } };
+    const states = new Map<number, Record<string, unknown>>([[7, state]]);
+    policy.sanitizeStates(connection, context, states);
+    expect(states.get(7)).toMatchObject({ cursor: realCursor });
+  });
+
+  it("still rejects a relative position that asserts both a root name and a type id", () => {
+    const connection = {};
+    const policy = createAwarenessPolicy({ now: () => 1_000 });
+    const conflicted = {
+      anchor: {
+        assoc: 0,
+        item: null,
+        tname: "body",
+        type: { client: 7, clock: 1 },
+      },
+      head: { assoc: 0, item: null, tname: "body", type: null },
+    };
+
+    expect(() => policy.validateFrame(connection, awarenessPayload(7, { cursor: conflicted })))
+      .toThrow(AwarenessPolicyError);
+  });
+
+  it("rejects oversize payloads and drops a keystroke burst without closing the connection", () => {
     const connection = {};
     const policy = createAwarenessPolicy({ now: () => 1_000 });
 
@@ -81,11 +120,43 @@ describe("server-owned Awareness policy", () => {
       .toThrow(AwarenessPolicyError);
     for (let index = 0; index < AWARENESS_RATE_LIMIT.messages; index += 1) {
       const state = { cursor: cursor(7, index) };
-      policy.validateFrame(connection, awarenessPayload(7, state));
+      policy.validateFrame(connection, awarenessPayload(7, state, index + 1));
       policy.sanitizeStates(connection, context, new Map([[7, state]]));
     }
-    expect(() => policy.validateFrame(connection, awarenessPayload(7, { cursor: cursor(7, 99) })))
-      .toThrow(AwarenessPolicyError);
+
+    // Awareness is ephemeral: a fast typist or a reconnect flush of queued
+    // frames may exceed the per-connection budget. Excess frames are dropped
+    // rather than treated as a protocol violation that closes the session.
+    expect(() => policy.validateFrame(
+      connection,
+      awarenessPayload(7, { cursor: cursor(7, 99) }, 99),
+    )).not.toThrow();
+    const droppedStates = new Map<number, Record<string, unknown>>([
+      [7, { cursor: cursor(7, 99) }],
+    ]);
+    policy.sanitizeStates(connection, context, droppedStates);
+    expect(droppedStates).toEqual(new Map());
+  });
+
+  it("ignores a duplicate own removal echo instead of closing the connection", () => {
+    const connection = {};
+    const policy = createAwarenessPolicy({ now: () => 1_000 });
+    const state = { cursor: cursor(7, 1) };
+    policy.validateFrame(connection, awarenessPayload(7, state, 3));
+    policy.sanitizeStates(connection, context, new Map([[7, state]]));
+
+    expect(() => policy.validateFrame(connection, awarenessPayload(7, null, 3))).not.toThrow();
+    const echoedRemoval = new Map<number, Record<string, unknown>>([
+      [7, { cursor: cursor(7, 1) }],
+    ]);
+    policy.sanitizeStates(connection, context, echoedRemoval);
+    expect(echoedRemoval).toEqual(new Map());
+
+    // A genuinely newer removal still applies.
+    policy.validateFrame(connection, awarenessPayload(7, null, 4));
+    const removal = new Map<number, Record<string, unknown>>([[7, {}]]);
+    policy.sanitizeStates(connection, context, removal);
+    expect(removal.get(7)).toBeNull();
   });
 
   it("drops exact canonical echoes without rate amplification and rejects foreign mutation", () => {
@@ -109,8 +180,98 @@ describe("server-owned Awareness policy", () => {
       awarenessPayload(7, { cursor: cursor(7, 3) }),
     )).toThrow(AwarenessPolicyError);
 
-    expect(() => policy.validateFrame(first, awarenessPayload(8, { cursor: cursor(8, 2) })))
-      .toThrow(AwarenessPolicyError);
+    // A cached foreign state whose owner is unknown is dropped, not applied:
+    // real providers flush cached peers on reconnect, so rejecting would kill
+    // legitimate connections, while applying would re-stamp the state with
+    // the sender's identity.
+    policy.validateFrame(first, awarenessPayload(8, { cursor: cursor(8, 2) }));
+    const ghostStates = new Map<number, Record<string, unknown>>([
+      [8, { cursor: cursor(8, 2) }],
+    ]);
+    policy.sanitizeStates(first, context, ghostStates);
+    expect(ghostStates).toEqual(new Map());
+  });
+
+  it("accepts a real reconnect flush containing its own state plus cached peer echoes", () => {
+    const peer = {};
+    const reconnecting = {};
+    const policy = createAwarenessPolicy({ now: () => 1_000 });
+    const peerState = { cursor: cursor(7, 1) };
+    policy.validateFrame(peer, awarenessPayload(7, peerState, 3));
+    policy.sanitizeStates(peer, context, new Map([[7, peerState]]));
+    const canonicalPeerState = structuredClone(peerState) as Record<string, unknown>;
+
+    // HocuspocusProvider flushes every client it knows on (re)connect:
+    // its own state plus exact echoes and stale echoes of cached peers.
+    const flush = multiAwarenessPayload([
+      { clientId: 9, clock: 2, state: { cursor: cursor(9, 1) } },
+      { clientId: 7, clock: 3, state: canonicalPeerState },
+    ]);
+    expect(() => policy.validateFrame(reconnecting, flush)).not.toThrow();
+    const states = new Map<number, Record<string, unknown>>([
+      [9, { cursor: cursor(9, 1) }],
+      [7, structuredClone(canonicalPeerState)],
+    ]);
+    policy.sanitizeStates(reconnecting, context, states);
+    expect(states.has(9)).toBe(true);
+    expect(states.has(7)).toBe(false);
+
+    // A stale echo with an older clock is dropped rather than treated as a
+    // foreign mutation.
+    const staleEcho = multiAwarenessPayload([
+      { clientId: 9, clock: 3, state: { cursor: cursor(9, 2) } },
+      { clientId: 7, clock: 1, state: { cursor: cursor(7, 9) } },
+    ]);
+    expect(() => policy.validateFrame(reconnecting, staleEcho)).not.toThrow();
+    const staleStates = new Map<number, Record<string, unknown>>([
+      [9, { cursor: cursor(9, 2) }],
+      [7, { cursor: cursor(7, 9) }],
+    ]);
+    policy.sanitizeStates(reconnecting, context, staleStates);
+    expect(staleStates.has(9)).toBe(true);
+    expect(staleStates.has(7)).toBe(false);
+  });
+
+  it("survives a same-client reconnect while the dead connection still owns the client id", () => {
+    const oldConnection = {};
+    const newConnection = {};
+    const policy = createAwarenessPolicy({ now: () => 1_000 });
+    const originalState = { cursor: cursor(7, 1) };
+    policy.validateFrame(oldConnection, awarenessPayload(7, originalState, 1));
+    policy.sanitizeStates(oldConnection, context, new Map([[7, originalState]]));
+
+    // A network drop leaves the old owner registered until the server detects
+    // the dead socket. The same tab reconnects with the same Yjs clientID and
+    // a newer clock; the update is dropped without being applied, but the
+    // connection must not be killed.
+    const reconnectState = { cursor: cursor(7, 5) };
+    expect(() => policy.validateFrame(newConnection, awarenessPayload(7, reconnectState, 2)))
+      .not.toThrow();
+    const droppedStates = new Map<number, Record<string, unknown>>([
+      [7, structuredClone(reconnectState) as Record<string, unknown>],
+    ]);
+    policy.sanitizeStates(newConnection, context, droppedStates);
+    expect(droppedStates).toEqual(new Map());
+
+    // After the dead connection is released, the reconnecting tab regains
+    // ownership with its next update.
+    policy.release(oldConnection);
+    policy.validateFrame(newConnection, awarenessPayload(7, reconnectState, 3));
+    const recoveredStates = new Map<number, Record<string, unknown>>([
+      [7, structuredClone(reconnectState) as Record<string, unknown>],
+    ]);
+    policy.sanitizeStates(newConnection, context, recoveredStates);
+    expect(recoveredStates.get(7)).toMatchObject({ cursor: reconnectState.cursor });
+  });
+
+  it("rejects an ambiguous first frame that claims two unregistered live clients", () => {
+    const connection = {};
+    const policy = createAwarenessPolicy({ now: () => 1_000 });
+
+    expect(() => policy.validateFrame(connection, multiAwarenessPayload([
+      { clientId: 11, clock: 1, state: { cursor: cursor(11, 1) } },
+      { clientId: 12, clock: 1, state: { cursor: cursor(12, 1) } },
+    ]))).toThrow(AwarenessPolicyError);
   });
 
   it("treats an unknown removal tombstone as a no-op", () => {
@@ -218,11 +379,19 @@ describe("server-owned Awareness policy", () => {
 });
 
 function awarenessPayload(clientId: number, state: unknown, clock = 1) {
+  return multiAwarenessPayload([{ clientId, clock, state }]);
+}
+
+function multiAwarenessPayload(
+  entries: Array<{ clientId: number; clock: number; state: unknown }>,
+) {
   const encoder = encoding.createEncoder();
-  encoding.writeVarUint(encoder, 1);
-  encoding.writeVarUint(encoder, clientId);
-  encoding.writeVarUint(encoder, clock);
-  encoding.writeVarString(encoder, JSON.stringify(state));
+  encoding.writeVarUint(encoder, entries.length);
+  for (const entry of entries) {
+    encoding.writeVarUint(encoder, entry.clientId);
+    encoding.writeVarUint(encoder, entry.clock);
+    encoding.writeVarString(encoder, JSON.stringify(entry.state));
+  }
   return encoding.toUint8Array(encoder);
 }
 
