@@ -64,4 +64,4 @@ Before opening a pull request:
 5. Run `pnpm e2e` when user flows change.
 6. Run `pnpm docs:build` when documentation changes.
 
-Read the repository [contribution guide](https://github.com/CoreDotToday/coredot-editor/blob/main/CONTRIBUTING.md) for more detail.
+Read the repository [contribution guide](https://github.com/CoreDotToday/coredoteditor/blob/main/CONTRIBUTING.md) for more detail.

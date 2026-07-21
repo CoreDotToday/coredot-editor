@@ -4,7 +4,7 @@ Coredot Editor is MIT licensed and designed for forking, adaptation, and product
 
 ## Contributing
 
-Read the repository [contribution guide](https://github.com/CoreDotToday/coredot-editor/blob/main/CONTRIBUTING.md) before opening a pull request.
+Read the repository [contribution guide](https://github.com/CoreDotToday/coredoteditor/blob/main/CONTRIBUTING.md) before opening a pull request.
 
 Good contributions usually:
 
@@ -26,12 +26,12 @@ Use the GitHub issue template and include:
 
 ## Security
 
-Do not report sensitive vulnerabilities in public issues. Read the repository [security policy](https://github.com/CoreDotToday/coredot-editor/blob/main/SECURITY.md) and use GitHub private vulnerability reporting when available.
+Do not report sensitive vulnerabilities in public issues. Read the repository [security policy](https://github.com/CoreDotToday/coredoteditor/blob/main/SECURITY.md) and use GitHub private vulnerability reporting when available.
 
 ## Code Of Conduct
 
-Participants are expected to follow the repository [code of conduct](https://github.com/CoreDotToday/coredot-editor/blob/main/CODE_OF_CONDUCT.md).
+Participants are expected to follow the repository [code of conduct](https://github.com/CoreDotToday/coredoteditor/blob/main/CODE_OF_CONDUCT.md).
 
 ## License
 
-Coredot Editor is released under the [MIT License](https://github.com/CoreDotToday/coredot-editor/blob/main/LICENSE).
+Coredot Editor is released under the [MIT License](https://github.com/CoreDotToday/coredoteditor/blob/main/LICENSE).

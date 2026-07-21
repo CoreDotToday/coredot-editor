@@ -1,8 +1,8 @@
 site_name: Coredot Editor
 site_description: Open-source AI document editor starter built with Next.js, Tiptap, Drizzle, SQLite, and the Vercel AI SDK.
-site_url: https://coredottoday.github.io/coredot-editor/
-repo_name: CoreDotToday/coredot-editor
-repo_url: https://github.com/CoreDotToday/coredot-editor
+site_url: https://coredottoday.github.io/coredoteditor/
+repo_name: CoreDotToday/coredoteditor
+repo_url: https://github.com/CoreDotToday/coredoteditor
 edit_uri: edit/main/docs/
 
 docs_dir: docs

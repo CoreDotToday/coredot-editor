@@ -14,9 +14,9 @@ The active Profile provides:
 - Allowed transitions among the four stored readiness IDs: `draft`, `needs_review`, `ready`, and `approved`.
 - Stable references to built-in prompt templates.
 
-The same definition drives create/update validation, Proposal application, metadata controls, list filters, readiness choices, and default-template selection. See the [Profile contract and validation source](https://github.com/CoreDotToday/coredot-editor/blob/main/src/features/projects/project-profile.ts).
+The same definition drives create/update validation, Proposal application, metadata controls, list filters, readiness choices, and default-template selection. See the [Profile contract and validation source](https://github.com/CoreDotToday/coredoteditor/blob/main/src/features/projects/project-profile.ts).
 
-`PROJECT_PROFILE_ID` is resolved on the server for the whole deployment. An unknown ID throws when the active Profile is first resolved; it does not silently fall back. See [active Profile resolution](https://github.com/CoreDotToday/coredot-editor/blob/main/src/features/projects/active-project-profile.ts).
+`PROJECT_PROFILE_ID` is resolved on the server for the whole deployment. An unknown ID throws when the active Profile is first resolved; it does not silently fall back. See [active Profile resolution](https://github.com/CoreDotToday/coredoteditor/blob/main/src/features/projects/active-project-profile.ts).
 
 A Profile does not replace authentication, Workspace authorization, provider credentials, editor plugins, or the shared document schema. Use the corresponding extension seam for each concern.
 
@@ -29,7 +29,7 @@ A Profile does not replace authentication, Workspace authorization, provider cre
 | Research writing (`research-writing`) | Built in | Drafts need an evidence-oriented publication path. | Research question, evidence status, research-specific Korean readiness labels, and Market Research template reference. |
 | Custom domain workflow | Downstream pattern | Your fields or lifecycle cannot be expressed by a built-in Profile. | A new stable Profile ID, code-owned definition, tests, and rollout plan. |
 
-The [built-in Profile registry](https://github.com/CoreDotToday/coredot-editor/blob/main/src/features/projects/default-project-profiles.ts) is the source of truth for the first three rows.
+The [built-in Profile registry](https://github.com/CoreDotToday/coredoteditor/blob/main/src/features/projects/default-project-profiles.ts) is the source of truth for the first three rows.
 
 ## Adoption profiles
 
@@ -60,7 +60,7 @@ This built-in Profile is the smallest starting point. Its readiness states can m
 
 Keep the [identity and Workspace boundary](ARCHITECTURE.md#identity-and-workspace-boundary) even for a small internal tool. Test identity is local-only and production startup rejects it.
 
-Review the repository [security policy](https://github.com/CoreDotToday/coredot-editor/blob/main/SECURITY.md) and the [operator decisions](production-readiness.md#operator-decisions-before-real-users) before storing real documents.
+Review the repository [security policy](https://github.com/CoreDotToday/coredoteditor/blob/main/SECURITY.md) and the [operator decisions](production-readiness.md#operator-decisions-before-real-users) before storing real documents.
 
 ### Legal review (`legal-review`)
 
@@ -92,7 +92,7 @@ Its stored IDs and English labels remain Draft, Needs review, Ready, and Approve
 
 A Profile is not a legal access-control policy. Preserve [Clerk roles and repository Workspace predicates](ARCHITECTURE.md#identity-and-workspace-boundary), then test cross-Workspace identifiers as not found.
 
-Treat fidelity as an explicit report, not Word parity. Read [DOCX resource safety](ARCHITECTURE.md#docx-interchange-and-resource-safety), [production readiness](production-readiness.md), and the [security policy](https://github.com/CoreDotToday/coredot-editor/blob/main/SECURITY.md).
+Treat fidelity as an explicit report, not Word parity. Read [DOCX resource safety](ARCHITECTURE.md#docx-interchange-and-resource-safety), [production readiness](production-readiness.md), and the [security policy](https://github.com/CoreDotToday/coredoteditor/blob/main/SECURITY.md).
 
 ### Research writing (`research-writing`)
 
@@ -124,7 +124,7 @@ Its stored IDs and English labels remain Draft, Needs review, Ready, and Approve
 
 Do not treat `evidenceStatus=verified` as automated source verification; it is Profile metadata whose meaning the deployment defines and enforces through its workflow.
 
-Use the [prompt evaluation cases](PROMPTING.md#evaluation-cases), [provider operating decisions](production-readiness.md#operator-decisions-before-real-users), and [security policy](https://github.com/CoreDotToday/coredot-editor/blob/main/SECURITY.md) when handling external content.
+Use the [prompt evaluation cases](PROMPTING.md#evaluation-cases), [provider operating decisions](production-readiness.md#operator-decisions-before-real-users), and [security policy](https://github.com/CoreDotToday/coredoteditor/blob/main/SECURITY.md) when handling external content.
 
 ### Custom domain workflow
 
@@ -153,7 +153,7 @@ This is a downstream pattern, not a fourth built-in Profile. Start from `default
 
 Never accept a Profile ID from the browser. A Profile describes product workflow; it does not grant roles, remove repository scope, or make test authentication safe for production.
 
-Review [Project Profile architecture](ARCHITECTURE.md#project-profile), [authentication configuration](configuration.md#authentication-and-workspaces), and the [security policy](https://github.com/CoreDotToday/coredot-editor/blob/main/SECURITY.md).
+Review [Project Profile architecture](ARCHITECTURE.md#project-profile), [authentication configuration](configuration.md#authentication-and-workspaces), and the [security policy](https://github.com/CoreDotToday/coredoteditor/blob/main/SECURITY.md).
 
 ## Create a custom Profile
 
@@ -202,7 +202,7 @@ defineProjectProfile({
 })
 ```
 
-Add the entry to `defaultProjectProfiles`, then set `PROJECT_PROFILE_ID=policy-review`. If it references a new built-in template, add a stable key to the [template key registry](https://github.com/CoreDotToday/coredot-editor/blob/main/src/features/templates/builtin-template-keys.ts) and seed it in the [database seed](https://github.com/CoreDotToday/coredot-editor/blob/main/src/db/seed.ts).
+Add the entry to `defaultProjectProfiles`, then set `PROJECT_PROFILE_ID=policy-review`. If it references a new built-in template, add a stable key to the [template key registry](https://github.com/CoreDotToday/coredoteditor/blob/main/src/features/templates/builtin-template-keys.ts) and seed it in the [database seed](https://github.com/CoreDotToday/coredoteditor/blob/main/src/db/seed.ts).
 
 Required fields are enforced when a document moves beyond draft. Existing unknown metadata survives only while its value is unchanged; a new or modified unknown key is rejected. Validate a data copy before tightening the definition.
 
