@@ -21,10 +21,7 @@ const postHandler = createProtectedRouteHandler(async (context, request: Request
   const { id: rawDocumentId } = await route.params;
   const documentId = documentIdSchema.safeParse(rawDocumentId);
   if (!documentId.success || hasNonemptyBody(request)) {
-    return NextResponse.json(
-      { error: "Invalid collaboration capability request" },
-      { status: 400 },
-    );
+    return invalidRequestResponse();
   }
   try {
     const capability = await issueCollaborationCapabilityForDocument(context, {
@@ -36,16 +33,16 @@ const postHandler = createProtectedRouteHandler(async (context, request: Request
   } catch (error) {
     if (!(error instanceof CollaborationCapabilityServiceError)) throw error;
     if (error.category === "not_found") {
-      return NextResponse.json({ error: "Document not found" }, { status: 404 });
-    }
-    if (error.category === "invalid_request") {
       return NextResponse.json(
-        { error: "Invalid collaboration capability request" },
-        { status: 400 },
+        { error: "Document not found", reason: "not_found" },
+        { status: 404 },
       );
     }
+    if (error.category === "invalid_request") {
+      return invalidRequestResponse();
+    }
     return NextResponse.json(
-      { error: "Collaboration capability unavailable" },
+      { error: "Collaboration capability unavailable", reason: "unavailable" },
       { headers: { "Retry-After": "1" }, status: 503 },
     );
   }
@@ -62,6 +59,13 @@ export async function POST(request: Request, params: Params) {
 
 export async function OPTIONS() {
   return optionsHandler();
+}
+
+function invalidRequestResponse() {
+  return NextResponse.json(
+    { error: "Invalid collaboration capability request", reason: "invalid_request" },
+    { status: 400 },
+  );
 }
 
 function hasNonemptyBody(request: Request) {

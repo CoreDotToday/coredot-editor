@@ -139,7 +139,10 @@ describe("POST /api/documents/[id]/collaboration-capability", () => {
     const response = await POST(request(body), { params: Promise.resolve({ id: "document-a" }) });
 
     expect(response.status).toBe(400);
-    await expect(response.json()).resolves.toEqual({ error: "Invalid collaboration capability request" });
+    await expect(response.json()).resolves.toEqual({
+      error: "Invalid collaboration capability request",
+      reason: "invalid_request",
+    });
     expect(issueCollaborationCapabilityForDocument).not.toHaveBeenCalled();
   });
 
@@ -153,7 +156,10 @@ describe("POST /api/documents/[id]/collaboration-capability", () => {
     });
 
     expect(response.status).toBe(404);
-    await expect(response.json()).resolves.toEqual({ error: "Document not found" });
+    await expect(response.json()).resolves.toEqual({
+      error: "Document not found",
+      reason: "not_found",
+    });
   });
 
   it("fails closed with a bounded 503 when signing configuration or storage is unavailable", async () => {
@@ -166,7 +172,10 @@ describe("POST /api/documents/[id]/collaboration-capability", () => {
     });
 
     expect(response.status).toBe(503);
-    await expect(response.json()).resolves.toEqual({ error: "Collaboration capability unavailable" });
+    await expect(response.json()).resolves.toEqual({
+      error: "Collaboration capability unavailable",
+      reason: "unavailable",
+    });
     expect(response.headers.get("Retry-After")).toBe("1");
   });
 });

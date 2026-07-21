@@ -300,7 +300,7 @@ The application signs a capability with an allowlisted asymmetric key and `kid`.
 
 The maximum lifetime is 60 seconds. Hocuspocus verifies the algorithm, key, all claims, exact `documentName === room`, and current Workspace/document ownership. Provider token synchronization refreshes active connections. `beforeHandleMessage` rejects expired or stale authorization epochs even before the next reconnect.
 
-Production configuration states the maximum access-revocation delay. An administrative connection-kill path may reduce it below the token lifetime later.
+Authorization-epoch verification is fully enforced at three layers — capability issuance and connect, per-message revalidation, and in-transaction command checks — but no product surface currently advances an epoch; `bumpEpoch` in the collaboration authorization repository is the reserved trigger for a future administrative revocation surface. Effective live-session revocation today is therefore bounded by capability expiry: an access-permission change takes effect no later than 60 seconds after the last capability was issued, because a Principal who lost access cannot refresh, while archiving a document closes its room immediately through the transactional closure outbox. Production configuration states the maximum access-revocation delay. An administrative connection-kill path may reduce it below the token lifetime later.
 
 ## Awareness And Privacy
 

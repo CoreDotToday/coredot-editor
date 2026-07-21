@@ -177,14 +177,17 @@ describe("document session client", () => {
   });
 
   it.each([
-    ["expected_readiness_conflict", 409],
-    ["head_conflict", 409],
-    ["forbidden", 403],
-    ["not_found", 404],
-    ["collaboration_unavailable", 503],
-    ["workflow_unavailable", 503],
-    ["legacy_approval_unsupported", 409],
-  ] as const)("preserves the stable %s workflow error and authoritative recovery state", async (reason, status) => {
+    ["expected_readiness_conflict", 409, "expected_readiness_conflict"],
+    ["head_conflict", 409, "head_conflict"],
+    ["forbidden", 403, "forbidden"],
+    ["not_found", 404, "not_found"],
+    ["collaboration_unavailable", 503, "collaboration_unavailable"],
+    // The wire token for temporary persistence unavailability is the shared
+    // "unavailable"; the client keeps its workflow-scoped internal reason.
+    ["unavailable", 503, "workflow_unavailable"],
+    ["workflow_unavailable", 503, "workflow_unavailable"],
+    ["legacy_approval_unsupported", 409, "legacy_approval_unsupported"],
+  ] as const)("preserves the stable %s workflow error and authoritative recovery state", async (reason, status, expectedReason) => {
     const workflow = {
       collaboration: { generation: 2, headSeq: 17 },
       documentId: "doc_1",
@@ -202,7 +205,7 @@ describe("document session client", () => {
       observedHeadSeq: 16,
     });
     await expect(result).rejects.toBeInstanceOf(DocumentWorkflowRequestError);
-    await expect(result).rejects.toMatchObject({ reason, status, workflow });
+    await expect(result).rejects.toMatchObject({ reason: expectedReason, status, workflow });
   });
 
   it("parses a workflow Project Profile violation without coercing unknown values", async () => {

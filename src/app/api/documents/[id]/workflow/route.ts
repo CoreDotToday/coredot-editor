@@ -152,7 +152,7 @@ function mapWorkflowError(error: unknown) {
       return invalidRequestResponse();
     case "unavailable":
       return NextResponse.json(
-        { error: "Document workflow unavailable", reason: "workflow_unavailable" },
+        { error: "Document workflow unavailable", reason: "unavailable" },
         { headers: { "Retry-After": "1" }, status: 503 },
       );
   }

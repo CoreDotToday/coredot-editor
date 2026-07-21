@@ -97,7 +97,7 @@ Rotate without interrupting active clients:
 
 Unknown `kid`, wrong algorithms, malformed claims, expired tokens, and missing signing configuration fail closed with bounded errors. Raw JWTs and JWK material must never be logged.
 
-Access revocation is bounded by the capability lifetime plus in-flight refresh: after a Principal's authorization epoch changes or a document leaves draft state, existing capabilities stop working at the next message revalidation and no later than 60 seconds after issuance. Treat 60 seconds as the maximum access-revocation delay for this release; an administrative connection-kill path that reduces it further is future work.
+Access revocation is bounded by the capability lifetime plus in-flight refresh. The authorization-epoch check is enforced at connect, on every message, and inside command transactions, but no product surface currently advances an epoch; `bumpEpoch` in the collaboration authorization repository is reserved for a future administrative revocation surface. An access-permission change therefore takes effect when outstanding capabilities expire — no later than 60 seconds after issuance, because a Principal who lost access cannot obtain a fresh capability — while archiving a document closes its room immediately through the transactional closure outbox. Treat 60 seconds as the maximum access-revocation delay for this release, and do not assume instant revocation; an administrative connection-kill path that reduces the delay further is future work.
 
 ### Collaboration resource limits
 

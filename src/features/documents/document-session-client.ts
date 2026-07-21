@@ -873,6 +873,10 @@ function isPositiveSafeInteger(value: unknown): value is number {
 }
 
 function parseWorkflowErrorReason(value: unknown): DocumentWorkflowErrorReason {
+  // The wire token for temporary collaboration persistence unavailability is
+  // the shared "unavailable" (same as the proposal/undo command routes); it
+  // maps onto the client's workflow-scoped reason vocabulary.
+  if (value === "unavailable") return "workflow_unavailable";
   return value === "collaboration_unavailable" ||
     value === "expected_readiness_conflict" ||
     value === "forbidden" ||

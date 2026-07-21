@@ -126,7 +126,7 @@ describe("/api/documents/[id]/workflow", () => {
     ["legacy_approval_unsupported", 409, "legacy_approval_unsupported"],
     ["forbidden", 403, "forbidden"],
     ["not_found", 404, "not_found"],
-    ["unavailable", 503, "workflow_unavailable"],
+    ["unavailable", 503, "unavailable"],
   ] as const)("maps %s to a bounded public response", async (category, status, reason) => {
     vi.mocked(executeDocumentWorkflowCommand).mockRejectedValueOnce(
       new DocumentWorkflowServiceError(category, category.includes("conflict") ? workflow : undefined),
